@@ -15,7 +15,7 @@ mod prelude {
     pub(super) use nom::sequence::{preceded, terminated};
     pub(super) use nom::Parser;
 
-    pub(super) use super::super::oracle_cost::parse_oracle_cost;
+    pub(super) use super::super::oracle_cost::{parse_gerund_cost, parse_oracle_cost};
     pub(super) use super::super::oracle_effect::subject::{
         parse_restriction_modes, static_mode_needs_grant_propagation,
     };

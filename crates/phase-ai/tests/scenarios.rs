@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::io::Read;
 
 use engine::game::combat::{AttackTarget, AttackerInfo, CombatState};
 use engine::game::engine::apply_as_current;
@@ -12,18 +13,122 @@ use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::{
-    StackEntry, StackEntryKind, TargetEffectDetail, TargetSelectionProgress, TargetSelectionSlot,
-    WaitingFor,
+    ManaChoiceContext, ManaChoicePrompt, StackEntry, StackEntryKind, TargetEffectDetail,
+    TargetSelectionProgress, TargetSelectionSlot, WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::log::{LogCategory, LogSegment};
+use engine::types::mana::ManaType;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use phase_ai::auto_play::{run_ai_actions, run_ai_actions_bounded, run_driver_loop, DriverExit};
 use phase_ai::choose_action;
 use phase_ai::config::{create_config, AiConfig, AiDifficulty, Platform};
+use phase_ai::saved_state::load_saved_game_state;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
+
+fn gunzip_fixture(gz: &[u8]) -> String {
+    let mut json = String::new();
+    flate2::read::GzDecoder::new(gz)
+        .read_to_string(&mut json)
+        .expect("fixture .json.gz must inflate to UTF-8 JSON");
+    json
+}
+
+#[test]
+fn saved_cosmic_crucible_mana_prompt_uses_an_issued_action_and_advances() {
+    let raw = gunzip_fixture(include_bytes!(
+        "../fixtures/scenarios/invisible-woman-cosmic-crucible-mana.json.gz"
+    ));
+    let mut state = load_saved_game_state(&raw).expect("saved Cosmic Crucible state deserializes");
+
+    let WaitingFor::ChooseManaColor {
+        player,
+        choice: ManaChoicePrompt::AnyCombination { count, options },
+        context: ManaChoiceContext::ResolvingEffect(resume),
+    } = &state.waiting_for
+    else {
+        panic!("capture must restore at Cosmic Crucible's resolving mana prompt");
+    };
+    let player = *player;
+    assert_eq!(
+        player,
+        PlayerId(2),
+        "Cosmic Crucible's controller owns the prompt"
+    );
+    assert_eq!(
+        resume.source_id,
+        ObjectId(200),
+        "the prompt must come from Cosmic Crucible"
+    );
+    assert_eq!(
+        options,
+        &[
+            ManaType::White,
+            ManaType::Blue,
+            ManaType::Black,
+            ManaType::Red,
+            ManaType::Green
+        ],
+        "the capture must retain all five color options"
+    );
+    assert_eq!(*count, 4, "Cosmic Crucible must produce exactly four mana");
+
+    let contract = engine::ai_support::AiDecisionContract::issue(&state, player);
+    assert_eq!(
+        contract.candidates.len(),
+        64,
+        "the engine must cap this 5^4 mana prompt to its finite issued domain"
+    );
+    let state_before = state.clone();
+    let ai_players = HashSet::from([player]);
+    let ai_configs = HashMap::from([(
+        player,
+        create_config(AiDifficulty::VeryHard, Platform::Native),
+    )]);
+    let mut ai_rng = SmallRng::seed_from_u64(25);
+    let ai_session = phase_ai::session::AiSession::arc_from_game(&state);
+    let run = run_ai_actions_bounded(
+        &mut state,
+        &ai_players,
+        &ai_configs,
+        &mut ai_rng,
+        &ai_session,
+        1,
+    );
+
+    assert_eq!(
+        run.len(),
+        1,
+        "the bounded controller must submit the mana choice"
+    );
+    assert!(
+        run.break_reason.is_none(),
+        "the issued mana action must apply without a controller break"
+    );
+    assert!(
+        contract.contains_action(&state_before, &run[0].action),
+        "the controller must submit the exact action from player two's contract"
+    );
+    assert_eq!(
+        run[0].action,
+        GameAction::ChooseManaColor {
+            choice: engine::types::game_state::ManaChoice::Combination(vec![
+                ManaType::White,
+                ManaType::White,
+                ManaType::Red,
+                ManaType::Green,
+            ]),
+            count: 1,
+        },
+        "the capped domain still maximizes the captured hand and deck color demand"
+    );
+    assert!(
+        !matches!(state.waiting_for, WaitingFor::ChooseManaColor { .. }),
+        "applying the choice must advance beyond Cosmic Crucible's mana prompt"
+    );
+}
 
 #[test]
 fn scenario_prefers_opponent_target_over_self() {

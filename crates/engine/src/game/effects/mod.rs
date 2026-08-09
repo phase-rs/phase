@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::game::conditions::{
-    eval_has_city_blessing, eval_is_initiative, eval_is_monarch,
+    eval_has_city_blessing, eval_has_enduring_story, eval_is_initiative, eval_is_monarch,
     eval_source_attached_to_controlled_creature, eval_source_entered_this_turn,
     eval_source_is_tapped,
 };
@@ -157,6 +157,7 @@ pub mod manifest_dread;
 pub mod mill;
 pub mod monstrosity;
 pub mod myriad;
+pub mod note_mana_spent;
 pub mod opponent_guess;
 pub mod overload;
 pub mod pair_with;
@@ -772,10 +773,30 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     if !waits_for_resolution_choice(&state.waiting_for)
         && state.active_ability_continuation().is_some()
     {
-        let frame = state
+        let discard_frame = state
+            .resolution_stack
+            .active_ability_continuation_discard_parent_id();
+        let mut frame = state
             .take_active_ability_continuation()
             .expect("checked active continuation must be consumable")
             .expect("checked active continuation must exist");
+        if let Some(discard_id) = discard_frame {
+            let discard = state
+                .resolution_stack
+                .take_active_discard()
+                .expect("direct Recruit parent must be active after its child is popped")
+                .expect("direct Recruit parent must exist");
+            assert_eq!(
+                discard.id, discard_id,
+                "direct Recruit parent id must remain adjacent"
+            );
+            if let Some(result) = discard.results.into_iter().next() {
+                frame
+                    .pending
+                    .chain
+                    .set_direct_discard_result_for_immediate_node(result);
+            }
+        }
         let cont = frame.pending;
         let PendingContinuation {
             chain,
@@ -878,6 +899,7 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
         ResolutionFrame::AbilityContinuation(_) | ResolutionFrame::ChangeZone(_) => {
             drain_pending_continuation(state, events)
         }
+        ResolutionFrame::Discard(_) => {}
         ResolutionFrame::RepeatFor(_) => drain_active_repeat_for(state, events),
         ResolutionFrame::RepeatUntil(_) => drain_active_repeat_until(state),
         ResolutionFrame::RepeatedOptionalPayment(_) => {
@@ -2252,6 +2274,7 @@ fn try_begin_reflexive_target_selection_inner(
             // into the later fresh-`apply()` target-assign.
             subject_match_count: freeze_reflexive_event_count(state, controller, source_id),
             die_result: state.die_result_this_resolution,
+            provenance: None,
         };
         let trigger_events =
             crate::game::triggers::take_pending_trigger_event_batch(state, &pending);
@@ -2345,6 +2368,7 @@ fn try_begin_reflexive_target_selection_inner(
         // creating ability so the reflexive entry can re-stamp it when it
         // resolves as its own stack object.
         die_result: state.die_result_this_resolution,
+        provenance: None,
     };
     let trigger_events = crate::game::triggers::take_pending_trigger_event_batch(state, &pending);
     let pending_for_state = pending.clone();
@@ -2438,6 +2462,15 @@ fn apply_parent_chain_context(
     state: &mut GameState,
 ) {
     child.context = parent.context.clone();
+    // CR 701.9a + CR 608.2c: A discard result is visible only to the direct
+    // contingent child. Every ordinary hand-off clears it, preventing a later
+    // grandchild (or an unrelated chain branch) from reading stale provenance.
+    if !matches!(
+        parent.effect,
+        Effect::Discard { .. } | Effect::DiscardCard { .. }
+    ) {
+        child.context.direct_discard_result = None;
+    }
     // CR 401.5 + CR 608.2c (issue #1365) + CR 609.3 + issue #4950
     // (Thoughtseize): `state.last_parent_target_missing_reason` is `Some` for
     // the narrow window between a Dig/ChooseFromZone/RevealHand reveal-choice
@@ -2520,7 +2553,10 @@ fn apply_parent_chain_context(
 /// bottom alongside the misses.
 /// Every other sub keeps today's behavior: parent targets propagate when the
 /// sub declares none of its own.
-fn should_propagate_parent_targets(ability: &ResolvedAbility, sub: &ResolvedAbility) -> bool {
+pub(crate) fn should_propagate_parent_targets(
+    ability: &ResolvedAbility,
+    sub: &ResolvedAbility,
+) -> bool {
     sub.targets.is_empty()
         && !ability.targets.is_empty()
         && (sub.target_choice_timing != TargetChoiceTiming::Resolution
@@ -2878,7 +2914,8 @@ fn quantity_ref_depends_on_zone_change_this_way(qty: &QuantityRef) -> bool {
 
 fn condition_depends_on_zone_change_this_way(condition: &AbilityCondition) -> bool {
     match condition {
-        AbilityCondition::ZoneChangedThisWay { .. } => true,
+        AbilityCondition::ZoneChangedThisWay { .. }
+        | AbilityCondition::DiscardedCardMatchesFilter { .. } => true,
         AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
             quantity_expr_depends_on_zone_change_this_way(lhs)
                 || quantity_expr_depends_on_zone_change_this_way(rhs)
@@ -2937,13 +2974,13 @@ fn sub_ability_target_belongs_to_reflexive_context(sub: &ResolvedAbility) -> boo
     }
 }
 
-fn condition_contains_city_blessing(condition: &AbilityCondition) -> bool {
+fn condition_contains_designation(condition: &AbilityCondition) -> bool {
     match condition {
-        AbilityCondition::HasCityBlessing => true,
-        AbilityCondition::Not { condition } => condition_contains_city_blessing(condition),
-        AbilityCondition::ConditionInstead { inner } => condition_contains_city_blessing(inner),
+        AbilityCondition::HasCityBlessing | AbilityCondition::HasEnduringStory => true,
+        AbilityCondition::Not { condition } => condition_contains_designation(condition),
+        AbilityCondition::ConditionInstead { inner } => condition_contains_designation(inner),
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
-            conditions.iter().any(condition_contains_city_blessing)
+            conditions.iter().any(condition_contains_designation)
         }
         _ => false,
     }
@@ -3234,6 +3271,8 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::CompletedDungeon { .. }
             | AbilityCondition::IsInitiative
             | AbilityCondition::HasCityBlessing
+            | AbilityCondition::HasEnduringStory
+            | AbilityCondition::DiscardedCardMatchesFilter { .. }
             | AbilityCondition::IsRingBearer
             | AbilityCondition::TargetHasKeywordInstead { .. }
             | AbilityCondition::TargetMatchesFilter { .. }
@@ -3323,26 +3362,92 @@ fn is_player_scope_local_continuation(
         return true;
     }
 
-    // CR 608.2c + CR 701.24a: "Each player shuffles the cards from their hand
-    // into their library" is one per-player move/shuffle instruction only for
-    // an all-player scope. Keep the terminal shuffle with its immediately
-    // preceding ChangeZoneAll; a following Draw remains the detached
-    // all-player instruction.
-    matches!(scope, PlayerFilter::All)
-        && matches!(
-            (parent, child),
-            (
-                Effect::ChangeZoneAll {
-                    origin: Some(Zone::Hand),
-                    destination: Zone::Library,
-                    target: TargetFilter::ScopedPlayer,
-                    ..
-                },
-                Effect::Shuffle {
-                    target: TargetFilter::ScopedPlayer,
-                }
-            )
+    // CR 608.2c + CR 701.24a: "<each subject> shuffles the cards from their hand
+    // into their library" is ONE per-player move/shuffle instruction. Keep the
+    // terminal shuffle with its immediately preceding ChangeZoneAll; a following
+    // Draw remains the detached post-loop instruction.
+    let is_scoped_whole_hand_shuffle = matches!(
+        (parent, child),
+        (
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Hand),
+                destination: Zone::Library,
+                target: TargetFilter::ScopedPlayer,
+                ..
+            },
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer,
+            }
         )
+    );
+    is_scoped_whole_hand_shuffle && scope_keeps_scoped_whole_hand_shuffle_local(scope)
+}
+
+/// CR 115.10 + CR 608.2c + CR 701.24a: Does this `player_scope` filter keep the
+/// scoped whole-hand-move/shuffle pair inside its own per-player iteration?
+///
+/// EXHAUSTIVE BY DESIGN — no `_` arm, no `matches!`, and it must stay that way.
+/// The predecessor form was `matches!(scope, PlayerFilter::All)`: a
+/// hand-maintained allowlist that silently answered "detach" for every filter it
+/// did not name (#6957). That answer is structural, not inert — the caller
+/// (`detach_after_player_scope_local_chain`) uses it to pull the shuffle out of
+/// the loop and run it ONCE as an unscoped tail, where `ScopedPlayer` has no
+/// iteration player to bind to. Compiler exhaustiveness cannot see inside a
+/// `matches!`, so a new SCOPE-position filter joined the wrong side for free.
+/// This form makes the compiler demand an answer, exactly as
+/// `player_filter_references_tracked_set` does for the publication allowlist.
+///
+/// The answer is the same for every filter, and that uniformity is the finding:
+/// the discriminator is the `TargetFilter::ScopedPlayer` recipient on BOTH halves
+/// of the pair, never the identity of the player set. Whichever players the
+/// filter selects, each one moves their OWN hand (CR 115.10 — the iteration
+/// player is bound as the effect resolves) and must therefore shuffle their OWN
+/// library as part of that same instruction (CR 701.24a). A filter that selects
+/// no player at all (CR 104.5 `HasLostTheGame`, CR 506.2 + CR 508.6
+/// `OpponentOfTriggeringPlayerNotAttacked` — both count-position-only, matching
+/// no live recipient) runs the pair zero times, which is also correct; detaching
+/// there would instead run one unbound shuffle after an empty loop.
+///
+/// Adding a variant to a `false` group must therefore be a deliberate decision
+/// backed by a rule, not the accident this predicate used to make.
+fn scope_keeps_scoped_whole_hand_shuffle_local(scope: &PlayerFilter) -> bool {
+    match scope {
+        // Plain relations and whole-table scopes.
+        PlayerFilter::Controller
+        | PlayerFilter::Opponent
+        | PlayerFilter::All
+        // Event-context and trigger anchors.
+        | PlayerFilter::DefendingPlayer
+        | PlayerFilter::TriggeringPlayer
+        | PlayerFilter::OpponentOtherThanTriggering
+        | PlayerFilter::OpponentOfTriggeringPlayer
+        | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+        | PlayerFilter::ParentObjectTargetController
+        | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::ChosenPlayer { .. }
+        // Turn/combat ledgers.
+        | PlayerFilter::OpponentLostLife
+        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::HasLostTheGame
+        | PlayerFilter::OpponentDealtDamage { .. }
+        | PlayerFilter::OpponentAttacked { .. }
+        | PlayerFilter::OpponentAttackingEnchantedPlayer
+        | PlayerFilter::HighestSpeed
+        // Resolution-local ledgers ("… this way") and linked-exile piles.
+        | PlayerFilter::ZoneChangedThisWay
+        | PlayerFilter::PerformedActionThisWay { .. }
+        | PlayerFilter::TrackedSetPossessor { .. }
+        | PlayerFilter::VotedFor { .. }
+        | PlayerFilter::OwnersOfCardsExiledBySource
+        // Per-candidate board / scalar comparisons.
+        | PlayerFilter::ControlsCount { .. }
+        | PlayerFilter::PlayerAttribute { .. } => true,
+        // The negation wrapper inherits its inner filter's decision, matching
+        // `player_filter_references_tracked_set`'s treatment of the same variant.
+        // Behaviour-identical while every arm above is `true`; recursing keeps it
+        // from silently disagreeing with its anchor the moment one is not.
+        PlayerFilter::AllExcept { exclude } => scope_keeps_scoped_whole_hand_shuffle_local(exclude),
+    }
 }
 
 /// CR 109.5 + CR 115.10 + CR 119.3: Detect that an effect's recipient is bound
@@ -3517,8 +3622,24 @@ fn detach_after_player_scope_local_chain(
     // "Each opponent may X and Y" makes the whole same-sentence X/Y clause
     // optional for that opponent. Keep the continuation inside the scoped
     // template so accepting the offer performs both instructions.
-    let next_is_optional_clause_continuation =
-        node.optional && next.sub_link == SubAbilityLink::ContinuationStep;
+    //
+    // CR 608.2c + CR 109.5: EXCEPT a child that carries its OWN distinct
+    // `player_scope` (a different population than this fan-out's) is a SEPARATE
+    // scoped instruction, not a continuation of this optional clause — e.g.
+    // Kwain, Itinerant Meddler's "each player may draw a card, then each player
+    // who drew a card this way gains 1 life": the GainLife is scoped to the
+    // drawers (`PerformedActionThisWay`), not to this "each player" (`All`)
+    // fan-out. Keeping it co-scoped would re-enter the fan-out driver once per
+    // outer iteration and re-count the incrementally growing this-way ledger,
+    // over-applying to the earlier-iterated players (a triangular over-gain). It
+    // must detach and resolve ONCE over its own population after the parent
+    // fan-out completes.
+    let next_is_optional_clause_continuation = node.optional
+        && next.sub_link == SubAbilityLink::ContinuationStep
+        && next
+            .player_scope
+            .as_ref()
+            .is_none_or(|child_scope| child_scope == scope);
     // CR 701.23i + CR 701.24a: A shuffle explicitly scoped to players who
     // searched this way is a once-after-all-searches tail, not the ordinary
     // per-player SearchLibrary → ChangeZone → Shuffle continuation. Keep the
@@ -4309,6 +4430,7 @@ pub fn resolve_effect(
         Effect::GrantCastingPermission { .. } => grant_permission::resolve(state, ability, events),
         Effect::ChooseFromZone { .. } => choose_from_zone::resolve(state, ability, events),
         Effect::RememberCard { .. } => remember_card::resolve(state, ability, events),
+        Effect::NoteManaSpent => note_mana_spent::resolve(state, ability, events),
         Effect::ForEachCategory { .. } => {
             choose_from_zone::resolve_for_each_category(state, ability, events)
         }
@@ -4926,7 +5048,7 @@ fn affected_objects_with_causes(
 /// stamped onto the tracked-set members it publishes. Derived purely from the
 /// effect kind (and its declared destination), so it is independent of any
 /// replacement that later redirects the members' landing zone.
-fn this_way_cause_for_effect(effect: &Effect) -> Option<ThisWayCause> {
+pub(crate) fn this_way_cause_for_effect(effect: &Effect) -> Option<ThisWayCause> {
     use crate::types::zones::Zone;
     // CR 400.7: a generic zone change names a "this way" verb only for the
     // destinations a consumer references — Exile (exiled), Battlefield
@@ -5891,6 +6013,116 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
     }
 }
 
+/// CR 608.2d: how a caller supplies the feasibility fact [`upfront_optional_gate`]'s LAST
+/// conjunct needs.
+///
+/// `resolve_chain_body` has ALREADY run the probe by the time it reaches the gate — it needs
+/// the value for the `CastFromZone` decline early-return that precedes both the CR 101.4
+/// fan-out and the gate — so it passes [`OptionalFeasibility::Known`] and production never
+/// probes twice. That matters: [`optional_effect_is_infeasible`]'s `CastFromZone` arm clones
+/// the whole `GameState` per bound object and runs a full `cast_from_zone::resolve` dry-run.
+/// Every other caller passes [`OptionalFeasibility::Probe`], which runs only after the cheap
+/// conjuncts have all passed.
+///
+/// A TWO-VARIANT DOMAIN ENUM RATHER THAN `Option<bool>`, and the reason is naming, not
+/// CLAUDE.md's `bool` prohibition (`Option<T>` is on its approved list): `Known(bool)` says
+/// *"the caller already ran the probe and this is its answer"* while `Probe` says *"run it
+/// here, after the cheap conjuncts"*. With `Option<bool>`, `None` would mean "probe here" only
+/// by convention — undocumented at every call site and indistinguishable from "no opinion".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OptionalFeasibility {
+    /// The caller ran [`optional_effect_is_infeasible`] and hands its answer over.
+    Known(bool),
+    /// Run the probe here, LAST — after every cheap conjunct has passed.
+    Probe,
+}
+
+/// CR 603.5 + CR 608.2c + CR 608.2d + CR 603.12a — THE single authority for *"does this
+/// ability open ONE up-front optional gate, and to whom, under which key?"*
+///
+/// `None` ⇒ no up-front gate opens at all. Four disjoint reasons, in the order they are
+/// evaluated:
+///
+/// 1. not `optional`;
+/// 2. `optional_for` is set — the CR 608.2d + CR 101.4 fan-out prompts eligible players in
+///    APNAP order instead, which is a CASCADE of up to one window per living player and not
+///    one gate (`resolve_chain_body` returns at that fan-out before ever reaching the gate;
+///    see the coupling note there);
+/// 3. one of the three `repeat_for` shapes that re-fire optionality PER ITERATION
+///    (CR 608.2c + CR 608.2d + CR 603.12a);
+/// 4. an infeasible optional (CR 608.2d: "a player can't choose an impossible option").
+///
+/// **THE FEASIBILITY PROBE IS THE LAST CONJUNCT, AND THAT ORDERING IS A GUARANTEE, NOT AN
+/// IMPLEMENTATION ACCIDENT.** `engine::entry_publishes_pin_slots` calls this once per announced
+/// entry, per candidate window, per beat, where production pays it once per resolution. LAST
+/// ordering restricts the clone-bearing arm to `optional ∧ ¬optional_for ∧ ¬repeat ∧
+/// Effect::CastFromZone` entries — a strict subset of the population production already pays
+/// for. It is deliberately NOT charged against `PROBE_BUDGET`: that counter bounds CR 732.2a
+/// certification ASKS at the verdict door, and putting wall-clock cost on the same counter
+/// would re-base every metered row's pinned spend and make neither number readable.
+pub(crate) struct UpfrontOptionalGate {
+    /// CR 608.2d: [`optional_prompt_player`] names who ANNOUNCES it — not always the controller.
+    pub prompt_player: PlayerId,
+    /// `None` ⇒ the ability carries no `may_trigger_origin`, so no stored preference can key
+    /// on it. That is not the same as "no preference stored": it is "no key exists".
+    pub key: Option<MayTriggerAutoChoiceKey>,
+}
+
+pub(crate) fn upfront_optional_gate(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    feasibility: OptionalFeasibility,
+) -> Option<UpfrontOptionalGate> {
+    if !ability.optional || ability.optional_for.is_some() {
+        return None;
+    }
+    // CR 608.2c + CR 608.2d + CR 603.12a: the three shapes that SUPPRESS the single up-front
+    // gate and fire optionality per iteration instead.
+    if has_kind_driven_repeat(ability)
+        || has_member_driven_repeat_after_hydration(state, ability)
+        || is_repeated_optional_payment(ability)
+    {
+        return None;
+    }
+    let infeasible = match feasibility {
+        OptionalFeasibility::Known(known) => known,
+        OptionalFeasibility::Probe => optional_effect_is_infeasible(state, ability),
+    };
+    if infeasible {
+        return None;
+    }
+    let prompt_player = optional_prompt_player(state, ability);
+    Some(UpfrontOptionalGate {
+        prompt_player,
+        key: ability
+            .may_trigger_origin
+            .clone()
+            .map(|origin| MayTriggerAutoChoiceKey {
+                player: prompt_player,
+                source_id: ability.source_id,
+                origin,
+            }),
+    })
+}
+
+/// CR 603.5: is that gate ALREADY ANSWERED by a stored "don't ask again" preference?
+///
+/// The CONSUMER half of [`upfront_optional_gate`], so the mint's suppression, the analysis's
+/// relief and production's own early return can no longer disagree about which mays are
+/// answered. `None` ⇒ the gate will PROMPT, or there is no gate, or the ability carries no
+/// `may_trigger_origin` for a preference to key on — all three are unspecified windows, which
+/// is the fail-closed direction for every consumer.
+///
+/// Passes [`OptionalFeasibility::Probe`]: a caller asking "is this already answered?" has by
+/// definition not run the feasibility probe itself.
+pub(crate) fn stored_may_answer(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<AutoMayChoice> {
+    let gate = upfront_optional_gate(state, ability, OptionalFeasibility::Probe)?;
+    state.may_trigger_auto_choice(gate.key.as_ref()?)
+}
+
 /// CR 603.12a + CR 608.2c: True when this ability is a "you may pay {cost} up to
 /// N times. When you do, [reflexive]" process (Hawkeye, Master Marksman — "Trick
 /// Arrows"). Unlike a generic `repeat_for` loop (one up-front "you may" then N
@@ -6469,8 +6701,8 @@ pub(crate) fn resolve_player_for_context_ref(
     ability.controller
 }
 
-/// CR 117.3a: Determine which player receives the "may" prompt for an optional
-/// effect. Most optional effects go to the caster (CR 608.2d). Subject-anchored
+/// CR 608.2d: Determine which player ANNOUNCES the choice — receives the "may"
+/// prompt — for an optional effect. Most go to the caster. Subject-anchored
 /// optional effects — "its controller may search their library" (Assassin's
 /// Trophy, Path to Exile, Ghost Quarter, Oblation, …) — route the prompt to the
 /// acting subject (the target permanent's controller). This mirrors the
@@ -6869,24 +7101,168 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
     }
 }
 
+/// CR 608.2c: What a chain step reports into `state.last_effect_amount` for a
+/// following "that many" / "that much" clause.
+///
+/// SINGLE AUTHORITY. Both the summing rule and the zero-result rule are derived
+/// from ONE match over `Effect` (`amount_channel`), so a new arm cannot join one
+/// and miss the other. The predecessor shipped a `_ => 0` summing arm paired to
+/// a separate `_ => false` zero-policy arm — a twin registry, and adding a
+/// summing arm without the matching zero arm would have silently restored #6956
+/// with no compile error. That is the same hand-maintained-registry mechanism
+/// #6957 exists to remove, so it is not reintroduced here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AmountChannel {
+    events: AmountEvents,
+    zero: ZeroSemantics,
+}
+
+/// Which event channel an effect's scalar result is summed from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AmountEvents {
+    /// CR 120.1: `DamageDealt.amount`, every recipient.
+    DamageDealt,
+    /// CR 120.10: `DamageDealt.excess`, scoped to the fought creature.
+    FightExcessOnFoughtCreature,
+    /// CR 119.3: the negative side of `LifeChanged`.
+    LifeLost,
+    /// CR 119.3: the positive side of `LifeChanged`.
+    LifeGained,
+    /// CR 122.1: `CounterRemoved.count`.
+    CountersRemoved,
+}
+
+/// What a ZERO total on that channel means for the effect that produced it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ZeroSemantics {
+    /// The effect owns this channel outright, so a zero total is a REAL zero
+    /// result once the instruction completed and must overwrite the slot.
+    MeasuredResult,
+    /// A zero total on this channel cannot be told apart from "this effect
+    /// produced nothing here", so it is pinned at the predecessor behaviour and
+    /// leaves the slot alone. Every use names why below.
+    Indistinguishable,
+}
+
+/// CR 608.2c: The one classifier. `None` means the effect has no scalar channel
+/// at all — the predecessor's `_ => 0` summing arm, which always filtered back
+/// out to `None`, so this is exactly equivalent.
+fn amount_channel(effect: &Effect) -> Option<AmountChannel> {
+    let (events, zero) = match effect {
+        // CR 120.8 + CR 614.7a: "If a source would deal 0 damage, it does not
+        // deal damage at all" — and CR 615.1 prevention likewise leaves no
+        // damage event behind. In both cases the damage DEALT this way is zero,
+        // which is what a following "that much" back-references. Reading an
+        // earlier step's amount instead is never correct.
+        Effect::DealDamage { .. } | Effect::DamageAll { .. } | Effect::DamageEachPlayer { .. } => {
+            (AmountEvents::DamageDealt, ZeroSemantics::MeasuredResult)
+        }
+        // NOT CLOSED — deliberately pinned at the predecessor behaviour (#6956).
+        //
+        // CR 120.10: unlike every other arm, `Fight` sums the EXCESS channel into
+        // the TOTAL slot, and scopes that sum to the fought creature resolved by
+        // `fight::resolve_fight_fighters`. That gives it a genuine THIRD state:
+        // a zero for want of a resolvable subject is neither "zero excess was
+        // dealt" nor "no fight ran". Settling it needs its own CR determination.
+        //
+        // Nothing on the current card pool can observe the difference: the only
+        // card chaining a `PreviousEffectAmount` consumer off a `Fight` is The
+        // Last Agni Kai, whose rider is gated on `PreviousEffectAmount { GT 0,
+        // channel: Excess }` — the EXCESS slot, written unconditionally by
+        // `previous_effect_excess_amount_from_events` and read via
+        // `.unwrap_or(0)`. The rider never runs in the zero case, so no
+        // production-path test can discriminate this arm today.
+        Effect::Fight { .. } => (
+            AmountEvents::FightExcessOnFoughtCreature,
+            ZeroSemantics::Indistinguishable,
+        ),
+        // CR 119.3: "If an effect causes a player to gain life or lose life,
+        // that player's life total is adjusted accordingly." An effect that
+        // caused a loss of zero produced a zero. Note the CR has NO life-loss
+        // analogue of CR 119.9 — the "losing 0 life is not a life-loss event"
+        // premise cited in #6956 (as CR 118.2, which is the mana-payment rule)
+        // does not appear anywhere in the rules text.
+        Effect::LoseLife { .. } => (AmountEvents::LifeLost, ZeroSemantics::MeasuredResult),
+        // NOT CLOSED — deliberately pinned at the predecessor behaviour (#6956).
+        //
+        // CR 118.1: `PayCost`'s `cost` is an arbitrary `AbilityCost`, and only a
+        // life payment emits the negative `LifeChanged` events this channel sums;
+        // a mana / sacrifice / discard payment owns no amount here at all.
+        // CR 119.4b makes paying 0 life a real, always-legal payment whose result
+        // is zero, so a life payment SHOULD report it — but `pay::resolve` pushes
+        // no events whatsoever, so it emits no `EffectResolved` terminal marker
+        // and the completion half of the zero rule cannot be established for it.
+        // Closing this arm means first giving cost payment a terminal marker,
+        // which is its own change with its own blast radius (the per-player
+        // counts helper, the trigger matchers and the game log all read that
+        // event class).
+        Effect::PayCost { .. } => (AmountEvents::LifeLost, ZeroSemantics::Indistinguishable),
+        // CR 119.3 + CR 119.9: gaining zero life is not a life-GAIN EVENT, so
+        // "whenever you gain life" correctly does not trigger — but CR 119.9
+        // governs triggering and replacement, not the arithmetic back-reference.
+        // The amount gained is still zero, and that is what "that much" reads.
+        // `life::resolve` stamps its terminal marker on the `final_amount <= 0`
+        // and CR 119.7 "can't gain life" paths too, so both reach the zero rule.
+        Effect::GainLife { .. } => (AmountEvents::LifeGained, ZeroSemantics::MeasuredResult),
+        // CR 122.1: a counter is a marker placed ON an object; removing counters
+        // from an object that has none removes zero counters, so "for each
+        // counter removed this way" is zero.
+        Effect::RemoveCounter { .. } => {
+            (AmountEvents::CountersRemoved, ZeroSemantics::MeasuredResult)
+        }
+        _ => return None,
+    };
+    Some(AmountChannel { events, zero })
+}
+
 fn previous_effect_amount_from_events(
     state: &GameState,
     ability: &ResolvedAbility,
     events: &[GameEvent],
 ) -> Option<i32> {
-    let amount = match &ability.effect {
-        Effect::DealDamage { .. } | Effect::DamageAll { .. } | Effect::DamageEachPlayer { .. } => {
-            events
-                .iter()
-                .filter_map(|event| match event {
-                    GameEvent::DamageDealt { amount, .. } => {
-                        Some(crate::game::arithmetic::u32_to_i32_saturating(*amount))
-                    }
-                    _ => None,
-                })
-                .sum()
-        }
-        Effect::Fight { .. } => {
+    // CR 706.2 + CR 706.4 + CR 608.2c: `roll_die::resolve` is the single
+    // authority for the scalar value a follow-up `PreviousEffectAmount` or
+    // `EventContextAmount` consumer reads. That avoids re-deriving from an
+    // event slice that may contain result-table branch effects or nested
+    // rolls interleaved with the outer dice.
+    if matches!(ability.effect, Effect::RollDie { .. }) {
+        return state.die_result_this_resolution;
+    }
+    // CR 121.2 + CR 121.2a + CR 608.2c: `draw::resume_draw_sequence` is the
+    // single authority for how many cards a draw instruction delivered — it
+    // commits the whole instruction's post-replacement total to
+    // `state.last_effect_count` once the sequence completes (a unit replaced
+    // by something else contributes 0; one doubled by a count modifier
+    // contributes its post-replacement count). Read that committed total
+    // instead of re-summing draw events, exactly as the `RollDie` arm above
+    // defers to `die_result_this_resolution`, so "draw N cards, then discard
+    // that many" (Varina, Lich Queen; Hordewing Skaab; Horrid Shadowspinner;
+    // Laquatus's Creativity; Last Stand) reads the true total rather than a
+    // per-unit or pre-replacement count. The same stamp feeds the condition
+    // peer `AbilityCondition::PreviousEffectAmount` — Transcendent Archaic's
+    // "if you draw one or more cards this way, discard two cards".
+    //
+    // Returns before the zero policy below: a draw that delivered zero cards is
+    // a real zero result and must stamp `Some(0)`. "Draw a card for each Island
+    // you control, then discard that many cards" (Last Stand) controlling no
+    // Islands has to discard 0, not inherit the life-gain amount its preceding
+    // chain step left behind in `last_effect_amount`.
+    if matches!(ability.effect, Effect::Draw { .. }) {
+        return state.last_effect_count;
+    }
+
+    let channel = amount_channel(&ability.effect)?;
+    let amount: i32 = match channel.events {
+        AmountEvents::DamageDealt => events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::DamageDealt { amount, .. } => {
+                    Some(crate::game::arithmetic::u32_to_i32_saturating(*amount))
+                }
+                _ => None,
+            })
+            .sum(),
+        AmountEvents::FightExcessOnFoughtCreature => {
             // CR 120.10 + CR 701.14a: "add that much {R}" (The Last Agni Kai)
             // reads the excess dealt to the *fought* creature — the fight's
             // damage recipient, which in a dual-target fight is the second
@@ -6914,21 +7290,21 @@ fn previous_effect_amount_from_events(
                 })
                 .sum()
         }
-        Effect::LoseLife { .. } | Effect::PayCost { .. } => events
+        AmountEvents::LifeLost => events
             .iter()
             .filter_map(|event| match event {
                 GameEvent::LifeChanged { amount, .. } if *amount < 0 => Some(-*amount),
                 _ => None,
             })
             .sum(),
-        Effect::GainLife { .. } => events
+        AmountEvents::LifeGained => events
             .iter()
             .filter_map(|event| match event {
                 GameEvent::LifeChanged { amount, .. } if *amount > 0 => Some(*amount),
                 _ => None,
             })
             .sum(),
-        Effect::RemoveCounter { .. } => events
+        AmountEvents::CountersRemoved => events
             .iter()
             .filter_map(|event| match event {
                 GameEvent::CounterRemoved { count, .. } => {
@@ -6937,37 +7313,91 @@ fn previous_effect_amount_from_events(
                 _ => None,
             })
             .sum(),
-        // CR 706.2 + CR 706.4 + CR 608.2c: `roll_die::resolve` is the single
-        // authority for the scalar value a follow-up `PreviousEffectAmount` or
-        // `EventContextAmount` consumer reads. That avoids re-deriving from an
-        // event slice that may contain result-table branch effects or nested
-        // rolls interleaved with the outer dice.
-        Effect::RollDie { .. } => return state.die_result_this_resolution,
-        // CR 121.2 + CR 121.2a + CR 608.2c: `draw::resume_draw_sequence` is the
-        // single authority for how many cards a draw instruction delivered — it
-        // commits the whole instruction's post-replacement total to
-        // `state.last_effect_count` once the sequence completes (a unit replaced
-        // by something else contributes 0; one doubled by a count modifier
-        // contributes its post-replacement count). Read that committed total
-        // instead of re-summing draw events, exactly as the `RollDie` arm above
-        // defers to `die_result_this_resolution`, so "draw N cards, then discard
-        // that many" (Varina, Lich Queen; Hordewing Skaab; Horrid Shadowspinner;
-        // Laquatus's Creativity; Last Stand) reads the true total rather than a
-        // per-unit or pre-replacement count. The same stamp feeds the condition
-        // peer `AbilityCondition::PreviousEffectAmount` — Transcendent Archaic's
-        // "if you draw one or more cards this way, discard two cards".
-        //
-        // Returns early rather than falling through the `> 0` filter below: a
-        // draw that delivered zero cards is a real zero result and must stamp
-        // `Some(0)`. "Draw a card for each Island you control, then discard that
-        // many cards" (Last Stand) controlling no Islands has to discard 0, not
-        // inherit the life-gain amount its preceding chain step left behind in
-        // `last_effect_amount`.
-        Effect::Draw { .. } => return state.last_effect_count,
-        _ => 0,
     };
 
-    (amount > 0).then_some(amount)
+    // CR 608.2c (#6956): the predecessor tail was `(amount > 0).then_some(amount)`,
+    // which collapsed "this instruction produced ZERO" into "this effect has no
+    // result on this channel". Both call sites assign only on `Some`, so that
+    // collapse did not leave the slot empty — it left the PREVIOUS chain step's
+    // amount standing, and the next "that many" / "that much" clause read that
+    // instead. `state.last_effect_amount` is ONE slot shared by every step of a
+    // chain (reset to `None` only at depth 0), so a real zero must overwrite.
+    //
+    // The opposite collapse is equally wrong and fails more quietly: stamping
+    // `Some(0)` unconditionally would let an effect that produced nothing on this
+    // channel silently zero a legitimately standing earlier value. So the zero
+    // case is decided per effect, not by the total.
+    if amount != 0 {
+        return Some(amount);
+    }
+    let zero_is_this_effects_result = channel.zero == ZeroSemantics::MeasuredResult
+        // CR 608.2c: "…X…, …X…, and …X…, where X is <definition>" names ONE
+        // value that every clause reads. The engine approximates that with a
+        // single mutable slot plus chain-relative reads, so a clause whose OWN
+        // quantity is that shared X is a RELAY, not a fresh anchor: letting its
+        // outcome redefine the slot destroys the X its later siblings still need.
+        //
+        // Thorna and Twigtooth is the live case — "remove all counters from
+        // target creature you control. Each opponent loses X life, you gain X
+        // life, … where X is the number of counters removed this way" lowers to
+        // `RemoveCounter -> LoseLife{PreviousEffectAmount} -> GainLife{PreviousEffectAmount}`.
+        // With an opponent under CR 119.8 "can't lose life" the middle clause
+        // totals zero, and claiming that zero makes the gain clause read 0
+        // instead of the counters removed.
+        //
+        // Scoped to the ZERO case on purpose: this is exactly a restoration of
+        // the predecessor behaviour for relays, so it is provably no wider than
+        // the #6956 change itself. It does NOT fix the nonzero chain-relative
+        // divergence (a two-opponent Thorna still stamps the doubled life loss)
+        // — that is a pre-existing anchored-quantity gap, tracked separately.
+        && !effect_relays_the_shared_amount(&ability.effect)
+        && effect_instruction_completed(ability, events);
+    zero_is_this_effects_result.then_some(0)
+}
+
+/// CR 608.2c: Is this effect's OWN quantity the shared "X" of a co-anchored
+/// clause group, rather than a fresh value of its own? See the relay note in
+/// `previous_effect_amount_from_events`.
+fn effect_relays_the_shared_amount(effect: &Effect) -> bool {
+    let mut relays = false;
+    effect.for_each_quantity_expr(&mut |quantity| {
+        relays |= quantity_expr_any_ref(quantity, &mut |qty| {
+            matches!(
+                qty,
+                QuantityRef::EventContextAmount | QuantityRef::PreviousEffectAmount { .. }
+            )
+        });
+    });
+    relays
+}
+
+/// CR 608.2c: Did THIS instruction complete within the supplied event window?
+///
+/// `EffectResolved { kind, source_id }` is pushed by a resolver as its last act
+/// and skipped when the resolver returns early to suspend for a player choice,
+/// so its presence is the authority for "the instruction finished". Matched on
+/// both the effect kind and the source so a same-window marker from another
+/// effect (a chained sub-ability, another permanent's ability) cannot stand in.
+///
+/// `previous_effect_counts_by_player_from_events` reads the same marker class,
+/// but not identically: it takes the LAST marker's index and then bounds its
+/// tally to `events[..=index]`, because events after the marker belong to later
+/// work. This predicate only asks whether the marker is present at all — the
+/// scalar sums above are not window-bounded, so there is nothing to bound. The
+/// two agree on every event slice the call sites produce today; tightening the
+/// scalar sums to the same window is a separate change.
+fn effect_instruction_completed(ability: &ResolvedAbility, events: &[GameEvent]) -> bool {
+    let kind = EffectKind::from(&ability.effect);
+    events.iter().any(|event| {
+        matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: event_kind,
+                source_id: event_source,
+                ..
+            } if *event_kind == kind && *event_source == ability.source_id
+        )
+    })
 }
 
 /// CR 120.10: Resolution-local excess-damage twin of
@@ -7137,28 +7567,21 @@ fn effect_consumes_event_context_amount(effect: &Effect) -> bool {
     consumes
 }
 
+/// Delegates to `QuantityExpr::any_ref` (`types/ability.rs`) — the single
+/// traversal authority, relocated there so the parser layer can consult it
+/// too without reaching into game internals. Kept as a thin free-function
+/// wrapper here since this module's call sites (below) predate the move.
+fn quantity_expr_any_ref(
+    quantity: &QuantityExpr,
+    pred: &mut dyn FnMut(&QuantityRef) -> bool,
+) -> bool {
+    quantity.any_ref(pred)
+}
+
 fn quantity_expr_references_event_context_amount(quantity: &QuantityExpr) -> bool {
-    match quantity {
-        QuantityExpr::Ref { qty } => matches!(qty, QuantityRef::EventContextAmount),
-        QuantityExpr::Offset { inner, .. }
-        | QuantityExpr::ClampMin { inner, .. }
-        | QuantityExpr::Multiply { inner, .. }
-        | QuantityExpr::DivideRounded { inner, .. } => {
-            quantity_expr_references_event_context_amount(inner)
-        }
-        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => exprs
-            .iter()
-            .any(quantity_expr_references_event_context_amount),
-        QuantityExpr::UpTo { max } => quantity_expr_references_event_context_amount(max),
-        QuantityExpr::Power { exponent, .. } => {
-            quantity_expr_references_event_context_amount(exponent)
-        }
-        QuantityExpr::Difference { left, right } => {
-            quantity_expr_references_event_context_amount(left)
-                || quantity_expr_references_event_context_amount(right)
-        }
-        QuantityExpr::Fixed { .. } => false,
-    }
+    quantity_expr_any_ref(quantity, &mut |qty| {
+        matches!(qty, QuantityRef::EventContextAmount)
+    })
 }
 
 fn mark_exile_choice_tracks_by_source(state: &mut GameState, source: ObjectId) {
@@ -8934,6 +9357,13 @@ fn resolve_chain_body(
     // affected player of the resolving replaced event (Zur's Weirding).
     if ability.optional {
         if let Some(scope) = ability.optional_for {
+            // COUPLING, recorded: `upfront_optional_gate` encodes this same fan-out
+            // pre-emption as `optional_for.is_some() ⇒ None`. The two agree because
+            // THIS returns first, not because either derives from the other. Moving
+            // or weakening this early return silently changes what the authority
+            // means at the gate below (CR 608.2d + CR 101.4). The `debug_assert!` at
+            // the gate is the executable half of this note.
+            //
             // Exhaustive match: there is no compiler exhaustiveness guard at the
             // other OpponentMayScope consumers, so this serves as the manual
             // guard. Adding a variant forces a decision here.
@@ -9008,23 +9438,38 @@ fn resolve_chain_body(
     // may" PER iteration via `drive_repeated_optional_payment`, not once up
     // front — suppress the single gate here exactly as the kind/member-driven
     // loops do.
-    if ability.optional
-        && !has_kind_driven_repeat(ability)
-        && !has_member_driven_repeat_after_hydration(state, ability)
-        && !is_repeated_optional_payment(ability)
-        && !optional_is_infeasible
-    {
+    //
+    // ADOPTION A: this branch IS `upfront_optional_gate`. The conjunct set is not restated
+    // here — that is what makes the function an authority rather than a fourth copy. The
+    // feasibility fact is handed over as `Known`, because `optional_is_infeasible` was
+    // already computed above for the `CastFromZone` decline early-return, and a re-probe
+    // would run the clone-bearing arm twice on production's hot resolve path.
+    if let Some(gate) = upfront_optional_gate(
+        state,
+        ability,
+        OptionalFeasibility::Known(optional_is_infeasible),
+    ) {
+        // The executable half of the `optional_for` coupling note above: this branch is
+        // reachable only because the CR 101.4 fan-out already returned, so the authority's
+        // `optional_for.is_some() ⇒ None` conjunct can never be the thing that admits an
+        // ability here. MEASURED across the whole `--lib` suite with an `unreachable!` in
+        // this position: zero firings.
+        debug_assert!(
+            ability.optional_for.is_none(),
+            "CR 608.2d + CR 101.4: the fan-out early return must have taken every \
+             `optional_for` ability before the up-front gate"
+        );
         let description = ability.description.clone();
-        let prompt_player = optional_prompt_player(state, ability);
-        let may_trigger_key =
-            ability
-                .may_trigger_origin
-                .clone()
-                .map(|origin| MayTriggerAutoChoiceKey {
-                    player: prompt_player,
-                    source_id: ability.source_id,
-                    origin,
-                });
+        let UpfrontOptionalGate {
+            prompt_player,
+            key: may_trigger_key,
+        } = gate;
+        // Deliberately the DIRECT store read rather than `stored_may_answer`, and this is
+        // not a duplicated authority: the KEY is what has to be built in one place, and it
+        // was — by `upfront_optional_gate`, above. `stored_may_answer` would re-enter the
+        // authority with `Probe` and run the feasibility clone a second time, which is the
+        // exact defect `OptionalFeasibility` exists to prevent. Same key, same store, same
+        // answer, one probe.
         if let Some(ref key) = may_trigger_key {
             if let Some(choice) = state.may_trigger_auto_choice(key) {
                 resolve_optional_effect_decision(
@@ -9735,6 +10180,56 @@ fn resolve_chain_body(
             _ => None,
         })
         .collect();
+    // CR 701.9a + CR 608.2c + CR 400.7: Capture the result from the active,
+    // operation-owned discard frame. Unlike an event-slice or global ledger,
+    // the frame remains exact through replacement redirection and cannot be
+    // satisfied by a sibling discard from the same source.
+    let mut discard_context;
+    let ability = if matches!(
+        ability.effect,
+        Effect::Discard { .. } | Effect::DiscardCard { .. }
+    ) {
+        let result = state.resolution_stack.active_discard().and_then(|frame| {
+            frame
+                .results
+                .first()
+                .map(|result| (frame.id, result.clone()))
+        });
+        if let Some((frame_id, result)) = result {
+            discard_context = ability.clone();
+            discard_context.context.direct_discard_result = Some(result);
+            let retired = state.resolution_stack.take_active_discard().expect(
+                "completed Recruit discard frame must remain live until direct-child hand-off",
+            );
+            assert_eq!(
+                retired.expect("active Recruit frame must exist").id,
+                frame_id
+            );
+            &discard_context
+        } else {
+            // A prevented/no-op Recruit discard cannot satisfy its contingent
+            // instruction. Once no prompt remains, retire the operation frame
+            // instead of letting it leak into a later discard resolution.
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                if let Some(frame_id) = state
+                    .resolution_stack
+                    .active_discard()
+                    .map(|frame| frame.id)
+                {
+                    let retired = state.resolution_stack.take_active_discard().expect(
+                        "settled Recruit discard frame must remain live until its gate is checked",
+                    );
+                    assert_eq!(
+                        retired.expect("active Recruit frame must exist").id,
+                        frame_id
+                    );
+                }
+            }
+            ability
+        }
+    } else {
+        ability
+    };
     // CR 608.2c + CR 109.5: Accumulate player actions across the chain for
     // `PlayerFilter::PerformedActionThisWay`. This is distinct from
     // `last_zone_changed_ids`: "searched this way" keys off the player action
@@ -9930,9 +10425,10 @@ fn resolve_chain_body(
     if ability.sub_ability.as_ref().is_some_and(|sub| {
         sub.condition
             .as_ref()
-            .is_some_and(condition_contains_city_blessing)
+            .is_some_and(condition_contains_designation)
     }) {
         crate::game::sba::apply_city_blessing_if_triggered(state, events);
+        crate::game::sba::apply_enduring_story_if_triggered(state, events);
     }
 
     // Follow typed sub_ability chain, propagating parent targets when sub has none.
@@ -11457,6 +11953,23 @@ pub(crate) fn evaluate_condition(
         // CR 702.131c: The city's blessing is a player designation that effects
         // can identify.
         AbilityCondition::HasCityBlessing => eval_has_city_blessing(state, ability.controller),
+        AbilityCondition::HasEnduringStory => eval_has_enduring_story(state, ability.controller),
+        // CR 701.9a + CR 608.2c + CR 400.7: Recruit reads the captured
+        // hand-time characteristics of the card discarded by its direct parent;
+        // a redirect and any destination-zone incarnation are irrelevant.
+        AbilityCondition::DiscardedCardMatchesFilter { filter } => ability
+            .context
+            .direct_discard_result
+            .as_ref()
+            .is_some_and(|result| {
+                crate::game::filter::matches_target_filter_on_lki_snapshot(
+                    state,
+                    result.object_id,
+                    &result.lki,
+                    filter,
+                    &crate::game::filter::FilterContext::from_ability(ability),
+                )
+            }),
         // CR 701.54a: Ring-bearer designation on the ability source.
         AbilityCondition::IsRingBearer => crate::game::effects::ring::is_current_ring_bearer(
             state,
@@ -12229,7 +12742,7 @@ mod tests {
         AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction, BounceSelection,
         CardPredicateChoice, CastingPermission, ChoiceType, ChoiceValue, Chooser, ChosenAttribute,
         ChosenCounterCountCondition, Comparator, ContinuousModification, ControllerRef,
-        DelayedTriggerCondition, Duration, EffectKind, EffectScope, FilterProp,
+        DamageChannel, DelayedTriggerCondition, Duration, EffectKind, EffectScope, FilterProp,
         ManaSpendPermission, ObjectProperty, PermissionGrantee, PlayerFilter, PlayerScope, PtValue,
         QuantityExpr, QuantityRef, SpellContext, StaticDefinition, TapStateChange, TargetFilter,
         TargetRef, TargetSelectionMode, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition,
@@ -22688,6 +23201,7 @@ mod tests {
     fn evaluate_condition_city_blessing_checks_ability_controller() {
         let mut state = GameState::new_two_player(42);
         state.city_blessing.insert(PlayerId(0));
+        state.enduring_story.insert(PlayerId(0));
         let ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
@@ -22703,6 +23217,11 @@ mod tests {
             &state,
             &ability,
         ));
+        assert!(evaluate_condition(
+            &AbilityCondition::HasEnduringStory,
+            &state,
+            &ability,
+        ));
 
         let opponent_ability = ResolvedAbility::new(
             Effect::Draw {
@@ -22715,6 +23234,11 @@ mod tests {
         );
         assert!(!evaluate_condition(
             &AbilityCondition::HasCityBlessing,
+            &state,
+            &opponent_ability,
+        ));
+        assert!(!evaluate_condition(
+            &AbilityCondition::HasEnduringStory,
             &state,
             &opponent_ability,
         ));
@@ -26287,15 +26811,15 @@ mod tests {
     }
 
     #[test]
-    fn condition_contains_city_blessing_recurses_through_condition_instead() {
+    fn condition_contains_designation_recurses_through_condition_instead() {
         let condition = AbilityCondition::ConditionInstead {
             inner: Box::new(AbilityCondition::HasCityBlessing),
         };
 
         assert!(
-            condition_contains_city_blessing(&condition),
-            "city's-blessing gated continuations wrapped in ConditionInstead must run the \
-             mid-chain blessing check before the condition is evaluated"
+            condition_contains_designation(&condition),
+            "designation-gated continuations wrapped in ConditionInstead must run the \
+             mid-chain designation check before the condition is evaluated"
         );
     }
 
@@ -27737,14 +28261,31 @@ mod tests {
             &PlayerFilter::All,
         ));
 
-        assert!(
-            !is_player_scope_local_continuation(
-                &scoped_move,
-                &scoped_shuffle,
-                &PlayerFilter::Opponent,
-            ),
-            "a non-All player scope must not enter the all-player hand shuffle continuation"
-        );
+        // CR 701.24a + #6957: the `ScopedPlayer` recipients on BOTH halves are
+        // the discriminator, not the identity of the player set. A SCOPE-position
+        // filter other than `All` must reach the SAME decision — the predecessor
+        // `matches!(scope, PlayerFilter::All)` silently detached these, running
+        // one unbound shuffle after the loop instead of one shuffle per player.
+        for scope in [
+            PlayerFilter::Opponent,
+            PlayerFilter::AllExcept {
+                exclude: Box::new(PlayerFilter::Controller),
+            },
+            PlayerFilter::TrackedSetPossessor {
+                relation: crate::types::ability::PlayerRelation::Opponent,
+                possession: crate::types::ability::PossessionAxis::Controller,
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    ..Default::default()
+                }),
+                caused_by: None,
+            },
+        ] {
+            assert!(
+                is_player_scope_local_continuation(&scoped_move, &scoped_shuffle, &scope),
+                "{scope:?} in SCOPE position must keep the scoped shuffle inside its iteration"
+            );
+        }
 
         let non_hand_move = zone_to_library_effect(Zone::Graveyard, TargetFilter::ScopedPlayer);
         assert!(
@@ -27899,6 +28440,625 @@ mod tests {
         assert!(
             last_shuffle < first_draw,
             "the draw tail must start only after every scoped move/shuffle pass"
+        );
+    }
+
+    /// CR 608.2c + CR 701.24a + CR 115.10 (#6957): a NON-`All` SCOPE-position
+    /// `PlayerFilter` keeps the scoped whole-hand shuffle inside each iteration.
+    ///
+    /// Deliberately run with TWO matching opponents. With a single iteration the
+    /// aggregate "a shuffle happened" is indistinguishable between "kept in
+    /// scope" and "detached and run once"; with two, the detached form can only
+    /// produce ONE shuffle, after BOTH hand moves, so both the shuffle count and
+    /// the move/shuffle interleaving flip when the fix is reverted.
+    #[test]
+    fn opponent_scoped_hand_shuffle_stays_inside_each_iteration() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let source = ObjectId(901);
+        let controller = PlayerId(0);
+        let opponents = [PlayerId(1), PlayerId(2)];
+        for (player, hand_count) in [(PlayerId(0), 4), (PlayerId(1), 3), (PlayerId(2), 5)] {
+            for card in 0..hand_count {
+                create_object(
+                    &mut state,
+                    CardId(4_000 + u64::from(player.0) * 100 + card as u64),
+                    player,
+                    format!("P{} hand {card}", player.0),
+                    Zone::Hand,
+                );
+            }
+            for card in 0..10 {
+                create_object(
+                    &mut state,
+                    CardId(5_000 + u64::from(player.0) * 100 + card as u64),
+                    player,
+                    format!("P{} library {card}", player.0),
+                    Zone::Library,
+                );
+            }
+        }
+
+        let mut move_hand = ResolvedAbility::new(
+            hand_to_library_effect(TargetFilter::ScopedPlayer),
+            vec![],
+            source,
+            controller,
+        );
+        move_hand.player_scope = Some(PlayerFilter::Opponent);
+        let mut shuffle = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer,
+            },
+            vec![],
+            source,
+            controller,
+        );
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                target: TargetFilter::ScopedPlayer,
+            },
+            vec![],
+            source,
+            controller,
+        );
+        draw.player_scope = Some(PlayerFilter::Opponent);
+        shuffle.sub_ability = Some(Box::new(draw));
+        move_hand.sub_ability = Some(Box::new(shuffle));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &move_hand, &mut events, 0).unwrap();
+
+        // `Effect::Shuffle` stamps exactly one `EffectResolved { Shuffle }` per
+        // invocation, so this counts INSTRUCTION runs — unlike the raw
+        // `ShuffledLibrary` action, which a whole-hand library insertion also
+        // emits per card.
+        let shuffle_instruction_indices: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| match event {
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Shuffle,
+                    ..
+                } => Some(index),
+                _ => None,
+            })
+            .collect();
+        // Discriminator: the shuffle instruction runs ONCE PER SCOPED OPPONENT.
+        // The detached form runs the tail exactly once, so this count drops to 1.
+        assert_eq!(
+            shuffle_instruction_indices.len(),
+            2,
+            "each of the two scoped opponents must run the shuffle instruction once"
+        );
+        for opponent in opponents {
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    GameEvent::PlayerPerformedAction {
+                        player_id,
+                        action: PlayerActionKind::ShuffledLibrary,
+                        ..
+                    } if *player_id == opponent
+                )),
+                "P{} must shuffle their own library",
+                opponent.0
+            );
+        }
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    player_id,
+                    action: PlayerActionKind::ShuffledLibrary,
+                    ..
+                } if *player_id == controller
+            )),
+            "the controller is outside an Opponent scope and must not shuffle"
+        );
+
+        // Interleaving discriminator: the FIRST shuffle must land before the LAST
+        // opponent's hand move. A detached tail runs after every move, so this
+        // inequality inverts when the scope gate is narrowed back to `All`.
+        let hand_move_indices: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| match event {
+                GameEvent::ZoneChanged { record, .. }
+                    if record.from_zone == Some(Zone::Hand)
+                        && record.to_zone == Zone::Library
+                        && opponents.contains(&record.owner) =>
+                {
+                    Some(index)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            hand_move_indices.len(),
+            8,
+            "both opponents' whole hands must move (3 + 5 cards)"
+        );
+        assert!(
+            shuffle_instruction_indices[0]
+                < *hand_move_indices.last().expect("hand moves occurred"),
+            "the first opponent's shuffle must precede the second opponent's hand move"
+        );
+
+        for (opponent, expected_draws) in opponents.into_iter().zip([3, 5]) {
+            assert_eq!(
+                state.players[opponent.0 as usize].cards_drawn_this_turn, expected_draws,
+                "P{} must draw exactly the number of cards they moved",
+                opponent.0
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // #6956 — a chain step that genuinely produced ZERO must overwrite
+    // `last_effect_amount`, not leave the previous step's value standing for
+    // the next "that many" / "that much" clause.
+    // ---------------------------------------------------------------------
+
+    /// Builds the three-step chain every #6956 test below drives through the
+    /// real resolution pipeline:
+    ///
+    ///   1. `GainLife 7` — a nonzero step that stamps `last_effect_amount = 7`.
+    ///      This is the value the bug leaks.
+    ///   2. `under_test` — the effect whose zero (or absence) is being probed.
+    ///   3. `Draw { PreviousEffectAmount { Total } }` — the "that many" consumer.
+    ///
+    /// Returns the number of cards the controller drew, i.e. exactly what the
+    /// following clause read out of the shared slot.
+    fn previous_effect_amount_seen_by_next_clause(
+        state: &mut GameState,
+        source: ObjectId,
+        under_test: Effect,
+        probe_targets: Vec<TargetRef>,
+    ) -> u32 {
+        let controller = PlayerId(0);
+        let mut gain = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 7 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            controller,
+        );
+        let mut probe = ResolvedAbility::new(under_test, probe_targets, source, controller);
+        let consumer = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount {
+                        channel: DamageChannel::Total,
+                    },
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            controller,
+        );
+        probe.sub_ability = Some(Box::new(consumer));
+        gain.sub_ability = Some(Box::new(probe));
+
+        resolve_ability_chain(state, &gain, &mut Vec::new(), 0).unwrap();
+        state.players[controller.0 as usize].cards_drawn_this_turn
+    }
+
+    fn state_for_previous_amount_probe() -> (GameState, ObjectId) {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        for card in 0..40u64 {
+            create_object(
+                &mut state,
+                CardId(6_000 + card),
+                PlayerId(0),
+                format!("P0 library {card}"),
+                Zone::Library,
+            );
+        }
+        let source = create_object(
+            &mut state,
+            CardId(6_900),
+            PlayerId(0),
+            "Probe Source".to_string(),
+            Zone::Battlefield,
+        );
+        (state, source)
+    }
+
+    /// CR 120.8 + CR 614.7a: "If a source would deal 0 damage, it does not deal
+    /// damage at all." The damage DEALT this way is zero, so the following
+    /// "that much" clause must read zero — not the 7 the preceding `GainLife`
+    /// left in the shared slot.
+    #[test]
+    fn zero_damage_overwrites_the_previous_chain_steps_amount() {
+        let (mut state, source) = state_for_previous_amount_probe();
+        let drawn = previous_effect_amount_seen_by_next_clause(
+            &mut state,
+            source,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Player,
+                damage_source: None,
+                excess: None,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+        );
+        assert_eq!(
+            drawn, 0,
+            "0 damage dealt must be read as 0, not as the preceding GainLife's 7"
+        );
+    }
+
+    /// Reach guard for the test above: the SAME chain with nonzero damage must
+    /// read the damage amount, proving the consumer is wired to this producer
+    /// at all and that the zero assertion is not vacuous.
+    #[test]
+    fn nonzero_damage_is_still_read_by_the_next_clause() {
+        let (mut state, source) = state_for_previous_amount_probe();
+        let drawn = previous_effect_amount_seen_by_next_clause(
+            &mut state,
+            source,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Player,
+                damage_source: None,
+                excess: None,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+        );
+        assert_eq!(drawn, 3, "the consumer must read this step's own amount");
+    }
+
+    /// CR 119.3: an effect that caused a player to lose zero life produced a
+    /// zero, and "that much" reads zero.
+    #[test]
+    fn zero_life_loss_overwrites_the_previous_chain_steps_amount() {
+        let (mut state, source) = state_for_previous_amount_probe();
+        let drawn = previous_effect_amount_seen_by_next_clause(
+            &mut state,
+            source,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 0 },
+                target: Some(TargetFilter::Controller),
+            },
+            vec![],
+        );
+        assert_eq!(
+            drawn, 0,
+            "0 life lost must be read as 0, not as the preceding GainLife's 7"
+        );
+    }
+
+    /// CR 119.3 + CR 119.9: gaining zero life is not a life-GAIN EVENT (so
+    /// "whenever you gain life" does not trigger), but the amount gained is
+    /// still zero and that is what the back-reference reads.
+    #[test]
+    fn zero_life_gain_overwrites_the_previous_chain_steps_amount() {
+        let (mut state, source) = state_for_previous_amount_probe();
+        let drawn = previous_effect_amount_seen_by_next_clause(
+            &mut state,
+            source,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 0 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+        );
+        assert_eq!(
+            drawn, 0,
+            "0 life gained must be read as 0, not as the preceding GainLife's 7"
+        );
+    }
+
+    /// CR 122.1: removing counters from an object that has none removes zero
+    /// counters. This is #6956's headline shape — "remove all −1/−1 counters
+    /// from it, then discard a card for each counter removed this way" behind a
+    /// nonzero life-gain step.
+    #[test]
+    fn zero_counters_removed_overwrites_the_previous_chain_steps_amount() {
+        let (mut state, source) = state_for_previous_amount_probe();
+        // The source carries NO counters, so the removal removes zero.
+        assert!(
+            state.objects[&source].counters.is_empty(),
+            "reach guard: the probe object must start with no counters"
+        );
+        let drawn = previous_effect_amount_seen_by_next_clause(
+            &mut state,
+            source,
+            Effect::RemoveCounter {
+                counter_type: Some(CounterType::Minus1Minus1),
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            },
+            vec![],
+        );
+        assert_eq!(
+            drawn, 0,
+            "0 counters removed must be read as 0, not as the preceding GainLife's 7"
+        );
+    }
+
+    /// Reach guard for the counter test: the same chain with counters actually
+    /// present must read the removed count.
+    #[test]
+    fn nonzero_counters_removed_is_still_read_by_the_next_clause() {
+        let (mut state, source) = state_for_previous_amount_probe();
+        state
+            .objects
+            .get_mut(&source)
+            .expect("probe source exists")
+            .counters
+            .insert(CounterType::Minus1Minus1, 2);
+        let drawn = previous_effect_amount_seen_by_next_clause(
+            &mut state,
+            source,
+            Effect::RemoveCounter {
+                counter_type: Some(CounterType::Minus1Minus1),
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::SelfRef,
+            },
+            vec![],
+        );
+        assert_eq!(drawn, 2, "the consumer must read this step's own amount");
+    }
+
+    /// CR 118.1: `Effect::PayCost` carries an arbitrary `AbilityCost`, so a MANA
+    /// payment emits no `LifeChanged` event and owns no amount on the life
+    /// channel at all. Claiming a zero for it would overwrite a legitimately
+    /// standing earlier value — the mirror bug #6956 warns about.
+    ///
+    /// This pins the RULE, not a card. An earlier draft of this comment claimed
+    /// the Extort cycle as the live case; that is wrong and the census says so:
+    /// in `PayCost -> LoseLife -> GainLife{PreviousEffectAmount}` the consumer's
+    /// nearest stamping producer is `LoseLife`, which overwrites any `PayCost`
+    /// value before `GainLife` reads it (the stamp is written per node before
+    /// `sub_ability` recurses). ZERO cards on the pool have a `PayCost` as the
+    /// direct parent of such a consumer. The guard rests on CR 118.1 alone.
+    #[test]
+    fn mana_pay_cost_does_not_zero_the_previous_chain_steps_amount() {
+        let (mut state, source) = state_for_previous_amount_probe();
+        let drawn = previous_effect_amount_seen_by_next_clause(
+            &mut state,
+            source,
+            Effect::PayCost {
+                cost: AbilityCost::Mana {
+                    cost: ManaCost::default(),
+                },
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+        );
+        assert_eq!(
+            drawn, 7,
+            "a mana payment owns no life-loss amount and must leave the preceding step's value"
+        );
+    }
+
+    /// NOT CLOSED (#6956): CR 118.1 + CR 119.4b say paying 0 life is a real,
+    /// always-legal payment whose result is zero, so this SHOULD read 0 — but
+    /// `pay::resolve` emits no `EffectResolved` terminal marker, so the
+    /// completion half of the zero rule cannot be established for
+    /// `Effect::PayCost`. Pinned at the PREDECESSOR behaviour
+    /// (the preceding step's 7 survives) so the arm's status is a visible,
+    /// asserted fact rather than an untested assumption. Flipping this
+    /// expectation to 0 is the acceptance test for the follow-up.
+    #[test]
+    fn zero_life_pay_cost_is_not_yet_distinguished_from_an_absent_producer() {
+        let (mut state, source) = state_for_previous_amount_probe();
+        let drawn = previous_effect_amount_seen_by_next_clause(
+            &mut state,
+            source,
+            Effect::PayCost {
+                cost: AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 0 },
+                },
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+        );
+        assert_eq!(
+            drawn, 7,
+            "PayCost has no terminal marker, so its zero cannot yet be told apart \
+             from an absent producer; see `amount_channel`'s PayCost arm"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // #6957 — CR 107.3i: every instance of a co-anchored X reads the SAME
+    // value. A consumer that is not the direct successor of the anchor must
+    // still read the anchor, not whatever the intervening RELAY clause
+    // happened to produce.
+    // ---------------------------------------------------------------------
+
+    /// Three players so the `player_scope: Opponent` relay fans out twice —
+    /// that fan-out is what makes the relay's own total (life lost across ALL
+    /// opponents) differ from the shared X it was reading.
+    fn state_for_shared_x_probe() -> (GameState, ObjectId) {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        for card in 0..40u64 {
+            create_object(
+                &mut state,
+                CardId(7_000 + card),
+                PlayerId(0),
+                format!("P0 library {card}"),
+                Zone::Library,
+            );
+        }
+        let source = create_object(
+            &mut state,
+            CardId(7_900),
+            PlayerId(0),
+            "Shared X Source".to_string(),
+            Zone::Battlefield,
+        );
+        (state, source)
+    }
+
+    /// NOT CLOSED (#6957): CR 107.3c + CR 107.3i — Thorna and Twigtooth,
+    /// "remove all counters from target creature you control. Each opponent
+    /// loses X life, you gain X life, … where X is the number of counters
+    /// removed this way."
+    ///
+    /// X is anchored to the `RemoveCounter` clause and read by TWO later
+    /// clauses. Both lower to `PreviousEffectAmount`, which reads the
+    /// *immediately preceding* chain step, so the second consumer reads the
+    /// intervening relay's own total instead of X. With two opponents that
+    /// total is the SUMMED life loss (2 × X), so the second consumer reads
+    /// 4 where CR 107.3i requires 2 — "normally, all instances of X on an
+    /// object have the same value at any given time."
+    ///
+    /// Pinned at the CURRENT (wrong) value so the gap is a visible asserted
+    /// fact rather than an untested assumption, exactly as
+    /// `zero_life_pay_cost_is_not_yet_distinguished_from_an_absent_producer`
+    /// pins its own open arm. **Flipping this expectation from 4 to 2 is the
+    /// acceptance test for the fix.** The fix cannot be made at this stamp
+    /// site — see
+    /// `a_relay_that_re_anchors_x_must_keep_publishing_its_own_result` for the
+    /// counter-shape that makes a stamp-time policy undecidable; it belongs in
+    /// the parser, binding one X into the single `chosen_x` channel the way
+    /// `ability_utils::publish_announced_x` already does for CR 601.2b
+    /// announce-time binders.
+    ///
+    /// `Draw` stands in for the "you gain X life" clause so the observation is
+    /// a clean scalar (`cards_drawn_this_turn`); the defect is in what the
+    /// consumer READS, which is independent of which effect consumes it.
+    #[test]
+    fn second_consumer_of_a_shared_x_reads_the_relay_not_the_anchor() {
+        let (mut state, source) = state_for_shared_x_probe();
+        let controller = PlayerId(0);
+        state
+            .objects
+            .get_mut(&source)
+            .expect("probe source exists")
+            .counters
+            .insert(CounterType::Minus1Minus1, 2);
+
+        // Clause 1 (anchor): remove all counters — X := 2.
+        let mut anchor = ResolvedAbility::new(
+            Effect::RemoveCounter {
+                counter_type: Some(CounterType::Minus1Minus1),
+                count: QuantityExpr::Fixed { value: -1 },
+                target: TargetFilter::SelfRef,
+            },
+            vec![],
+            source,
+            controller,
+        );
+        // Clause 2 (relay): each opponent loses X life. Two opponents, so the
+        // instruction's own total is 4 while the X it read is 2.
+        let mut relay = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount {
+                        channel: DamageChannel::Total,
+                    },
+                },
+                target: None,
+            },
+            vec![],
+            source,
+            controller,
+        );
+        relay.player_scope = Some(PlayerFilter::Opponent);
+        // Clause 3 (second consumer of the SAME X).
+        let consumer = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount {
+                        channel: DamageChannel::Total,
+                    },
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            controller,
+        );
+        relay.sub_ability = Some(Box::new(consumer));
+        anchor.sub_ability = Some(Box::new(relay));
+
+        resolve_ability_chain(&mut state, &anchor, &mut Vec::new(), 0).unwrap();
+
+        // Reach guard: the relay must actually have fanned out over both
+        // opponents, otherwise its total would coincide with X and the test
+        // would pass vacuously.
+        for opponent in [PlayerId(1), PlayerId(2)] {
+            assert_eq!(
+                state.players[opponent.0 as usize].life, 18,
+                "reach guard: P{} must have lost exactly X = 2 life",
+                opponent.0
+            );
+        }
+        assert_eq!(
+            state.players[controller.0 as usize].cards_drawn_this_turn, 4,
+            "pinned gap: the second consumer reads the relay's summed life loss \
+             (2 opponents × X) instead of the anchor's X. CR 107.3i requires 2 \
+             — flipping this to 2 is the acceptance test for the fix"
+        );
+    }
+
+    /// The counter-shape that makes a stamp-time fix for
+    /// `second_consumer_of_a_shared_x_reads_the_relay_not_the_anchor`
+    /// UNDECIDABLE, and therefore the regression guard any such attempt must
+    /// clear.
+    ///
+    /// Magma Pummeler — "prevent that damage and remove that many +1/+1
+    /// counters from it. When one or more counters are removed from this
+    /// creature this way, it deals that much damage to any target." Here the
+    /// middle clause is a relay (its own count reads the prevented damage) AND
+    /// is itself the anchor for the third clause: "that much damage" is the
+    /// number of counters actually REMOVED, which is capped by how many
+    /// counters were on the object. CR 122.1.
+    ///
+    /// That is byte-identical in the AST to Thorna's co-anchored
+    /// `RemoveCounter -> relay -> consumer` shape, but demands the opposite
+    /// answer: here the consumer MUST read the relay's own result, there it
+    /// must reach past it. So "a relay never redefines the shared slot" — the
+    /// tempting generalization of `effect_relays_the_shared_amount` from the
+    /// zero case to every case — is wrong, and no runtime policy keyed on the
+    /// resolved AST can separate the two. The binding has to be recorded when
+    /// the parser lowers X, not recovered at resolution.
+    ///
+    /// The relay reads 7 but the object carries only 2 counters, so the two
+    /// candidate answers are far apart: 2 (correct, the relay's own result)
+    /// vs 7 (what declining to overwrite would leak).
+    #[test]
+    fn a_relay_that_re_anchors_x_must_keep_publishing_its_own_result() {
+        let (mut state, source) = state_for_previous_amount_probe();
+        state
+            .objects
+            .get_mut(&source)
+            .expect("probe source exists")
+            .counters
+            .insert(CounterType::Plus1Plus1, 2);
+        // `previous_effect_amount_seen_by_next_clause` prefixes `GainLife 7`,
+        // so the relay's own quantity resolves to 7 while only 2 counters
+        // exist to remove.
+        let drawn = previous_effect_amount_seen_by_next_clause(
+            &mut state,
+            source,
+            Effect::RemoveCounter {
+                counter_type: Some(CounterType::Plus1Plus1),
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount {
+                        channel: DamageChannel::Total,
+                    },
+                },
+                target: TargetFilter::SelfRef,
+            },
+            vec![],
+        );
+        assert_eq!(
+            drawn, 2,
+            "CR 122.1: only 2 counters existed, so the re-anchoring consumer must \
+             read the 2 actually removed — not the 7 the relay asked for"
         );
     }
 }

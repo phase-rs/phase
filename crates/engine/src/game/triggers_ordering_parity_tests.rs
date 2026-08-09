@@ -210,6 +210,28 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // MISaligned copies go to a different graveyard and are correctly prompted by
     // the same conflict — see the impl-report soundness note.)
     "skyfisher spider",
+    // ---- unprofiled-effect commute, batch: the effect node has no RW profile, so
+    // the fail-closed `RwProfile::conservative()` catch-all prompts ----
+    // dies-batch optional PutOnTopOrBottom{SelfRef, chooser: Controller} (AST
+    // measured): each co-departing copy moves ONLY its own graveyard card (CR 603.6c
+    // first-zone check) to its OWN owner's library, so the members' writes are
+    // disjoint — owner-misaligned copies route to different libraries entirely, and
+    // same-owner copies contend only for the top/bottom slot, where identical
+    // same-name cards commute up to relabeling. The "may" and the top-or-bottom pick
+    // are resolution-time choices (CR 603.5) made by the batch's one controller in
+    // either order: production ordering groups are partitioned per-controller
+    // (`trigger_order_controller` / `begin_trigger_ordering`, triggers.rs; CR 603.3b
+    // — each player orders only the triggers THEY control, cross-controller
+    // placement being APNAP-fixed, not chosen), the premise the §5 batch rows model
+    // as `ControllerUniformity::Uniform` — single-controller BY CONSTRUCTION, not an
+    // artifact of the Phase+OnlyDuringYourTurn privacy predicate (same-event S2
+    // only). The prompt is conservative: `PutOnTopOrBottom` is unprofiled — it
+    // lands in `RwProfile::conservative()` (maximal reads/writes + fail-closed
+    // `reads_member_bound`), refusing batch-T1 and tripping the feed rows, so no
+    // in-scope recognizer proves the self-scoped move context-free (Valakut
+    // Exploration misparse-fix fixture regen surfaced this card in the sweep
+    // corpus; same adjudication as the #7031 branch).
+    "arashin sovereign",
 ];
 
 /// Batch-depth GENUINE order-dependence (kept SEPARATE from the same-event
@@ -948,6 +970,7 @@ fn ctx(
         may_trigger_origin: None,
         subject_match_count: None,
         die_result,
+        provenance: None,
     })
 }
 
@@ -1410,6 +1433,7 @@ fn ctx_c(
         may_trigger_origin: None,
         subject_match_count: None,
         die_result: None,
+        provenance: None,
     })
 }
 

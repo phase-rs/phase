@@ -229,9 +229,11 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         targets: _,                // concrete announced target refs (already resolved)
         source_id: _,              // object id
         source_incarnation: _,     // self-transform epoch latch, no dynamic read
+        noted_mana_payment: _,     // concrete activation-payment snapshot, no dynamic read
         trigger_source: _,         // exact triggered-source authority, no dynamic read
         trigger_definition_ref: _, // exact trigger occurrence, no dynamic read
         force_block_attacker: _,   // exact force-block referent, no dynamic read
+        target_incarnations: _,    // CR 400.7 referent pins, no dynamic read
         controller: _,             // player id
         original_controller: _,    // player id
         scoped_player: _,          // player id (iteration binding)
@@ -798,6 +800,8 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
         Effect::TimeTravel => Axes::NONE,
         Effect::BecomeMonarch => Axes::NONE,
         Effect::NoOp => Axes::NONE,
+        // Captured at activation time; no resolution-time dynamic read.
+        Effect::NoteManaSpent => Axes::NONE,
         Effect::Proliferate => Axes::NONE,
         Effect::ProliferateTarget { target } => {
             let mut acc = Axes::NONE;
@@ -2656,6 +2660,10 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
         AbilityCondition::CompletedDungeon { .. } => Axes::NONE,
         AbilityCondition::IsInitiative => Axes::NONE,
         AbilityCondition::HasCityBlessing => Axes::NONE,
+        AbilityCondition::HasEnduringStory => Axes::NONE,
+        AbilityCondition::DiscardedCardMatchesFilter { filter } => {
+            scan_target_filter(filter, FilterReadContext::SnapshotOrEvent, mode)
+        }
         AbilityCondition::IsRingBearer => Axes::NONE,
         AbilityCondition::TargetHasKeywordInstead { keyword: _ } => Axes::NONE,
         // `subject_slot: _` is a target-slot INDEX selector (CR 608.2c): `Some(n)`
@@ -3276,6 +3284,7 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
             projected: true,
         },
         TriggerCondition::HasCityBlessing => Axes::NONE,
+        TriggerCondition::HasEnduringStory => Axes::NONE,
         TriggerCondition::CompletedDungeon { specific: _ } => Axes::NONE,
         TriggerCondition::SourceIsTapped => Axes::NONE,
         TriggerCondition::SourceIsTransformed => Axes::NONE,
@@ -3563,6 +3572,7 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes {
         StaticCondition::IsInitiative => Axes::NONE,
         StaticCondition::NoMonarch => Axes::NONE,
         StaticCondition::HasCityBlessing => Axes::NONE,
+        StaticCondition::HasEnduringStory => Axes::NONE,
         StaticCondition::CompletedADungeon => Axes::NONE,
         StaticCondition::WasStartingPlayer { controller, .. } => {
             let mut acc = Axes::NONE;
@@ -4476,6 +4486,7 @@ fn scan_ability_cost(cost: &AbilityCost, mode: ScanMode) -> Axes {
         | AbilityCost::Waterbend { .. }
         | AbilityCost::NinjutsuFamily { .. }
         | AbilityCost::KeywordCostOfCastSpell { .. }
+        | AbilityCost::GetPlayerCounters { .. }
         | AbilityCost::Unimplemented { .. } => Axes::NONE,
     }
 }
@@ -4575,6 +4586,7 @@ pub(crate) fn keyword_cost_reads_growing_class(kw: &Keyword) -> bool {
         | Keyword::Exploit
         | Keyword::Explore
         | Keyword::Ascend
+        | Keyword::Storied
         | Keyword::StartYourEngines
         | Keyword::Dredge(_)
         | Keyword::Modular(_)
@@ -4840,6 +4852,7 @@ fn scan_keyword(kw: &Keyword, mode: ScanMode) -> Axes {
         | Keyword::Exploit
         | Keyword::Explore
         | Keyword::Ascend
+        | Keyword::Storied
         | Keyword::StartYourEngines
         | Keyword::Dredge(_)
         | Keyword::Modular(_)
@@ -5002,6 +5015,14 @@ fn scan_mana_production(p: &ManaProduction, mode: ScanMode) -> Axes {
         | ManaProduction::AnyInCommandersColorIdentity { count, .. } => {
             scan_quantity_expr(count, mode)
         }
+        // `NotedManaSpent` is mutable per-object state written by a companion
+        // `Effect::NoteManaSpent`, so sibling activations can affect its value.
+        ManaProduction::NotedType { count } => Axes {
+            event: false,
+            sibling: true,
+            projected: false,
+        }
+        .or(scan_quantity_expr(count, mode)),
         // SCOPED-OBJECT (Omnath, Locus of All): a SINGLE scoped object's colors,
         // NOT a board aggregate — the scope's own read surface is the sole sibling
         // source (CR 202.2c). NO own sibling literal.
@@ -5366,6 +5387,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::TimeTravel
         | Effect::BecomeMonarch
         | Effect::NoOp
+        | Effect::NoteManaSpent
         | Effect::Proliferate
         | Effect::ProliferateTarget { .. }
         | Effect::Populate
@@ -5771,6 +5793,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::TimeTravel
         | Effect::BecomeMonarch
         | Effect::NoOp
+        | Effect::NoteManaSpent
         | Effect::Proliferate
         | Effect::ProliferateTarget { .. }
         | Effect::Populate
@@ -6005,6 +6028,7 @@ pub(crate) fn effect_is_randomness_bearing(e: &Effect) -> bool {
         | Effect::TimeTravel
         | Effect::BecomeMonarch
         | Effect::NoOp
+        | Effect::NoteManaSpent
         | Effect::Proliferate
         | Effect::ProliferateTarget { .. }
         | Effect::Populate
@@ -7367,6 +7391,22 @@ mod tests {
     }
 
     #[test]
+    fn noted_mana_effect_is_read_free_and_deterministic() {
+        let effect = Effect::NoteManaSpent;
+        let axes = scan_effect(&effect, ScanMode::LoopFirewall);
+        assert!(!axes.event && !axes.sibling && !axes.projected);
+        assert_eq!(
+            effect_target_ctx(&effect, ScanMode::LoopFirewall),
+            FilterReadContext::SnapshotOrEvent
+        );
+        assert_eq!(
+            effect_census_role(&effect),
+            CensusRole::Relax(RelaxReason::BoundedOrNoPopulation)
+        );
+        assert!(!effect_is_randomness_bearing(&effect));
+    }
+
+    #[test]
     fn spell_ability_randomness_ability_level_and_tree() {
         use crate::types::ability::{AbilityKind, TargetSelectionMode};
 
@@ -7752,7 +7792,7 @@ mod tests {
         let face = db
             .face_index
             .get("park heights pegasus")
-            .expect("Park Heights Pegasus is in tests/fixtures/integration_cards.json");
+            .expect("Park Heights Pegasus is in tests/fixtures/integration_cards.json.gz");
 
         // (1) the flip CANNOT be landing on the Conservative `condition` path.
         assert_eq!(face.triggers.len(), 1, "(1) exactly one trigger definition");

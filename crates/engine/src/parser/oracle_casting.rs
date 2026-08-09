@@ -6,7 +6,7 @@ use nom::combinator::{all_consuming, map, opt, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
-use super::oracle_cost::parse_oracle_cost;
+use super::oracle_cost::{parse_gerund_cost, parse_oracle_cost};
 use super::oracle_util::{parse_mana_symbols, parse_ordinal, TextPair};
 use crate::parser::oracle_condition::parse_restriction_condition;
 use crate::types::ability::{
@@ -220,11 +220,40 @@ fn parse_self_flash_option(
         }
     }
 
-    if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("by ").parse(rest) {
-        if let Some(cost_text) = after.strip_suffix(" in addition to paying its other costs") {
-            option = option.cost(parse_oracle_cost(cost_text));
-            return Some(option);
+    if let Some(((), after)) = nom_on_lower(rest, &rest.to_lowercase(), |input| {
+        value((), tag::<_, _, OracleError<'_>>("by ")).parse(input)
+    }) {
+        let after = after.trim();
+        let after_lower = after.to_lowercase();
+        // CR 601.2f: the trailing closer has the same independent axes as the
+        // graveyard permission parser: optional "paying " and either possessive
+        // pronoun. A malformed closer must decline the whole option rather than
+        // fall through to an uncosted flash grant.
+        let (cost_len, _) = nom_on_lower(after, &after_lower, |input| {
+            all_consuming(map(
+                (
+                    terminated(
+                        take_until::<_, _, OracleError<'_>>(" in addition to "),
+                        tag(" in addition to "),
+                    ),
+                    opt(tag("paying ")),
+                    alt((tag("their other costs"), tag("its other costs"))),
+                    opt(tag(".")),
+                ),
+                |(cost, _, _, _)| cost.len(),
+            ))
+            .parse(input)
+        })?;
+        // CR 601.2f: the rider names the additional cost as a GERUND ("by
+        // discarding a card") — de-gerund via the shared cost authority. A
+        // present-but-unmodeled cost declines the whole option, avoiding a
+        // strictly-more-permissive cost-less flash permission.
+        let cost = parse_gerund_cost(&after[..cost_len]);
+        if matches!(cost, AbilityCost::Unimplemented { .. }) {
+            return None;
         }
+        option = option.cost(cost);
+        return Some(option);
     }
 
     if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("if you ").parse(rest) {
@@ -1143,32 +1172,24 @@ Trample";
         assert!(restrictions.contains(&CastingRestriction::AfterCombat));
     }
 
+    /// The blight count is parameterized, not enumerated — every count parses to the
+    /// same `Optional` shape with `AbilityCost::Blight { count }`.
     #[test]
-    fn parse_additional_cost_optional_blight() {
-        let lower = "as an additional cost to cast this spell, you may blight 1.";
-        let raw = "As an additional cost to cast this spell, you may blight 1.";
-        let result = parse_additional_cost_line(lower, raw);
-        assert_eq!(
-            result,
-            Some(AdditionalCost::Optional {
-                cost: AbilityCost::Blight { count: 1 },
-                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
-            })
-        );
-    }
-
-    #[test]
-    fn parse_additional_cost_optional_blight_2() {
-        let lower = "as an additional cost to cast this spell, you may blight 2.";
-        let raw = "As an additional cost to cast this spell, you may blight 2.";
-        let result = parse_additional_cost_line(lower, raw);
-        assert_eq!(
-            result,
-            Some(AdditionalCost::Optional {
-                cost: AbilityCost::Blight { count: 2 },
-                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
-            })
-        );
+    fn parse_additional_cost_optional_blight_counts() {
+        for count in [1, 2] {
+            let lower =
+                format!("as an additional cost to cast this spell, you may blight {count}.");
+            let raw = format!("As an additional cost to cast this spell, you may blight {count}.");
+            let result = parse_additional_cost_line(&lower, &raw);
+            assert_eq!(
+                result,
+                Some(AdditionalCost::Optional {
+                    cost: AbilityCost::Blight { count },
+                    repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
+                }),
+                "blight {count}"
+            );
+        }
     }
 
     #[test]
@@ -1324,42 +1345,32 @@ Trample";
         }
     }
 
+    /// Both the blight count and the generic-mana alternative are parameterized —
+    /// the `(blight N, pay {M})` pair varies independently of the `Choice` shape.
     #[test]
-    fn parse_additional_cost_choice_blight_or_pay() {
-        let lower = "as an additional cost to cast this spell, blight 2 or pay {1}.";
-        let raw = "As an additional cost to cast this spell, blight 2 or pay {1}.";
-        let result = parse_additional_cost_line(lower, raw);
-        assert_eq!(
-            result,
-            Some(AdditionalCost::Choice(
-                AbilityCost::Blight { count: 2 },
-                AbilityCost::Mana {
-                    cost: ManaCost::Cost {
-                        generic: 1,
-                        shards: vec![]
+    fn parse_additional_cost_choice_blight_or_pay_counts() {
+        for (blight, generic) in [(2, 1), (1, 3)] {
+            let lower = format!(
+                "as an additional cost to cast this spell, blight {blight} or pay {{{generic}}}."
+            );
+            let raw = format!(
+                "As an additional cost to cast this spell, blight {blight} or pay {{{generic}}}."
+            );
+            let result = parse_additional_cost_line(&lower, &raw);
+            assert_eq!(
+                result,
+                Some(AdditionalCost::Choice(
+                    AbilityCost::Blight { count: blight },
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            generic,
+                            shards: vec![]
+                        }
                     }
-                }
-            ))
-        );
-    }
-
-    #[test]
-    fn parse_additional_cost_choice_blight_or_pay_3() {
-        let lower = "as an additional cost to cast this spell, blight 1 or pay {3}.";
-        let raw = "As an additional cost to cast this spell, blight 1 or pay {3}.";
-        let result = parse_additional_cost_line(lower, raw);
-        assert_eq!(
-            result,
-            Some(AdditionalCost::Choice(
-                AbilityCost::Blight { count: 1 },
-                AbilityCost::Mana {
-                    cost: ManaCost::Cost {
-                        generic: 3,
-                        shards: vec![]
-                    }
-                }
-            ))
-        );
+                )),
+                "blight {blight} or pay {{{generic}}}"
+            );
+        }
     }
 
     #[test]
@@ -1655,6 +1666,59 @@ Trample";
             } if sac.requirement.fixed_count() == Some(2) => {}
             other => panic!("expected Sacrifice(count=2) alt-cost, got {other:?}"),
         }
+    }
+
+    /// CR 601.2f: a self-flash rider that names its additional cost as a GERUND
+    /// ("as though it had flash by discarding a card in addition to paying its
+    /// other costs") must de-gerund the cost via the shared authority and carry a
+    /// concrete Discard cost — not the `Unimplemented` the old imperative-only
+    /// `parse_oracle_cost(cost_text)` produced. Class completeness for the
+    /// "cast … by <gerund> in addition to …" family alongside the graveyard rider.
+    #[test]
+    fn self_flash_by_gerund_additional_cost_carries_discard() {
+        for closer in [
+            "its other costs",
+            "their other costs",
+            "paying its other costs",
+            "paying their other costs",
+        ] {
+            let option = parse_spell_casting_option_line(
+                &format!(
+                    "You may cast this spell as though it had flash by discarding a card in addition to {closer}."
+                ),
+                "Test Card",
+            )
+            .expect("self-flash rider should parse");
+            match option {
+                SpellCastingOption {
+                    kind: crate::types::ability::SpellCastingOptionKind::AsThoughHadFlash,
+                    cost: Some(AbilityCost::Discard { .. }),
+                    condition: None,
+                } => {}
+                other => panic!("expected AsThoughHadFlash with a Discard cost, got {other:?}"),
+            }
+        }
+    }
+
+    /// The paired negative: an unmodeled gerund cost on the self-flash rider must
+    /// DECLINE the whole option (return `None`), mirroring the graveyard
+    /// `AdditionalCostRider::Unmodeled` decline — NOT emit a cost-less flash grant
+    /// (which coverage would falsely mark supported). Asserting `is_none()` is the
+    /// load-bearing, discriminating check: it flips to failure the instant the
+    /// guard falls through to the cost-less `Some(option)` tail. A `!matches!(cost,
+    /// Some(Unimplemented))` assertion would pass vacuously for that exact
+    /// (dishonest) `cost == None` outcome, so it cannot catch the regression.
+    #[test]
+    fn self_flash_by_unmodeled_gerund_declines_option() {
+        let option = parse_spell_casting_option_line(
+            "You may cast this spell as though it had flash by frobnicating a card in addition to paying its other costs.",
+            "Test Card",
+        );
+        assert!(
+            option.is_none(),
+            "an unmodeled gerund additional cost must decline the whole self-flash \
+             option (honest coverage gap), not emit a cost-less flash grant: {option:?}"
+        );
     }
 
     #[test]
@@ -2266,73 +2330,42 @@ Trample";
     // because the global turn counter counts both players' turns (my turn 3 = global turn 5).
     #[test]
     fn spell_cast_restriction_parses_first_n_turns_of_game_per_player() {
-        // Spider-Man 2099 exact oracle text (with ability-word prefix and curly apostrophe,
-        // after card-name normalization to "~").
-        let restrictions = parse_casting_restriction_line(
-            "From the Future \u{2014} You can\u{2019}t cast ~ during your first, second, or third turns of the game.",
-        )
-        .expect("Spider-Man 2099 restriction should parse");
-        assert_eq!(
-            restrictions,
-            vec![CastingRestriction::RequiresCondition {
-                condition: Some(ParsedCondition::Not {
-                    condition: Box::new(ParsedCondition::QuantityComparison {
-                        lhs: QuantityExpr::Ref {
-                            qty: QuantityRef::TurnsTaken,
-                        },
-                        comparator: Comparator::LE,
-                        rhs: QuantityExpr::Fixed { value: 3 },
+        // Each row is a distinct English form, not just a different ordinal: the
+        // Spider-Man 2099 row carries an ability-word prefix, a curly apostrophe, and
+        // "~" after card-name normalization; the singular row uses "this spell".
+        for (max_ordinal, text) in [
+            (
+                3,
+                "From the Future \u{2014} You can\u{2019}t cast ~ during your first, second, or third turns of the game.",
+            ),
+            (
+                2,
+                "You can't cast ~ during your first or second turns of the game.",
+            ),
+            (
+                1,
+                "You can't cast this spell during your first turn of the game.",
+            ),
+        ] {
+            let restrictions = parse_casting_restriction_line(text)
+                .unwrap_or_else(|| panic!("{text:?} should parse"));
+            assert_eq!(
+                restrictions,
+                vec![CastingRestriction::RequiresCondition {
+                    condition: Some(ParsedCondition::Not {
+                        condition: Box::new(ParsedCondition::QuantityComparison {
+                            lhs: QuantityExpr::Ref {
+                                qty: QuantityRef::TurnsTaken,
+                            },
+                            comparator: Comparator::LE,
+                            rhs: QuantityExpr::Fixed { value: max_ordinal },
+                        }),
                     }),
-                }),
-            }],
-            "must block casting on turns 1–3 using per-player TurnsTaken, not global turn_number"
-        );
-    }
-
-    #[test]
-    fn spell_cast_restriction_parses_first_two_turns_of_game() {
-        // "first or second" variant — max_ordinal = 2.
-        let restrictions = parse_casting_restriction_line(
-            "You can't cast ~ during your first or second turns of the game.",
-        )
-        .expect("two-turn restriction should parse");
-        assert_eq!(
-            restrictions,
-            vec![CastingRestriction::RequiresCondition {
-                condition: Some(ParsedCondition::Not {
-                    condition: Box::new(ParsedCondition::QuantityComparison {
-                        lhs: QuantityExpr::Ref {
-                            qty: QuantityRef::TurnsTaken,
-                        },
-                        comparator: Comparator::LE,
-                        rhs: QuantityExpr::Fixed { value: 2 },
-                    }),
-                }),
-            }]
-        );
-    }
-
-    #[test]
-    fn spell_cast_restriction_parses_first_turn_of_game() {
-        // Singular "turn" variant — max_ordinal = 1.
-        let restrictions = parse_casting_restriction_line(
-            "You can't cast this spell during your first turn of the game.",
-        )
-        .expect("single-turn restriction should parse");
-        assert_eq!(
-            restrictions,
-            vec![CastingRestriction::RequiresCondition {
-                condition: Some(ParsedCondition::Not {
-                    condition: Box::new(ParsedCondition::QuantityComparison {
-                        lhs: QuantityExpr::Ref {
-                            qty: QuantityRef::TurnsTaken,
-                        },
-                        comparator: Comparator::LE,
-                        rhs: QuantityExpr::Fixed { value: 1 },
-                    }),
-                }),
-            }]
-        );
+                }],
+                "must block casting on turns 1–{max_ordinal} using per-player TurnsTaken, \
+                 not global turn_number: {text:?}"
+            );
+        }
     }
 
     #[test]

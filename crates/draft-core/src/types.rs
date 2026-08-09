@@ -153,13 +153,16 @@ impl DeckAddableCards {
 
     pub fn display_names(&self) -> Vec<String> {
         let mut names = Vec::new();
-        if matches!(
-            self.policy,
-            DeckAddableCardPolicy::StandardBasics | DeckAddableCardPolicy::StandardBasicsPlusCustom
-        ) {
-            names.extend(STANDARD_BASIC_LANDS.iter().map(|name| (*name).to_string()));
+        match self.policy {
+            DeckAddableCardPolicy::StandardBasics => {
+                names.extend(STANDARD_BASIC_LANDS.iter().map(|name| (*name).to_string()));
+            }
+            DeckAddableCardPolicy::CustomOnly => names.extend(self.custom.iter().cloned()),
+            DeckAddableCardPolicy::StandardBasicsPlusCustom => {
+                names.extend(STANDARD_BASIC_LANDS.iter().map(|name| (*name).to_string()));
+                names.extend(self.custom.iter().cloned());
+            }
         }
-        names.extend(self.custom.iter().cloned());
         names.sort();
         names.dedup();
         names
@@ -700,6 +703,30 @@ mod tests {
     #[test]
     fn spectator_visibility_default_is_public() {
         assert_eq!(SpectatorVisibility::default(), SpectatorVisibility::Public);
+    }
+
+    #[test]
+    fn displayed_addable_cards_match_the_selected_policy() {
+        let custom = "Watery Grave";
+        for (policy, should_display_custom) in [
+            (DeckAddableCardPolicy::StandardBasics, false),
+            (DeckAddableCardPolicy::CustomOnly, true),
+            (DeckAddableCardPolicy::StandardBasicsPlusCustom, true),
+        ] {
+            let addable_cards = DeckAddableCards {
+                policy,
+                custom: vec![custom.to_string()],
+            };
+
+            assert_eq!(
+                addable_cards
+                    .display_names()
+                    .iter()
+                    .any(|name| name == custom),
+                should_display_custom,
+            );
+            assert_eq!(addable_cards.is_addable(custom), should_display_custom);
+        }
     }
 
     #[test]

@@ -180,6 +180,16 @@ function dataFileDefines(mode: string): Record<string, string> {
       process.env.CARD_DATA_LOCALE_URL_TEMPLATE ||
         (base ? `${base}/card-data.{lng}.json` : "/card-data.{lng}.json"),
     ),
+    // Per-locale card-ART map URL template ({lng} replaced at runtime). Maps an
+    // English Scryfall printing id to the same printing's localized sibling id,
+    // so the art the player already chose is re-rendered in their language. Same
+    // manifest/upload/strip lifecycle as the content sidecar above; a 404
+    // degrades to English art, which is also the per-card fallback whenever a
+    // printing has no localized sibling. An explicit env override still wins.
+    __SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE__: JSON.stringify(
+      process.env.SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE ||
+        (base ? `${base}/scryfall-images.{lng}.json` : "/scryfall-images.{lng}.json"),
+    ),
   };
   for (const filename of manifest) {
     // "card-names.json" → "__CARD_NAMES_URL__"; "card-data.de.json" →
@@ -307,6 +317,31 @@ export default defineConfig(({ mode }) => ({
             handler: "StaleWhileRevalidate",
             options: {
               cacheName: "card-locale-sidecars",
+              expiration: { maxEntries: 6, maxAgeSeconds: 2592000 },
+            },
+          },
+          {
+            // Per-locale card-ART maps (`scryfall-images.<lng>.json`), the image
+            // counterpart to the content sidecars above. The data-manifest rule
+            // below is an exact-name alternation that does not list these, and
+            // the precache glob covers only js/css/html — so without this rule a
+            // non-English PWA user would fall back to English art offline while
+            // their card *text* stayed localized. Same mutability and reasoning
+            // as card-locale-sidecars: regenerated each deploy, so
+            // StaleWhileRevalidate.
+            //
+            // Two anchored branches, mirroring the engine-WASM rule above.
+            // Workbox's RegExpRoute refuses a cross-origin match that does not
+            // begin at index 0 of the href, and in production these are served
+            // from R2 at DATA_BASE_URL — so a bare `…\.json$` suffix pattern
+            // silently never routes the very requests this rule exists for. The
+            // second branch keeps the same-origin path working in dev/Tauri,
+            // where the files are served from the site root.
+            urlPattern:
+              /(?:^https:\/\/data\.phase-rs\.dev\/scryfall-images\.[a-z]{2}\.json$|\/scryfall-images\.[a-z]{2}\.json$)/,
+            handler: "StaleWhileRevalidate",
+            options: {
+              cacheName: "card-art-locale-maps",
               expiration: { maxEntries: 6, maxAgeSeconds: 2592000 },
             },
           },

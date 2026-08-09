@@ -2352,6 +2352,10 @@ fn is_inside_temporal_prefix(lower: &str) -> bool {
 /// - "that creature each" — the object-axis form (CR 115.1 parent-target
 ///   binding; e.g. Gogo, Mysterious Mime's "~ and that creature each get
 ///   +2/+0 and gain haste ... and attack this turn if able").
+/// - "target &lt;filter&gt;'s controller/owner each" — the possessive-actor form
+///   (CR 109.4; Life at Stake's "You and target creature's controller each
+///   secretly choose a number 0 or greater"), delegated to the shared axis
+///   combinator so the two sites cannot drift.
 fn remainder_trimmed_starts_with_compound_subject_each(remainder: &str) -> bool {
     let lower = remainder.to_ascii_lowercase();
     let result: nom::IResult<&str, (), OracleError<'_>> = alt((
@@ -2365,6 +2369,7 @@ fn remainder_trimmed_starts_with_compound_subject_each(remainder: &str) -> bool 
         return true;
     }
     controlled_creature_each_subject_starts(&lower)
+        || super::parse_possessive_actor_each_second_subject(&lower).is_some()
 }
 
 fn controlled_creature_each_subject_starts(lower: &str) -> bool {
@@ -4958,6 +4963,22 @@ pub(super) fn apply_clause_continuation(
                 position: crate::types::ability::LibraryPosition::Top,
                 face_down,
             };
+            // CR 608.2c + CR 401.1: "look at the top card of each player's library,
+            // then exile those cards" — the `ScopedPlayer` owner marker set by
+            // `parse_dig_library_owner` lifts this materialized `ExileTop` into a
+            // per-player `player_scope: All` fan-out, the same shape the direct
+            // "exile the top card of each player's library" path gets via the lift
+            // in `parse_effect_chain_ir`. This is the symmetric materialization
+            // seam: the direct path lifts where `parse_exile_ast` produces its
+            // `ExileTop`, and this look-then-exile path lifts where the `Dig` is
+            // back-patched into one. The lift survives assembly because this
+            // back-patched def already passed the per-clause `player_scope` write,
+            // and the current clause's write only touches its own def. The
+            // after-scope play/cast tail (Extract Power's `CastFromZone`) is
+            // detached by `split_player_scope_chain` and runs once for the
+            // controller over the union of exiled cards.
+            let d = &mut defs[bound_index];
+            super::lift_each_player_exile_top_scope(&mut d.effect, &mut d.player_scope);
         }
         // CR 702.75a + CR 406.3: "exile one of them face down" patches the
         // preceding private `Dig` into the Hideaway shape — the controller
@@ -6342,6 +6363,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::Bolster { .. }
         | Effect::Adapt { .. }
         | Effect::Learn
+        | Effect::NoteManaSpent
         | Effect::Forage
         | Effect::Harness
         | Effect::CollectEvidence { .. }
@@ -11750,33 +11772,29 @@ mod tests {
 
     // --- Token enters with counters continuation ---
 
+    /// The parser accepts both the "the token enters with " and "it enters with "
+    /// prefixes in one `alt`; both must produce the same continuation. The `let …
+    /// else` is load-bearing: a bare `if let` would let any other `ContinuationAst`
+    /// variant pass without ever asserting the variant under test.
     #[test]
     fn token_enters_with_x_counters_where_x_is() {
-        let result = try_parse_token_enters_with_counters(
+        for text in [
             "the token enters with x +1/+1 counters on it, where x is the number of other creatures you control",
-        );
-        assert!(result.is_some());
-        if let Some(ContinuationAst::TokenEntersWithCounters {
-            counter_type,
-            count,
-        }) = result
-        {
-            assert_eq!(counter_type, CounterType::Plus1Plus1);
-            // Should be an ObjectCount ref for "the number of other creatures you control"
-            assert!(matches!(count, QuantityExpr::Ref { .. }));
-        } else {
-            panic!("expected TokenEntersWithCounters");
-        }
-    }
-
-    #[test]
-    fn token_enters_with_it_prefix() {
-        let result = try_parse_token_enters_with_counters(
             "it enters with x +1/+1 counters on it, where x is the number of creatures you control",
-        );
-        assert!(result.is_some());
-        if let Some(ContinuationAst::TokenEntersWithCounters { counter_type, .. }) = result {
-            assert_eq!(counter_type, CounterType::Plus1Plus1);
+        ] {
+            let Some(ContinuationAst::TokenEntersWithCounters {
+                counter_type,
+                count,
+            }) = try_parse_token_enters_with_counters(text)
+            else {
+                panic!("expected TokenEntersWithCounters for {text:?}");
+            };
+            assert_eq!(counter_type, CounterType::Plus1Plus1, "{text:?}");
+            // An ObjectCount ref for the "where x is the number of …" tail.
+            assert!(
+                matches!(count, QuantityExpr::Ref { .. }),
+                "{text:?} count should be a ref, got {count:?}"
+            );
         }
     }
 

@@ -88,6 +88,28 @@ pub fn resolve(
         return Ok(());
     }
 
+    // CR 400.7 + CR 603.7c: a delayed attach whose pinned referent became a new
+    // object attaches nothing. The trigger fired and resolved (CR 603.7b); it
+    // affected nothing.
+    //
+    // PLACEMENT IS LOAD-BEARING — this MUST sit above the two `ok_or_else(..)?`
+    // conversions below. Letting the substitution in `resolve_object_filter`
+    // empty the list instead would surface `EffectError::MissingParam` and emit
+    // NO EffectResolved. Mirrors the CR 303.4j no-op guard further down, which
+    // is this function's proof that an events sink is in scope here.
+    //
+    // Reached by `gift of immortality` and `next of kin`: their ROOT is
+    // `ChangeZone{SelfRef}`, but `ability_pins_object_anaphor` walks the whole
+    // chain, so the `Attach` sub-ability's `ParentTarget` earns the pins.
+    if ability.pinned_object_targets_all_stale(state) {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
+
     // CR 608.2h + CR 608.2k: Typed attachment operands resolve from the
     // battlefield/LKI unless they are explicit player-chosen targets.
     // Typed/scan-based attachment filters (e.g. "Equipment attached to ~") resolve
@@ -227,7 +249,28 @@ pub fn resolve_unattach_all(
         attachment_filter,
         TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
     )
-    .then(|| super::effect_object_targets(attachment_filter, &ability.targets));
+    .then(|| {
+        // CR 400.7 + CR 603.7c: substitution only. Population inside the class
+        // is 0 (zero `UnattachAll` nodes), and the one card that reaches this
+        // (`stolen uniform`) is denied a pin by
+        // `condition_names_referent_zone_change`, so `live_object_targets` is
+        // the identity here today. Applied for uniformity and defence in depth;
+        // deliberately NO early return, since a population of 0 admits no
+        // non-vacuous test.
+        //
+        // Slot carve-out DOES apply: `attachment_filter` may be
+        // `ParentTargetSlot`, and `effect_object_targets` indexes it
+        // positionally. This is the second call site of the standing
+        // 22-call-site constraint.
+        let live_targets = ability.live_object_targets(state);
+        let pool: &[TargetRef] =
+            if matches!(attachment_filter, TargetFilter::ParentTargetSlot { .. }) {
+                &ability.targets
+            } else {
+                &live_targets
+            };
+        super::effect_object_targets(attachment_filter, pool)
+    });
     for target_id in target_ids {
         let attachments = state
             .objects
@@ -494,10 +537,19 @@ fn resolve_object_filter<'a>(
                     TargetRef::Player(_) => None,
                 })
         }
-        TargetFilter::ParentTarget => ability.targets.iter().find_map(|target| match target {
-            TargetRef::Object(id) => Some(*id),
-            TargetRef::Player(_) => None,
-        }),
+        // CR 400.7 + CR 603.7c: a pinned referent that became a new object is
+        // dropped. The all-stale case is caught by the early return at the top
+        // of `resolve` (which can emit `EffectResolved`); this substitution
+        // handles the PARTIAL-stale case.
+        TargetFilter::ParentTarget => {
+            ability
+                .live_object_targets(state)
+                .into_iter()
+                .find_map(|target| match target {
+                    TargetRef::Object(id) => Some(id),
+                    TargetRef::Player(_) => None,
+                })
+        }
         // CR 608.2c: a precise slot anaphor ("Attach it to the chosen creature"
         // → attachment slot 1, target slot 0) resolves against the whole
         // resolving chain's accumulated targets. The per-clause `ability.targets`

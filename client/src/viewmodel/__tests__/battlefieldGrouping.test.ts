@@ -222,7 +222,7 @@ describe("groupByName", () => {
       makeGameObject({ id: 3, name: "Mountain" }),
     ];
 
-    const groups = groupByName(objects);
+    const groups = groupByName(objects, undefined, undefined, undefined);
 
     expect(groups).toHaveLength(2);
     expect(groups[0]).toMatchObject({ name: "Forest", ids: [1, 2], count: 2 });
@@ -236,7 +236,7 @@ describe("groupByName", () => {
       makeGameObject({ id: 3, name: "Forest", tapped: false }),
     ];
 
-    const groups = groupByName(objects);
+    const groups = groupByName(objects, undefined, undefined, undefined);
 
     expect(groups).toHaveLength(2);
     const untapped = groups.find((g) => !g.representative.tapped);
@@ -251,8 +251,14 @@ describe("groupByName", () => {
       makeGameObject({ id: 2, name: "Grizzly Bears", counters: { Plus1Plus1: 1 } }),
       makeGameObject({ id: 3, name: "Grizzly Bears", attachments: [99] }),
     ];
+    // The group identity reads the ENGINE's rows, so the fixture supplies them; `obj.counters` is
+    // kept in sync only so the object stays a plausible engine snapshot.
+    const counterDisplay = {
+      "1": { pills: [{ counter: "Plus1Plus1", count: 1 }] },
+      "2": { pills: [{ counter: "Plus1Plus1", count: 1 }] },
+    };
 
-    const groups = groupByName(objects);
+    const groups = groupByName(objects, undefined, undefined, counterDisplay);
 
     // Two copies with identical counters stack; the one with an attachment is solo
     expect(groups).toHaveLength(2);
@@ -267,7 +273,7 @@ describe("groupByName", () => {
       makeGameObject({ id: 3, name: "Orc Army" }),
     ];
 
-    const groups = groupByName(objects, new Set([2]));
+    const groups = groupByName(objects, new Set([2]), undefined, undefined);
 
     // The ring-bearer (id 2) never gets hidden behind a non-bearer
     // representative in a collapsed group — it always has its own entry so
@@ -283,8 +289,13 @@ describe("groupByName", () => {
       makeGameObject({ id: 2, name: "Grizzly Bears", counters: { Plus1Plus1: 2 } }),
       makeGameObject({ id: 3, name: "Grizzly Bears", counters: { Plus1Plus1: 1 } }),
     ];
+    const counterDisplay = {
+      "1": { pills: [{ counter: "Plus1Plus1", count: 1 }] },
+      "2": { pills: [{ counter: "Plus1Plus1", count: 2 }] },
+      "3": { pills: [{ counter: "Plus1Plus1", count: 1 }] },
+    };
 
-    const groups = groupByName(objects);
+    const groups = groupByName(objects, undefined, undefined, counterDisplay);
 
     expect(groups).toHaveLength(2);
     expect(groups.find((g) => g.count === 2)?.ids).toEqual([1, 3]);
@@ -298,7 +309,7 @@ describe("groupByName", () => {
       makeGameObject({ id: 3, name: "Grizzly Bears", power: 2, toughness: 2 }),
     ];
 
-    const groups = groupByName(objects);
+    const groups = groupByName(objects, undefined, undefined, undefined);
 
     expect(groups).toHaveLength(2);
     expect(groups.find((g) => g.count === 2)?.ids).toEqual([1, 3]);
@@ -312,7 +323,7 @@ describe("groupByName", () => {
       makeGameObject({ id: 3, name: "Grizzly Bears", power: 2, toughness: 2 }),
     ];
 
-    const groups = groupByName(objects);
+    const groups = groupByName(objects, undefined, undefined, undefined);
 
     expect(groups).toHaveLength(2);
     expect(groups.find((g) => g.count === 2)?.ids).toEqual([1, 3]);
@@ -326,7 +337,7 @@ describe("groupByName", () => {
       makeGameObject({ id: 3, name: "Llanowar Elves", keywords: [] }),
     ];
 
-    const groups = groupByName(objects);
+    const groups = groupByName(objects, undefined, undefined, undefined);
 
     expect(groups).toHaveLength(2);
     expect(groups.find((g) => g.count === 2)?.ids).toEqual([1, 3]);
@@ -342,7 +353,7 @@ describe("groupByName", () => {
       makeGameObject({ id: 3, name: "Spectral Sailor", keywords: [ward2] }),
     ];
 
-    const groups = groupByName(objects);
+    const groups = groupByName(objects, undefined, undefined, undefined);
 
     expect(groups).toHaveLength(2);
     expect(groups.find((g) => g.count === 2)?.ids).toEqual([1, 3]);
@@ -356,7 +367,7 @@ describe("groupByName", () => {
       makeGameObject({ id: 3, name: "Grizzly Bears", color: ["Green"] }),
     ];
 
-    const groups = groupByName(objects);
+    const groups = groupByName(objects, undefined, undefined, undefined);
 
     expect(groups).toHaveLength(2);
     expect(groups.find((g) => g.count === 2)?.ids).toEqual([1, 3]);
@@ -369,7 +380,7 @@ describe("groupByName", () => {
       makeGameObject({ id: 9, name: "Mountain" }),
     ];
 
-    const groups = groupByName(objects);
+    const groups = groupByName(objects, undefined, undefined, undefined);
 
     expect(groups[0].name).toBe("Forest");
     expect(groups[0].representative.id).toBe(5);
@@ -417,7 +428,7 @@ describe("groupByName", () => {
       color: ["Black", "Green"],
     });
 
-    const groups = groupByName([attackPest, diesPest]);
+    const groups = groupByName([attackPest, diesPest], undefined, undefined, undefined);
 
     expect(groups).toHaveLength(2);
     expect(groups.map((g) => g.count).sort()).toEqual([1, 1]);
@@ -465,7 +476,7 @@ describe("groupByName", () => {
       }),
     ];
 
-    const groups = groupByName(objects);
+    const groups = groupByName(objects, undefined, undefined, undefined);
 
     expect(groups).toHaveLength(2);
   });
@@ -515,7 +526,7 @@ describe("groupByName", () => {
       }),
     ];
 
-    const groups = groupByName(objects);
+    const groups = groupByName(objects, undefined, undefined, undefined);
 
     expect(groups).toHaveLength(2);
   });
@@ -534,7 +545,7 @@ describe("groupByName", () => {
       }),
     ];
 
-    const groups = groupByName(objects);
+    const groups = groupByName(objects, undefined, undefined, undefined);
 
     expect(groups).toHaveLength(2);
   });
@@ -559,7 +570,7 @@ describe("groupByName", () => {
       }),
     ];
 
-    const groups = groupByName(objects);
+    const groups = groupByName(objects, undefined, undefined, undefined);
 
     expect(groups).toHaveLength(1);
     expect(groups[0]).toMatchObject({
@@ -593,7 +604,7 @@ describe("groupByName", () => {
     const pile = new Set([1, 2]);
 
     // Both tapped Saprolings are pile members → the group is ∞.
-    const infinite = groupByName(tappedFodder, undefined, pile);
+    const infinite = groupByName(tappedFodder, undefined, pile, undefined);
     expect(infinite).toHaveLength(1);
     expect(infinite[0].isUnboundedPile).toBe(true);
 
@@ -607,12 +618,56 @@ describe("groupByName", () => {
       toughness: 1,
       card_types: { supertypes: [], core_types: ["Creature"], subtypes: ["Saproling"] },
     });
-    const mixed = groupByName([...tappedFodder, untapped], undefined, pile);
+    const mixed = groupByName([...tappedFodder, untapped], undefined, pile, undefined);
     const untappedGroup = mixed.find((g) => g.ids.includes(3));
     expect(untappedGroup?.isUnboundedPile).toBe(false);
 
     // Empty pile set → no group is ∞ (the dominant no-loop case; also the default).
-    expect(groupByName(tappedFodder)[0].isUnboundedPile).toBe(false);
-    expect(groupByName(tappedFodder, undefined, new Set())[0].isUnboundedPile).toBe(false);
+    expect(groupByName(tappedFodder, undefined, undefined, undefined)[0].isUnboundedPile).toBe(false);
+    expect(groupByName(tappedFodder, undefined, new Set(), undefined)[0].isUnboundedPile).toBe(false);
+  });
+
+  // CR 122.1 + CR 732.2a: the group identity keys on the engine's RENDERED counter rows, so a
+  // collapsed group's representative can never speak for a member that renders differently. This
+  // is the live `GroupedPermanent` representative bug — the collapsed branch subscribes the
+  // counter projection for `ids[0]` alone.
+  it("splits a group whose members disagree on their counter rows, and only then", () => {
+    const twins = () => [
+      makeGameObject({ id: 1, name: "Pentad Prism", counters: { charge: 4 } }),
+      makeGameObject({ id: 2, name: "Pentad Prism", counters: { charge: 4 } }),
+    ];
+
+    // NEGATIVE — THE FIX. Byte-identical counter maps; only id 1 is `∞`-annotated. `magnitude` is
+    // absent on id 2's row exactly as the engine omits the serde default.
+    const divergent = groupByName(twins(), undefined, undefined, {
+      "1": { pills: [{ counter: "charge", count: 4, magnitude: "Unbounded" }] },
+      "2": { pills: [{ counter: "charge", count: 4 }] },
+    });
+    expect(divergent).toHaveLength(2);
+    expect(divergent.find((g) => g.ids.includes(1))?.ids).toEqual([1]);
+
+    // POSITIVE — THE REACH-GUARD. The SAME two objects with the SAME entry collapse into one
+    // group, which is what proves the split above is caused by the ∞ divergence and by nothing
+    // else (a groupKey that split on object id would pass the negative arm vacuously).
+    const identical = groupByName(twins(), undefined, undefined, {
+      "1": { pills: [{ counter: "charge", count: 4, magnitude: "Unbounded" }] },
+      "2": { pills: [{ counter: "charge", count: 4, magnitude: "Unbounded" }] },
+    });
+    expect(identical).toHaveLength(1);
+    expect(identical[0].ids).toEqual([1, 2]);
+
+    // FREE ARM 1 — objects with no entry at all still collapse, i.e. the new fragment does not
+    // accidentally key on identity.
+    expect(groupByName(twins(), undefined, undefined, {})).toHaveLength(1);
+
+    // FREE ARM 2 — the DE-split direction (behavior change #5). The engine drops zero-count
+    // finite rows (CR 122.1), so a `{charge: 0}` permanent and a counterless one publish the same
+    // (empty) row set and now render identically. Reading `obj.counters` here instead of the
+    // projection splits them, as the head revision did.
+    const zeroVsAbsent = [
+      makeGameObject({ id: 1, name: "Pentad Prism", counters: { charge: 0 } }),
+      makeGameObject({ id: 2, name: "Pentad Prism", counters: {} }),
+    ];
+    expect(groupByName(zeroVsAbsent, undefined, undefined, {})).toHaveLength(1);
   });
 });

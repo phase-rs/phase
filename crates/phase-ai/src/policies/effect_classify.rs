@@ -331,6 +331,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::Monstrosity { .. }
         | Effect::Myriad
         | Effect::NoOp
+        | Effect::NoteManaSpent
         | Effect::OpenAttractions { .. }
         | Effect::OpponentGuess { .. }
         | Effect::PairWith { .. }

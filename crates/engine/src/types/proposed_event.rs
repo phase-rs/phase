@@ -78,7 +78,7 @@ pub struct BoundSearchFoundCandidate {
     pub is_optional: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(tag = "type")]
 pub enum AppliedReplacementKey {
     Object { source: ObjectId, index: usize },
@@ -418,6 +418,12 @@ pub enum ProposedEvent {
         /// delivered.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enter_as_copy: Option<Box<CopyTokenSpec>>,
+        /// CR 701.9a + CR 614.1: Preserves an operation-owned discard frame
+        /// through the inner hand-to-destination move and any replacement
+        /// choices. Unrelated zone changes omit it from the wire.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        discard_frame: Option<crate::types::identifiers::DiscardFrameId>,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     Damage {
@@ -425,11 +431,13 @@ pub enum ProposedEvent {
         target: TargetRef,
         amount: u32,
         is_combat: bool,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     Draw {
         player_id: PlayerId,
         count: u32,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 701.23a + CR 614.1: One card found during a search, before the
@@ -442,6 +450,7 @@ pub enum ProposedEvent {
         library_owner: Option<PlayerId>,
         object_id: ObjectId,
         disposition: SearchFoundDisposition,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 701.22a + CR 614.1a: A player is about to scry cards. Replacement
@@ -449,6 +458,7 @@ pub enum ProposedEvent {
     Scry {
         player_id: PlayerId,
         count: u32,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 701.17a + CR 614.1a: A player is about to mill cards. Count-level
@@ -458,6 +468,7 @@ pub enum ProposedEvent {
         player_id: PlayerId,
         count: u32,
         destination: Zone,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 705.1 + CR 614.1a: A player is about to flip a single coin. Carried
@@ -467,12 +478,14 @@ pub enum ProposedEvent {
     CoinFlip {
         player_id: PlayerId,
         count: u32,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 701.37a + CR 614.1a: A creature is about to explore. Replacement
     /// effects can modify the explore action (e.g., add a scry prelude).
     Explore {
         object_id: ObjectId,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 701.50a + CR 614.1a: A creature is about to connive (draw N, discard N,
@@ -489,6 +502,7 @@ pub enum ProposedEvent {
         /// a legacy raw-id-only parked event cannot reconstruct this authority.
         subject: Box<EventObjectSnapshot>,
         count: u32,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 701.34a + CR 614.1a: A player is about to proliferate. Replacement
@@ -497,16 +511,19 @@ pub enum ProposedEvent {
     Proliferate {
         player_id: PlayerId,
         count: u32,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     LifeGain {
         player_id: PlayerId,
         amount: u32,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     LifeLoss {
         player_id: PlayerId,
         amount: u32,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     AddCounter {
@@ -516,12 +533,14 @@ pub enum ProposedEvent {
         #[serde(flatten)]
         placement: CounterPlacement,
         count: u32,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     RemoveCounter {
         object_id: ObjectId,
         counter_type: CounterType,
         count: u32,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 122.5: Moving a counter is atomic: remove it from one object and put
@@ -536,6 +555,7 @@ pub enum ProposedEvent {
         remove_count: u32,
         add_count: u32,
         stage: CounterMoveStage,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 111.1 + CR 614.1a: Token creation event carrying the full
@@ -564,6 +584,7 @@ pub enum ProposedEvent {
         enter_tapped: EtbTapState,
         /// CR 614.1a: Number of tokens to create. May be modified by replacement effects.
         count: u32,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     TokenEntry {
@@ -572,6 +593,7 @@ pub enum ProposedEvent {
         enter_tapped: EtbTapState,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         enter_with_counters: Vec<(CounterType, u32)>,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     Discard {
@@ -584,20 +606,29 @@ pub enum ProposedEvent {
         /// actions (cleanup hand-size discard).
         #[serde(default)]
         caused_by_effect: bool,
+        /// CR 701.9a + CR 614.1: Operation-owned provenance for an in-flight
+        /// discard. `None` preserves ordinary discard/cost behavior; Recruit
+        /// installs an id before the event enters replacement processing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        discard_frame: Option<crate::types::identifiers::DiscardFrameId>,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     Tap {
         object_id: ObjectId,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     Untap {
         object_id: ObjectId,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 614.1e + CR 708.11: a permanent is being turned face up. "As ~ is turned
     /// face up" replacement effects apply here (megamorph/disguise).
     TurnFaceUp {
         object_id: ObjectId,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     Destroy {
@@ -605,11 +636,13 @@ pub enum ProposedEvent {
         source: Option<ObjectId>,
         /// CR 701.19c: When true, regeneration shields cannot prevent this destruction.
         cant_regenerate: bool,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     Sacrifice {
         object_id: ObjectId,
         player_id: PlayerId,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 500.1 + CR 614.1b + CR 614.10: A turn is about to begin. Carried
@@ -621,6 +654,7 @@ pub enum ProposedEvent {
     BeginTurn {
         player_id: PlayerId,
         is_extra_turn: bool,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 500.1 + CR 614.1b: A phase/step is about to begin. Carried through
@@ -631,6 +665,7 @@ pub enum ProposedEvent {
     BeginPhase {
         player_id: PlayerId,
         phase: Phase,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 106.3 + CR 614.1a: Mana is about to be produced by a source and added
@@ -648,6 +683,7 @@ pub enum ProposedEvent {
         /// ability with the tap symbol in its cost.
         #[serde(default)]
         tapped_for_mana: bool,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 703.4q + CR 614.1a + CR 616.1: A player's step-end "empty unspent
@@ -670,7 +706,11 @@ pub enum ProposedEvent {
     EmptyManaPool {
         player_id: PlayerId,
         units: Vec<UnitDecision>,
-        #[serde(default, deserialize_with = "deserialize_applied_keys_step_end_mana")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_applied_keys_step_end_mana",
+            serialize_with = "crate::types::deterministic_serde::hash_set"
+        )]
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 701.31 + CR 614.1a: A player is about to planeswalk. All CR 701.31c
@@ -685,6 +725,7 @@ pub enum ProposedEvent {
         /// only the cause their Oracle text names.
         #[serde(default)]
         cause: PlaneswalkCause,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     /// CR 701.3a + CR 614.1a: An Aura, Equipment, or Fortification is about to
@@ -699,6 +740,7 @@ pub enum ProposedEvent {
     Attach {
         attachment_id: ObjectId,
         target_id: ObjectId,
+        #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
 }
@@ -722,6 +764,7 @@ impl ProposedEvent {
             enter_transformed: false,
             face_down_profile: None,
             enter_as_copy: None,
+            discard_frame: None,
             applied: HashSet::new(),
         }
     }
@@ -1057,163 +1100,6 @@ impl ProposedEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn proposed_event_variants_compile() {
-        // Verify all variants compile, including the parameterized counter
-        // placement recipients.
-        let events: Vec<ProposedEvent> = vec![
-            ProposedEvent::zone_change(ObjectId(1), Zone::Battlefield, Zone::Graveyard, None),
-            ProposedEvent::Damage {
-                source_id: ObjectId(1),
-                target: TargetRef::Player(PlayerId(0)),
-                amount: 3,
-                is_combat: false,
-                applied: HashSet::new(),
-            },
-            ProposedEvent::Draw {
-                player_id: PlayerId(0),
-                count: 1,
-                applied: HashSet::new(),
-            },
-            ProposedEvent::Scry {
-                player_id: PlayerId(0),
-                count: 1,
-                applied: HashSet::new(),
-            },
-            ProposedEvent::Mill {
-                player_id: PlayerId(0),
-                count: 1,
-                destination: Zone::Graveyard,
-                applied: HashSet::new(),
-            },
-            ProposedEvent::CoinFlip {
-                player_id: PlayerId(0),
-                count: 1,
-                applied: HashSet::new(),
-            },
-            ProposedEvent::LifeGain {
-                player_id: PlayerId(0),
-                amount: 3,
-                applied: HashSet::new(),
-            },
-            ProposedEvent::LifeLoss {
-                player_id: PlayerId(0),
-                amount: 3,
-                applied: HashSet::new(),
-            },
-            ProposedEvent::AddCounter {
-                placement: CounterPlacement::Object {
-                    actor: PlayerId(0),
-                    object_id: ObjectId(1),
-                    counter_type: CounterType::Plus1Plus1,
-                },
-                count: 1,
-                applied: HashSet::new(),
-            },
-            ProposedEvent::AddCounter {
-                placement: CounterPlacement::Player {
-                    actor: PlayerId(0),
-                    player_id: PlayerId(0),
-                    counter_kind: PlayerCounterKind::Poison,
-                },
-                count: 1,
-                applied: HashSet::new(),
-            },
-            ProposedEvent::AddCounter {
-                placement: CounterPlacement::Energy {
-                    actor: PlayerId(0),
-                    player_id: PlayerId(0),
-                },
-                count: 1,
-                applied: HashSet::new(),
-            },
-            ProposedEvent::RemoveCounter {
-                object_id: ObjectId(1),
-                counter_type: CounterType::Plus1Plus1,
-                count: 1,
-                applied: HashSet::new(),
-            },
-            ProposedEvent::MoveCounter {
-                actor: PlayerId(0),
-                source_id: ObjectId(1),
-                destination_id: ObjectId(2),
-                counter_type: CounterType::Plus1Plus1,
-                remove_count: 1,
-                add_count: 1,
-                stage: CounterMoveStage::Remove,
-                applied: HashSet::new(),
-            },
-            ProposedEvent::CreateToken {
-                owner: PlayerId(0),
-                spec: Box::new(TokenSpec {
-                    characteristics: TokenCharacteristics {
-                        display_name: "Soldier".to_string(),
-                        power: Some(1),
-                        toughness: Some(1),
-                        core_types: Vec::new(),
-                        subtypes: Vec::new(),
-                        supertypes: Vec::new(),
-                        colors: Vec::new(),
-                        keywords: Vec::new(),
-                    },
-                    script_name: "w_1_1_soldier".to_string(),
-                    static_abilities: Vec::new(),
-                    enter_with_counters: Vec::new(),
-                    tapped: false,
-                    enters_attacking: false,
-                    sacrifice_at: None,
-                    source_id: ObjectId(1),
-                    controller: PlayerId(0),
-                    attach_to: None,
-                }),
-                copy: None,
-                enter_tapped: EtbTapState::Unspecified,
-                count: 1,
-                applied: HashSet::new(),
-            },
-            ProposedEvent::Discard {
-                player_id: PlayerId(0),
-                object_id: ObjectId(2),
-                source_id: None,
-                caused_by_effect: false,
-                applied: HashSet::new(),
-            },
-            ProposedEvent::Tap {
-                object_id: ObjectId(1),
-                applied: HashSet::new(),
-            },
-            ProposedEvent::Untap {
-                object_id: ObjectId(1),
-                applied: HashSet::new(),
-            },
-            ProposedEvent::Destroy {
-                object_id: ObjectId(1),
-                source: None,
-                cant_regenerate: false,
-                applied: HashSet::new(),
-            },
-            ProposedEvent::Sacrifice {
-                object_id: ObjectId(1),
-                player_id: PlayerId(0),
-                applied: HashSet::new(),
-            },
-            ProposedEvent::begin_turn(PlayerId(0), false),
-            ProposedEvent::begin_phase(PlayerId(0), Phase::Untap),
-            ProposedEvent::produce_mana(ObjectId(1), PlayerId(0), ManaType::Green),
-            ProposedEvent::EmptyManaPool {
-                player_id: PlayerId(0),
-                units: Vec::new(),
-                applied: HashSet::new(),
-            },
-            ProposedEvent::Attach {
-                attachment_id: ObjectId(1),
-                target_id: ObjectId(2),
-                applied: HashSet::new(),
-            },
-        ];
-        assert_eq!(events.len(), 24);
-    }
 
     #[test]
     fn replacement_id_equality_and_hash() {

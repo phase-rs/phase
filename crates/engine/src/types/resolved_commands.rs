@@ -806,6 +806,12 @@ pub enum ResolvedLedgerEdit {
         expected_turn_count: u32,
         expected_game_count: u32,
     },
+    /// CR 700.13: Record the first committed crime of the turn after its
+    /// targeting action is successfully placed on the stack.
+    CrimeCommitted {
+        player: PlayerId,
+        expected_turn_count: u32,
+    },
     /// CR 603.2c: Record one constrained trigger occurrence.
     TriggerFired {
         trigger: TriggerDefinitionRef,
@@ -899,6 +905,8 @@ pub enum ResolvedZoneChangeReplayInvariantError {
     DestinationPositionMismatch { expected: usize, found: usize },
     #[error("zone-change turn-record index mismatch: expected {expected}, found {found}")]
     TurnRecordIndexMismatch { expected: usize, found: usize },
+    #[error("zone-change recorded-turn mismatch: expected {expected}, found {found}")]
+    RecordedTurnMismatch { expected: u32, found: u32 },
     #[error("zone-change battlefield entry is missing its timestamp")]
     MissingBattlefieldEntryTimestamp,
     #[error("zone-change nonbattlefield entry unexpectedly has a timestamp")]
@@ -1636,6 +1644,7 @@ pub enum ResolvedLedgerEditReplayInvariantError {
     UnknownPlayer(PlayerId),
     SpellCastPreconditionMismatch,
     AbilityActivationPreconditionMismatch,
+    CrimeCommittedPreconditionMismatch,
     CardsDrawnPreconditionMismatch,
     DrawnObjectMismatch {
         expected: ObjectIncarnationRef,
@@ -1665,6 +1674,9 @@ impl std::fmt::Display for ResolvedLedgerEditReplayInvariantError {
                 f,
                 "resolved activated-ability command does not match its ledger prefix"
             ),
+            Self::CrimeCommittedPreconditionMismatch => {
+                write!(f, "resolved crime command does not match its ledger prefix")
+            }
             Self::CardsDrawnPreconditionMismatch => write!(
                 f,
                 "resolved draw-bookkeeping command does not match its ledger prefix"
@@ -3182,6 +3194,10 @@ pub(crate) fn ledger_edit_is_invalid(edit: &ResolvedLedgerEdit) -> bool {
             expected_game_count,
             ..
         } => *expected_turn_count == u32::MAX || *expected_game_count == u32::MAX,
+        ResolvedLedgerEdit::CrimeCommitted {
+            expected_turn_count,
+            ..
+        } => *expected_turn_count != 0,
         ResolvedLedgerEdit::CardsDrawn {
             drawn_object,
             attempted_empty_library,

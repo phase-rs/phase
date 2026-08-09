@@ -118,6 +118,9 @@ describe("ArtCropCard", () => {
     useGameStore.setState({
       gameState: {
         objects: { [token.id]: token },
+        // The counter badge is engine-projected, so the frame must carry the projection to have
+        // a badge at all — this site renders `counter_display`, never `obj.counters`.
+        derived: { counter_display: { [token.id]: { pills: [{ counter: "p1p1", count: 1 }] } } },
       } as never,
     });
 
@@ -320,7 +323,11 @@ describe("ArtCropCard", () => {
     useGameStore.setState({
       gameState: {
         objects: { [permanent.id]: permanent },
-        derived: { unbounded_counters: { [permanent.id]: ["charge"] } },
+        derived: {
+          counter_display: {
+            [permanent.id]: { pills: [{ counter: "charge", count: 2, magnitude: "Unbounded" }] },
+          },
+        },
       } as never,
     });
 
@@ -331,13 +338,39 @@ describe("ArtCropCard", () => {
     expect(screen.queryByText("2")).not.toBeInTheDocument();
   });
 
+  // CR 122.1: a ZERO-count unbounded row is a shape the engine really emits — the unbounded pass
+  // of `counter_display_views` publishes its live count with no zero filter (only the finite pass
+  // runs `positive_counter_entries`). That is the `0 → 1` case, so it must still render as ∞; a
+  // `count > 0` filter over the projected rows here would silently delete real ∞ badges.
+  it("renders ∞ for a zero-count unbounded counter (CR 122.1 art-crop mode)", () => {
+    mockUseCardImage.mockReturnValue({ src: "card.png", isLoading: false, isRotated: false, isFlip: false });
+    const permanent = pentadWithCharge();
+    useGameStore.setState({
+      gameState: {
+        objects: { [permanent.id]: permanent },
+        derived: {
+          counter_display: {
+            [permanent.id]: { pills: [{ counter: "charge", count: 0, magnitude: "Unbounded" }] },
+          },
+        },
+      } as never,
+    });
+
+    render(<ArtCropCard objectId={101} />);
+
+    expect(screen.getByText("∞")).toBeInTheDocument();
+  });
+
   it("renders the finite count when the counter is NOT marked unbounded (discriminator)", () => {
     mockUseCardImage.mockReturnValue({ src: "card.png", isLoading: false, isRotated: false, isFlip: false });
     const permanent = pentadWithCharge();
     useGameStore.setState({
       gameState: {
         objects: { [permanent.id]: permanent },
-        derived: { unbounded_counters: {} },
+        // `magnitude` omitted exactly as the engine omits the serde default.
+        derived: {
+          counter_display: { [permanent.id]: { pills: [{ counter: "charge", count: 2 }] } },
+        },
       } as never,
     });
 
@@ -356,7 +389,11 @@ describe("ArtCropCard", () => {
     useGameStore.setState({
       gameState: {
         objects: { [permanent.id]: permanent },
-        derived: { unbounded_counters: { [permanent.id]: ["charge"] } },
+        derived: {
+          counter_display: {
+            [permanent.id]: { pills: [{ counter: "charge", count: 2, magnitude: "Unbounded" }] },
+          },
+        },
       } as never,
     });
 
@@ -373,7 +410,10 @@ describe("ArtCropCard", () => {
     useGameStore.setState({
       gameState: {
         objects: { [permanent.id]: permanent },
-        derived: { unbounded_counters: {} },
+        // `magnitude` omitted exactly as the engine omits the serde default.
+        derived: {
+          counter_display: { [permanent.id]: { pills: [{ counter: "charge", count: 2 }] } },
+        },
       } as never,
     });
 
@@ -381,5 +421,42 @@ describe("ArtCropCard", () => {
 
     expect(screen.getByText(/2 \S+ counters/i)).toBeInTheDocument();
     expect(screen.queryByText(/∞ \S+ counters/i)).not.toBeInTheDocument();
+  });
+
+  // THE NO-FALLBACK MATCHED PAIR. `counter_display` is the SINGLE authority: an object carrying
+  // real counters with no projection entry renders NO badge. This is what catches this render
+  // site re-introducing `Object.entries(obj.counters)`, and it is worthless without its positive
+  // twin — alone it would also pass on a component that rendered nothing at all.
+  it("renders no counter badge for an object with counters but no projection entry", () => {
+    mockUseCardImage.mockReturnValue({ src: "card.png", isLoading: false, isRotated: false, isFlip: false });
+    const permanent = pentadWithCharge();
+    useGameStore.setState({
+      gameState: {
+        objects: { [permanent.id]: permanent },
+        derived: {}, // a frame that arrived without `derived.counter_display`
+      } as never,
+    });
+
+    render(<ArtCropCard objectId={101} />);
+
+    expect(screen.queryByText("2")).not.toBeInTheDocument();
+    expect(screen.queryByText("∞")).not.toBeInTheDocument();
+  });
+
+  it("renders the badge for that SAME object once the projection carries it", () => {
+    mockUseCardImage.mockReturnValue({ src: "card.png", isLoading: false, isRotated: false, isFlip: false });
+    const permanent = pentadWithCharge();
+    useGameStore.setState({
+      gameState: {
+        objects: { [permanent.id]: permanent },
+        derived: {
+          counter_display: { [permanent.id]: { pills: [{ counter: "charge", count: 2 }] } },
+        },
+      } as never,
+    });
+
+    render(<ArtCropCard objectId={101} />);
+
+    expect(screen.getByText("2")).toBeInTheDocument();
   });
 });

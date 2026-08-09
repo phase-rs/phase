@@ -2649,10 +2649,9 @@ fn target_hand_card_filter(
 /// searched and failed to find).
 ///
 /// Nesting: the population word ("opponent(s)"/"player(s)") fixes the relation,
-/// then the shared `"who "` prefix dispatches on the verb arm. The search arm
-/// carries an object-noun ("searched their library"); the investigate arm is
-/// object-less ("investigated"). Composed entirely from `alt`/`value`/`tag` —
-/// no permutation enumeration.
+/// then the shared `"who … this way"` tail (`parse_who_action_this_way`)
+/// dispatches on the verb arm. Composed entirely from `alt`/`value`/`tag` — no
+/// permutation enumeration.
 fn parse_action_this_way(
     input: &str,
 ) -> nom::IResult<&str, (PlayerRelation, PlayerActionKind), OracleError<'_>> {
@@ -2663,10 +2662,32 @@ fn parse_action_this_way(
         value(PlayerRelation::All, tag("player ")),
     ))
     .parse(input)?;
-    let (input, _) = tag("who ").parse(input)?;
-    let (input, action) = alt((parse_searched_arm, parse_investigated_arm)).parse(input)?;
-    let (input, _) = tag(" this way").parse(input)?;
+    let (input, action) = parse_who_action_this_way(input)?;
     Ok((input, (relation, action)))
+}
+
+/// CR 608.2c + CR 109.5: The population-agnostic `"who [verb] this way"`
+/// relative-clause tail shared by both this-way callers. Matches the `"who "`
+/// prefix, the verb arm (search carries an object-noun "searched their library";
+/// investigate is object-less; draw carries "drew a card"), and the `" this way"`
+/// anaphor terminator, returning the performed action and the residual after the
+/// terminator. Composed entirely from `alt`/`value`/`tag`.
+///
+/// Single authority for the this-way verb table across two scopes:
+/// - `parse_action_this_way` (this module) prepends the population relation for
+///   the QUANTITY path ("the number of opponents who drew a card this way").
+/// - `strip_performed_action_this_way_clause` (oracle_effect/lower.rs) supplies
+///   the relation from the already-stripped "each player "/"each opponent "
+///   subject prefix for the player-SCOPE SUBJECT path (Kwain, Itinerant Meddler:
+///   "each player who drew a card this way gains 1 life").
+pub(crate) fn parse_who_action_this_way(
+    input: &str,
+) -> nom::IResult<&str, PlayerActionKind, OracleError<'_>> {
+    let (input, _) = tag("who ").parse(input)?;
+    let (input, action) =
+        alt((parse_searched_arm, parse_investigated_arm, parse_drew_arm)).parse(input)?;
+    let (input, _) = tag(" this way").parse(input)?;
+    Ok((input, action))
 }
 
 /// "searches/searched a/their library" → `SearchedLibrary` (Tempting Offer cycle).
@@ -2685,6 +2706,21 @@ fn parse_investigated_arm(input: &str) -> nom::IResult<&str, PlayerActionKind, O
         alt((tag("investigates"), tag("investigated"))),
     )
     .parse(input)
+}
+
+/// "draws/drew/draw a card" → `Draw`. The tense axis is one `alt`; the
+/// object noun "a card" is fixed. The `" this way"` terminator is consumed by
+/// `parse_who_action_this_way`, so "drew a card this turn" cannot reach this arm.
+///
+/// Reached from both this-way callers via that shared tail: the QUANTITY path
+/// (Cut a Deal: "for each opponent who drew a card this way") through
+/// `parse_action_this_way`, and the player-SCOPE SUBJECT path (Kwain, Itinerant
+/// Meddler: "each player who drew a card this way gains 1 life") through
+/// `strip_performed_action_this_way_clause` in oracle_effect/lower.rs.
+fn parse_drew_arm(input: &str) -> nom::IResult<&str, PlayerActionKind, OracleError<'_>> {
+    let (input, _) = alt((tag("draws"), tag("drew"), tag("draw"))).parse(input)?;
+    let (input, _) = tag(" a card").parse(input)?;
+    Ok((input, PlayerActionKind::Draw))
 }
 
 /// Normalize the two existing "<object phrase> <verb> this way" tails to a
@@ -4207,66 +4243,35 @@ mod tests {
         }
     }
 
+    /// Every counter-removed for-each phrase lowers to the same
+    /// `PreviousEffectAmount { Total }` — the counter-type word and the "this way"
+    /// suffix are both informational; the runtime amount is whatever the parent
+    /// effect removed.
     #[test]
-    fn for_each_charge_counter_removed_this_way_is_previous_effect_amount() {
-        let qty = parse_for_each_clause("charge counter removed this way").unwrap();
-        assert_eq!(
-            qty,
-            QuantityRef::PreviousEffectAmount {
-                channel: crate::types::ability::DamageChannel::Total,
-            }
-        );
-    }
-
-    #[test]
-    fn for_each_charge_counters_removed_this_way_is_previous_effect_amount() {
-        // Plural variant — same dispatch.
-        let qty = parse_for_each_clause("charge counters removed this way").unwrap();
-        assert_eq!(
-            qty,
-            QuantityRef::PreviousEffectAmount {
-                channel: crate::types::ability::DamageChannel::Total,
-            }
-        );
-    }
-
-    #[test]
-    fn for_each_counter_removed_this_way_is_previous_effect_amount() {
-        // Untyped (no leading counter-type word). The runtime amount is whatever
-        // the parent removed; the omitted English type word is informational.
-        let qty = parse_for_each_clause("counter removed this way").unwrap();
-        assert_eq!(
-            qty,
-            QuantityRef::PreviousEffectAmount {
-                channel: crate::types::ability::DamageChannel::Total,
-            }
-        );
-    }
-
-    #[test]
-    fn for_each_storage_counter_removed_this_way_is_previous_effect_amount() {
-        // Storage Counter cycle (Saprazzan Cove etc.) — same shape, different
-        // counter type. Must produce the same dispatch.
-        let qty = parse_for_each_clause("storage counter removed this way").unwrap();
-        assert_eq!(
-            qty,
-            QuantityRef::PreviousEffectAmount {
-                channel: crate::types::ability::DamageChannel::Total,
-            }
-        );
-    }
-
-    #[test]
-    fn for_each_bare_counter_removed_is_previous_effect_amount() {
-        // Blademane Baku: "For each counter removed, this creature gets +2/+0
-        // until end of turn" — no "this way" suffix on the activated tail.
-        let qty = parse_for_each_clause("counter removed").unwrap();
-        assert_eq!(
-            qty,
-            QuantityRef::PreviousEffectAmount {
-                channel: crate::types::ability::DamageChannel::Total,
-            }
-        );
+    fn for_each_counter_removed_phrases_are_previous_effect_amount() {
+        for (phrase, note) in [
+            ("charge counter removed this way", "typed singular"),
+            ("charge counters removed this way", "typed plural"),
+            ("counter removed this way", "untyped — no leading type word"),
+            (
+                "storage counter removed this way",
+                "Storage Counter cycle (Saprazzan Cove)",
+            ),
+            (
+                "counter removed",
+                "Blademane Baku — no \"this way\" suffix on the activated tail",
+            ),
+        ] {
+            let qty = parse_for_each_clause(phrase)
+                .unwrap_or_else(|| panic!("{phrase:?} ({note}) must parse"));
+            assert_eq!(
+                qty,
+                QuantityRef::PreviousEffectAmount {
+                    channel: crate::types::ability::DamageChannel::Total,
+                },
+                "{phrase:?} ({note})"
+            );
+        }
     }
 
     #[test]
@@ -6657,6 +6662,92 @@ mod tests {
                 },
             }
         );
+    }
+
+    /// CR 121.1 + CR 608.2c + CR 109.5: Cut a Deal — "you draw a card for each
+    /// opponent who drew a card this way" must count the PLAYERS who drew, via
+    /// `PerformedActionThisWay { Opponent, Draw }`, NOT the object-count
+    /// `TrackedSetSize` fallback that the misparse produced. Revert-failing
+    /// anchor: without the `parse_drew_arm` in `parse_action_this_way`, this
+    /// clause falls through to `TrackedSetSize`.
+    #[test]
+    fn for_each_opponent_who_drew_a_card_this_way_is_player_count() {
+        let qty = parse_for_each_clause("opponent who drew a card this way").unwrap();
+        assert_eq!(
+            qty,
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::PerformedActionThisWay {
+                    relation: PlayerRelation::Opponent,
+                    action: PlayerActionKind::Draw,
+                },
+            }
+        );
+    }
+
+    /// CR 121.1 + CR 608.2c: The present-tense / all-players sibling ("each
+    /// player who draws a card this way", Kwain class) shares the same combinator
+    /// and only differs on the relation axis.
+    #[test]
+    fn for_each_player_who_draws_a_card_this_way_is_all_player_count() {
+        let qty = parse_for_each_clause("player who draws a card this way").unwrap();
+        assert_eq!(
+            qty,
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::PerformedActionThisWay {
+                    relation: PlayerRelation::All,
+                    action: PlayerActionKind::Draw,
+                },
+            }
+        );
+    }
+
+    /// CR 121.1: Reach-guard — `parse_action_this_way` (the shared authority for
+    /// both quantity dispatch sites) recognizes the population-scoped "drew a
+    /// card this way" form and binds the correct relation.
+    #[test]
+    fn parse_action_this_way_binds_drew_arm() {
+        assert_eq!(
+            parse_action_this_way("opponent who drew a card this way"),
+            Ok(("", (PlayerRelation::Opponent, PlayerActionKind::Draw)))
+        );
+    }
+
+    #[test]
+    fn parse_action_this_way_binds_plural_draw_arm() {
+        assert_eq!(
+            parse_action_this_way("players who draw a card this way"),
+            Ok(("", (PlayerRelation::All, PlayerActionKind::Draw)))
+        );
+    }
+
+    /// CR 121.1 + CR 608.2c: Negative — "drew a card this turn" is a per-turn
+    /// attribute, NOT the CR 608.2c "this way" anaphor. The `" this way"`
+    /// terminator in `parse_action_this_way` rejects the "this turn" tail, so the
+    /// Draw arm is unreachable and the clause never becomes a
+    /// `PerformedActionThisWay` draw count. Paired with the positive above, this
+    /// proves the arm is gated on the "this way" anaphor, not on the verb alone.
+    #[test]
+    fn opponent_who_drew_a_card_this_turn_is_not_performed_action_draw() {
+        assert!(parse_action_this_way("opponent who drew a card this turn").is_err());
+        let this_way = QuantityRef::PlayerCount {
+            filter: PlayerFilter::PerformedActionThisWay {
+                relation: PlayerRelation::Opponent,
+                action: PlayerActionKind::Draw,
+            },
+        };
+        assert_ne!(
+            parse_for_each_clause("opponent who drew a card this turn"),
+            Some(this_way)
+        );
+    }
+
+    /// CR 121.1: Negative — a bare "cards drawn this way" object phrase has no
+    /// "[population] who" prefix, so `parse_action_this_way` cannot match and the
+    /// arm stays unreachable; such clauses keep falling through to the
+    /// object-count `TrackedSetSize` path unchanged.
+    #[test]
+    fn cards_drawn_this_way_has_no_population_who_prefix() {
+        assert!(parse_action_this_way("cards drawn this way").is_err());
     }
 
     /// CR 109.1 + CR 122.1: "[type] you control with a [counter] counter on it"

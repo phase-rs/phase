@@ -48,6 +48,7 @@ function logEntry(text: string): GameLogEntry {
     phase: "PreCombatMain",
     category: "Debug",
     segments: [{ type: "Text", value: text }],
+    presentation: { importance: "Diagnostic", tone: "Diagnostic", boundary: "None", visibility: "Public" },
   } as GameLogEntry;
 }
 

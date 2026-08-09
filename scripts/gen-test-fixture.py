@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -32,7 +33,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 EXPORT_PATH = REPO_ROOT / "client/public/card-data.json"
 TESTS_DIR = REPO_ROOT / "crates/engine/tests"
 SRC_DIR = REPO_ROOT / "crates/engine/src"
-FIXTURE_PATH = REPO_ROOT / "crates/engine/tests/fixtures/integration_cards.json"
+FIXTURE_PATH = REPO_ROOT / "crates/engine/tests/fixtures/integration_cards.json.gz"
 
 # This fixture must exercise Witherbloom Apprentice and Sakashima of a
 # Thousand Faces through the raw-MTGJSON parser, not a hand-maintained
@@ -95,6 +96,24 @@ def referenced_card_keys(export: dict[str, object]) -> set[str]:
     return keys
 
 
+def canonical_gzip(data: bytes) -> bytes:
+    """Compress with the repository's byte-reproducible fixture format."""
+    return subprocess.run(
+        ["gzip", "-9", "-n", "-c"],
+        input=data,
+        stdout=subprocess.PIPE,
+        check=True,
+    ).stdout
+
+
+def decompress_fixture(path: Path) -> bytes:
+    return subprocess.run(
+        ["gzip", "-d", "-c", str(path)],
+        stdout=subprocess.PIPE,
+        check=True,
+    ).stdout
+
+
 def main() -> int:
     if not EXPORT_PATH.exists():
         sys.exit(
@@ -121,41 +140,58 @@ def main() -> int:
         if oid:
             selected.update(by_oracle.get(oid, ()))
 
-    # `--check`: verify the committed fixture still covers every referenced card,
-    # without rewriting it. Exits non-zero (for CI / pre-commit) when stale.
+    fixture = {key: export[key] for key in sorted(selected)}
+    serialized = (json.dumps(fixture, separators=(",", ":"), ensure_ascii=False) + "\n").encode(
+        "utf-8"
+    )
+    compressed = canonical_gzip(serialized)
+
+    # `--check`: decompress and validate the semantic subset, then prove the
+    # checked-in archive is the exact canonical `gzip -9 -n` byte stream.
     if "--check" in sys.argv:
         if not FIXTURE_PATH.exists():
             sys.exit("error: fixture missing — run `python3 scripts/gen-test-fixture.py`")
-        current = set(json.loads(FIXTURE_PATH.read_text(encoding="utf-8")))
-        missing = selected - current
+        current_bytes = decompress_fixture(FIXTURE_PATH)
+        current = json.loads(current_bytes)
+        if not isinstance(current, dict):
+            sys.exit("error: fixture must decompress to a JSON object")
+        current_keys = set(current)
+        missing = selected - current_keys
         if missing:
             listed = "\n  ".join(sorted(missing))
             sys.exit(
                 f"error: fixture is stale — {len(missing)} card(s) not covered:\n  "
                 f"{listed}\nregenerate with `python3 scripts/gen-test-fixture.py`"
             )
-        parser_backed = current & PARSER_BACKED_FIXTURE_CARDS
+        parser_backed = current_keys & PARSER_BACKED_FIXTURE_CARDS
         if parser_backed:
             listed = "\n  ".join(sorted(parser_backed))
             sys.exit(
                 "error: parser-backed cards leaked into the export fixture:\n  "
                 f"{listed}\nregenerate with `python3 scripts/gen-test-fixture.py`"
             )
-        print(f"ok: fixture covers all {len(selected)} referenced cards")
+        if current != fixture:
+            sys.exit(
+                "error: fixture semantic values are stale — regenerate with "
+                "`python3 scripts/gen-test-fixture.py`"
+            )
+        if FIXTURE_PATH.read_bytes() != compressed:
+            sys.exit(
+                "error: fixture bytes are not canonical gzip -9 -n output — "
+                "regenerate with `python3 scripts/gen-test-fixture.py`"
+            )
+        print(f"ok: fixture covers all {len(selected)} referenced cards with canonical gzip bytes")
         return 0
 
-    fixture = {key: export[key] for key in sorted(selected)}
     FIXTURE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    # Compact separators keep the committed fixture small.
-    serialized = json.dumps(fixture, separators=(",", ":"), ensure_ascii=False)
-    FIXTURE_PATH.write_text(serialized + "\n", encoding="utf-8")
+    FIXTURE_PATH.write_bytes(compressed)
 
     siblings = len(selected) - len(export_referenced)
     print(
         f"wrote {len(selected)} cards "
         f"({len(export_referenced)} export-referenced + {siblings} sibling faces) to "
         f"{FIXTURE_PATH.relative_to(REPO_ROOT)} "
-        f"({len(serialized) / 1024:.0f} KB)"
+        f"({len(compressed) / 1024:.0f} KB compressed)"
     )
     return 0
 

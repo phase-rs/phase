@@ -152,6 +152,9 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
     details?.paid?.filter((fact) => fact.type !== "XValue").map((fact) => formatPaidFact(fact, t)) ??
     [];
   const contextLabels = details?.trigger_context?.map((context) => context.label) ?? [];
+  const stormCopyCount = details?.provenance?.type === "Storm"
+    ? details.provenance.data.copy_count
+    : undefined;
   const controllerLabel = entry.controller === playerId ? t("stack.controllerYou") : t("stack.controllerOpp");
   const seatColor = useSeatColor(entry.controller);
   const controllerInitial =
@@ -333,8 +336,16 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
         </section>
       )}
 
-      {(targetLabels.length > 0 || paidLabels.length > 0 || contextLabels.length > 0) && (
+      {(stormCopyCount !== undefined || targetLabels.length > 0 || paidLabels.length > 0 || contextLabels.length > 0) && (
         <div className="absolute left-1 right-1 top-5 flex flex-wrap gap-1">
+          {stormCopyCount !== undefined && (
+            <span
+              className="max-w-full rounded bg-violet-950/90 px-1.5 py-0.5 text-[8px] font-semibold text-violet-100 shadow"
+              title={t("storm.copies", { count: stormCopyCount })}
+            >
+              {t("storm.copies", { count: stormCopyCount })}
+            </span>
+          )}
           {targetLabels.slice(0, 2).map((label) => (
             <span
               key={`target-${label}`}

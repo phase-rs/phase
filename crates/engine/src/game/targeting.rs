@@ -845,13 +845,27 @@ pub fn resolved_targets(
     // CR 608.2c: ParentTarget / ParentTargetSlot inherit propagated targets;
     // StackSpell uses player-chosen stack targets at ETB (issue #2351).
     // Slot indexing for ParentTargetSlot happens in `effect_object_targets`.
+    //
+    // CR 400.7 + CR 603.7c: a delayed ability's pinned referent that has since
+    // become a new object is dropped here — it "left that zone and then
+    // returned", so the ability won't affect it. Unpinned targets (every
+    // non-delayed ability, and every delayed trigger whose condition names a
+    // zone change of the referent) pass through unchanged.
+    //
+    // ORDERING IS LOAD-BEARING: at this line `ability.targets` is non-empty, so
+    // the `is_empty()` fallbacks above have ALREADY been passed and returning an
+    // empty vec here cannot re-bind the referent to `ability.source_id`. Do not
+    // hoist this guard above them. The `matches!` admits only
+    // `ParentTarget | StackSpell`, never `ParentTargetSlot` (that is the
+    // separate branch below), so the returned vector is never consumed
+    // positionally from here and the slot renumbering hazard does not arise.
     if !ability.targets.is_empty()
         && matches!(
             target_filter,
             TargetFilter::ParentTarget | TargetFilter::StackSpell
         )
     {
-        return ability.targets.clone();
+        return ability.live_object_targets(state);
     }
     // CR 608.2c: ParentTargetSlot needs the accumulated targets from the entire
     // chain, not just the current ability's targets. During normal resolution
@@ -1039,7 +1053,30 @@ pub(crate) fn resolved_object_ids_for_filter_with_context(
             .then_some(ability.source_id)
             .into_iter()
             .collect(),
-        TargetFilter::ParentTarget => object_targets(&ability.targets).collect(),
+        // CR 400.7 + CR 603.7c: mirror the `resolved_targets` pin check on the
+        // untargeted-pool path (the second SelfRef chokepoint).
+        TargetFilter::ParentTarget => object_targets(&ability.live_object_targets(state)).collect(),
+        // CR 400.7 + CR 603.7c: `ParentTargetSlot` is deliberately NOT
+        // pin-filtered. Slot numbering is declared, not live:
+        // `effects::effect_object_targets` indexes `ParentTargetSlot { index }`
+        // straight into whatever slice it is handed (the single slot-indexing
+        // authority, 22 call sites), so dropping a stale element anywhere
+        // upstream would renumber every later slot.
+        //
+        // No slot pin-check exists anywhere in the engine, and none is needed
+        // today: the only delayed-trigger card carrying a `ParentTargetSlot`
+        // (`stolen uniform`, `WhenNextEvent { ChangesController, valid_card:
+        // ParentTargetSlot }`) is denied a pin by
+        // `condition_names_referent_zone_change` — `ChangesController` is not on
+        // `mode_provably_leaves_referent_in_place`'s allowlist — so
+        // `target_pin_is_current` is vacuously true for every slot id in
+        // practice.
+        //
+        // THE STANDING CONSTRAINT FOR ALL 22 CALL SITES: never hand
+        // `effect_object_targets` a pin-filtered slice when the filter may be
+        // `ParentTargetSlot`. `sacrifice.rs` is the one guarded read that can
+        // see one, and it passes the raw `ability.targets` for exactly that
+        // reason.
         TargetFilter::ParentTargetSlot { index } => {
             resolve_parent_slot_from_root(state, ability, *index)
                 .and_then(|target| target_ref_object(&target))
@@ -1659,9 +1696,13 @@ pub(crate) fn extract_player_from_event(
         GameEvent::AttackersDeclared { attacker_ids, .. } => attacker_ids
             .iter()
             .find_map(|id| state.objects.get(id).map(|obj| obj.controller)),
-        GameEvent::BecomesTarget { target, source_id } => match target {
+        GameEvent::BecomesTarget {
+            target,
+            source_controller,
+            ..
+        } => match target {
             TargetRef::Player(player_id) => Some(*player_id),
-            TargetRef::Object(_) => state.objects.get(source_id).map(|obj| obj.controller),
+            TargetRef::Object(_) => Some(*source_controller),
         },
         // CR 603.7c: "that player" for DamageDone triggers refers to the damaged player.
         GameEvent::DamageDealt { target, .. } => match target {
@@ -2530,6 +2571,23 @@ mod tests {
             source_amounts: vec![(ObjectId(1), 3)],
             total_damage: 3,
         };
+        assert_eq!(extract_player_from_event(&event, &state), Some(PlayerId(1)));
+    }
+
+    #[test]
+    fn becomes_target_uses_the_announcement_controller_snapshot() {
+        let (mut state, source, target) = setup_with_creatures();
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(target),
+            source_id: source,
+            source_controller: PlayerId(1),
+        };
+
+        // The targeting source can change controllers after targets are
+        // announced but before a trigger resolves. The event records the
+        // announcement-time controller, which is the referent for "that player".
+        state.objects.get_mut(&source).unwrap().controller = PlayerId(0);
+
         assert_eq!(extract_player_from_event(&event, &state), Some(PlayerId(1)));
     }
 

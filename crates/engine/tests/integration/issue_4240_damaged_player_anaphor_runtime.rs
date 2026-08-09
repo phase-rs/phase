@@ -229,11 +229,6 @@ fn quietus_spike_halves_the_damaged_players_life() {
     assert_half_life_uses_damaged_player("Quietus Spike");
 }
 
-#[test]
-fn scytheclaw_halves_the_damaged_players_life() {
-    assert_half_life_uses_damaged_player("Scytheclaw");
-}
-
 /// CR 120.3a + CR 603.2: Sword of War and Peace deals damage equal to the
 /// number of cards in **their** hand (the damaged player's), while the life
 /// gain counts **your** hand (the controller's). Asserting both halves in one

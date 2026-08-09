@@ -1,7 +1,7 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { GameObject } from "../../../adapter/types.ts";
+import type { GameObject, ObjectCounterDisplay } from "../../../adapter/types.ts";
 import { useCardImage } from "../../../hooks/useCardImage.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
@@ -565,8 +565,8 @@ describe("CardPreview blocked abilities", () => {
 
 // CR 732.2a / CR 701.34a: the hover status box under the full card render is the
 // THIRD counter render site (after PermanentCard's pill and ArtCropCard's badge).
-// An accepted counter-growth ∞ loop marks the pumped counter in
-// `derived.unbounded_counters` and deliberately leaves the object's real count
+// An accepted counter-growth ∞ loop annotates the pumped row in
+// `derived.counter_display` and deliberately leaves the object's real count
 // finite (engine.rs `materialize_object_growth_shortcut`: "the object's real
 // counter count is NOT mutated ... this only marks the pill to render ∞"), so a
 // site that reads `obj.counters` alone shows a stale pre-shortcut number.
@@ -581,37 +581,62 @@ describe("CardPreview blocked abilities", () => {
 // Matched pair: the ONLY difference between the two cases is the engine mark, so
 // it is the discriminator.
 describe("CardPreview unbounded counters", () => {
-  function inspectPentadPrism(unbounded: string[] | null) {
+  // `null` means "a frame that arrived with no `derived.counter_display` at all" — the object's
+  // own `counters` map stays populated either way, so a site that fell back to it would show a
+  // pill in that case. It must not.
+  function inspectPentadPrism(display: ObjectCounterDisplay | null) {
     const object = battlefieldObject({
       id: 409,
       name: "Pentad Prism",
       counters: { charge: 2 },
     });
     const gameState = gameStateWithObject(object);
-    gameState.derived = unbounded ? { unbounded_counters: { 409: unbounded } } : {};
+    gameState.derived = display ? { counter_display: { 409: display } } : {};
     useGameStore.setState({ gameState, spellCosts: {} });
     useUiStore.setState({ inspectedObjectId: object.id, altHeld: false });
     return render(<CardPreview cardName="Pentad Prism" position={{ x: 20, y: 20 }} />);
   }
 
   it("renders ∞ for a counter the engine marks as unbounded", () => {
-    const { container } = inspectPentadPrism(["charge"]);
+    const { container } = inspectPentadPrism({
+      pills: [{ counter: "charge", count: 2, magnitude: "Unbounded" }],
+    });
 
     expect(container.textContent).toContain("charge: ∞");
     expect(container.textContent).not.toContain("charge: 2");
   });
 
   it("renders the finite count when the counter is not marked unbounded", () => {
-    const { container } = inspectPentadPrism(null);
+    // `magnitude` omitted exactly as the engine omits the serde default.
+    const { container } = inspectPentadPrism({ pills: [{ counter: "charge", count: 2 }] });
 
     expect(container.textContent).toContain("charge: 2");
     expect(container.textContent).not.toContain("∞");
   });
 
+  // THE NO-FALLBACK MATCHED PAIR. `counter_display` is the SINGLE authority: an object carrying
+  // real counters with no projection entry renders NO row. This is what catches this render site
+  // re-introducing `Object.entries(obj.counters)`, and it is worthless without its positive twin
+  // — alone it would also pass on a panel that rendered nothing at all.
+  it("renders no counter row for an object with counters but no projection entry", () => {
+    const { container } = inspectPentadPrism(null);
+
+    expect(container.textContent).not.toContain("charge");
+    expect(container.textContent).not.toContain("∞");
+  });
+
+  it("renders the row for that SAME object once the projection carries it", () => {
+    const { container } = inspectPentadPrism({ pills: [{ counter: "charge", count: 2 }] });
+
+    expect(container.textContent).toContain("charge: 2");
+  });
+
   // LOW: the ∞ row and its TOOLTIP must agree — a badge saying ∞ over a tooltip
   // interpolating the finite count contradicts itself (mirrors ArtCropCard.test.tsx:353).
   it("the ∞ status row's tooltip agrees with the badge", () => {
-    const { container } = inspectPentadPrism(["charge"]);
+    const { container } = inspectPentadPrism({
+      pills: [{ counter: "charge", count: 2, magnitude: "Unbounded" }],
+    });
 
     // `GameplayTooltip` renders its lines through `createPortal(…, document.body)`, so the
     // summary is NOT inside `container` — query it via `screen`, exactly as the tooltip
@@ -622,21 +647,35 @@ describe("CardPreview unbounded counters", () => {
     expect(screen.queryByText(/2 charge counters/i)).not.toBeInTheDocument();
   });
 
-  // KNOWN GAP (F2), not desired behaviour: `grown_generic_counter_targets`
-  // (analysis/resource.rs:1330-1331) reads the BEFORE count off the live state, so the
-  // engine can mark an (object, counter) pair the object does not carry. Every display
-  // mode iterates `obj.counters`, so such a mark renders nowhere. The frontend must NOT
-  // synthesize a counter row the engine says does not exist; if the ∞ should be visible
-  // there, the ENGINE must decide it.
-  it("KNOWN GAP: a marked counter type the object does not carry renders nowhere (F2)", () => {
-    const { container } = inspectPentadPrism(["oil"]);
+  // REGRESSION (F2) — this test used to assert the GAP, and now asserts its fix. The ∞ counter
+  // targets are derived by `analysis::resource::grown_beneficial_counter_deltas` over the two
+  // frames `game::engine::drive_one_period_frames` produces, and its BEFORE frame is a clone of
+  // the LIVE state. A pair that grows 0 → 1 across the driven period is therefore registered
+  // while the live object carries none of that counter. While the channel published bare counter
+  // TYPES, every display mode iterated `obj.counters` and such a mark rendered NOWHERE — a real,
+  // accepted, registered ∞ that was invisible.
+  //
+  // The engine now publishes a self-sufficient ROW carrying the live count (`0` when absent), so
+  // the display renders it without synthesizing anything: the frontend still must NOT invent a
+  // counter row the engine did not publish, and it does not — the ENGINE decided this row exists.
+  // Pinned end-to-end on the engine side by
+  // `loop_counter_growth::plus_one_counter_growth_registers_a_target_the_bearer_does_not_yet_carry`.
+  //
+  // DISCRIMINATOR: `charge: 2` in the same frame is the paired positive — it proves the finite
+  // path still renders finitely, so this is not a component that started drawing ∞ for
+  // everything, and it makes the `oil: 0` negative non-vacuous.
+  it("renders a marked counter the object does not carry, with count 0 (F2 regression)", () => {
+    const { container } = inspectPentadPrism({
+      pills: [
+        { counter: "oil", count: 0, magnitude: "Unbounded" },
+        { counter: "charge", count: 2 },
+      ],
+    });
 
+    expect(container.textContent).toContain("oil: ∞");
     expect(container.textContent).toContain("charge: 2");
-    // "nowhere" is asserted against `document.body`, not `container`: `GameplayTooltip`
-    // portals its summary lines out of the RTL container (GameplayTooltip.tsx:86-107), so
-    // a container-scoped negative could not see a tooltip that DID render the ∞.
-    expect(document.body.textContent).not.toContain("∞");
-    expect(document.body.textContent).not.toContain("oil");
+    // The ∞ must not be bought by showing a bogus finite count for a counter that is absent.
+    expect(container.textContent).not.toContain("oil: 0");
   });
 });
 

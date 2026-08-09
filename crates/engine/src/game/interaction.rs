@@ -2469,9 +2469,13 @@ fn loop_shortcut_projection(
             // restored dump into an engine panic.
             //
             // LATENT, NOT LIVE (measured at this head): no in-tree producer can reach this
-            // arm with `0`. `build_shortcut_schema` (`game/engine.rs`) has exactly two call
-            // sites and both pass `MAX_SHORTCUT_CYCLES`; the per-viewer projection in
-            // `game/visibility.rs` only re-projects an existing schema's value; and
+            // arm with `0`. `build_shortcut_schema` (`game/engine.rs`) has THREE call sites:
+            // `interactive_loop_bridge` and `try_offer_object_growth_shortcut` pass
+            // `MAX_SHORTCUT_CYCLES`, while `certified_bounded_cycle_offer` passes a NARROWED
+            // `max_iterations` — which cannot be `0` either, because that producer refuses
+            // outright unless `(1..MAX_SHORTCUT_CYCLES).contains(&max_iterations)`. The
+            // per-viewer projection in `game/visibility.rs` only re-projects an existing
+            // schema's value; and
             // `ShortcutDecisionSchema::default().max_iterations == default_max_iterations()
             // == MAX_SHORTCUT_CYCLES` (`analysis/decision_template.rs`), which is also the
             // `#[serde(default)]` for a pre-bound save. The only way `0`
