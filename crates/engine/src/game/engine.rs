@@ -6,7 +6,7 @@ use crate::types::ability::{EffectKind, KeywordAction, TargetRef};
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::actions::{
-    GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp, TriggerOrderTemplateOp,
+    DebugAction, GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp, TriggerOrderTemplateOp,
 };
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState, PlayerActionKind};
 use crate::types::game_state::{
@@ -986,7 +986,7 @@ pub(super) fn apply_action_boundary_with_stack_limit(
     if let GameAction::Debug(debug_action) = &action {
         if debug_action.is_zero_count_create() {
             check_actor_authorization(state, authenticated_actor, &action)?;
-            check_debug_action_access(state, semantic_owner)?;
+            preflight_debug_action(state, semantic_owner, debug_action)?;
             return Ok(ActionResult {
                 events: vec![],
                 waiting_for: state.waiting_for.clone(),
@@ -7025,10 +7025,7 @@ fn apply_action(
     // a defense-in-depth invariant — a player not in `debug_permitted` should
     // never have reached `apply`.
     if let GameAction::Debug(debug_action) = action {
-        check_debug_action_access(state, actor)?;
-        debug_action
-            .validate_create_count()
-            .map_err(EngineError::InvalidAction)?;
+        preflight_debug_action(state, actor, &debug_action)?;
         let description = debug_action.describe(state);
         let mut result =
             super::engine_debug::apply_debug_action(state, actor, debug_action, &mut events)?;
@@ -11578,9 +11575,52 @@ fn apply_action(
     })
 }
 
-/// Sandbox capability check shared by normal debug actions and a zero-count
-/// create no-op. Keeping it at the engine boundary means transports cannot use
-/// a no-op payload to probe or bypass debug authorization.
+/// Validate one debug action before any transport-specific lookup or engine
+/// mutation. Source-bound Create Card requests use this same authority again
+/// immediately before materialization.
+pub fn preflight_debug_action(
+    state: &GameState,
+    actor: PlayerId,
+    action: &DebugAction,
+) -> Result<(), EngineError> {
+    check_debug_action_access(state, actor)?;
+    action
+        .validate_create_count()
+        .map_err(EngineError::InvalidAction)?;
+
+    if let DebugAction::CreateCard {
+        owner,
+        zone,
+        count,
+        run_etb,
+        ..
+    } = action
+    {
+        if !state.players.iter().any(|player| player.id == *owner) {
+            return Err(EngineError::InvalidAction(
+                "Debug: invalid owner player id".into(),
+            ));
+        }
+        // Real entry can park a private parent frame while replacements or
+        // as-enters choices resolve. Only a settled Priority boundary can own
+        // that frame; synchronous hand/raw placements need no such boundary.
+        if *count != 0
+            && *zone == Zone::Battlefield
+            && *run_etb
+            && !matches!(state.waiting_for, WaitingFor::Priority { .. })
+        {
+            return Err(EngineError::InvalidAction(
+                "Debug::CreateCard with ETB processing requires a Priority window".into(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Sandbox capability check shared by every debug-action preflight. Keeping it
+/// at the engine boundary means transports cannot use a no-op payload to probe
+/// or bypass debug authorization.
 fn check_debug_action_access(state: &GameState, actor: PlayerId) -> Result<(), EngineError> {
     if !state.debug_mode {
         return Err(EngineError::InvalidAction(

@@ -202,6 +202,7 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 26 — Added ActionNoOp acknowledgement for accepted transport no-ops.
  * 25 — DebugCardEntries added a serialized, private resolution frame for
  *      multi-card sandbox battlefield entries that pause for replacement or
  *      as-enters choices. Old peers cannot deserialize that GameState shape.
@@ -231,7 +232,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 25;
+export const PROTOCOL_VERSION = 26;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -1445,6 +1446,16 @@ export class WebSocketAdapter implements EngineAdapter {
           // TAKEBACK's reason string, which would be a misattribution rather
           // than merely a stale spinner.
           this.emit({ type: "requestRejected", reason: data.reason });
+        }
+        break;
+      }
+
+      case "ActionNoOp": {
+        this.emit({ type: "actionPendingChanged", pending: false });
+        if (this.pendingResolve) {
+          this.pendingResolve({ events: [], log_entries: [] });
+          this.pendingResolve = null;
+          this.pendingReject = null;
         }
         break;
       }

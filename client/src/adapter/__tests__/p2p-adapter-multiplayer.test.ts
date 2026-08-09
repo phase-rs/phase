@@ -1131,6 +1131,69 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(mockGetViewerSnapshot).toHaveBeenCalledWith(2);
   });
 
+  it("keeps a host zero-count debug create out of transition side effects", async () => {
+    const { adapter } = makeHost(2);
+    await adapter.initialize();
+    const revisionBefore = (adapter as unknown as { authoritativeRevision: number })
+      .authoritativeRevision;
+
+    await expect(adapter.submitAction({
+      type: "Debug",
+      data: {
+        type: "CreateCard",
+        data: {
+          card_name: "Lightning Bolt",
+          owner: 0,
+          zone: "Hand",
+          run_etb: false,
+          nonlegendary: false,
+          count: 0,
+        },
+      },
+    }, 0)).resolves.toEqual({ events: [] });
+
+    expect(mockSubmitAction).toHaveBeenCalledOnce();
+    expect((adapter as unknown as { authoritativeRevision: number }).authoritativeRevision)
+      .toBe(revisionBefore);
+    expect(mockGetViewerSnapshot).not.toHaveBeenCalled();
+    expect(mockGetState).not.toHaveBeenCalled();
+  });
+
+  it("acknowledges a guest zero-count debug create without broadcasting a transition", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    guest.sent.length = 0;
+    mockGetViewerSnapshot.mockClear();
+    mockGetState.mockClear();
+    const revisionBefore = (adapter as unknown as { authoritativeRevision: number })
+      .authoritativeRevision;
+
+    await guest.simulateData({
+      type: "action",
+      senderPlayerId: 1,
+      action: {
+        type: "Debug",
+        data: {
+          type: "CreateTokenCopy",
+          data: { source_id: 1, owner: 1, nonlegendary: false, count: 0 },
+        },
+      },
+    });
+
+    expect(await guest.getSentMessages()).toEqual([
+      expect.objectContaining({ type: "action_noop" }),
+    ]);
+    expect((adapter as unknown as { authoritativeRevision: number }).authoritativeRevision)
+      .toBe(revisionBefore);
+    expect(mockGetViewerSnapshot).not.toHaveBeenCalled();
+    expect(mockGetState).not.toHaveBeenCalled();
+  });
+
   it("holds the seat on guest disconnect and NEVER auto-concedes on grace expiry", async () => {
     const { adapter, emitConnection } = makeHost(3, 5_000);
     await adapter.initialize();
@@ -1769,6 +1832,57 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
         events: unsolicitedEvents,
         logEntries: unsolicitedLogs,
       }),
+    );
+  });
+
+  it("guest receive path resolves action_noop without replacing its cached snapshot", async () => {
+    const { peer } = createFakePeer();
+    const conn = new FakeDataConnection();
+    const adapter = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      peer as unknown as Peer,
+      "host-peer",
+      conn as unknown as DataConnection,
+    );
+    const emitted = vi.fn();
+    adapter.onEvent(emitted);
+    await adapter.initialize();
+    const setupState = remoteState("setup");
+    await conn.simulateData({
+      type: "game_setup",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      assignedPlayerId: 1,
+      playerToken: "seat-token",
+      state: setupState,
+      events: [],
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    await adapter.initializeGame();
+    const cachedSnapshot = await adapter.getSnapshot();
+    emitted.mockClear();
+
+    const pending = adapter.submitAction({
+      type: "Debug",
+      data: {
+        type: "CreateCard",
+        data: {
+          card_name: "Lightning Bolt",
+          owner: 1,
+          zone: "Hand",
+          run_etb: false,
+          nonlegendary: false,
+          count: 0,
+        },
+      },
+    }, 1);
+    await conn.simulateData({ type: "action_noop" });
+
+    await expect(pending).resolves.toEqual({ events: [], log_entries: [] });
+    expect(await adapter.getSnapshot()).toBe(cachedSnapshot);
+    expect(emitted).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "stateChanged" }),
     );
   });
 

@@ -43,6 +43,7 @@ pub enum ServerErrorCode {
 /// handshake. When making such changes, plan a deprecation window where
 /// both the old and new variants coexist, then bump and remove the old.
 ///
+/// 26 — Added `ServerMessage::ActionNoOp` for accepted transport no-ops.
 /// 25 — `DebugCardEntries` added a serialized, private resolution frame for
 ///      multi-card sandbox battlefield entries that pause for replacement or
 ///      as-enters choices. Old peers cannot deserialize that `GameState` shape.
@@ -72,7 +73,7 @@ pub enum ServerErrorCode {
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 25;
+pub const PROTOCOL_VERSION: u32 = 26;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake. Lobby traffic has a one-version rollout window; full game servers
@@ -408,13 +409,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn protocol_version_tracks_priority_passing_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 25);
+    fn protocol_version_tracks_full_game_wire_additions() {
+        assert_eq!(PROTOCOL_VERSION, 26);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which is what refuses an older full-game peer whose GameState cannot
-        // carry a paused DebugCardEntries resolution frame.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 24);
+        // understand a success acknowledgment the submitting client awaits.
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 25);
     }
 
     #[test]

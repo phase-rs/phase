@@ -20,7 +20,7 @@ use crate::types::zones::Zone;
 
 use super::effects::attach::{attach_to as attach_object_to, attach_to_player};
 use super::effects::change_zone::shuffle_library;
-use super::engine::EngineError;
+use super::engine::{preflight_debug_action, EngineError};
 use super::game_object::AttachTarget;
 use super::zones;
 use crate::database::CardDatabase;
@@ -32,9 +32,6 @@ pub fn apply_debug_action(
     action: DebugAction,
     events: &mut Vec<GameEvent>,
 ) -> Result<ActionResult, EngineError> {
-    action
-        .validate_create_count()
-        .map_err(EngineError::InvalidAction)?;
     match action {
         DebugAction::MoveToZone {
             object_id,
@@ -845,6 +842,7 @@ pub fn debug_card_entry_source(db: &CardDatabase, face: &CardFace) -> DebugCardE
 /// resolved its requested name into a face-complete private source.
 #[derive(Debug, Clone)]
 pub struct DebugCardCreateRequest {
+    pub actor: PlayerId,
     pub source: DebugCardEntrySource,
     pub owner: PlayerId,
     pub zone: Zone,
@@ -858,8 +856,31 @@ pub struct DebugCardCreateRequest {
 /// battlefield creation and explicitly raw battlefield placement complete
 /// synchronously. Real battlefield entries drain serially through the private
 /// resolution frame below.
-pub fn create_debug_cards(state: &mut GameState, request: DebugCardCreateRequest) -> ActionResult {
+pub fn create_debug_cards(
+    state: &mut GameState,
+    request: DebugCardCreateRequest,
+) -> Result<ActionResult, EngineError> {
+    let debug_action = DebugAction::CreateCard {
+        card_name: request.source.face.name.clone(),
+        owner: request.owner,
+        zone: request.zone,
+        count: request.count,
+        attach_to: request.attach_to,
+        run_etb: request.run_etb,
+        nonlegendary: request.nonlegendary,
+    };
+    preflight_debug_action(state, request.actor, &debug_action)?;
+    if request.count == 0 {
+        return Ok(ActionResult {
+            events: vec![],
+            waiting_for: state.waiting_for.clone(),
+            log_entries: vec![],
+        });
+    }
+    let description = debug_action.describe(state);
+    let before = state.clone();
     let DebugCardCreateRequest {
+        actor,
         source,
         owner,
         zone,
@@ -869,15 +890,8 @@ pub fn create_debug_cards(state: &mut GameState, request: DebugCardCreateRequest
         nonlegendary,
     } = request;
     let mut events = Vec::new();
-    if count == 0 {
-        return ActionResult {
-            events,
-            waiting_for: state.waiting_for.clone(),
-            log_entries: vec![],
-        };
-    }
 
-    if zone != Zone::Battlefield || !run_etb {
+    let mut result = if zone != Zone::Battlefield || !run_etb {
         for _ in 0..count {
             let initial_zone = if zone == Zone::Battlefield {
                 Zone::Hand
@@ -901,34 +915,45 @@ pub fn create_debug_cards(state: &mut GameState, request: DebugCardCreateRequest
                 events.extend(entry.events);
             }
         }
-        return ActionResult {
+        ActionResult {
             events,
             waiting_for: state.waiting_for.clone(),
             log_entries: vec![],
-        };
-    }
-
-    drain_debug_card_entries(
-        state,
-        PendingDebugCardEntries {
-            source,
-            owner,
-            attach_to,
-            nonlegendary,
-            remaining: count,
-        },
-        &mut events,
-    );
-    ActionResult {
-        events,
-        waiting_for: state.waiting_for.clone(),
-        log_entries: vec![],
-    }
+        }
+    } else {
+        drain_debug_card_entries(
+            state,
+            PendingDebugCardEntries {
+                source,
+                owner,
+                attach_to,
+                nonlegendary,
+                remaining: count,
+            },
+            &mut events,
+        );
+        ActionResult {
+            events,
+            waiting_for: state.waiting_for.clone(),
+            log_entries: vec![],
+        }
+    };
+    result.events.push(GameEvent::DebugActionUsed {
+        player_id: actor,
+        description,
+    });
+    result.log_entries = super::log::resolve_log_entries(&result.events, &before, state);
+    Ok(result)
 }
 
 /// Resume the active real-entry debug batch after its exact replacement or
 /// as-enters child has completed.
 pub(crate) fn drain_pending_debug_card_entries(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    // A non-Priority state belongs to the entry's still-active child. Leave
+    // the parent frame structurally intact until that child has settled.
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        return;
+    }
     let Some(pending) = state
         .take_active_debug_card_entries()
         .expect("debug-card resumer may consume only its active frame")
@@ -1084,6 +1109,151 @@ mod tests {
     }
 
     #[test]
+    fn debug_create_card_preflight_validates_owner_and_real_entry_context() {
+        let mut state = sandbox_state();
+        state.waiting_for = WaitingFor::GameOver { winner: None };
+
+        let invalid_owner = DebugAction::CreateCard {
+            card_name: "Debug Creature".into(),
+            owner: PlayerId(9),
+            zone: Zone::Hand,
+            count: 1,
+            attach_to: None,
+            run_etb: true,
+            nonlegendary: false,
+        };
+        let owner_error = preflight_debug_action(&state, PlayerId(0), &invalid_owner)
+            .expect_err("CreateCard must name an existing owner");
+        assert!(owner_error.to_string().contains("invalid owner player id"));
+
+        let real_entry = DebugAction::CreateCard {
+            card_name: "Debug Creature".into(),
+            owner: PlayerId(0),
+            zone: Zone::Battlefield,
+            count: 1,
+            attach_to: None,
+            run_etb: true,
+            nonlegendary: false,
+        };
+        let priority_error = preflight_debug_action(&state, PlayerId(0), &real_entry)
+            .expect_err("a real battlefield entry may start only from Priority");
+        assert!(priority_error.to_string().contains("Priority window"));
+
+        let zero_entry = DebugAction::CreateCard {
+            card_name: "Debug Creature".into(),
+            owner: PlayerId(0),
+            zone: Zone::Battlefield,
+            count: 0,
+            attach_to: None,
+            run_etb: true,
+            nonlegendary: false,
+        };
+        preflight_debug_action(&state, PlayerId(0), &zero_entry)
+            .expect("zero is a no-op even off Priority");
+        let hand_create = DebugAction::CreateCard {
+            card_name: "Debug Creature".into(),
+            owner: PlayerId(0),
+            zone: Zone::Hand,
+            count: 1,
+            attach_to: None,
+            run_etb: true,
+            nonlegendary: false,
+        };
+        preflight_debug_action(&state, PlayerId(0), &hand_create)
+            .expect("off-battlefield creation is synchronous off Priority");
+        let raw_battlefield_create = DebugAction::CreateCard {
+            card_name: "Debug Creature".into(),
+            owner: PlayerId(0),
+            zone: Zone::Battlefield,
+            count: 1,
+            attach_to: None,
+            run_etb: false,
+            nonlegendary: false,
+        };
+        preflight_debug_action(&state, PlayerId(0), &raw_battlefield_create)
+            .expect("raw battlefield creation is synchronous off Priority");
+    }
+
+    #[test]
+    fn source_bound_debug_create_preflight_fails_before_materialization() {
+        let mut state = sandbox_state();
+        let revision = state.state_revision;
+        let error = create_debug_cards(
+            &mut state,
+            DebugCardCreateRequest {
+                actor: PlayerId(0),
+                source: DebugCardEntrySource {
+                    face: CardFace {
+                        name: "Unmaterialized Debug Card".into(),
+                        ..Default::default()
+                    },
+                    back_face: None,
+                },
+                owner: PlayerId(9),
+                zone: Zone::Hand,
+                count: 1,
+                attach_to: None,
+                run_etb: true,
+                nonlegendary: false,
+            },
+        )
+        .expect_err("the source-bound creator must reuse the shared owner preflight");
+
+        assert!(error.to_string().contains("invalid owner player id"));
+        assert!(state.objects.is_empty());
+        assert_eq!(state.state_revision, revision);
+
+        state.debug_permitted.insert(PlayerId(0));
+        let permission_error = create_debug_cards(
+            &mut state,
+            DebugCardCreateRequest {
+                actor: PlayerId(1),
+                source: DebugCardEntrySource {
+                    face: CardFace {
+                        name: "Unauthorized Debug Card".into(),
+                        ..Default::default()
+                    },
+                    back_face: None,
+                },
+                owner: PlayerId(0),
+                zone: Zone::Hand,
+                count: 1,
+                attach_to: None,
+                run_etb: true,
+                nonlegendary: false,
+            },
+        )
+        .expect_err("the actor carried by the source-bound request must be authorized");
+        assert!(permission_error.to_string().contains("debug permission"));
+        assert!(state.objects.is_empty());
+        assert_eq!(state.state_revision, revision);
+    }
+
+    #[test]
+    fn zero_debug_create_card_uses_the_shared_owner_preflight() {
+        let mut state = sandbox_state();
+        let revision = state.state_revision;
+        let error = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::Debug(DebugAction::CreateCard {
+                card_name: "No Card Needed".into(),
+                owner: PlayerId(9),
+                zone: Zone::Battlefield,
+                count: 0,
+                attach_to: None,
+                run_etb: true,
+                nonlegendary: false,
+            }),
+        )
+        .expect_err("the action-boundary zero fast path must validate CreateCard owner");
+
+        assert!(error.to_string().contains("invalid owner player id"));
+        assert_eq!(state.state_revision, revision);
+        assert!(state.objects.is_empty());
+    }
+
+    #[test]
     fn debug_create_card_batch_enters_battlefield_serially() {
         let mut state = sandbox_state();
         let source = DebugCardEntrySource {
@@ -1097,6 +1267,7 @@ mod tests {
         let result = create_debug_cards(
             &mut state,
             DebugCardCreateRequest {
+                actor: PlayerId(0),
                 source,
                 owner: PlayerId(0),
                 zone: Zone::Battlefield,
@@ -1105,9 +1276,11 @@ mod tests {
                 run_etb: true,
                 nonlegendary: false,
             },
-        );
+        )
+        .expect("an authorized debug batch should succeed");
 
         assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(result.log_entries.len(), 1);
         assert!(state.resolution_stack.is_empty());
         assert_eq!(
             state
@@ -1180,6 +1353,7 @@ mod tests {
         let result = create_debug_cards(
             &mut state,
             DebugCardCreateRequest {
+                actor: PlayerId(0),
                 source: DebugCardEntrySource {
                     face: CardFace {
                         name: "Paused Debug Batch Creature".into(),
@@ -1194,12 +1368,27 @@ mod tests {
                 run_etb: true,
                 nonlegendary: false,
             },
-        );
+        )
+        .expect("an authorized debug batch should start");
 
         assert!(matches!(
             result.waiting_for,
             WaitingFor::ReplacementChoice { .. }
         ));
+        assert_eq!(
+            result
+                .events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::DebugActionUsed { .. }))
+                .count(),
+            1,
+            "the source-bound action emits one audit event when the batch starts"
+        );
+        assert_eq!(
+            result.log_entries.len(),
+            1,
+            "the source-bound engine path resolves its audit log entry"
+        );
         assert_eq!(
             state
                 .objects
@@ -1222,21 +1411,43 @@ mod tests {
                 .is_empty(),
             "the private source/frame never crosses a viewer-state boundary"
         );
+        let pending_before = state
+            .active_debug_card_entries()
+            .cloned()
+            .expect("the remaining batch member is active");
+        let mut premature_events = Vec::new();
+        drain_pending_debug_card_entries(&mut state, &mut premature_events);
+        assert_eq!(
+            state.active_debug_card_entries(),
+            Some(&pending_before),
+            "an off-Priority resume attempt must not consume the batch frame"
+        );
+        assert!(premature_events.is_empty());
 
         let persisted = PersistedGameState::capture(state);
         let serialized = serde_json::to_string(&persisted).expect("paused batch serializes");
         let persisted: PersistedGameState =
             serde_json::from_str(&serialized).expect("paused batch deserializes");
         let mut restored = persisted.into_game_state();
-        apply_as_current(&mut restored, GameAction::ChooseReplacement { index: 0 })
-            .expect("replacement choice resumes the serial batch");
+        let first_resume =
+            apply_as_current(&mut restored, GameAction::ChooseReplacement { index: 0 })
+                .expect("replacement choice resumes the serial batch");
+        assert!(first_resume
+            .events
+            .iter()
+            .all(|event| !matches!(event, GameEvent::DebugActionUsed { .. })));
 
         assert!(matches!(
             restored.waiting_for,
             WaitingFor::ReplacementChoice { .. }
         ));
-        apply_as_current(&mut restored, GameAction::ChooseReplacement { index: 0 })
-            .expect("the remaining entrant presents and resumes its own replacement choice");
+        let second_resume =
+            apply_as_current(&mut restored, GameAction::ChooseReplacement { index: 0 })
+                .expect("the remaining entrant presents and resumes its own replacement choice");
+        assert!(second_resume
+            .events
+            .iter()
+            .all(|event| !matches!(event, GameEvent::DebugActionUsed { .. })));
 
         assert!(matches!(restored.waiting_for, WaitingFor::Priority { .. }));
         assert!(restored.resolution_stack.is_empty());

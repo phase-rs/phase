@@ -40,6 +40,15 @@ function isMemoryConstrainedDevice(): boolean {
 // Parallel scoring is optional. Bound its queued restore-and-score work so a
 // stalled score worker cannot make a healthy local game appear hung.
 const AI_POOL_SCORE_TIMEOUT_MS = 5_000;
+const DEBUG_CREATE_CARD_DB_MISSING = "Engine error: card database not loaded";
+
+function isDebugCreateCard(action: GameAction): boolean {
+  return action.type === "Debug" && action.data.type === "CreateCard";
+}
+
+function isDebugCreateCardDbMissing(error: unknown): boolean {
+  return error instanceof Error && error.message === DEBUG_CREATE_CARD_DB_MISSING;
+}
 
 class AiPoolScoreTimeoutError extends Error {
   constructor() {
@@ -304,11 +313,18 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
 
   async submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult> {
     this.assertInitialized();
-    if (action.type === "Debug" && action.data.type === "CreateCard") {
-      await this.ensureCardDb();
-    }
     try {
-      const result = this.engine ? await this.engine.submitAction(actor, action) : await this.fallback!.submitAction(action, actor);
+      const submit = () => this.engine
+        ? this.engine.submitAction(actor, action)
+        : this.fallback!.submitAction(action, actor);
+      let result: SubmitResult;
+      try {
+        result = await submit();
+      } catch (error) {
+        if (!isDebugCreateCard(action) || !isDebugCreateCardDbMissing(error)) throw error;
+        await this.ensureCardDb();
+        result = await submit();
+      }
       this.invalidateAiDecisionDiagnostics();
       return result;
     } catch (err) {
