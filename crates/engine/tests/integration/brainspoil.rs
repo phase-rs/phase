@@ -6,12 +6,11 @@
 //! regeneration rider modifies this Destroy instruction (CR 608.2c), so it
 //! bypasses a shield actually created by the card Regenerate (CR 701.19c).
 
-use engine::game::ability_utils::{build_resolved_from_def, build_target_slots};
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{Effect, ShieldKind, TargetRef};
+use engine::types::ability::{ShieldKind, TargetRef};
 use engine::types::actions::GameAction;
-use engine::types::game_state::CastPaymentMode;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -35,17 +34,6 @@ fn attach(runner: &mut GameRunner, attachment: ObjectId, host: ObjectId) {
         .push(attachment);
 }
 
-fn brainspoil_destroy_definition(
-    runner: &GameRunner,
-    brainspoil: ObjectId,
-) -> &engine::types::ability::AbilityDefinition {
-    runner.state().objects[&brainspoil]
-        .abilities
-        .iter()
-        .find(|definition| matches!(definition.effect.as_ref(), Effect::Destroy { .. }))
-        .expect("the exact Brainspoil Oracle text must produce its Destroy ability")
-}
-
 /// Cast the canonical Regenerate card through the production action path.
 fn cast_regenerate(runner: &mut GameRunner, regenerate: ObjectId, target: ObjectId) {
     let card_id = runner.state().objects[&regenerate].card_id;
@@ -63,6 +51,19 @@ fn cast_regenerate(runner: &mut GameRunner, regenerate: ObjectId, target: Object
         })
         .expect("select Regenerate's target");
     runner.advance_until_stack_empty();
+}
+
+/// Begins a Brainspoil cast and leaves its target-selection prompt open.
+fn start_brainspoil_target_selection(runner: &mut GameRunner, brainspoil: ObjectId) {
+    let card_id = runner.state().objects[&brainspoil].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: brainspoil,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting Brainspoil must reach its production target-selection prompt");
 }
 
 #[test]
@@ -93,7 +94,10 @@ fn brainspoil_target_slot_excludes_enchanted_creatures_not_equipped_creatures() 
         .as_enchantment()
         .with_subtypes(vec!["Aura"])
         .id();
-    let brainspoil = scenario
+    let equipped_brainspoil = scenario
+        .add_spell_to_hand_from_oracle(P0, "Brainspoil", false, BRAINSPOIL_ORACLE)
+        .id();
+    let bare_brainspoil = scenario
         .add_spell_to_hand_from_oracle(P0, "Brainspoil", false, BRAINSPOIL_ORACLE)
         .id();
 
@@ -102,31 +106,71 @@ fn brainspoil_target_slot_excludes_enchanted_creatures_not_equipped_creatures() 
     attach(&mut runner, p0_aura, p0_enchanted);
     attach(&mut runner, p1_aura, p1_enchanted);
 
-    let resolved = build_resolved_from_def(
-        brainspoil_destroy_definition(&runner, brainspoil),
-        brainspoil,
-        P0,
-    );
-    let slots = build_target_slots(runner.state(), &resolved).expect("Brainspoil target slot");
-    assert_eq!(slots.len(), 1, "Brainspoil has one printed target");
-    let legal = &slots[0].legal_targets;
-    let object = TargetRef::Object;
+    start_brainspoil_target_selection(&mut runner, equipped_brainspoil);
+    let WaitingFor::TargetSelection {
+        target_slots,
+        selection,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "Brainspoil must use the production target-selection path, got {}",
+            runner.waiting_for_kind()
+        );
+    };
+    assert_eq!(target_slots.len(), 1, "Brainspoil has one printed target");
+    let legal = &target_slots[selection.current_slot].legal_targets;
     assert!(
-        legal.contains(&object(bare)),
+        legal.contains(&TargetRef::Object(bare)),
         "bare creature must be legal: {legal:?}"
     );
     assert!(
-        legal.contains(&object(equipped)),
+        legal.contains(&TargetRef::Object(equipped)),
         "Equipment is not an Aura, so equipped creature must remain legal: {legal:?}"
     );
     assert!(
-        !legal.contains(&object(p0_enchanted)) && !legal.contains(&object(p1_enchanted)),
+        !legal.contains(&TargetRef::Object(p0_enchanted))
+            && !legal.contains(&TargetRef::Object(p1_enchanted)),
         "an Aura controlled by either player makes its host illegal: {legal:?}"
     );
     assert!(
-        !legal.contains(&object(unattached_aura)),
+        !legal.contains(&TargetRef::Object(unattached_aura)),
         "an unattached Aura is not a creature target and gives no host an attachment"
     );
+
+    for enchanted_creature in [p0_enchanted, p1_enchanted] {
+        let rejected = runner.act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(enchanted_creature)],
+        });
+        assert!(
+            rejected.is_err(),
+            "Aura-enchanted creature {enchanted_creature:?} must be rejected by the production target-selection action"
+        );
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::TargetSelection { .. }
+            ),
+            "a rejected Aura-enchanted target must leave Brainspoil's target-selection prompt open"
+        );
+    }
+
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(equipped)],
+        })
+        .expect("an equipped creature must be accepted by production target selection");
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().objects[&equipped].zone, Zone::Graveyard);
+
+    start_brainspoil_target_selection(&mut runner, bare_brainspoil);
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(bare)],
+        })
+        .expect("a bare creature must be accepted by production target selection");
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().objects[&bare].zone, Zone::Graveyard);
 }
 
 #[test]
@@ -156,7 +200,9 @@ fn brainspoil_cant_regenerate_rider_bypasses_a_real_regeneration_shield() {
             .replacement_definitions
             .as_slice()
             .iter()
-            .any(|replacement| replacement.shield_kind == ShieldKind::Regeneration),
+            .any(|replacement| {
+                replacement.shield_kind == ShieldKind::Regeneration && !replacement.is_consumed
+            }),
         "precondition: Regenerate must install a live shield on Brainspoil's victim"
     );
     assert!(
@@ -164,7 +210,9 @@ fn brainspoil_cant_regenerate_rider_bypasses_a_real_regeneration_shield() {
             .replacement_definitions
             .as_slice()
             .iter()
-            .any(|replacement| replacement.shield_kind == ShieldKind::Regeneration),
+            .any(|replacement| {
+                replacement.shield_kind == ShieldKind::Regeneration && !replacement.is_consumed
+            }),
         "precondition: Regenerate must install a live shield on the control victim"
     );
 

@@ -15034,6 +15034,71 @@ mod tests {
     }
 
     #[test]
+    fn that_arent_enchanted_negates_aura_attachment() {
+        let clause = " that aren't enchanted";
+        let (props, consumed) =
+            parse_that_clause_suffix(clause, None).expect("plural negated Aura clause must parse");
+        assert_eq!(
+            consumed,
+            clause.len(),
+            "the complete plural clause must be consumed"
+        );
+        assert_eq!(
+            props,
+            vec![FilterProp::Not {
+                prop: Box::new(FilterProp::HasAttachment {
+                    kind: AttachmentKind::Aura,
+                    controller: None,
+                    exclude_source: crate::types::ability::SourceExclusion::Include,
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn that_arent_equipped_negates_equipment_attachment() {
+        let clause = " that aren't equipped";
+        let (props, consumed) = parse_that_clause_suffix(clause, None)
+            .expect("plural negated Equipment clause must parse");
+        assert_eq!(
+            consumed,
+            clause.len(),
+            "the complete plural clause must be consumed"
+        );
+        assert_eq!(
+            props,
+            vec![FilterProp::Not {
+                prop: Box::new(FilterProp::HasAttachment {
+                    kind: AttachmentKind::Equipment,
+                    controller: None,
+                    exclude_source: crate::types::ability::SourceExclusion::Include,
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn that_arent_enchanted_or_equipped_negates_attachment_disjunction() {
+        let clause = " that aren't enchanted or equipped";
+        let (props, consumed) = parse_that_clause_suffix(clause, None)
+            .expect("plural negated compound attachment clause must parse");
+        assert_eq!(
+            consumed,
+            clause.len(),
+            "the complete plural clause must be consumed"
+        );
+        assert_eq!(
+            props,
+            vec![FilterProp::Not {
+                prop: Box::new(FilterProp::HasAnyAttachmentOf {
+                    kinds: vec![AttachmentKind::Aura, AttachmentKind::Equipment],
+                    controller: None,
+                }),
+            }]
+        );
+    }
+
+    #[test]
     fn that_s_red_or_green_emits_color_disjunction() {
         let result = parse_that_clause_suffix(" that's red or green", None);
         let (props, consumed) = result.expect("should parse");
