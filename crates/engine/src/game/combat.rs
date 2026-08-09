@@ -1163,7 +1163,7 @@ fn per_defender_caps(state: &GameState) -> Vec<(PlayerId, u32)> {
         .collect()
 }
 
-/// CR 508.5 + CR 310.8d: Resolve the defending player for an `AttackTarget` —
+/// CR 508.5 + CR 310.9d: Resolve the defending player for an `AttackTarget` —
 /// the player for a direct attack, a planeswalker's controller, or a battle's
 /// protector.
 fn defending_player_for_target(state: &GameState, target: AttackTarget) -> PlayerId {
@@ -3653,7 +3653,7 @@ fn attacker_can_attack_target(
     gates: &CombatStaticGates,
     active_team: &[PlayerId],
 ) -> bool {
-    // CR 508.1b + CR 310.5/310.8b: target validity + active-team exclusion.
+    // CR 508.1b + CR 310.5/310.9b: target validity + active-team exclusion.
     match target {
         AttackTarget::Player(pid) => {
             if !state.players.iter().any(|p| p.id == pid)
@@ -4668,7 +4668,7 @@ pub(super) fn commit_attack_declaration(
     let mut attackers: Vec<AttackerInfo> = attacks
         .iter()
         .map(|(object_id, target)| {
-            // CR 508.5 + CR 310.8d: Defending player for a battle = its protector,
+            // CR 508.5 + CR 310.9d: Defending player for a battle = its protector,
             // not its controller. For planeswalkers, defending player = controller.
             let defending_player = defending_player_for_target(state, *target);
             AttackerInfo::new(*object_id, *target, defending_player)
@@ -6118,9 +6118,9 @@ pub fn get_valid_attack_targets(state: &GameState) -> Vec<AttackTarget> {
         }
     }
 
-    // CR 310.8b + CR 506.2: A battle can be attacked by any attacking player for whom
+    // CR 310.9b + CR 506.2: A battle can be attacked by any attacking player for whom
     // its protector is a defending player. Notably a Siege can be attacked by its own
-    // controller if the protector is a different player (CR 310.8b "Siege battle can
+    // controller if the protector is a different player (CR 310.9b "Siege battle can
     // be attacked by its own controller"). The only player who cannot attack is the
     // battle's protector.
     for &id in &state.battlefield {

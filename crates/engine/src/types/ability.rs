@@ -3135,7 +3135,7 @@ pub enum CastingPermission {
     /// Card may be cast from exile for the specified cost by its owner.
     /// Building block for Airbending, Suspend, and similar "cast from exile" mechanics.
     /// `cast_transformed` causes the spell to resolve to its back face (CR 712.14a); used
-    /// by Siege victory triggers (CR 310.11b: "cast it transformed without paying its mana cost").
+    /// by Siege victory triggers (CR 310.12b: "cast it transformed without paying its mana cost").
     ExileWithAltCost {
         cost: ManaCost,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -12639,7 +12639,7 @@ pub enum Effect {
         /// CR 601.2 vs CR 305.1: Cast (spells only) vs Play (spells + lands).
         #[serde(default)]
         mode: CardPlayMode,
-        /// CR 712.14a + CR 310.11b: When true, the card is cast transformed — it
+        /// CR 712.14a + CR 310.12b: When true, the card is cast transformed — it
         /// resolves to its back face (used by Siege victory: "cast it transformed
         /// without paying its mana cost").
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]

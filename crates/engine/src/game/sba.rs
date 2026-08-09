@@ -1911,7 +1911,7 @@ fn check_illegal_attachment_unattach(
     }
 }
 
-/// CR 704.5w + CR 704.5x + CR 310.10 + CR 310.11a: If a battle that isn't being
+/// CR 704.5w + CR 704.5x + CR 310.11 + CR 310.12a: If a battle that isn't being
 /// attacked has no protector, an illegal protector, or (for Sieges) a protector
 /// that equals its controller, its controller chooses a legal protector. If no
 /// legal player exists, the battle is put into its owner's graveyard.
@@ -1960,7 +1960,7 @@ fn check_battle_protector(
         let is_siege = battle.card_types.subtypes.iter().any(|s| s == "Siege");
         let protector = battle.protector();
 
-        // Legal protectors for a Siege are opponents of the controller (CR 310.11a).
+        // Legal protectors for a Siege are opponents of the controller (CR 310.12a).
         // For non-Siege battles with no battle type, CR 310.9a says the controller
         // becomes the protector; we treat the controller as legal in that case.
         let protector_legal = match protector {
@@ -1978,7 +1978,7 @@ fn check_battle_protector(
         }
 
         // Compute legal choices.
-        // CR 310.11a: a Siege's controller "must choose its protector from among their
+        // CR 310.12a: a Siege's controller "must choose its protector from among their
         // opponents", and CR 704.5w's SBA phrasing — "no player IN THE GAME designated as
         // its protector ... chooses an appropriate player" — seats CR 102.1 directly on
         // this seam. A CHOICE, not a target (CR 115.10a), so the candidate list is the
