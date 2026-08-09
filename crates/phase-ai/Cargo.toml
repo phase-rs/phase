@@ -80,6 +80,7 @@ test = false
 [dev-dependencies]
 # cfg(test) modules place objects with the raw zone API (sealed in production builds).
 engine = { path = "../engine", package = "phase-engine", features = ["test-support"] }
+flate2 = "1"
 # `DeckArchetype::iter()` in the mana-development floor test — exhaustiveness comes
 # from the enum, not a hand-written array, so a sixth archetype cannot escape the
 # floor guarantee. Test-only: the derive is `cfg_attr(test, ..)`-gated.

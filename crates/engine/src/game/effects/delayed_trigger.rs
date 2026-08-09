@@ -32,6 +32,34 @@ pub fn resolve(
         }
     };
 
+    // CR 603.7c + CR 400.7e: Decide the expected-zone question from the
+    // PARSER-EMITTED condition, while its `ParentTarget` anaphor is still
+    // visible.
+    //
+    // PLACEMENT IS LOAD-BEARING — DO NOT SINK THIS CALL. Two binders below
+    // rewrite the exact filter shapes this predicate keys on:
+    //   * `bind_tracked_set_to_condition`      — ParentTarget | Any | TrackedSet(0)
+    //                                            -> TrackedSet { real_id }
+    //   * `bind_contextual_filter_to_condition` — ParentTarget -> SpecificObject
+    //                                            / Or / Any; ParentTargetSlot likewise
+    // Evaluated after either of them, this predicate returns `false` for EVERY
+    // in-class pair — both sides of its discrimination collapse to `false`, the
+    // pin is always stamped, and Saffi Eriksdotter / Adarkar Valkyrie / Cryptek /
+    // Together Forever / Whippoorwill / Fatal Fissure / Lagrella go permanently
+    // inert. (Lagrella is the sharpest case: it is a tracked-set form, so its
+    // condition is erased before the contextual bind runs at all.)
+    //
+    // NOTE the asymmetry with `ability_pins_object_anaphor` below, which
+    // correctly stays inside the `ability_refs_parent_target` arm: that one
+    // reads the EFFECT chain and is nested inside a post-bind read of the same
+    // chain, so the two agree by construction. This one reads the CONDITION and
+    // has no such nesting.
+    //
+    // The shipped `WheneverEvent` empty-parent early return below is the same
+    // pattern and documents the same hazard: a decision that must be taken
+    // before a binder erases its discriminator.
+    let condition_expects_referent_move = condition_names_referent_zone_change(&condition);
+
     // CR 603.7 + CR 608.2c: Resolve the most-recent tracked set once, up front,
     // so the tracked-set CONDITION rewrite runs BEFORE the single-target
     // contextual bind below. Genuine "those cards" tracked-set forms (Ugin the
@@ -176,59 +204,104 @@ pub fn resolve(
     //
     // CR 603.7c: See separate branch for LastCreated snapshots.
     //
-    // CR 603.7b: A MULTI-FIRE WheneverEvent must NOT snapshot TriggeringSource at
-    // creation — each firing has its own triggering source (Love on the
-    // Battlefield: "put a +1/+1 counter on it" resolves `it` = the creature that
-    // dealt combat damage THIS firing, re-resolved from the per-firing damage
-    // event). Snapshotting here would freeze it to the creation event
-    // (AttackersDeclared), which carries no per-firing source, dropping the
-    // counter. The snapshot exists for ONE-SHOT delayed triggers whose end-step
-    // firing event lacks the source (Grave Betrayal, Liliana emblem); those keep
-    // it. `!one_shot` (a WheneverEvent) forces per-firing event-context
-    // resolution instead.
+    // Event-delayed triggers, including one-shot `WhenNextEvent`, must not
+    // snapshot TriggeringSource at creation: each firing resolves it from the
+    // event that actually fired the trigger. Only phase-delayed triggers need
+    // the creation-time fallback because their later phase event has no object
+    // subject.
     //
     // CR 603.7c: Computed ONCE here and reused for the creation-snapshot gate, the
-    // TriggeringSource origin-stamp gate, and the `DelayedTrigger.one_shot` field,
-    // so the three sites can never silently diverge. `condition`'s variant is not
-    // reassigned between them.
+    // `DelayedTrigger.one_shot` field. `condition`'s variant is not reassigned
+    // between them.
     let one_shot = !matches!(
         condition,
         crate::types::ability::DelayedTriggerCondition::WheneverEvent { .. }
     );
-    let snapshot_targets = if one_shot && super::ability_refs_triggering_source(&delayed_ability) {
+    // CR 400.7 + CR 603.7c: Pin each snapshotted ParentTarget referent to the
+    // incarnation it has right now. CR 400.7j lets the later parts of this same
+    // effect find an object this effect just moved to a public zone (Goryo's
+    // Vengeance reanimates, then refers to the creature it returned), so the
+    // epoch captured here is the post-move one. If that object later changes
+    // zones, with or without returning, it becomes a new object and this pin
+    // stops matching.
+    //
+    // TWO gates, both mandatory:
+    //  * `ability_pins_object_anaphor` — only genuine ParentTarget/ParentTargetSlot
+    //    OBJECT anaphors. Controller/Owner derive players and are built to
+    //    survive departure under CR 608.2h. Correct to evaluate HERE, inside
+    //    this arm, because the enclosing `ability_refs_parent_target` is a
+    //    post-bind read of the SAME chain (`bind_tracked_set_to_ability_chain`
+    //    already ran), so the two agree by construction. Do NOT hoist it above
+    //    that binder.
+    //  * `!condition_expects_referent_move` — computed at the top of this
+    //    function from the PARSER-EMITTED condition. A delayed trigger whose
+    //    CONDITION is the referent's own zone change expects the referent to
+    //    have moved (CR 603.7c operative test; CR 400.7e). Pinning it would make
+    //    it inert forever. THIS VALUE MUST COME FROM THERE — recomputing it here
+    //    reads a condition both binders have already rewritten and yields
+    //    `false` for every card in the class.
+    //
+    // Scoped to the ParentTarget arm: the TriggeringSource arm re-resolves from
+    // the firing event and already carries a creation-time zone guard
+    // (`stamp_triggering_source_origins_in_ability_chain`, below); the
+    // LastCreated arm names tokens, which cease to exist on a zone change
+    // (CR 111.7) rather than returning as a new incarnation.
+    let creation_time_provenance = condition_uses_creation_time_provenance(&condition);
+    let (snapshot_targets, target_pins) = if creation_time_provenance
+        && super::ability_refs_triggering_source(&delayed_ability)
+    {
         // CR 603.7c: TriggeringSource always reads the event context (the dying
         // creature from the ZoneChanged event), not the parent ability's chosen
         // targets. Bypasses parent_target_snapshot's ability.targets early-return,
         // which is correct for ParentTarget (Flickerwisp) but wrong here.
-        crate::game::targeting::resolve_event_context_target(
-            state,
-            &crate::types::ability::TargetFilter::TriggeringSource,
-            ability.source_id,
+        (
+            crate::game::targeting::resolve_event_context_target(
+                state,
+                &crate::types::ability::TargetFilter::TriggeringSource,
+                ability.source_id,
+            )
+            .map(|t| vec![t])
+            .unwrap_or_default(),
+            Vec::new(),
         )
-        .map(|t| vec![t])
-        .unwrap_or_default()
     } else if super::ability_refs_parent_target(&delayed_ability) {
-        parent_target_snapshot(state, ability)
+        let targets = parent_target_snapshot(state, ability);
+        let pins =
+            if ability_pins_object_anaphor(&delayed_ability) && !condition_expects_referent_move {
+                targets
+                    .iter()
+                    .filter_map(|target| match target {
+                        TargetRef::Object(id) => state
+                            .objects
+                            .get(id)
+                            .map(crate::types::identifiers::ObjectIncarnationRef::from_object),
+                        TargetRef::Player(_) => None,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+        (targets, pins)
     } else if effect_references_last_created(&delayed_ability.effect)
         && !state.last_created_token_ids.is_empty()
     {
-        state
-            .last_created_token_ids
-            .iter()
-            .map(|&id| TargetRef::Object(id))
-            .collect()
+        (
+            state
+                .last_created_token_ids
+                .iter()
+                .map(|&id| TargetRef::Object(id))
+                .collect(),
+            Vec::new(),
+        )
     } else {
-        vec![]
+        (vec![], Vec::new())
     };
 
     // CR 603.7c: Stamp `ChangeZone.origin` from the CREATION event's
-    // TriggeringSource destination zone only for ONE-SHOT delayed triggers, whose
-    // later firing event (an end step / phase change) carries no source and so
-    // relies on the creation-time snapshot. A MULTI-FIRE WheneverEvent re-resolves
-    // TriggeringSource from EACH firing event, so freezing the origin to the
-    // creation event's zone would make a later firing from a different zone skip
-    // the zone move. Gated on the same `one_shot` flag as `snapshot_targets` above.
-    if one_shot && super::ability_refs_triggering_source(&delayed_ability) {
+    // TriggeringSource destination zone only for phase-delayed triggers, whose
+    // later firing event has no source and relies on the creation-time snapshot.
+    // Event-delayed triggers re-resolve TriggeringSource from their firing event.
+    if creation_time_provenance && super::ability_refs_triggering_source(&delayed_ability) {
         if let Some(zone) = triggering_source_destination_zone(state) {
             stamp_triggering_source_origins_in_ability_chain(&mut delayed_ability, zone);
         }
@@ -248,6 +321,7 @@ pub fn resolve(
         rebind_last_created_to_parent_target(&mut delayed_ability.effect);
     }
 
+    delayed_ability.set_target_incarnations_recursive(target_pins);
     delayed_ability.targets = snapshot_targets;
     // CR 603.7c: A delayed triggered ability that refers to information from
     // its creation event keeps that creation-time binding for later resolution.
@@ -318,6 +392,24 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 603.7c: Only phase-delayed triggers lose their event subject between
+/// creation and firing. Event-based delayed triggers, including one-shot
+/// `WhenNextEvent`, must resolve `TriggeringSource` from the event that
+/// actually fires them.
+fn condition_uses_creation_time_provenance(condition: &DelayedTriggerCondition) -> bool {
+    match condition {
+        DelayedTriggerCondition::AtNextPhase { .. }
+        | DelayedTriggerCondition::AtNextPhaseForPlayer { .. } => true,
+        DelayedTriggerCondition::WhenLeavesPlay { .. }
+        | DelayedTriggerCondition::WhenDies { .. }
+        | DelayedTriggerCondition::WhenLeavesPlayFiltered { .. }
+        | DelayedTriggerCondition::WhenEntersBattlefield { .. }
+        | DelayedTriggerCondition::WhenDiesOrExiled { .. }
+        | DelayedTriggerCondition::WhenNextEvent { .. }
+        | DelayedTriggerCondition::WheneverEvent { .. } => false,
+    }
 }
 
 /// CR 603.7c + CR 608.2c: A delayed triggered ability that refers to a
@@ -969,6 +1061,198 @@ fn bind_tracked_set_to_ability_chain(ability: &mut ResolvedAbility, real_id: Tra
     }
 }
 
+/// CR 400.7 + CR 603.7c: True when `filter` is an anaphor that names the
+/// parent's chosen OBJECT, and is therefore a referent an incarnation pin can
+/// govern.
+///
+/// Deliberately NARROWER than `effects::filter_refs_parent_target`, which also
+/// admits `ParentTargetController` / `ParentTargetOwner`. Those derive a
+/// `TargetRef::Player`, not an object: under CR 608.2h they are built to
+/// survive the referent's departure (`ability_utils::parent_target_controller`
+/// prefers the LKI controller once the object is off-battlefield), and owner is
+/// invariant under CR 108.3. Pinning them could only suppress a correct result.
+///
+/// Recurses compound filters for the same reason `filter_refs_parent_target`
+/// does, so a wrapped anaphor is still found.
+///
+/// ALSO USED BY `trigger_names_referent_zone_change` to decide whether an
+/// embedded trigger definition names the REFERENT. Keeping `ParentTargetSlot`
+/// in the `true` arm is load-bearing there: it is what withholds the pin from
+/// `stolen uniform` (`WhenNextEvent { ChangesController, valid_card:
+/// ParentTargetSlot }`), the only delayed slot card in the data. Narrowing this
+/// arm would silently start pinning it.
+///
+/// `_ => false` IS CORRECT HERE. `TargetFilter` is a broad, open enum and the
+/// shipped template ends the same way. Do NOT try to exhaust it.
+fn filter_refs_parent_object_anaphor(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => true,
+        // CR 608.2h + CR 108.3: these derive a PLAYER, not an object.
+        TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner => false,
+        TargetFilter::Typed(typed) => {
+            // `Typed { controller: ParentTargetController }` selects objects BY
+            // the parent's controller; the referent being filtered is not the
+            // parent's object, so it is NOT a parent object anaphor.
+            typed.properties.iter().any(|prop| {
+                matches!(
+                    prop,
+                    crate::types::ability::FilterProp::DistinctFrom { reference }
+                        if filter_refs_parent_object_anaphor(reference)
+                )
+            })
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(filter_refs_parent_object_anaphor)
+        }
+        TargetFilter::Not { filter } => filter_refs_parent_object_anaphor(filter),
+        _ => false,
+    }
+}
+
+/// True when any effect in the ability chain references a parent OBJECT anaphor
+/// (including nested sub/else abilities). Mirrors `ability_refs_parent_target`'s
+/// walk over `effect_parent_ref_slots`; narrower in exactly one respect (above).
+fn ability_pins_object_anaphor(ability: &ResolvedAbility) -> bool {
+    super::effect_parent_ref_slots(&ability.effect)
+        .iter()
+        .any(|filter| filter_refs_parent_object_anaphor(filter))
+        || ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_pins_object_anaphor)
+        || ability
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_pins_object_anaphor)
+}
+
+/// CR 400.7 + CR 603.7c: True when this embedded trigger definition names a zone
+/// change OF THE REFERENT — i.e. the delayed trigger fires *because* the pinned
+/// object moved zones.
+///
+/// TWO-STEP, ANAPHOR FIRST. Step 1 asks whether the trigger names the referent
+/// at all; measured, that is true for 3 of the 46 embedded trigger definitions
+/// in this class, so 43 are answered without inspecting the mode. Step 2 asks
+/// whether the named event moves it.
+///
+/// Step 1 must read the PARSER-EMITTED filters — `bind_contextual_filter_to_condition`
+/// rewrites all three `valid_*` slots. See the call site at the top of `resolve`.
+fn trigger_names_referent_zone_change(trigger: &crate::types::ability::TriggerDefinition) -> bool {
+    let names_referent = [
+        &trigger.valid_card,
+        &trigger.valid_source,
+        &trigger.valid_target,
+    ]
+    .into_iter()
+    .flatten()
+    .any(filter_refs_parent_object_anaphor);
+
+    names_referent && !mode_provably_leaves_referent_in_place(&trigger.mode)
+}
+
+/// CR 400.7: Modes VERIFIED not to move the object they name.
+///
+/// THE DEFAULT IS DELIBERATELY THE SAFE DIRECTION. `TriggerMode` has 171
+/// variants with no `Enters` and no `Dies` — enters-the-battlefield and dies are
+/// BOTH `ChangesZone` — and roughly forty are arguably zone changes
+/// (`ChangesZone`, `ChangesZoneAll`, `LeavesBattlefield`, `Exiled`,
+/// `Sacrificed`, `Destroyed`, `Milled*`, `Discarded*`, `Drawn`, `Championed`,
+/// `Foretell`, `NinjutsuActivated`, `Cycled*`, `Devoured`, `Exploited`,
+/// `EntersOr*`, `HauntedCreatureDies`, …). Enumerating the dangerous set means
+/// adjudicating each against CR with no card driving it, and a missed one
+/// silently PINS a referent the condition expects to have moved.
+///
+/// So this allowlist names only what is verified SAFE, and everything else falls
+/// to `false` here (=> treated as a zone change => pin withheld => the card
+/// keeps its pre-existing behavior). An unrecognized mode can cost coverage on a
+/// future card; it can never break one. That asymmetry is the point.
+///
+/// Measured at the pinned card-data: the only modes that co-occur with a parent
+/// object anaphor in this class are `DamageDone` (long river lurker, niko aris)
+/// and `Attacks` (okoye, mighty and adored) — combat/damage events, which per
+/// CR 120 and CR 506/508 move nothing between zones. All 3 pairs therefore still
+/// pin, so this shape costs ZERO coverage today relative to an exhaustive match.
+fn mode_provably_leaves_referent_in_place(mode: &crate::types::triggers::TriggerMode) -> bool {
+    matches!(
+        mode,
+        crate::types::triggers::TriggerMode::DamageDone
+            | crate::types::triggers::TriggerMode::Attacks
+    )
+}
+
+/// CR 603.7c + CR 400.7e: True when this delayed trigger's own condition names a
+/// ZONE CHANGE OF THE REFERENT ITSELF — in EITHER direction.
+///
+/// CR 603.7c's operative test is whether the object is "no longer in the zone
+/// it's expected to be in at the time the delayed triggered ability resolves".
+/// For "when that creature dies this turn, return that card…" the expected zone
+/// IS the graveyard; for "when an exiled card enters the battlefield this way,
+/// put counters on it" (Lagrella) the expected zone IS the battlefield. In both
+/// the referent is exactly where it belongs, and CR 400.7e explicitly grants
+/// that such an ability "can find the new object that it became in the zone it
+/// moved to … if that zone is a public zone".
+///
+/// DIRECTION-AGNOSTIC BY DESIGN. An earlier revision named this "…departure" and
+/// answered `WhenEntersBattlefield => false` on the strength of the name. That
+/// is wrong by this function's own criterion: `zones.rs` bumps the incarnation
+/// UNCONDITIONALLY on `to == Zone::Battlefield`, so an entry condition
+/// guarantees the creation-time pin is stale at 100% of firings, exactly as a
+/// death condition does. Pinning either turns the card into a permanent no-op
+/// (Saffi Eriksdotter, Adarkar Valkyrie, Cryptek, Together Forever,
+/// Whippoorwill, Fatal Fissure, Lagrella the Magpie).
+///
+/// THE DISCRIMINATOR IS THE PARSER-EMITTED CONDITION'S OWN FILTER — not the
+/// runtime-bound one. This function MUST be called before
+/// `bind_tracked_set_to_condition` and `bind_contextual_filter_to_condition`,
+/// which rewrite `ParentTarget` to `TrackedSet` / `SpecificObject` / `Any` and
+/// erase the anaphor entirely. See the call site at the top of `resolve`.
+/// A condition filtered on `SelfRef` names the SOURCE's departure (Animate
+/// Dead's Aura leaving, Golden Guardian's own death), which leaves the
+/// referent's expected zone unchanged, so those still pin.
+///
+/// EXHAUSTIVE, NO WILDCARD ARM. A new `DelayedTriggerCondition` variant must
+/// fail to compile here until someone decides its referent's expected zone.
+/// Adding `_ => false` would let a future variant silently inherit the wrong
+/// assumption — precisely the defect that produced the `WhenEntersBattlefield`
+/// arm above.
+fn condition_names_referent_zone_change(condition: &DelayedTriggerCondition) -> bool {
+    match condition {
+        // Phase-based: the referent is expected wherever it was at creation.
+        DelayedTriggerCondition::AtNextPhase { .. }
+        | DelayedTriggerCondition::AtNextPhaseForPlayer { .. } => false,
+
+        // The condition IS the referent's zone change when it is filtered on the
+        // referent; filtered on `SelfRef` it is the SOURCE's zone change.
+        // `WhenEntersBattlefield` gets IDENTICAL treatment to the departure
+        // family — an entry moves the referent exactly as a departure does.
+        DelayedTriggerCondition::WhenDies { filter }
+        | DelayedTriggerCondition::WhenLeavesPlayFiltered { filter }
+        | DelayedTriggerCondition::WhenDiesOrExiled { filter }
+        | DelayedTriggerCondition::WhenEntersBattlefield { filter } => {
+            filter_refs_parent_object_anaphor(filter)
+        }
+
+        // Names a specific object leaving; that object is the referent.
+        // (0 in-class pairs today — decided here so it cannot silently appear.)
+        DelayedTriggerCondition::WhenLeavesPlay { .. } => true,
+
+        // Delegate to the embedded trigger definition(s).
+        DelayedTriggerCondition::WheneverEvent { trigger, .. } => {
+            trigger_names_referent_zone_change(trigger)
+        }
+        DelayedTriggerCondition::WhenNextEvent {
+            trigger,
+            or_trigger,
+            ..
+        } => {
+            trigger_names_referent_zone_change(trigger)
+                || or_trigger
+                    .as_deref()
+                    .is_some_and(trigger_names_referent_zone_change)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1083,6 +1367,155 @@ mod tests {
         assert_eq!(
             state.delayed_triggers[0].condition,
             DelayedTriggerCondition::AtNextPhase { phase: Phase::End }
+        );
+    }
+
+    #[test]
+    fn only_phase_delayed_conditions_use_creation_time_provenance() {
+        let trigger = || Box::new(TriggerDefinition::new(TriggerMode::Taps));
+        assert!(condition_uses_creation_time_provenance(
+            &DelayedTriggerCondition::AtNextPhase { phase: Phase::End }
+        ));
+        assert!(condition_uses_creation_time_provenance(
+            &DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase: Phase::End,
+                player: PlayerId(0),
+                gate: Default::default(),
+            }
+        ));
+        for condition in [
+            DelayedTriggerCondition::WhenLeavesPlay {
+                object_id: ObjectId(1),
+            },
+            DelayedTriggerCondition::WhenDies {
+                filter: TargetFilter::Any,
+            },
+            DelayedTriggerCondition::WhenLeavesPlayFiltered {
+                filter: TargetFilter::Any,
+            },
+            DelayedTriggerCondition::WhenEntersBattlefield {
+                filter: TargetFilter::Any,
+            },
+            DelayedTriggerCondition::WhenDiesOrExiled {
+                filter: TargetFilter::Any,
+            },
+            DelayedTriggerCondition::WhenNextEvent {
+                trigger: trigger(),
+                or_trigger: Some(trigger()),
+                lifetime: Default::default(),
+            },
+            DelayedTriggerCondition::WheneverEvent {
+                trigger: trigger(),
+                expiry: Default::default(),
+            },
+        ] {
+            assert!(!condition_uses_creation_time_provenance(&condition));
+        }
+    }
+
+    /// CR 603.7c + CR 608.2k: an event-delayed TriggeringSource reads the
+    /// event that fires it, rather than retaining the unrelated creation event.
+    #[test]
+    fn when_next_event_uses_firing_event_triggering_source() {
+        let mut state = GameState::new_two_player(42);
+        let source = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Delayed source".to_string(),
+            Zone::Battlefield,
+        );
+        let creation_subject = crate::game::zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Creation subject".to_string(),
+            Zone::Graveyard,
+        );
+        let firing_subject = crate::game::zones::create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Firing subject".to_string(),
+            Zone::Battlefield,
+        );
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: creation_subject,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(crate::types::game_state::ZoneChangeRecord::test_minimal(
+                creation_subject,
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            )),
+        });
+
+        let mut trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+        trigger.origin = Some(Zone::Battlefield);
+        trigger.destination = Some(Zone::Graveyard);
+        let effect = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Battlefield,
+                target: TargetFilter::TriggeringSource,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WhenNextEvent {
+                    trigger: Box::new(trigger),
+                    or_trigger: None,
+                    lifetime: Default::default(),
+                },
+                effect: Box::new(effect),
+                uses_tracked_set: false,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("install delayed trigger");
+
+        match &state.delayed_triggers[0].ability.effect {
+            Effect::ChangeZone { origin, target, .. } => {
+                assert_eq!(
+                    *origin, None,
+                    "event-delayed origin is not creation-stamped"
+                );
+                assert_eq!(*target, TargetFilter::TriggeringSource);
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+        assert!(
+            state.delayed_triggers[0].ability.targets.is_empty(),
+            "event-delayed TriggeringSource must not snapshot the creation subject"
+        );
+
+        crate::game::zones::move_to_zone(&mut state, firing_subject, Zone::Graveyard, &mut events);
+        crate::game::triggers::check_delayed_triggers(&mut state, &events);
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects[&creation_subject].zone,
+            Zone::Graveyard,
+            "the creation event's subject must remain untouched"
+        );
+        assert_eq!(
+            state.objects[&firing_subject].zone,
+            Zone::Battlefield,
+            "the firing event's subject must be returned"
         );
     }
 
@@ -3146,5 +3579,297 @@ mod tests {
             }
             other => panic!("expected ChangeZoneAll, got {other:?}"),
         }
+    }
+
+    // ================================================================ T-U3
+    /// T-U3 — `condition_names_referent_zone_change`, exhaustive over the
+    /// shipped variants, in BOTH shapes.
+    ///
+    /// This is the §5.3(b) predicate's contract table. It is a UNIT test and by
+    /// construction it CANNOT see placement — it builds pre-bind shapes
+    /// directly, so it stays fully green even when the production call site is
+    /// misplaced. That blind spot is exactly why T-D1 exists; do not read a
+    /// green here as evidence the gate is called in the right place.
+    #[test]
+    fn t_u3_condition_names_referent_zone_change_contract() {
+        use DelayedTriggerCondition as C;
+
+        // ---- (i) PRE-BIND rows: the shapes production actually passes. ----
+        assert!(!condition_names_referent_zone_change(&C::AtNextPhase {
+            phase: Phase::End
+        }));
+        assert!(!condition_names_referent_zone_change(
+            &C::AtNextPhaseForPlayer {
+                phase: Phase::Upkeep,
+                player: PlayerId(0),
+                gate: Default::default(),
+            }
+        ));
+
+        // The referent's OWN zone change ⇒ no pin.
+        assert!(condition_names_referent_zone_change(&C::WhenDies {
+            filter: TargetFilter::ParentTarget
+        }));
+        assert!(condition_names_referent_zone_change(
+            &C::WhenLeavesPlayFiltered {
+                filter: TargetFilter::ParentTarget
+            }
+        ));
+        assert!(condition_names_referent_zone_change(&C::WhenDiesOrExiled {
+            filter: TargetFilter::ParentTarget
+        }));
+        // The B-R3-2 arm: entry is a zone change too. `zones.rs` bumps the
+        // incarnation unconditionally on `to == Battlefield`, so pinning this
+        // would make the card a permanent no-op at 100% of firings.
+        assert!(condition_names_referent_zone_change(
+            &C::WhenEntersBattlefield {
+                filter: TargetFilter::ParentTarget
+            }
+        ));
+        assert!(condition_names_referent_zone_change(&C::WhenLeavesPlay {
+            object_id: ObjectId(7)
+        }));
+
+        // ANTI-VACUITY HALF: a stub returning `true` for every `WhenDies`
+        // passes every row above and fails every row here. `SelfRef` names the
+        // SOURCE's departure (Animate Dead's Aura, Golden Guardian's own
+        // death), which leaves the REFERENT's expected zone unchanged.
+        assert!(!condition_names_referent_zone_change(&C::WhenDies {
+            filter: TargetFilter::SelfRef
+        }));
+        assert!(!condition_names_referent_zone_change(
+            &C::WhenLeavesPlayFiltered {
+                filter: TargetFilter::SelfRef
+            }
+        ));
+        assert!(!condition_names_referent_zone_change(
+            &C::WhenEntersBattlefield {
+                filter: TargetFilter::SelfRef
+            }
+        ));
+
+        // ---- (ii) POST-BIND rows — the anti-vacuity half B-R3-1 requires. ----
+        //
+        // ⚠️ READ BEFORE "FIXING" ANY OF THESE.
+        //
+        // These are NOT shapes production passes. They are the shapes the two
+        // binders (`bind_tracked_set_to_condition`,
+        // `bind_contextual_filter_to_condition`) PRODUCE, and the gate is
+        // called at the top of `resolve` — before both — precisely so it never
+        // sees them. Their `false` answers are correct only in that light: the
+        // anaphor has been erased, so the predicate genuinely cannot recognize
+        // the referent any more.
+        //
+        // Turning any of these into `true` would break every pinned card. If
+        // you got here because a pinned card regressed, the bug is the CALL
+        // SITE having moved below a binder — see T-D1, which is the test that
+        // detects that.
+        assert!(!condition_names_referent_zone_change(&C::WhenDies {
+            filter: TargetFilter::SpecificObject { id: ObjectId(3) }
+        }));
+        assert!(!condition_names_referent_zone_change(&C::WhenDies {
+            filter: TargetFilter::TrackedSet {
+                id: TrackedSetId(1)
+            }
+        }));
+        assert!(!condition_names_referent_zone_change(&C::WhenDies {
+            filter: TargetFilter::Any
+        }));
+        // Lagrella's post-bind shape.
+        assert!(!condition_names_referent_zone_change(
+            &C::WhenEntersBattlefield {
+                filter: TargetFilter::TrackedSet {
+                    id: TrackedSetId(1)
+                }
+            }
+        ));
+    }
+
+    // ================================================================ T-U4
+    /// T-U4 — `filter_refs_parent_object_anaphor` is genuinely NARROWER than
+    /// the shared `filter_refs_parent_target`, in exactly the two intended
+    /// arms and identical elsewhere.
+    ///
+    /// The second half asserts the SHARED function still answers `true` for all
+    /// four anaphors — i.e. that it was not modified. Widening or narrowing
+    /// `filter_refs_parent_target` is a hard non-goal, and this is its guard.
+    #[test]
+    fn t_u4_parent_object_anaphor_is_narrower_than_parent_target() {
+        use crate::game::effects::filter_refs_parent_target;
+
+        // The two OBJECT anaphors ⇒ true.
+        assert!(filter_refs_parent_object_anaphor(
+            &TargetFilter::ParentTarget
+        ));
+        // LOAD-BEARING: this row is what makes T-U3's `stolen uniform`
+        // (`ChangesController` + `ParentTargetSlot`) row work, and therefore
+        // what makes §5.4(b)'s slot cut safe.
+        assert!(filter_refs_parent_object_anaphor(
+            &TargetFilter::ParentTargetSlot { index: 1 }
+        ));
+
+        // The two PLAYER anaphors ⇒ false. These are the narrowing, and they
+        // are why `searing blood` / `touch of moonglove` keep working (CR
+        // 608.2h / issue #1582): a controller or owner reference must never be
+        // pinned to an OBJECT incarnation.
+        assert!(!filter_refs_parent_object_anaphor(
+            &TargetFilter::ParentTargetController
+        ));
+        assert!(!filter_refs_parent_object_anaphor(
+            &TargetFilter::ParentTargetOwner
+        ));
+
+        // Recursion is preserved through composite filters.
+        assert!(filter_refs_parent_object_anaphor(&TargetFilter::Or {
+            filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget],
+        }));
+
+        // ---- The shared function was NOT modified: all four still true. ----
+        assert!(filter_refs_parent_target(&TargetFilter::ParentTarget));
+        assert!(filter_refs_parent_target(&TargetFilter::ParentTargetSlot {
+            index: 1
+        }));
+        assert!(filter_refs_parent_target(
+            &TargetFilter::ParentTargetController
+        ));
+        assert!(filter_refs_parent_target(&TargetFilter::ParentTargetOwner));
+    }
+
+    // ================================================================ T-U5
+    /// T-U5 — `trigger_names_referent_zone_change`: the anaphor-first two-step
+    /// order, and the deliberate SAFE DEFAULT.
+    #[test]
+    fn t_u5_trigger_names_referent_zone_change_two_step_order() {
+        use crate::types::triggers::TriggerMode;
+
+        // Step 1 short-circuits: no referent named ⇒ the mode is never
+        // consulted. Without this ordering every `SpellCast` delayed trigger
+        // would be classified on its mode alone.
+        let bare = TriggerDefinition::new(TriggerMode::SpellCast);
+        assert!(!trigger_names_referent_zone_change(&bare));
+
+        // Allowlisted modes: the referent is named, but the event provably
+        // leaves it where it is. `DamageDone` is the `long river lurker` /
+        // `niko aris` shape; `Attacks` is the `okoye` shape.
+        let mut damage = TriggerDefinition::new(TriggerMode::DamageDone);
+        damage.valid_source = Some(TargetFilter::ParentTarget);
+        assert!(!trigger_names_referent_zone_change(&damage));
+
+        let mut attacks = TriggerDefinition::new(TriggerMode::Attacks);
+        attacks.valid_card = Some(TargetFilter::ParentTarget);
+        assert!(!trigger_names_referent_zone_change(&attacks));
+
+        // Genuine zone-change modes naming the referent ⇒ true.
+        let mut changes_zone = TriggerDefinition::new(TriggerMode::ChangesZone);
+        changes_zone.valid_card = Some(TargetFilter::ParentTarget);
+        assert!(trigger_names_referent_zone_change(&changes_zone));
+
+        let mut leaves = TriggerDefinition::new(TriggerMode::LeavesBattlefield);
+        leaves.valid_card = Some(TargetFilter::ParentTarget);
+        assert!(trigger_names_referent_zone_change(&leaves));
+
+        // Anti-vacuity: same mode, SelfRef referent ⇒ false.
+        let mut leaves_self = TriggerDefinition::new(TriggerMode::LeavesBattlefield);
+        leaves_self.valid_card = Some(TargetFilter::SelfRef);
+        assert!(!trigger_names_referent_zone_change(&leaves_self));
+
+        // The `stolen uniform` shape — the slot anaphor is recognized in step 1
+        // and `ChangesController` is not allowlisted in step 2.
+        let mut stolen = TriggerDefinition::new(TriggerMode::ChangesController);
+        stolen.valid_card = Some(TargetFilter::ParentTargetSlot { index: 1 });
+        assert!(trigger_names_referent_zone_change(&stolen));
+
+        // THE SAFE DEFAULT, asserted explicitly rather than left implicit: an
+        // unrecognized mode naming the referent WITHHOLDS the pin. That is a
+        // deliberate trade — `mode_provably_leaves_referent_in_place` uses a
+        // closed allowlist with `_ => false`, so a mode nobody has classified
+        // fails safe. If a future card needs its mode pinned, extend the
+        // allowlist AND this row together.
+        let mut unclassified = TriggerDefinition::new(TriggerMode::Cycled);
+        unclassified.valid_card = Some(TargetFilter::ParentTarget);
+        assert!(trigger_names_referent_zone_change(&unclassified));
+    }
+
+    // ================================================================ T-U6
+    /// T-U6 — the slot renumbering carve-out, demonstrated rather than
+    /// asserted.
+    ///
+    /// Assertion (3) is the failure mode §5.5(b)'s carve-out prevents: handing
+    /// a pin-FILTERED list to `effect_object_targets`, whose
+    /// `ParentTargetSlot { index }` arm indexes POSITIONALLY, silently
+    /// renumbers the slots. Delete the `matches!(filter, ParentTargetSlot{..})`
+    /// carve-out from the guarded handlers and assertion (3)'s behavior becomes
+    /// the shipped path.
+    ///
+    /// The real-card population for a pinned slot filter is **0 today** —
+    /// `stolen uniform` is denied a pin by §5.3(b), which T-U3's
+    /// `ChangesController` row asserts. The carve-out exists so that a FUTURE
+    /// pinned slot card cannot be silently renumbered by this plan's own
+    /// substitution. Non-vacuous by construction: it needs no card, no
+    /// pin-stamping path and no `ChangesController` fixture.
+    #[test]
+    fn t_u6_slot_filter_must_not_be_handed_a_pin_filtered_list() {
+        use crate::game::effects::effect_object_targets;
+
+        let mut state = GameState::new_two_player(42);
+        let a = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "A".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        let b = crate::game::zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "B".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+
+        let mut ability = ResolvedAbility::new(
+            Effect::unimplemented("t_u6_slot_carve_out", "unit fixture"),
+            vec![TargetRef::Object(a), TargetRef::Object(b)],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        // A is pinned at a STALE epoch, B at its live one.
+        ability.target_incarnations = vec![
+            crate::types::identifiers::ObjectIncarnationRef {
+                object_id: a,
+                incarnation: state.objects[&a].incarnation + 1,
+            },
+            crate::types::identifiers::ObjectIncarnationRef {
+                object_id: b,
+                incarnation: state.objects[&b].incarnation,
+            },
+        ];
+
+        let slot1 = TargetFilter::ParentTargetSlot { index: 1 };
+
+        // (1) The declared slot resolves correctly from the RAW list.
+        assert_eq!(
+            effect_object_targets(&slot1, &ability.targets),
+            vec![b],
+            "slot 1 of the raw list is B"
+        );
+
+        // (2) The pin filter drops the stale referent.
+        assert_eq!(
+            ability.live_object_targets(&state),
+            vec![TargetRef::Object(b)],
+            "A is stale and must be dropped"
+        );
+
+        // (3) THE DEFECT: the filtered list has only one element, so slot 1 no
+        //     longer exists — the live referent B has been renumbered out of
+        //     existence. This is why the carve-out passes the RAW list for
+        //     `ParentTargetSlot` shapes.
+        assert_eq!(
+            effect_object_targets(&slot1, &ability.live_object_targets(&state)),
+            Vec::<ObjectId>::new(),
+            "filtering BEFORE a positional index silently renumbers the slots — \
+             the carve-out exists to prevent exactly this"
+        );
     }
 }

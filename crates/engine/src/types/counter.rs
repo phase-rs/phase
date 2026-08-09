@@ -212,22 +212,21 @@ impl<'de> serde::Deserialize<'de> for CounterType {
 pub(crate) mod counter_map_serde {
     use super::*;
     use serde::de::{self, MapAccess, Visitor};
-    use serde::ser::SerializeMap;
     use serde::{Deserializer, Serializer};
     use std::fmt;
 
-    pub(crate) fn serialize<S>(
-        map: &HashMap<CounterType, u32>,
+    pub(crate) fn serialize<S, H>(
+        map: &HashMap<CounterType, u32, H>,
         serializer: S,
     ) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let mut ser_map = serializer.serialize_map(Some(map.len()))?;
-        for (counter_type, count) in map {
-            ser_map.serialize_entry(counter_type.as_str().as_ref(), count)?;
-        }
-        ser_map.end()
+        crate::types::deterministic_serde::serialize_sorted_map_entries(
+            map.iter(),
+            std::convert::identity,
+            serializer,
+        )
     }
 
     pub(crate) fn deserialize<'de, D>(
@@ -434,10 +433,58 @@ pub fn prune_zero_counters(counters: &mut HashMap<CounterType, u32>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        has_positive_counters, parse_counter_type, positive_counter_entries,
+        counter_map_serde, has_positive_counters, parse_counter_type, positive_counter_entries,
         positive_counter_types, prune_zero_counters, try_parse_counter_type, CounterType,
     };
+    use crate::types::deterministic_serde::test_support::ReverseBuildHasher;
+    use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
+
+    #[derive(Serialize)]
+    struct AdversarialCounterMapFixture<'a> {
+        #[serde(serialize_with = "counter_map_serde::serialize")]
+        counters: &'a HashMap<CounterType, u32, ReverseBuildHasher>,
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    struct CounterMapFixture {
+        #[serde(with = "counter_map_serde")]
+        counters: HashMap<CounterType, u32>,
+    }
+
+    #[test]
+    fn counter_map_serializer_sorts_typed_keys_without_changing_its_object_shape() {
+        let counters = HashMap::with_hasher(ReverseBuildHasher);
+        let mut counters = counters;
+        counters.insert(CounterType::Loyalty, 3);
+        counters.insert(CounterType::Minus1Minus1, 2);
+        counters.insert(CounterType::Plus1Plus1, 1);
+
+        assert_eq!(
+            counters.keys().cloned().collect::<Vec<_>>(),
+            vec![
+                CounterType::Loyalty,
+                CounterType::Minus1Minus1,
+                CounterType::Plus1Plus1,
+            ],
+            "hostile hasher must expose descending native iteration"
+        );
+        assert_eq!(
+            serde_json::to_string(&AdversarialCounterMapFixture {
+                counters: &counters
+            })
+            .expect("counter fixture should serialize"),
+            r#"{"counters":{"P1P1":1,"M1M1":2,"loyalty":3}}"#
+        );
+
+        let restored: CounterMapFixture =
+            serde_json::from_str(r#"{"counters":{"loyalty":3,"M1M1":2,"P1P1":1}}"#)
+                .expect("current counter object shape should deserialize");
+        assert_eq!(
+            serde_json::to_string(&restored).expect("restored counter map should serialize"),
+            r#"{"counters":{"P1P1":1,"M1M1":2,"loyalty":3}}"#
+        );
+    }
 
     #[test]
     fn parses_legacy_power_toughness_counter_deltas() {
@@ -480,12 +527,6 @@ mod tests {
 
     #[test]
     fn sums_legacy_duplicate_counter_keys_on_deserialize() {
-        #[derive(serde::Deserialize)]
-        struct CounterMapFixture {
-            #[serde(with = "super::counter_map_serde")]
-            counters: HashMap<CounterType, u32>,
-        }
-
         let fixture: CounterMapFixture =
             serde_json::from_str(r#"{"counters":{"P1P1":2,"p1p1":3,"M1M1":1,"m1m1":4}}"#).unwrap();
 

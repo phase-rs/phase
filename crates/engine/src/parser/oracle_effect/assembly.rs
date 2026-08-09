@@ -25,8 +25,8 @@ use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::OracleError;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CastFromZoneDriver,
-    CastingPermission, ControllerRef, Effect, PlayerFilter, QuantityExpr, StaticCondition,
-    SubAbilityLink, TapStateChange, TargetFilter,
+    CastingPermission, ControllerRef, Effect, PlayerFilter, QuantityExpr, QuantityRef,
+    StaticCondition, SubAbilityLink, TapStateChange, TargetFilter,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -76,11 +76,11 @@ use super::{
     has_explicit_player_target, inject_chosen_color_choice_grant, mark_uses_tracked_set,
     parse_spell_graveyard_replacement_rider,
     parse_spells_cast_this_way_graveyard_replacement_rider,
-    publishes_aggregate_set_from_resolution, publishes_tracked_set_from_resolution,
-    rebind_tracked_aggregate_to_chain_set, retarget_counter_additional_cost_to_target,
-    rewrite_grant_parent_to_filter, rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode,
-    rewrite_that_type_mana_instead, stamp_delayed_returns, try_fold_token_repeat_into_count,
-    wire_optional_cast_decline_fallback,
+    publishes_aggregate_set_from_resolution, publishes_exiled_cause_at_resolution,
+    publishes_tracked_set_from_resolution, rebind_tracked_aggregate_to_chain_set,
+    retarget_counter_additional_cost_to_target, rewrite_grant_parent_to_filter,
+    rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode, rewrite_that_type_mana_instead,
+    stamp_delayed_returns, try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback,
 };
 
 /// CR 601.2c: True when the assembled head chose one or more players at
@@ -1218,6 +1218,41 @@ impl AssemblyEnv {
     }
 }
 
+/// Coverage-honesty marker (issue #7046): a `DamageEachPlayer` reading "that
+/// much/that many" (`Ref(EventContextAmount)`) chained IMMEDIATELY after a mass
+/// zone move cannot be faithfully executed today. CR 608.2c requires the
+/// completed move's TOTAL for every recipient, but the runtime hand-off
+/// (`install_previous_effect_counts_by_player`) publishes a per-OWNER table that
+/// `DamageEachPlayer`'s per-recipient resolution consults first — each opponent
+/// reads their OWN swept-card count (0 in the Valakut Exploration native
+/// pattern). Emitting the parsed shape would be silently wrong at runtime,
+/// which is strictly worse than an honest residual gap (the Winnowing-class
+/// precedent in `imperative.rs`). Scoped to the immediately-chained pairing
+/// because only the next resolution step can see the table (any intermediate
+/// effect clears it), and only `DamageEachPlayer` resolves per-recipient —
+/// scalar consumers (Draw / DealDamage-to-object / Mill / LoseLife /
+/// SearchLibrary / Token) read max-over-owners, which equals the true total for
+/// every corpus pool (single-owner by CR 400.3). DELETE this gate when #7046
+/// provides the completed-sweep scalar-total channel; the T1 zero-delta
+/// assertions and the P2 marker assertion are the tripwires that force that
+/// deletion to be a conscious, tested change.
+pub(crate) const MASS_MOVE_TOTAL_DAMAGE_GAP: &str = "mass_move_total_damage";
+
+/// CR 608.2c: does `effect`'s amount expression read `EventContextAmount`
+/// ("that much"/"that many")? Leaf helper for the `MASS_MOVE_TOTAL_DAMAGE_GAP`
+/// gate above. Mirrors the game-side
+/// `quantity_expr_references_event_context_amount` (`game/effects/mod.rs`),
+/// which this parser module cannot call directly — the parser layer never
+/// reaches into game internals; both consult the single traversal authority
+/// `QuantityExpr::any_ref`.
+fn damage_amount_reads_event_context(effect: &Effect) -> bool {
+    let mut reads = false;
+    effect.for_each_quantity_expr(&mut |quantity| {
+        reads |= quantity.any_ref(&mut |qty| matches!(qty, QuantityRef::EventContextAmount));
+    });
+    reads
+}
+
 pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     let kind = ir.kind;
     let continuation_kind = ir.continuation_kind.unwrap_or(AbilityKind::Spell);
@@ -1950,6 +1985,26 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // boundary→link authority (`oracle_ir::ast::sub_link_after_boundary`),
         // which the referent walk in `oracle_effect::mod` also consults.
         def.sub_link = sub_link_after_boundary(prev_boundary);
+        // Coverage-honesty gate (issue #7046, see `MASS_MOVE_TOTAL_DAMAGE_GAP`
+        // doc comment above `assemble_effect_chain`): a `DamageEachPlayer`
+        // reading "that much/that many" chained IMMEDIATELY after a mass zone
+        // move cannot be faithfully executed today. `prev.sub_ability.is_none()`
+        // matches the runtime scope exactly — only the immediately-next
+        // resolution step can see the per-owner count table
+        // (`install_previous_effect_counts_by_player` clears it for any other
+        // consumer), and only `DamageEachPlayer` resolves per-recipient.
+        if let Some(prev) = defs.last() {
+            if prev.sub_ability.is_none()
+                && matches!(&*prev.effect, Effect::ChangeZoneAll { .. })
+                && matches!(&*def.effect, Effect::DamageEachPlayer { .. })
+                && damage_amount_reads_event_context(&def.effect)
+            {
+                *def.effect = Effect::unimplemented(
+                    MASS_MOVE_TOTAL_DAMAGE_GAP,
+                    clause_ir.source.fragment().unwrap_or_default(),
+                );
+            }
+        }
         // CR 615.5: A "(When|Whenever|If) damage [from a <type> source] is
         // prevented this way, …" rider is printed as its own sentence but is not
         // an independent instruction — its "this way" back-reference binds to the
@@ -2431,9 +2486,19 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 let has_tracked_ref = contains_explicit_tracked_set_pronoun(&source_text_lower)
                     || contains_implicit_tracked_set_pronoun(&source_text_lower);
                 if has_tracked_ref {
+                    // CR 608.2c + CR 607.2a: same walk, narrower predicate —
+                    // does any prior clause publish members stamped `Exiled`?
+                    // Only then may a cast anaphor narrow to
+                    // `caused_by: Exiled`.
+                    let cast_anaphor_is_exiled = defs
+                        .iter()
+                        .any(|d| publishes_exiled_cause_at_resolution(&d.effect));
                     for current in &mut current_defs {
                         mark_uses_tracked_set(current);
-                        rewrite_parent_targets_to_tracked_set(&mut current.effect);
+                        rewrite_parent_targets_to_tracked_set(
+                            &mut current.effect,
+                            cast_anaphor_is_exiled,
+                        );
                     }
                 }
             } else if contains_explicit_tracked_set_pronoun(&source_text_lower) {

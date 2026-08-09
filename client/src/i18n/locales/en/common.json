@@ -78,6 +78,7 @@
     "showAiHand": "Show AI Hand",
     "hideAiHand": "Hide AI Hand",
     "requestTakeback": "Request Takeback",
+    "undoLastAction": "Undo Last Action",
     "concede": "Concede",
     "backToDraft": "Back to Draft",
     "mainMenu": "Main Menu",

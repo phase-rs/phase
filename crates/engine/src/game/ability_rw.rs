@@ -1861,6 +1861,7 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
         | TriggerCondition::IsInitiative
         | TriggerCondition::NoMonarch
         | TriggerCondition::HasCityBlessing
+        | TriggerCondition::HasEnduringStory
         | TriggerCondition::CompletedDungeon { .. }
         | TriggerCondition::TributeNotPaid
         | TriggerCondition::CastDuringPhase { .. }
@@ -1879,6 +1880,7 @@ fn legacy_ability_condition(x: &AbilityCondition) -> bool {
         }
         AbilityCondition::PreviousEffectAmount { rhs, .. } => legacy_quantity_expr(rhs),
         AbilityCondition::ScopedPlayerMatches { filter } => legacy_player_filter(filter),
+        AbilityCondition::DiscardedCardMatchesFilter { filter } => legacy_target_filter(filter),
         AbilityCondition::ConditionInstead { inner }
         | AbilityCondition::Not { condition: inner } => legacy_ability_condition(inner),
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
@@ -1923,6 +1925,7 @@ fn legacy_ability_condition(x: &AbilityCondition) -> bool {
         | AbilityCondition::CompletedDungeon { .. }
         | AbilityCondition::IsInitiative
         | AbilityCondition::HasCityBlessing
+        | AbilityCondition::HasEnduringStory
         | AbilityCondition::IsRingBearer
         | AbilityCondition::TargetHasKeywordInstead { .. }
         | AbilityCondition::HasObjectTarget
@@ -1985,6 +1988,7 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
+        | StaticCondition::HasEnduringStory
         | StaticCondition::CompletedADungeon
         | StaticCondition::Unrecognized { .. }
         | StaticCondition::DuringYourTurn
@@ -3406,6 +3410,7 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::RegisterBending { .. }
         | Effect::Cleanup { .. }
         | Effect::Learn
+        | Effect::NoteManaSpent
         | Effect::Forage
         | Effect::Harness
         | Effect::CollectEvidence { .. }
@@ -3722,6 +3727,7 @@ fn walk_ability(
         trigger_source: _,     // exact triggered-source authority, no read/write effect
         trigger_definition_ref: _, // exact trigger occurrence, no read/write effect
         force_block_attacker: _, // exact force-block referent, no read/write effect
+        target_incarnations: _, // CR 400.7 pins on the referents, no read/write effect
         controller: _,
         original_controller: _,
         scoped_player: _,
@@ -3740,6 +3746,7 @@ fn walk_ability(
         distribution: _,
         chosen_x: _,
         cost_paid_object: _,
+        noted_mana_payment: _, // concrete captured payment snapshot, no read/write effect
         cost_paid_object_ids: _,
         effect_context_object: _,
         amassed_army_object: _,
@@ -5651,6 +5658,7 @@ fn rw_effect(
         | Effect::Harness
         | Effect::ChooseAndSacrificeRest { .. }
         | Effect::RememberCard { .. }
+        | Effect::NoteManaSpent
         | Effect::ForEachCategory { .. }
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
@@ -6094,6 +6102,7 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
         // feed — the read is the write's own reveal output). So `conservative()`
         // (which the coarse fallback assigned) falsely conflicts.
         AbilityCondition::RevealedHasCardType { .. } => RwProfile::empty(),
+        AbilityCondition::DiscardedCardMatchesFilter { .. } => RwProfile::empty(),
         AbilityCondition::SourceEnteredThisTurn
         | AbilityCondition::AdditionalCostPaid { .. }
         | AbilityCondition::CastVariantPaid { .. }
@@ -6127,6 +6136,7 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
         | AbilityCondition::CompletedDungeon { .. }
         | AbilityCondition::IsInitiative
         | AbilityCondition::HasCityBlessing
+        | AbilityCondition::HasEnduringStory
         | AbilityCondition::IsRingBearer
         | AbilityCondition::TargetHasKeywordInstead { .. }
         | AbilityCondition::HasObjectTarget
@@ -6244,6 +6254,7 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
         | TriggerCondition::IsInitiative
         | TriggerCondition::NoMonarch
         | TriggerCondition::HasCityBlessing
+        | TriggerCondition::HasEnduringStory
         | TriggerCondition::CompletedDungeon { .. }
         | TriggerCondition::TributeNotPaid
         | TriggerCondition::CastDuringPhase { .. }
@@ -6340,6 +6351,7 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
+        | StaticCondition::HasEnduringStory
         | StaticCondition::CompletedADungeon
         | StaticCondition::Unrecognized { .. }
         | StaticCondition::DuringYourTurn

@@ -799,48 +799,6 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                 }
             }
 
-            // Price the cost of an *affordable* ward (must pay an extra cost).
-            // An unaffordable ward is hard-rejected upstream by `tactical_gate`
-            // (CR 702.21a — the spell would just be countered), so this judgment
-            // layer never double-scores that case.
-            for keyword in &object.keywords {
-                if let Keyword::Ward(ward_cost) = keyword {
-                    if !can_pay_ward_cost(ctx, ward_cost, object) {
-                        break;
-                    }
-                    let severity = match ward_cost {
-                        WardCost::Mana(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
-                        WardCost::PayLife(amount) => (*amount as f64 / 3.0).min(2.0),
-                        WardCost::PayLifeEqualToPower => {
-                            (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
-                        }
-                        WardCost::DiscardCard => 1.5,
-                        WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
-                        WardCost::Waterbend(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
-                        // CR 702.21a: Compound costs sum severity of components.
-                        WardCost::Compound(costs) => costs
-                            .iter()
-                            .map(|c| match c {
-                                WardCost::Mana(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
-                                WardCost::PayLife(amount) => (*amount as f64 / 3.0).min(2.0),
-                                WardCost::PayLifeEqualToPower => {
-                                    (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
-                                }
-                                WardCost::DiscardCard => 1.5,
-                                WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
-                                WardCost::Waterbend(cost) => {
-                                    (cost.mana_value() as f64 / 2.0).min(2.0)
-                                }
-                                WardCost::Compound(_) => 2.0,
-                            })
-                            .sum::<f64>()
-                            .min(4.0),
-                    };
-                    score += ctx.penalties().ward_cost_penalty_base * severity;
-                    break;
-                }
-            }
-
             // Removal quality mismatch: penalize premium removal on cheap targets
             if let Some(source) = ctx.source_object() {
                 let spell_mv = source.mana_cost.mana_value();
@@ -909,6 +867,102 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
             (object.mana_cost.mana_value() as f64).min(6.0)
         };
         score += controller_delta * noncreature_value;
+    }
+
+    // Price the cost of an *affordable* ward (must pay an extra cost). Applies to every
+    // permanent type, not just creatures — a Ward-bearing artifact/enchantment/planeswalker
+    // is exactly as real a target-choice cost as a Ward-bearing creature. An unaffordable ward
+    // is hard-rejected upstream by `tactical_gate` (CR 702.21a — the spell would just be
+    // countered), so this judgment layer never double-scores that case.
+    if !beneficial {
+        for keyword in &object.keywords {
+            if let Keyword::Ward(ward_cost) = keyword {
+                if !can_pay_ward_cost(ctx, ward_cost, object) {
+                    break;
+                }
+                let severity = match ward_cost {
+                    WardCost::Mana(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
+                    WardCost::PayLife(amount) => (*amount as f64 / 3.0).min(2.0),
+                    WardCost::PayLifeEqualToPower => {
+                        (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
+                    }
+                    WardCost::DiscardCard => 1.5,
+                    WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
+                    WardCost::Waterbend(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
+                    // CR 702.21a + CR 122.1 + CR 728.1: giving yourself
+                    // player counters has an explicit, kind-specific
+                    // valuation — no wildcard fallback, so a future
+                    // supported counter kind forces a deliberate
+                    // decision here. A lethal poison payment never
+                    // reaches this scoring at all — `can_pay_ward_cost`
+                    // above already rejects it (reframed as "can't
+                    // rationally pay"), so the Poison arm only ever sees
+                    // sub-lethal, ordinary-severity payments.
+                    WardCost::GetPlayerCounters {
+                        counter_kind: engine::types::player::PlayerCounterKind::Poison,
+                        count,
+                    } => *count as f64 * 3.0,
+                    // CR 728.1: each rad counter mills a card and, if that
+                    // card is nonland, costs 1 life. Real cost, not
+                    // harmless — approximated as PayLife's per-life
+                    // severity (amount/3.0) scaled by ~0.6 (typical
+                    // nonland fraction of a deck), i.e. ~0.2 per counter.
+                    WardCost::GetPlayerCounters {
+                        counter_kind: engine::types::player::PlayerCounterKind::Rad,
+                        count,
+                    } => (*count as f64 * 0.2).min(2.0),
+                    // Experience/ticket counters carry no loss-condition
+                    // or resource-drain risk — purely beneficial or
+                    // neutral to receive.
+                    WardCost::GetPlayerCounters {
+                        counter_kind: engine::types::player::PlayerCounterKind::Experience,
+                        ..
+                    } => 0.0,
+                    WardCost::GetPlayerCounters {
+                        counter_kind: engine::types::player::PlayerCounterKind::Ticket,
+                        ..
+                    } => 0.0,
+                    // CR 702.21a: Compound costs sum severity of components.
+                    // A Compound containing a lethal poison sub-cost is
+                    // also already rejected upstream by `can_pay_ward_cost`
+                    // (which requires every sub-cost payable), so this
+                    // fold only ever sees payable compounds.
+                    WardCost::Compound(costs) => costs
+                        .iter()
+                        .map(|c| match c {
+                            WardCost::Mana(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
+                            WardCost::PayLife(amount) => (*amount as f64 / 3.0).min(2.0),
+                            WardCost::PayLifeEqualToPower => {
+                                (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
+                            }
+                            WardCost::DiscardCard => 1.5,
+                            WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
+                            WardCost::Waterbend(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
+                            WardCost::GetPlayerCounters {
+                                counter_kind: engine::types::player::PlayerCounterKind::Poison,
+                                count,
+                            } => *count as f64 * 3.0,
+                            WardCost::GetPlayerCounters {
+                                counter_kind: engine::types::player::PlayerCounterKind::Rad,
+                                count,
+                            } => (*count as f64 * 0.2).min(2.0),
+                            WardCost::GetPlayerCounters {
+                                counter_kind: engine::types::player::PlayerCounterKind::Experience,
+                                ..
+                            } => 0.0,
+                            WardCost::GetPlayerCounters {
+                                counter_kind: engine::types::player::PlayerCounterKind::Ticket,
+                                ..
+                            } => 0.0,
+                            WardCost::Compound(_) => 2.0,
+                        })
+                        .sum::<f64>()
+                        .min(4.0),
+                };
+                score += ctx.penalties().ward_cost_penalty_base * severity;
+                break;
+            }
+        }
     }
 
     score
@@ -3878,6 +3932,7 @@ mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         }));
 
         let config = AiConfig::default();
@@ -3955,6 +4010,159 @@ mod tests {
     }
 
     #[test]
+    fn noncreature_ward_target_scores_lower_than_unwarded_equivalent() {
+        let mut state = make_state();
+
+        // Two identical artifacts (non-creature): one bare, one with a small, payable,
+        // nonlethal poison-counter Ward. Both owned by the opponent (PlayerId(1)) so removal
+        // targeting them is non-beneficial from the AI's (PlayerId(0)) perspective.
+        let bare_card_id = CardId(state.next_object_id);
+        let bare_artifact = create_object(
+            &mut state,
+            bare_card_id,
+            PlayerId(1),
+            "Prophetic Prism".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&bare_artifact)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(engine::types::card_type::CoreType::Artifact);
+
+        let warded_card_id = CardId(state.next_object_id);
+        let warded_artifact = create_object(
+            &mut state,
+            warded_card_id,
+            PlayerId(1),
+            "Warded Relic".to_string(),
+            Zone::Battlefield,
+        );
+        let warded_obj = state.objects.get_mut(&warded_artifact).unwrap();
+        warded_obj
+            .card_types
+            .core_types
+            .push(engine::types::card_type::CoreType::Artifact);
+        warded_obj
+            .keywords
+            .push(Keyword::Ward(WardCost::GetPlayerCounters {
+                counter_kind: engine::types::player::PlayerCounterKind::Poison,
+                count: 2,
+            }));
+
+        // Set up pending trigger with a removal (exile) effect, matching
+        // `trigger_target_prefers_creature_over_token` above.
+        state.pending_trigger = Some(Box::new(engine::game::triggers::PendingTrigger {
+            source_id: ObjectId(200),
+            controller: PlayerId(0),
+            condition: None,
+            ability: Box::new(ResolvedAbility::new(
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Exile,
+                    target: TargetFilter::Any,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+                Vec::new(),
+                ObjectId(200),
+                PlayerId(0),
+            )),
+            timestamp: 1,
+            target_constraints: Vec::new(),
+            distribute: None,
+            trigger_event: None,
+            modal: None,
+            mode_abilities: vec![],
+            description: None,
+            may_trigger_origin: None,
+            subject_match_count: None,
+            die_result: None,
+            provenance: None,
+        }));
+
+        let config = AiConfig::default();
+        let legal_targets = vec![
+            TargetRef::Object(bare_artifact),
+            TargetRef::Object(warded_artifact),
+        ];
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::TriggerTargetSelection {
+                player: PlayerId(0),
+                trigger_controller: None,
+                trigger_event: None,
+                trigger_events: Vec::new(),
+                target_slots: vec![TargetSelectionSlot {
+                    legal_targets: legal_targets.clone(),
+                    optional: false,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
+                }],
+                mode_labels: Vec::new(),
+                target_constraints: Vec::new(),
+                selection: Default::default(),
+                source_id: Some(ObjectId(200)),
+                description: None,
+            },
+            candidates: Vec::new(),
+        };
+
+        // Score targeting the bare artifact
+        let bare_candidate = CandidateAction {
+            action: GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(bare_artifact)),
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
+        };
+        let bare_ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &bare_candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        let bare_score = AntiSelfHarmPolicy.score(&bare_ctx);
+
+        // Score targeting the warded artifact
+        let warded_candidate = CandidateAction {
+            action: GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(warded_artifact)),
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
+        };
+        let warded_ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &warded_candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        let warded_score = AntiSelfHarmPolicy.score(&warded_ctx);
+
+        assert!(
+            bare_score > warded_score,
+            "Should prefer targeting the unwarded artifact ({bare_score}) over the poison-Ward artifact ({warded_score})"
+        );
+    }
+
+    #[test]
     fn trigger_target_effects_are_extracted() {
         let mut state = make_state();
         state.pending_trigger = Some(Box::new(engine::game::triggers::PendingTrigger {
@@ -3991,6 +4199,7 @@ mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         }));
 
         let config = AiConfig::default();

@@ -5,7 +5,7 @@ import {
   PROTOCOL_VERSION,
   WebSocketAdapter,
 } from "../ws-adapter";
-import { AdapterError, supportsMatchConcede } from "../types";
+import { AdapterError, supportsMatchConcede, supportsServerRewind } from "../types";
 import type { GameState } from "../types";
 import type { PhaseSocketTransport } from "../../services/openPhaseSocket";
 
@@ -149,6 +149,121 @@ describe("WebSocketAdapter", () => {
     adapter.sendMatchConcede();
 
     expect(ws.send).toHaveBeenLastCalledWith(JSON.stringify({ type: "ConcedeMatch" }));
+  });
+
+  describe("server rewind capability (F2)", () => {
+    it("declares the capability through the standalone type guard", () => {
+      expect(supportsServerRewind(adapter)).toBe(true);
+    });
+
+    // The reverse-skew guard. The last-action frame must carry NO `data` key —
+    // byte-identical to the frame every already-deployed server accepts, and
+    // the reason `ClientMessage::RequestTakeback` is a newtype over
+    // `Option<RewindTarget>` rather than a struct variant (which would reject
+    // this exact frame with `missing field \`data\``).
+    it("sends a data-free frame for a last-action undo", () => {
+      adapter.sendRequestTakeback();
+      expect(JSON.parse(ws.send.mock.lastCall![0] as string)).toEqual({
+        type: "RequestTakeback",
+      });
+
+      adapter.sendRequestTakeback({ kind: "last_action" });
+      expect(JSON.parse(ws.send.mock.lastCall![0] as string)).toEqual({
+        type: "RequestTakeback",
+      });
+    });
+
+    it("sends the data-bearing frame for a turn rewind", () => {
+      adapter.sendRequestTakeback({ kind: "turn_start", turn_number: 3 });
+      expect(JSON.parse(ws.send.mock.lastCall![0] as string)).toEqual({
+        type: "RequestTakeback",
+        data: { kind: "turn_start", turn_number: 3 },
+      });
+    });
+
+    it("emits rewindTargets from a StateUpdate that carries them", () => {
+      const listener = vi.fn();
+      adapter.onEvent(listener);
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "StateUpdate",
+          data: {
+            state: createMockState(),
+            events: [],
+            rewind_targets: [{ turn_number: 3, active_player: 1 }],
+          },
+        }),
+      );
+      expect(listener).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "stateChanged",
+          rewindTargets: [{ turn_number: 3, active_player: 1 }],
+        }),
+      );
+    });
+
+    // Forward-skew hostile: an omitted field must become `[]`, never
+    // `undefined`. On this transport `undefined` means "does not publish",
+    // which is false here — and `dispatch.ts` treats the two differently, so
+    // collapsing them would leave a stale list on screen forever.
+    it("emits an empty array when a StateUpdate omits rewind_targets", () => {
+      const listener = vi.fn();
+      adapter.onEvent(listener);
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "StateUpdate",
+          data: { state: createMockState(), events: [] },
+        }),
+      );
+      expect(listener).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "stateChanged", rewindTargets: [] }),
+      );
+    });
+
+    // The reconnect path: a mid-game reattach must see the list immediately
+    // rather than waiting for the next action.
+    it("emits rewindTargets from a reconnect GameStarted", async () => {
+      MockWebSocket.last = null;
+      const reconnected = new WebSocketAdapter(
+        "ws://localhost:9374/ws",
+        "join",
+        { main_deck: [], sideboard: [] },
+        "ABC123",
+      );
+      const listener = vi.fn();
+      reconnected.onEvent(listener);
+      const initPromise = reconnected.initialize();
+      const ws2 = await completeHandshake(reconnected);
+      // Resolve init with a first GameStarted, then deliver the reconnect one.
+      ws2.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "GameStarted",
+          data: { state: createMockState(), your_player: 0 },
+        }),
+      );
+      await initPromise;
+      listener.mockClear();
+      ws2.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "GameStarted",
+          data: {
+            state: createMockState(),
+            your_player: 0,
+            rewind_targets: [{ turn_number: 5, active_player: 0 }],
+          },
+        }),
+      );
+      expect(listener).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "stateChanged",
+          rewindTargets: [{ turn_number: 5, active_player: 0 }],
+        }),
+      );
+    });
   });
 
   describe("native AI transport", () => {

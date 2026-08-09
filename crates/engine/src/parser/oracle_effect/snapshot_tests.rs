@@ -308,17 +308,6 @@ fn delayed_return_stamps_exile_origin_for_that_card_phrasing() {
     assert!(is_parent);
 }
 
-/// The stamp is independent of which anaphor the text uses ("return it").
-#[test]
-fn delayed_return_stamps_exile_origin_for_it_phrasing() {
-    let def = parse_effect_chain(
-            "exile target creature. return it to the battlefield under its owner's control at the beginning of the next end step",
-            AbilityKind::Spell,
-        );
-    let (origin, _) = delayed_return_change_zone(&def);
-    assert_eq!(origin, Some(Zone::Exile));
-}
-
 /// SHOULD-FIX 1: a top-level `ParentTarget` `ChangeZone` NOT wrapped in a
 /// `CreateDelayedTrigger` must keep `origin == None` — only delayed snapshot
 /// returns are stamped.

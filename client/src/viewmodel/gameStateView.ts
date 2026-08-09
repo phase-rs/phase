@@ -2,6 +2,7 @@ import type {
   GameAction,
   GameObject,
   GameState,
+  ObjectCounterDisplay,
   ObjectId,
   PlayerId,
   WaitingFor,
@@ -105,137 +106,53 @@ export function getPlayerZoneIds(
   }
   if (zone === "library") {
     // library[0] = top of library (engine convention from zones.rs). Returns
-    // the full ordered library; the library viewer filters to the cards the
-    // engine has revealed to the viewer (isLibraryCardRevealedToViewer) so
-    // unrevealed cards are never shown.
+    // the full ordered library; the library viewer consumes each object's
+    // engine-projected display visibility before rendering it.
     return gameState.players[playerId]?.library ?? [];
   }
   return gameState.exile.filter((id) => gameState.objects[id]?.owner === playerId);
 }
 
 /**
- * CR 701.20e: whether the engine's private "look at" set (Mishra's Bauble at an
- * opponent's library, a scry look, Glasses of Urza / Gitaxian Probe at a hand)
- * surfaces `objectId`'s identity to `viewerId`. Zone-agnostic — the engine's
- * `private_look_ids`/`private_look_player` fields carry object ids regardless
- * of which zone those objects sit in, so this same check backs both the
- * library viewer and the opponent-hand viewer below.
- */
-export function isPrivatelyLookedAtByViewer(
-  gameState: GameState | null,
-  objectId: ObjectId,
-  viewerId: PlayerId | null | undefined,
-): boolean {
-  // Guard against `undefined === undefined`: if the caller hasn't resolved a
-  // real viewer yet (e.g. mid-load) and `private_look_player` also happens to
-  // be unset, a bare `===` would match and leak the private look to nobody.
-  if (!gameState || viewerId == null) return false;
-  return (
-    gameState.private_look_player === viewerId &&
-    (gameState.private_look_ids?.includes(objectId) ?? false)
-  );
-}
-
-/**
- * Whether the engine has revealed a given library card's identity to `viewerId`.
- *
- * Mirrors the engine's library visibility (`crates/engine/src/game/visibility.rs`)
- * using the explicit reveal sets — NEVER the card name. In single-player the
- * client renders the raw, unredacted state (the `showAiHand` debug toggle depends
- * on it), so `name !== "Hidden Card"` is always true and cannot be used to infer
- * visibility; doing so leaks every opponent library card. This is the same
- * pattern `OpponentHand` uses for opponent hand cards.
- *
- * Deliberately excludes `public_revealed_cards`: the engine does not un-redact
- * library cards by that persistent memory set (a card revealed once and put back
- * must not leak its new position).
+ * Whether the engine has projected a library card's identity for this viewer.
+ * The display layer reads the per-object projection; it does not reconstruct
+ * visibility from reveal, look, or product-knowledge state.
  */
 export function isLibraryCardRevealedToViewer(
   gameState: GameState | null,
   objectId: ObjectId,
-  viewerId: PlayerId,
+  _viewerId: PlayerId,
 ): boolean {
-  if (!gameState) return false;
-  // CR 701.20b: publicly revealed top cards (RevealTop, "play with the top card
-  // revealed") are visible to every player.
-  if (gameState.revealed_cards?.includes(objectId)) return true;
-  // CR 701.20e: a private "look at the top card" (Mishra's Bauble at an
-  // opponent's library; your own scry look) surfaces the peeked ids only to the
-  // looking player.
-  return isPrivatelyLookedAtByViewer(gameState, objectId, viewerId);
+  return gameState?.objects[objectId]?.display_visible_to_viewer ?? false;
 }
 
 /**
  * Whether a face-down card sitting in the shared Exile zone is visible to
  * `viewerId`.
  *
- * Mirrors the engine's `hidden_facedown_exile_ids` gate
- * (`crates/engine/src/game/visibility.rs`, CR 406.3 + CR 702.75a +
- * CR 702.143e): a foretold card's owner may look at it, and the controller of
- * the permanent that Hideaway-exiled a card may look at it. Every other
- * face-down exile — including a plain `TrackedBySource` link that grants no
- * look-permission (Bomat Courier, Necropotence, Asmodeus) — stays hidden.
- *
- * Like `isLibraryCardRevealedToViewer` above, this exists because single-player
- * renders the raw, unredacted state: `obj.face_down` alone can't distinguish
- * "hidden from this viewer" from "visible to this viewer", and the object's
- * `name`/`printed_ref` carry the real identity regardless of viewer. Used by
- * the exile `ZoneViewer` to keep an opponent's Hideaway-exiled card (or a
- * non-owner's foretold exile) from leaking its name or image.
+ * The rules permissions (Foretell, Hideaway, and face-down look effects) are
+ * resolved by Rust before this value reaches the client.
  */
 export function isFaceDownExileCardVisibleToViewer(
-  gameState: GameState | null,
+  _gameState: GameState | null,
   obj: GameObject,
-  viewerId: PlayerId,
+  _viewerId: PlayerId,
 ): boolean {
-  if (!gameState || !obj.face_down) return false;
-  if (obj.foretold && obj.owner === viewerId) return true;
-  return (gameState.exile_links ?? []).some(
-    (link) =>
-      link.exiled_id === obj.id &&
-      link.kind === "HideawayLookable" &&
-      gameState.objects[link.source_id]?.controller === viewerId,
-  );
+  return obj.face_down && (obj.display_visible_to_viewer ?? false);
 }
 
 /**
  * Whether `viewerId` may see the identity of `obj` for the card-report picker.
  *
- * Composes the engine-mirroring reveal-set helpers above; NEVER infers
- * visibility from `name !== HIDDEN_CARD_NAME`. In single-player the client
- * renders the raw, unredacted state (the `showAiHand` debug toggle depends on
- * it), so hidden-zone objects carry their real names and a name check would leak
- * every opponent card. Conservative: hides on any doubt, never leaks.
+ * Rust resolves every zone and reveal rule into `display_visible_to_viewer`.
+ * Conservative: hides on an omitted projection, never leaks.
  */
 export function isObjectReportableToViewer(
   gameState: GameState | null,
   obj: GameObject,
-  viewerId: PlayerId,
+  _viewerId: PlayerId,
 ): boolean {
-  if (!gameState) return false;
-  // CR 701.20b: a publicly revealed card is visible to every player.
-  const revealed = gameState.revealed_cards?.includes(obj.id) ?? false;
-  switch (obj.zone) {
-    case "Stack":
-    case "Battlefield":
-      // Public zones; a face-down (morph/manifest) permanent hides its identity
-      // from non-owners unless it has been publicly revealed.
-      return !obj.face_down || obj.owner === viewerId || revealed;
-    case "Graveyard":
-    case "Command":
-      return true; // public, face-up
-    case "Exile":
-      return !obj.face_down || isFaceDownExileCardVisibleToViewer(gameState, obj, viewerId);
-    case "Hand":
-      // Own hand, or a card revealed to everyone (mirror OpponentHand's gate).
-      return (
-        obj.owner === viewerId ||
-        revealed ||
-        (gameState.public_revealed_cards?.includes(obj.id) ?? false)
-      );
-    case "Library":
-      return false; // hidden; rare face-up-top reveals are out of scope
-  }
+  return gameState != null && (obj.display_visible_to_viewer ?? false);
 }
 
 export function getWaitingForObjectChoiceIds(
@@ -839,10 +756,14 @@ export function buildPlayerBattlefieldView(
   // CR 732.2a: engine-authored ∞-pile membership (accepted object-growth loop).
   // Read exactly like ring_bearer — the adapter attaches `derived` onto gameState.
   const unboundedPileIds = new Set(gameState.derived?.unbounded_pile ?? []);
+  // CR 122.1: the engine's complete counter-display projection is part of the group IDENTITY —
+  // two permanents that render different counter rows must not share a representative. Read
+  // exactly like `unbounded_pile` above.
   return buildPlayerBattlefieldViewFromObjects(
     playerObjects,
     ringBearerIds,
     unboundedPileIds,
+    gameState.derived?.counter_display,
   );
 }
 
@@ -850,6 +771,7 @@ export function buildPlayerBattlefieldViewFromObjects(
   playerObjects: GameObject[],
   ringBearerIds: ReadonlySet<ObjectId> = new Set(),
   unboundedPileIds: ReadonlySet<ObjectId> = new Set(),
+  counterDisplay: Record<string, ObjectCounterDisplay> | undefined,
 ): PlayerBattlefieldView {
   const partition = partitionByType(playerObjects);
   const objectMap = new Map(playerObjects.map((object) => [object.id, object]));
@@ -859,11 +781,11 @@ export function buildPlayerBattlefieldViewFromObjects(
       .filter(Boolean) as GameObject[];
 
   return {
-    creatures: groupByName(resolveObjects(partition.creatures), ringBearerIds, unboundedPileIds),
-    lands: groupByName(resolveObjects(partition.lands), ringBearerIds, unboundedPileIds),
-    support: groupByName(resolveObjects(partition.support), ringBearerIds, unboundedPileIds),
-    planeswalkers: groupByName(resolveObjects(partition.planeswalkers), ringBearerIds, unboundedPileIds),
-    other: groupByName(resolveObjects(partition.other), ringBearerIds, unboundedPileIds),
+    creatures: groupByName(resolveObjects(partition.creatures), ringBearerIds, unboundedPileIds, counterDisplay),
+    lands: groupByName(resolveObjects(partition.lands), ringBearerIds, unboundedPileIds, counterDisplay),
+    support: groupByName(resolveObjects(partition.support), ringBearerIds, unboundedPileIds, counterDisplay),
+    planeswalkers: groupByName(resolveObjects(partition.planeswalkers), ringBearerIds, unboundedPileIds, counterDisplay),
+    other: groupByName(resolveObjects(partition.other), ringBearerIds, unboundedPileIds, counterDisplay),
   };
 }
 

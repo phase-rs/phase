@@ -101,7 +101,7 @@ fn jailbreak_returns_the_permanent_under_its_owners_control() {
             dump.contains("ParentTargetOwner"),
             "stale fixture: Jailbreak's parsed ability must carry \
              enters_under: Some(ParentTargetOwner); regenerate \
-             crates/engine/tests/fixtures/integration_cards.json"
+             crates/engine/tests/fixtures/integration_cards.json.gz"
         );
     }
 

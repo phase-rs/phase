@@ -229,9 +229,22 @@ export function ActionButton() {
       setShowTargetPicker(true);
       return;
     }
+    const attacks = buildAttacks(
+      selectedAttackers,
+      validAttackTargetsByAttacker,
+      validAttackTargets,
+    );
+    if (attacks == null) {
+      // A present support map can authoritatively give a selected candidate no
+      // selectable targets. Keep the complete selection in the picker rather
+      // than silently sending a shortened declaration; only the engine decides
+      // whether an eventual full declaration is accepted.
+      setShowTargetPicker(true);
+      return;
+    }
     dispatchAction({
       type: "DeclareAttackers",
-      data: { attacks: buildAttacks(selectedAttackers, validAttackTargetsByAttacker, validAttackTargets) },
+      data: { attacks },
     });
   }
 

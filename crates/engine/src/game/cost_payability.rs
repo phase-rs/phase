@@ -724,6 +724,10 @@ impl AbilityCost {
             // affordability is decided by the separate mana-payment step, not this
             // choice-of-object gate.
             AbilityCost::KeywordCostOfCastSpell { .. } => true,
+            // CR 702.21a + CR 122.1: Ward's player-counter cost is never paid
+            // as an activation cost (only at resolution, via the unless-pay
+            // round trip), and it has no affordability limit — always payable.
+            AbilityCost::GetPlayerCounters { .. } => true,
         }
     }
 }

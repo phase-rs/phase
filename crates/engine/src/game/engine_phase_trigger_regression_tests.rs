@@ -17,6 +17,7 @@ use crate::types::format::FormatConfig;
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
+use crate::types::phase::{PhaseStop, PhaseStopScope};
 use crate::types::player::PlayerId;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::triggers::TriggerMode;
@@ -84,11 +85,11 @@ fn hand_to_battlefield_choice_ability(
     )
 }
 
-/// Verify that combat is skipped when there are no attackers and no triggers.
-/// With no BeginCombat triggers and no potential attackers, auto_advance()
-/// skips straight to PostCombatMain.
+/// CR 507.2 + CR 508.1a: Even with no attackers and no beginning-of-combat
+/// triggers, beginning of combat has an active-player priority window before
+/// the active player makes the (here forced-empty) attacker declaration.
 #[test]
-fn combat_skipped_when_no_attackers_no_triggers() {
+fn begin_combat_window_precedes_forced_empty_attacker_declaration() {
     let mut state = new_game(42);
     state.turn_number = 2;
     state.phase = Phase::PreCombatMain;
@@ -98,24 +99,23 @@ fn combat_skipped_when_no_attackers_no_triggers() {
         player: PlayerId(0),
     };
 
-    // Create a 0/1 creature with no triggers — can't attack, no combat triggers.
-    let creature_id = create_object(
-        &mut state,
-        CardId(200),
+    // Stops make both windows observable; otherwise the forced empty
+    // declaration is deliberately auto-submitted by the normal auto-pass loop.
+    state.phase_stops.insert(
         PlayerId(0),
-        "Wall".to_string(),
-        Zone::Battlefield,
+        vec![
+            PhaseStop {
+                phase: Phase::BeginCombat,
+                scope: PhaseStopScope::OwnTurn,
+            },
+            PhaseStop {
+                phase: Phase::DeclareAttackers,
+                scope: PhaseStopScope::OwnTurn,
+            },
+        ],
     );
-    {
-        let obj = state.objects.get_mut(&creature_id).unwrap();
-        obj.card_types.core_types.push(CoreType::Creature);
-        obj.power = Some(0);
-        obj.toughness = Some(1);
-    }
 
-    // Pass priority twice (P0 passes, then P1 passes) with empty stack.
-    // This advances from PreCombatMain → BeginCombat → no triggers, no
-    // attackers → skip to PostCombatMain.
+    // Passing the precombat-main priority window reaches beginning of combat.
     let result1 = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     assert!(matches!(
         result1.waiting_for,
@@ -126,18 +126,85 @@ fn combat_skipped_when_no_attackers_no_triggers() {
 
     let result2 = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
 
-    // We should now be at PostCombatMain with empty stack.
-    assert_eq!(state.phase, Phase::PostCombatMain);
+    assert_eq!(state.phase, Phase::BeginCombat);
+    assert!(matches!(
+        result2.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(0)
+        }
+    ));
     assert!(
         state.stack.is_empty(),
-        "Stack should be empty — no triggers exist. Stack: {:?}",
+        "the no-trigger window must not fabricate stack work: {:?}",
         state.stack
     );
+    assert!(state.pending_trigger.is_none());
+
+    // Both players then pass the mandated beginning-of-combat window. The
+    // downstream DeclareAttackers prompt remains visible despite its forced
+    // empty declaration because the explicit stop overrides auto-submit.
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    let result4 = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    assert_eq!(state.phase, Phase::DeclareAttackers);
+    assert!(matches!(
+        result4.waiting_for,
+        WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            ref valid_attacker_ids,
+            ..
+        } if valid_attacker_ids.is_empty()
+    ));
+
+    // Submit the only legal declaration through the production action path.
+    // CR 508.8 then skips only DeclareBlockers and CombatDamage, leaving combat
+    // and arriving at PostCombatMain normally.
+    let empty_declaration = apply_as_current(
+        &mut state,
+        GameAction::DeclareAttackers {
+            attacks: vec![],
+            bands: vec![],
+        },
+    )
+    .expect("the empty declaration offered by the engine must be submitable");
+    assert_eq!(state.phase, Phase::PostCombatMain);
     assert!(
-        state.pending_trigger.is_none(),
-        "No pending trigger should exist"
+        state.combat.is_none(),
+        "combat ends after the empty declaration"
     );
-    assert!(matches!(result2.waiting_for, WaitingFor::Priority { .. }));
+    assert!(matches!(
+        empty_declaration.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(0)
+        }
+    ));
+}
+
+/// CR 500.8 + CR 507.2: An inserted combat phase gets the same
+/// beginning-of-combat priority window as the natural combat phase.
+#[test]
+fn inserted_begin_combat_gets_priority_window() {
+    let mut state = setup_game_at_main_phase();
+    state.phase = Phase::EndCombat;
+    state
+        .extra_phases
+        .push(crate::types::game_state::ExtraPhase {
+            anchor: Phase::EndCombat,
+            phase: Phase::BeginCombat,
+            attacker_restriction: None,
+            attacker_restriction_source: None,
+        });
+
+    let mut events = Vec::new();
+    let waiting_for = crate::game::turns::auto_advance(&mut state, &mut events);
+
+    assert_eq!(state.phase, Phase::BeginCombat);
+    assert!(state.combat.is_some());
+    assert!(matches!(
+        waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(0)
+        }
+    ));
 }
 
 /// CR 503.1a: Upkeep triggers fire when the upkeep step begins.
@@ -244,6 +311,61 @@ fn begin_combat_trigger_fires_with_attackers() {
         !state.stack.is_empty() || state.pending_trigger.is_some(),
         "BeginCombat trigger should have fired"
     );
+}
+
+/// CR 603.3b + CR 507.2: A phase-trigger ordering prompt is a stronger result
+/// than the ordinary beginning-of-combat priority window and must propagate
+/// unchanged through the phase interpreter.
+#[test]
+fn begin_combat_propagates_generic_phase_trigger_ordering_prompt() {
+    let mut state = setup_game_at_main_phase();
+    for (card_id, amount) in [(201_u64, 1), (202, 2)] {
+        let source_id = create_object(
+            &mut state,
+            CardId(card_id),
+            PlayerId(0),
+            format!("Combat trigger {card_id}"),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let source = state.objects.get_mut(&source_id).unwrap();
+        source.power = Some(1);
+        source.toughness = Some(1);
+        source.trigger_definitions.push(
+            TriggerDefinition::new(TriggerMode::Phase)
+                .phase(Phase::BeginCombat)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: amount },
+                        player: TargetFilter::Controller,
+                    },
+                ))
+                .trigger_zones(vec![Zone::Battlefield]),
+        );
+    }
+
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    let result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+    assert_eq!(state.phase, Phase::BeginCombat);
+    assert!(
+        state.combat.is_some(),
+        "combat state is available to the prompt"
+    );
+    assert!(matches!(
+        result.waiting_for,
+        WaitingFor::OrderTriggers {
+            player: PlayerId(0),
+            ref triggers,
+        } if triggers.len() == 2
+    ));
 }
 
 /// CR 507.1: BeginCombat triggers fire even without potential attackers.

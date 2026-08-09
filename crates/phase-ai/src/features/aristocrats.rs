@@ -12,10 +12,13 @@
 //!   landfall is the canonical owner of fetchland semantics.
 //! - `Effect::Token { types: Vec<String>, .. }` at `ability.rs:2131`.
 //!   Creature tokens have `types.iter().any(|s| s == "Creature")`.
-//! - `Effect::ChangeZone { origin: Some(Graveyard), destination: Battlefield,
-//!   .. }` is the recursion shape (`ability.rs:2271`). Recursion does not
-//!   correspond to a single CR keyword action — it's a generic zone-change
-//!   effect, so no specific CR annotation applies here.
+//! - `Effect::ChangeZone` (in `engine::types::ability`) with
+//!   `destination: Battlefield` is the recursion shape. The graveyard
+//!   constraint may ride `origin: Some(Graveyard)` **or** the target filter's
+//!   `FilterProp::InZone { Graveyard }` — `features::reanimator` owns that
+//!   question. Recursion does not correspond to a single CR keyword action —
+//!   it's a generic zone-change effect, so no specific CR annotation applies
+//!   here.
 //! - `AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter, 1))` at `ability.rs:1757`
 //!   — after the `CostCategory::SacrificesPermanent` gate confirms the cost
 //!   type, the `target` field is inspected to verify creature-you-control scope.
@@ -38,6 +41,7 @@ use engine::types::zones::Zone;
 use crate::ability_chain::collect_chain_effects;
 use crate::features::commitment;
 use crate::features::landfall::ability_searches_library_for_land;
+use crate::features::reanimator::change_zone_leaves_graveyard;
 
 /// CR 701.21 + CR 603.6c + CR 111.1: per-deck aristocrats classification.
 ///
@@ -316,8 +320,11 @@ pub(crate) fn typed_filter_is_creature_you_control_or_any(typed: &TypedFilter) -
 /// - Creature token generator: `Effect::Token { types, .. }` with
 ///   `types.iter().any(|s| s == "Creature")`. Treasure/Clue/Food tokens do NOT
 ///   count — their `types` lacks "Creature". CR 111.1.
-/// - Creature recursion: `Effect::ChangeZone { origin: Some(Graveyard),
-///   destination: Battlefield, target, .. }` where `target` references a creature.
+/// - Creature recursion: `Effect::ChangeZone { destination: Battlefield, target,
+///   .. }` where `target` references a creature and the graveyard is positively
+///   asserted — by `origin: Some(Graveyard)` or by the target filter's
+///   `FilterProp::InZone { Graveyard }` (see
+///   [`crate::features::reanimator::change_zone_leaves_graveyard`]).
 ///   Generic zone-change effect — no CR keyword action applies.
 fn is_fodder_source(face: &CardFace) -> bool {
     // Check abilities.
@@ -343,14 +350,17 @@ fn is_creature_fodder_effect(e: &&Effect) -> bool {
         // CR 111.1: creature token production.
         Effect::Token { types, .. } => types.iter().any(|s| s == "Creature"),
         // Recursion from graveyard to battlefield targeting a creature.
-        // No CR keyword action — generic zone-change effect.
+        // No CR keyword action — generic zone-change effect. The graveyard
+        // constraint may ride `origin` or the target filter — `reanimator` owns
+        // that question (mirrors this module's use of `landfall` for land-fetch
+        // semantics).
         Effect::ChangeZone {
             origin,
             destination,
             target,
             ..
         } => {
-            *origin == Some(Zone::Graveyard)
+            change_zone_leaves_graveyard(origin, target)
                 && *destination == Zone::Battlefield
                 && filter_references_creature(target)
         }
@@ -378,8 +388,8 @@ mod tests {
     use super::*;
     use engine::game::DeckEntry;
     use engine::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, PtValue, QuantityExpr,
-        SacrificeCost, TargetFilter, TriggerDefinition, TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, FilterProp, PtValue,
+        QuantityExpr, SacrificeCost, TargetFilter, TriggerDefinition, TypedFilter,
     };
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType};
@@ -675,6 +685,37 @@ mod tests {
         )
     }
 
+    /// The filter-borne recursion shape: [`recursion_ability`] with `origin`
+    /// unset, so the graveyard constraint must come from the target filter.
+    /// Mirrors Ashen Powder / Borg Queen's measured filter.
+    fn filter_borne_recursion_ability() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Battlefield,
+                target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::Opponent,
+                    },
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                ])),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: Some(ControllerRef::You),
+                enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        )
+    }
+
     // --- Outlet tests ---
 
     #[test]
@@ -826,6 +867,22 @@ mod tests {
 
         let feature = detect(&deck);
         assert_eq!(feature.fodder_source_count, 1);
+    }
+
+    #[test]
+    fn fodder_detection_sees_filter_borne_graveyard_recursion() {
+        // Ashen Powder / Borg Queen shape: "from an opponent's graveyard"
+        // leaves `origin` unset and carries the graveyard on the target filter.
+        // Driven through the public `detect` surface, not the private helper.
+        let mut face = creature_face("Ashen Powder");
+        face.abilities.push(filter_borne_recursion_ability());
+
+        let feature = detect(&[entry(face, 1)]);
+
+        assert_eq!(
+            feature.fodder_source_count, 1,
+            "a graveyard constraint carried on the target filter must count as fodder recursion"
+        );
     }
 
     #[test]

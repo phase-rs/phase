@@ -358,6 +358,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             }
             GameEvent::MonarchChanged { player_id }
             | GameEvent::CityBlessingGained { player_id }
+            | GameEvent::EnduringStoryGained { player_id }
             | GameEvent::InitiativeTaken { player_id }
             | GameEvent::AttractionOpened { player_id, .. }
             | GameEvent::ContraptionAssembled { player_id, .. }
