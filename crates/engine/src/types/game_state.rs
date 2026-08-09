@@ -11373,7 +11373,7 @@ pub enum WaitingFor {
         /// The zone the commander is currently in (Graveyard, Exile, Hand, or Library).
         current_zone: Zone,
     },
-    /// CR 310.10 + CR 704.5w + CR 704.5x: A battle that isn't being attacked has no
+    /// CR 310.11 + CR 310.12a + CR 704.5w + CR 704.5x: A battle that isn't being attacked has no
     /// protector, an illegal protector, or (for Sieges) a protector equal to its
     /// controller. The battle's controller (`player`) chooses a legal protector from
     /// `candidates`. Emitted only when `candidates.len() > 1`; the SBA auto-applies
@@ -12349,7 +12349,7 @@ impl WaitingFor {
         self.has_pending_cast() && !matches!(self, WaitingFor::ManaSourceSelection { .. })
     }
 
-    /// CR 603.3b / CR 603.3d / CR 603.5 + CR 608.2d / CR 903.9a / CR 704.5j / CR 310.10 /
+    /// CR 603.3b / CR 603.3d / CR 603.5 + CR 608.2d / CR 903.9a / CR 704.5j / CR 310.11 /
     /// CR 703.1 + CR 117.3a + CR 704.3: the windows the ENGINE forces open before the
     /// next grant of priority. Two sources feed the class — the windows that open
     /// between (or during) a resolution and the next priority, and the turn-based
@@ -12381,9 +12381,9 @@ impl WaitingFor {
     /// * [`WaitingFor::ChooseLegend`] — CR 704.5j, the legend rule ("that player chooses
     ///   one of them") *is* a state-based action, answered inside the same CR 704.3
     ///   fixpoint before priority is granted.
-    /// * [`WaitingFor::BattleProtectorChoice`] — CR 310.10 (which says in so many words
-    ///   "This is a state-based action") + CR 704.5w / CR 704.5x, likewise answered
-    ///   inside the CR 704.3 fixpoint.
+    /// * [`WaitingFor::BattleProtectorChoice`] — CR 310.11 ("its controller chooses an
+    ///   appropriate player to be its protector ... This is a state-based action")
+    ///   + CR 704.5w / CR 704.5x, likewise answered inside the CR 704.3 fixpoint.
     ///
     /// Those SBA members (the commander-zone, legend and battle-protector choices) are
     /// the COMPLETE set of player-choice pauses `game::sba` opens inside the SBA
@@ -21863,7 +21863,7 @@ mod forced_cascade_window_tests {
     }
 
     /// CR 603.3b / CR 603.3d / CR 603.5 + CR 608.2d / CR 903.9a / CR 704.5j /
-    /// CR 310.10 / CR 703.1 + CR 117.3a: the membership matrix for
+    /// CR 310.11 / CR 703.1 + CR 117.3a: the membership matrix for
     /// [`WaitingFor::is_forced_cascade_window`], asserted in BOTH directions —
     /// thirteen members and eight non-members, each named.
     ///
@@ -21973,7 +21973,7 @@ mod forced_cascade_window_tests {
                 },
             ),
             (
-                "BattleProtectorChoice (CR 310.10 + CR 704.5w / CR 704.5x — likewise an SBA)",
+                "BattleProtectorChoice (CR 310.11 + CR 704.5w / CR 704.5x — likewise an SBA)",
                 WaitingFor::BattleProtectorChoice {
                     player: PlayerId(0),
                     battle_id: ObjectId(5),

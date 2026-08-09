@@ -26894,6 +26894,110 @@ fn elder_brain_they_draw_binds_to_defending_player() {
     }
 }
 
+#[test]
+fn archnemesis_you_attack_enchanted_player_drains_enchanted_player() {
+    // CR 303.4b + CR 508.1a: "Whenever you attack enchanted player,
+    // that player loses 2 life. You draw a card and gain 2 life." must parse as a
+    // DEFENDER-scoped attack trigger (fires only when the controller attacks the
+    // enchanted player), and the "that player" anaphor in the body must resolve to
+    // the enchanted (attached) player — NOT the attacking controller. Before the
+    // fix this was a bare `YouAttack` trigger with `LoseLife { TriggeringPlayer }`,
+    // draining the controller on every attack.
+    use crate::types::ability::{Effect, QuantityExpr, TargetFilter};
+    use crate::types::triggers::AttackTargetFilter;
+    let def = parse_trigger_line(
+        "Whenever you attack enchanted player, that player loses 2 life. You draw a card and gain 2 life.",
+        "Archnemesis",
+    );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    assert_eq!(def.valid_source, Some(TargetFilter::Controller));
+    assert_eq!(def.valid_target, Some(TargetFilter::AttachedTo));
+    assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player));
+
+    let execute = def.execute.expect("execute");
+    let Effect::LoseLife { amount, target } = execute.effect.as_ref() else {
+        panic!("expected LoseLife head, got {:?}", execute.effect);
+    };
+    assert!(
+        matches!(amount, QuantityExpr::Fixed { value: 2 }),
+        "expected 2 life, got {amount:?}"
+    );
+    assert_eq!(
+        target.as_ref(),
+        Some(&TargetFilter::DefendingPlayer),
+        "'that player' must drain the captured defender, not the attacker"
+    );
+
+    // The "You draw a card and gain 2 life" tail stays on the controller.
+    let draw = execute.sub_ability.as_ref().expect("draw sub-ability");
+    assert!(
+        matches!(
+            draw.effect.as_ref(),
+            Effect::Draw {
+                target: TargetFilter::Controller,
+                ..
+            }
+        ),
+        "expected Draw{{Controller}}, got {:?}",
+        draw.effect
+    );
+    let gain = draw.sub_ability.as_ref().expect("gain-life sub-ability");
+    assert!(
+        matches!(
+            gain.effect.as_ref(),
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                ..
+            }
+        ),
+        "expected GainLife{{Controller}}, got {:?}",
+        gain.effect
+    );
+}
+
+#[test]
+fn attack_enchanted_player_binds_damage_to_them_to_declared_defender() {
+    // The "attack enchanted player" trigger
+    // class must bind a bare "them"/"they" damage recipient in the effect body to
+    // the defender captured at attack declaration, not the attacker — the same
+    // anaphor binding used for the "that player loses N life" subject form
+    // (Archnemesis, above). This exercises the damage-recipient sibling resolver
+    // (`resolve_player_anaphor_damage_recipient`, oracle_effect/lower.rs): before
+    // the shared `enchanted_player_anaphor_filter` binding it had no EnchantedPlayer
+    // arm and fell through to the trigger's "you"/Controller subject, misbinding
+    // "them" to the ATTACKER. Latent-class guard (no shipping card uses this body
+    // yet), so the assertion pins the building block, not one card.
+    use crate::types::ability::{Effect, TargetFilter};
+    let def = parse_trigger_line(
+        "Whenever you attack enchanted player, this creature deals 2 damage to them.",
+        "Testcurse",
+    );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    assert_eq!(def.valid_target, Some(TargetFilter::AttachedTo));
+
+    let execute = def.execute.expect("execute");
+    let Effect::DealDamage { target, .. } = execute.effect.as_ref() else {
+        panic!("expected DealDamage head, got {:?}", execute.effect);
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::DefendingPlayer,
+        "'them' must bind to the captured defender, not the attacker"
+    );
+}
+
+#[test]
+fn bare_you_attack_trigger_stays_you_attack_without_defender_scope() {
+    // Negative sibling of the Archnemesis fix: a bare "Whenever you attack" (any
+    // defender) must remain a `YouAttack` trigger with no `AttachedTo` defender
+    // scope — Edit 1's " enchanted player" tail guard must not over-capture the
+    // ordinary case.
+    let def = parse_trigger_line("Whenever you attack, draw a card.", "Bare Attacker");
+    assert_eq!(def.mode, TriggerMode::YouAttack);
+    assert_eq!(def.valid_target, None);
+    assert_eq!(def.attack_target_filter, None);
+}
+
 // ---------------------------------------------------------------------------
 // Entailment-gated plural-antecedent derivation — direct unit tests over the
 // private `trigger_plural_object_pronoun_ref_for_intervening_if` helper

@@ -2188,6 +2188,44 @@ fn parse_block_grant_duration(input: &str) -> OracleResult<'_, Option<Duration>>
     opt(preceded(tag(" "), parse_duration)).parse(input)
 }
 
+/// CR 303.4b: The `EnchantedPlayer` relative-player scope — produced
+/// by an "attack[s] enchanted player" trigger condition
+/// (`relative_player_scope_for_condition`, oracle_trigger.rs) — resolves a bare
+/// player anaphor ("that player" / "them" / "they") in the effect body to the
+/// defender captured by that attack event via `TargetFilter::DefendingPlayer`.
+///
+/// Single authority for the scope→filter binding, consulted by all three parallel
+/// "that player"/"them" anaphor resolvers — `parse_subject_application` (this
+/// module), `that_player_library_filter` (imperative.rs), and
+/// `resolve_player_anaphor_damage_recipient` (lower.rs) — so the scope value the
+/// trigger layer emits has ONE mapping every consumer honors, rather than a
+/// binding only the subject-application verb forms understand. Covers the whole
+/// "attack enchanted player" curse class (Archnemesis + the Curse cycle),
+/// including future bodies that mill/damage "that player"/"them".
+pub(super) fn enchanted_player_anaphor_filter(
+    scope: Option<&ControllerRef>,
+) -> Option<TargetFilter> {
+    matches!(scope, Some(ControllerRef::EnchantedPlayer)).then_some(TargetFilter::DefendingPlayer)
+}
+
+/// Which player-subject anaphor a standalone "that/the player" clause names.
+///
+/// Both forms resolve to an event-context `TargetFilter` via
+/// `parse_event_context_ref`, and they diverge in exactly one place: on a
+/// player-attached Aura/Curse (`relative_player_scope == EnchantedPlayer`), a
+/// bare `Player` anaphor rebinds to the attack event's defender, while an
+/// `AttackingPlayer` anaphor always names the attacker
+/// (CR 506.2 / CR 603.7c) and must keep its event-context filter. Carrying the
+/// distinction as a typed discriminant lets the enchanted-player guard branch on
+/// the parsed kind instead of re-matching the subject's text label.
+#[derive(Clone, Copy)]
+enum PlayerSubjectAnaphor {
+    /// "that player" / "the player".
+    Player,
+    /// "that attacking player" / "the attacking player".
+    AttackingPlayer,
+}
+
 pub(super) fn parse_subject_application(
     subject: &str,
     ctx: &mut ParseContext,
@@ -2565,18 +2603,26 @@ pub(super) fn parse_subject_application(
     // TriggeringPlayer branch here to the two player-referencing forms.
     let player_subject = all_consuming(alt((
         value(
-            ("that attacking player", true),
+            (
+                "that attacking player",
+                true,
+                PlayerSubjectAnaphor::AttackingPlayer,
+            ),
             tag::<_, _, OracleError<'_>>("that attacking player may"),
         ),
         // CR 603.7c: "the attacking player" on a DamageReceived trigger — the
         // controller of the creature that dealt combat damage (Contested Game
         // Ball). Longest-match before "the player".
         value(
-            ("the attacking player", true),
+            (
+                "the attacking player",
+                true,
+                PlayerSubjectAnaphor::AttackingPlayer,
+            ),
             tag("the attacking player may"),
         ),
         value(
-            ("that player", true),
+            ("that player", true, PlayerSubjectAnaphor::Player),
             tag::<_, _, OracleError<'_>>("that player may"),
         ),
         // CR 608.2c: "that opponent" is the same anaphoric back-reference as
@@ -2586,19 +2632,45 @@ pub(super) fn parse_subject_application(
         // "that player" (e.g. to `ScopedPlayer` inside a villainous choice,
         // Sycorax Commander's "That opponent discards all the cards in their
         // hand"). Longest-match: the `may` form precedes the bare one.
-        value(("that opponent", true), tag("that opponent may")),
-        value(("the player", true), tag("the player may")),
         value(
-            ("that attacking player", false),
+            ("that opponent", true, PlayerSubjectAnaphor::Player),
+            tag("that opponent may"),
+        ),
+        value(
+            ("the player", true, PlayerSubjectAnaphor::Player),
+            tag("the player may"),
+        ),
+        value(
+            (
+                "that attacking player",
+                false,
+                PlayerSubjectAnaphor::AttackingPlayer,
+            ),
             tag("that attacking player"),
         ),
-        value(("the attacking player", false), tag("the attacking player")),
-        value(("that player", false), tag("that player")),
-        value(("that opponent", false), tag("that opponent")),
-        value(("the player", false), tag("the player")),
+        value(
+            (
+                "the attacking player",
+                false,
+                PlayerSubjectAnaphor::AttackingPlayer,
+            ),
+            tag("the attacking player"),
+        ),
+        value(
+            ("that player", false, PlayerSubjectAnaphor::Player),
+            tag("that player"),
+        ),
+        value(
+            ("the player", false, PlayerSubjectAnaphor::Player),
+            tag("the player"),
+        ),
+        value(
+            ("that opponent", false, PlayerSubjectAnaphor::Player),
+            tag("that opponent"),
+        ),
     )))
     .parse(lower.as_str());
-    if let Ok((_, (subject_lower, is_optional))) = player_subject {
+    if let Ok((_, (subject_lower, is_optional, subject_anaphor))) = player_subject {
         let Ok((_, ctx_filter)) = all_consuming(parse_event_context_ref).parse(subject_lower)
         else {
             return None;
@@ -2648,6 +2720,23 @@ pub(super) fn parse_subject_application(
                 // `ParentTargetController` below. `ctx_filter` is the matching
                 // event-context ref for the parsed subject phrase.
                 ctx_filter
+            } else if let Some(filter) =
+                enchanted_player_anaphor_filter(ctx.relative_player_scope.as_ref())
+                    .filter(|_| matches!(subject_anaphor, PlayerSubjectAnaphor::Player))
+            {
+                // A bare "that player"/"the player" anaphor in an effect body whose
+                // trigger condition names "attack enchanted player" refers to the
+                // defender captured at attack declaration, resolved via
+                // `DefendingPlayer` (the shared
+                // `enchanted_player_anaphor_filter` binding). The explicit "that/the
+                // attacking player" phrases name the attacker instead, so the
+                // `PlayerSubjectAnaphor::AttackingPlayer` discriminant excludes them
+                // here and they keep their event-context `ctx_filter`
+                // (`TriggeringPlayer` for "that attacking player",
+                // `TriggeringSourceController` for "the attacking player") via the
+                // `ctx.subject.is_some()` fallback below (Archnemesis vs. the Curse
+                // cycle).
+                filter
             } else if ctx.subject.is_some() {
                 ctx_filter
             } else {
