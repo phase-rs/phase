@@ -1839,7 +1839,7 @@ mod tests {
             look_count: None,
             scry_bottom_count: None,
         };
-        let draw_entries = resolve_log_entries(&[draw_event], &state);
+        let draw_entries = resolve_log_entries(&[draw_event], &state, &state);
         assert!(
             draw_entries.is_empty(),
             "PlayerPerformedAction {{ Draw }} is a ledger-only signal and must be excluded from the log"
@@ -1854,7 +1854,7 @@ mod tests {
             look_count: Some(1),
             scry_bottom_count: Some(0),
         };
-        let scry_entries = resolve_log_entries(&[scry_event], &state);
+        let scry_entries = resolve_log_entries(&[scry_event], &state, &state);
         assert_eq!(
             scry_entries.len(),
             1,
