@@ -229,7 +229,7 @@ fn parse_self_flash_option(
         // graveyard permission parser: optional "paying " and either possessive
         // pronoun. A malformed closer must decline the whole option rather than
         // fall through to an uncosted flash grant.
-        let Some((cost_len, _)) = nom_on_lower(after, &after_lower, |input| {
+        let (cost_len, _) = nom_on_lower(after, &after_lower, |input| {
             all_consuming(map(
                 (
                     terminated(
@@ -243,9 +243,7 @@ fn parse_self_flash_option(
                 |(cost, _, _, _)| cost.len(),
             ))
             .parse(input)
-        }) else {
-            return None;
-        };
+        })?;
         // CR 601.2f: the rider names the additional cost as a GERUND ("by
         // discarding a card") — de-gerund via the shared cost authority. A
         // present-but-unmodeled cost declines the whole option, avoiding a
