@@ -1106,12 +1106,16 @@ mod tests {
         f(&ctx)
     }
 
-    /// The control half targets "artifact or creature" via a TypeFilter-level
-    /// `AnyOf` disjunction — the opponent's artifact is a legal control target
-    /// (CR 613.1b, Layer 2). The fail-open guard must recurse into `AnyOf` and
-    /// treat an inner permanent type as sufficient; without the AnyOf arm the
-    /// old `_ => false` catch-all vetoes the mixed spell. Guards round-3 review
-    /// LOW #2 (filter-shape coverage).
+    /// The control half targets "artifact or creature" via a NESTED
+    /// TypeFilter-level `AnyOf(AnyOf(artifact, creature))` disjunction — the
+    /// opponent's artifact is a legal control target (CR 613.1b, Layer 2). The
+    /// pre-commit `AnyOf` arm only matched a single level of plain
+    /// permanent-type inners, so this nested disjunction fell through to the
+    /// old `_ => false` catch-all and vetoed the mixed spell; the recursive
+    /// helper added in the fix must descend into nested `AnyOf`. A sibling
+    /// `AnyOf(Non(Land), Non(Creature))` case pins the same recursion over
+    /// negated inners, which the pre-commit arm likewise rejected. Guards
+    /// round-3 review LOW #2 (filter-shape coverage).
     #[test]
     fn can_kill_fails_open_on_anyof_gain_control_target() {
         let mut state = make_state();
@@ -1121,18 +1125,42 @@ mod tests {
         with_mixed_gain_control_spell(
             &mut state,
             TargetFilter::Typed(TypedFilter {
-                type_filters: vec![TypeFilter::AnyOf(vec![
+                type_filters: vec![TypeFilter::AnyOf(vec![TypeFilter::AnyOf(vec![
                     TypeFilter::Artifact,
                     TypeFilter::Creature,
+                ])])],
+                ..Default::default()
+            }),
+            |ctx| {
+                assert!(
+                    can_kill_any_legal_target(ctx),
+                    "nested AnyOf(AnyOf(artifact, creature)) control half must fail \
+                     open: the outer disjunction wraps a disjunction naming the \
+                     opponent's artifact (CR 613.1b, Layer 2), a useful control line \
+                     the recursive matcher must descend to find"
+                );
+            },
+        );
+
+        // Negated inners: "nonland, noncreature" is `AnyOf(Non(Land), Non(Creature))`
+        // — the opponent's artifact satisfies the Non(Land) alternative, so the
+        // recursive helper must descend through the disjunction into the negation.
+        with_mixed_gain_control_spell(
+            &mut state,
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::AnyOf(vec![
+                    TypeFilter::Non(Box::new(TypeFilter::Land)),
+                    TypeFilter::Non(Box::new(TypeFilter::Creature)),
                 ])],
                 ..Default::default()
             }),
             |ctx| {
                 assert!(
                     can_kill_any_legal_target(ctx),
-                    "AnyOf(artifact, creature) control half must fail open: the \
-                     disjunction names the opponent's artifact (CR 613.1b, Layer 2), \
-                     a useful control line invisible to a flat permanent match"
+                    "AnyOf(Non(Land), Non(Creature)) control half must fail open: \
+                     the Non(Land) alternative matches the opponent's artifact \
+                     (CR 613.1b, Layer 2), a useful control line the recursive \
+                     matcher must descend to find"
                 );
             },
         );
