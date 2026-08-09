@@ -23,8 +23,8 @@ pub fn guard_create_draft_with_settings(
     validate_required_label("display_name", display_name, MAX_DISPLAY_NAME_LEN)?;
     validate_token("set_code", set_code, MAX_DRAFT_SET_CODE_LEN)?;
     validate_optional_token("password", password.as_deref(), MAX_PASSWORD_LEN)?;
-    if pod_size == 0 || pod_size > MAX_PLAYER_COUNT {
-        return Err(format!("pod_size must be between 1 and {MAX_PLAYER_COUNT}"));
+    if !(2..=MAX_PLAYER_COUNT).contains(&pod_size) {
+        return Err(format!("pod_size must be between 2 and {MAX_PLAYER_COUNT}"));
     }
     if let Some(secs) = timer_seconds {
         if secs > MAX_TIMER_SECONDS {

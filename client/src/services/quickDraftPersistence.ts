@@ -1,7 +1,7 @@
 import { del, get, set } from "idb-keyval";
 
 import { ACTIVE_QUICK_DRAFT_KEY, DRAFT_RUN_KEY_PREFIX, QUICK_DRAFT_KEY_PREFIX } from "../constants/storage";
-import type { DraftPhase, PoolSortMode } from "../stores/draftStore";
+import type { DraftPhase, LocalDraftKind, PoolSortMode } from "../stores/draftStore";
 import { getDraftStore } from "./draftPersistence";
 
 // ── Types ──────────────────────────────────────────────────────────────
@@ -13,7 +13,9 @@ export interface ActiveQuickDraftMeta {
   setCode: string;
   setName?: string;
   difficulty: number;
-  phase: "drafting" | "deckbuilding" | "playing" | "complete";
+  /** Defaults to Quick for snapshots created before local Sealed existed. */
+  kind?: LocalDraftKind;
+  phase: "drafting" | "deckbuilding" | "launching" | "playing" | "complete";
   pickCount: number;
   updatedAt: number;
   runFormat?: DraftRunFormat;

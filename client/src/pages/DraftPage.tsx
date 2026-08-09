@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
 import { useNavigate, useSearchParams } from "react-router";
 
-import { useDraftStore } from "../stores/draftStore";
+import { useDraftStore, type LocalDraftKind } from "../stores/draftStore";
 import type { CardHoverInfo } from "../components/card/CardPreview";
 import { HoverCardPreview } from "../components/card/HoverCardPreview";
 import { BotDifficultySelector } from "../components/draft/BotDifficultySelector";
@@ -31,7 +31,7 @@ const FORMAT_OPTIONS: Array<{ value: DraftRunFormat; labelKey: string; descKey: 
 
 type DraftSetupMode = "set" | "cube";
 
-function FormatPicker({ onLaunch }: { onLaunch: () => void }) {
+function FormatPicker({ onLaunch, sealed }: { onLaunch: () => void; sealed: boolean }) {
   const { t } = useTranslation("draft");
   const runFormat = useDraftStore((s) => s.runFormat);
   const setRunFormat = useDraftStore((s) => s.setRunFormat);
@@ -44,7 +44,7 @@ function FormatPicker({ onLaunch }: { onLaunch: () => void }) {
       </div>
 
       <div className="flex w-full max-w-lg flex-col gap-3">
-        {FORMAT_OPTIONS.map((opt) => (
+        {(sealed ? FORMAT_OPTIONS.filter((opt) => opt.value === "single") : FORMAT_OPTIONS).map((opt) => (
           <button
             key={opt.value}
             type="button"
@@ -311,6 +311,8 @@ export function DraftPage() {
   const [setupMode, setSetupMode] = useState<DraftSetupMode>(() =>
     requestedSetupMode === "cube" ? "cube" : "set",
   );
+  const [localKind, setLocalKind] = useState<LocalDraftKind>("Quick");
+  const draftKind = useDraftStore((s) => s.kind);
 
   useEffect(() => {
     if (searchParams.get("resume") !== "1") return;
@@ -343,7 +345,7 @@ export function DraftPage() {
 
   const handleStartDraft = useCallback(
     async (setCode: string, setName: string) => {
-      const { difficulty, startDraft } = useDraftStore.getState();
+      const { difficulty, startDraft, startSealedDraft } = useDraftStore.getState();
 
       const resp = await fetch(__DRAFT_POOLS_URL__);
       if (!resp.ok) throw new Error(`Failed to load draft pools: ${resp.status}`);
@@ -351,9 +353,13 @@ export function DraftPage() {
       const setPool = allPools[setCode.toLowerCase()] ?? allPools[setCode.toUpperCase()];
       if (!setPool) throw new Error(`No pool data for set: ${setCode}`);
 
-      await startDraft(JSON.stringify(setPool), setCode, setName, difficulty);
+      if (localKind === "Sealed") {
+        await startSealedDraft(JSON.stringify(setPool), setCode, setName, difficulty);
+      } else {
+        await startDraft(JSON.stringify(setPool), setCode, setName, difficulty);
+      }
     },
-    [],
+    [localKind],
   );
 
   const handleLaunchMatch = useCallback(async () => {
@@ -395,7 +401,11 @@ export function DraftPage() {
         {!resumeLoading && phase === "setup" && (
           <div className="mx-auto w-full max-w-4xl">
             <h1 className="mb-8 menu-display text-3xl text-white">
-              {setupMode === "cube" ? t("page.cubeDraftTitle") : t("page.quickDraftTitle")}
+              {setupMode === "cube"
+                ? t("page.cubeDraftTitle")
+                : localKind === "Sealed"
+                  ? t("page.sealedTitle")
+                  : t("page.quickDraftTitle")}
             </h1>
             <div className="mb-5 inline-flex rounded-lg border border-white/10 bg-black/25 p-1">
               {(["set", "cube"] as const).map((mode) => (
@@ -414,7 +424,29 @@ export function DraftPage() {
               ))}
             </div>
             {setupMode === "set" ? (
-              <SetSelector onStartDraft={handleStartDraft} />
+              <div className="flex flex-col gap-6">
+                <div className="flex items-center gap-4 text-sm text-white/70">
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="radio"
+                      name="localDraftKind"
+                      checked={localKind === "Quick"}
+                      onChange={() => setLocalKind("Quick")}
+                    />
+                    {t("page.quickDraftTitle")}
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="radio"
+                      name="localDraftKind"
+                      checked={localKind === "Sealed"}
+                      onChange={() => setLocalKind("Sealed")}
+                    />
+                    {t("page.sealedTitle")}
+                  </label>
+                </div>
+                <SetSelector onStartDraft={handleStartDraft} />
+              </div>
             ) : (
               <div className="flex flex-col gap-6">
                 <BotDifficultySelector />
@@ -455,7 +487,7 @@ export function DraftPage() {
         )}
 
         {phase === "launching" && (
-          <FormatPicker onLaunch={handleLaunchMatch} />
+          <FormatPicker onLaunch={handleLaunchMatch} sealed={draftKind === "Sealed"} />
         )}
 
         {!resumeLoading && phase === "playing" && (

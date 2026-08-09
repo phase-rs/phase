@@ -141,7 +141,7 @@ pub struct DraftLobbyMetadata {
     /// `"custom-cube"`; see [`DraftLobbyMetadata::cube_name`] for the
     /// human-readable cube name.
     pub set_code: String,
-    /// Draft kind label: "Quick", "Premier", or "Traditional".
+    /// Draft kind label: "Quick", "Premier", "Traditional", or "Sealed".
     pub draft_kind: String,
     /// Human-readable cube name when the pod is a cube draft. Absent for
     /// set drafts. Backward-compatible: `#[serde(default)]` accepts

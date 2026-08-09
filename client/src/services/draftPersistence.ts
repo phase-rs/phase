@@ -12,7 +12,7 @@
 
 import { createStore, del, get, set } from "idb-keyval";
 
-import type { PoolInput } from "../adapter/draft-adapter";
+import type { DraftKind, PoolInput } from "../adapter/draft-adapter";
 import type { DraftMatchBinding, DraftMatchLaunch, DraftMatchSettlement } from "../network/draftProtocol";
 import { ACTIVE_DRAFT_POD_KEY } from "../constants/storage";
 import type { DraftIntergameCommand } from "./intergameCommandLedger";
@@ -30,7 +30,7 @@ export type { PoolInput } from "../adapter/draft-adapter";
 export interface PersistedDraftHostSession {
   persistenceId: string;
   roomCode: string;
-  kind: "Premier" | "Traditional";
+  kind: Exclude<DraftKind, "Quick">;
   podSize: number;
   hostDisplayName: string;
   tournamentFormat: "Swiss" | "SingleElimination";
@@ -104,7 +104,7 @@ export type ActiveDraftPodPhase =
 export interface ActiveDraftPodMeta {
   id: string;
   roomCode: string;
-  kind: "Premier" | "Traditional";
+  kind: Exclude<DraftKind, "Quick">;
   podSize: number;
   hostDisplayName: string;
   tournamentFormat: "Swiss" | "SingleElimination";

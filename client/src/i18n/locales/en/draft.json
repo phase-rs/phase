@@ -239,6 +239,7 @@
   "page": {
     "cubeDraftTitle": "Cube Draft",
     "quickDraftTitle": "Quick Draft",
+    "sealedTitle": "Sealed",
     "setDraftTab": "Set Draft",
     "cubeTab": "Cube"
   },
@@ -264,6 +265,8 @@
     "kindPremierDesc": "Best-of-one tournament matches after deckbuilding. Faster rounds, no sideboarding between games.",
     "kindTraditional": "Traditional",
     "kindTraditionalDesc": "Best-of-three tournament matches after deckbuilding, with sideboarding between games.",
+    "kindSealed": "Sealed",
+    "kindSealedDesc": "Open six packs directly into each player's pool, then build a best-of-one tournament deck.",
     "tournamentFormat": "Tournament Format",
     "tournamentSwiss": "Swiss",
     "tournamentSwissDesc": "Everyone keeps playing through three rounds, even after a loss.",

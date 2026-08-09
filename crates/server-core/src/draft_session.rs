@@ -91,6 +91,27 @@ impl DraftSession {
         }
     }
 
+    /// Validate a disk snapshot before it becomes a live server session.
+    fn try_from_persisted(ps: PersistedDraftSession) -> Result<Self, String> {
+        let core = &ps.session;
+        let seat_count = core.seats.len();
+        if ps.draft_code != core.draft_code {
+            return Err("persisted draft code does not match core session".to_string());
+        }
+        if ps.config != core.config {
+            return Err("persisted draft configuration does not match core session".to_string());
+        }
+        if ps.config.pod_size as usize != seat_count
+            || ps.player_tokens.len() != seat_count
+            || ps.display_names.len() != seat_count
+        {
+            return Err("persisted draft seat vectors do not match core seats".to_string());
+        }
+        core.validate_sealed_snapshot()
+            .map_err(|error| format!("invalid persisted sealed snapshot: {error}"))?;
+        Ok(Self::from_persisted(ps))
+    }
+
     /// Inject server-side timer into the filtered view before serializing.
     pub fn view_for_seat(&self, seat: usize) -> DraftPlayerView {
         let mut view = draft_core::view::filter_for_player(&self.session, seat as u8);
@@ -423,6 +444,21 @@ impl DraftSessionManager {
             }
         }
         self.sessions.insert(draft_code, session);
+    }
+
+    /// Restore an untrusted persisted snapshot only after its wrapper and core
+    /// session agree. The manager remains unchanged when validation fails.
+    pub fn restore_persisted_session(&mut self, ps: PersistedDraftSession) -> Result<(), String> {
+        let session = DraftSession::try_from_persisted(ps)?;
+        let draft_code = session.draft_code.clone();
+        for token in &session.player_tokens {
+            if !token.is_empty() {
+                self.token_to_draft
+                    .insert(token.clone(), draft_code.clone());
+            }
+        }
+        self.sessions.insert(draft_code, session);
+        Ok(())
     }
 
     /// Auto-pick a random card for a disconnected seat whose grace period expired.
@@ -1188,6 +1224,18 @@ mod tests {
 
         // Original host token should still work
         assert_eq!(mgr2.draft_for_token(&token), Some(code.as_str()));
+    }
+
+    #[test]
+    fn restore_persisted_session_rejects_mismatched_wrapper_without_mutation() {
+        let mut mgr = DraftSessionManager::new();
+        let (code, _token, _) = mgr.create_draft(test_config(), "Alice".to_string());
+        let mut persisted = mgr.sessions[&code].to_persisted();
+        persisted.display_names.pop();
+
+        let mut restored = DraftSessionManager::new();
+        assert!(restored.restore_persisted_session(persisted).is_err());
+        assert!(restored.sessions.is_empty());
     }
 
     fn fill_and_start(mgr: &mut DraftSessionManager, code: &str) {

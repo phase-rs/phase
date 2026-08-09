@@ -38,8 +38,9 @@ import type {
  *   5 — bind match settlement to a durable pod-issued capability
  *   6 — durable authorized Bo3 intergame command ledger
  *   7 — forward authenticated match-host between-games observations
+ *   8 — add Sealed event kind and deckbuilding-first start flow
  */
-export const DRAFT_PROTOCOL_VERSION = 7 as const;
+export const DRAFT_PROTOCOL_VERSION = 8 as const;
 
 /**
  * Typed reason for a draft pause, used over the wire and on the i18n key path.

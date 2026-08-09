@@ -210,6 +210,57 @@ pub fn start_quick_draft(
     Ok(to_js(&view))
 }
 
+/// Start a local Sealed event: one human and seven bots each open six packs,
+/// then the human proceeds directly to deckbuilding.
+#[wasm_bindgen]
+pub fn start_sealed_draft(
+    set_pool_json: &str,
+    difficulty: u8,
+    seed: u32,
+) -> Result<JsValue, JsValue> {
+    let set_pool: LimitedSetPool = serde_json::from_str(set_pool_json)
+        .map_err(|e| JsValue::from_str(&format!("Failed to parse set pool: {e}")))?;
+    let set_code = set_pool.code.clone();
+    let config = DraftConfig {
+        source: DraftSource::Set {
+            code: set_code.clone(),
+        },
+        set_code,
+        kind: DraftKind::Sealed,
+        pod_size: 8,
+        cards_per_pack: 14,
+        pack_count: 6,
+        min_deck_size: 40,
+        addable_cards: DeckAddableCards::standard_basics(),
+        rng_seed: seed as u64,
+        tournament_format: TournamentFormat::Swiss,
+        pod_policy: PodPolicy::Competitive,
+        spectator_visibility: SpectatorVisibility::default(),
+    };
+    let mut seats = vec![DraftSeat::Human {
+        player_id: engine::types::player::PlayerId(0),
+        display_name: "Player".to_string(),
+    }];
+    for i in 1..8u8 {
+        seats.push(DraftSeat::Bot {
+            name: format!("Bot {i}"),
+        });
+    }
+
+    let mut draft_session = DraftSession::new(config, seats, "sealed-draft".to_string());
+    let pack_gen = PackGenerator::new(set_pool);
+    session::apply(&mut draft_session, DraftAction::StartDraft, Some(&pack_gen))
+        .map_err(|e| JsValue::from_str(&format!("Failed to start sealed event: {e}")))?;
+    let view = filter_for_player(&draft_session, 0);
+
+    DRAFT_SESSION.with(|cell| cell.set(Some(draft_session)));
+    PACK_GEN.with(|cell| cell.set(Some(pack_gen)));
+    DIFFICULTY.with(|cell| cell.set(map_difficulty(difficulty)));
+    RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(seed as u64))));
+
+    Ok(to_js(&view))
+}
+
 /// Start a Quick Cube Draft session from a counted cube list.
 #[wasm_bindgen]
 pub fn start_quick_cube_draft(
@@ -505,79 +556,9 @@ pub fn suggest_lands(spells_json: &str) -> Result<JsValue, JsValue> {
 //
 // These exports support the P2P draft host running an authoritative
 // DraftSession for 8 human players. Unlike Quick Draft (single human +
-// bots), the host calls `start_multiplayer_draft` with human seat names,
+// bots), the host calls `create_multiplayer_draft` with seat descriptors,
 // then proxies picks/decks per-seat as guests submit them over the
 // DataChannel.
-
-/// Start a multiplayer draft session (Premier or Traditional).
-///
-/// - `set_pool_json`: serialized LimitedSetPool
-/// - `kind`: "Premier" or "Traditional"
-/// - `seat_names_json`: JSON array of display names, one per seat (length = pod size)
-/// - `seed`: RNG seed for deterministic pack generation
-///
-/// Returns the DraftPlayerView for seat 0 (the host).
-#[wasm_bindgen]
-pub fn start_multiplayer_draft(
-    set_pool_json: &str,
-    kind: &str,
-    seat_names_json: &str,
-    seed: u32,
-) -> Result<JsValue, JsValue> {
-    let set_pool: LimitedSetPool = serde_json::from_str(set_pool_json)
-        .map_err(|e| JsValue::from_str(&format!("Failed to parse set pool: {e}")))?;
-
-    let seat_names: Vec<String> = serde_json::from_str(seat_names_json)
-        .map_err(|e| JsValue::from_str(&format!("Failed to parse seat names: {e}")))?;
-
-    let draft_kind = match kind {
-        "Premier" => DraftKind::Premier,
-        "Traditional" => DraftKind::Traditional,
-        other => return Err(JsValue::from_str(&format!("Unknown draft kind: {other}"))),
-    };
-
-    let set_code = set_pool.code.clone();
-    let config = DraftConfig {
-        source: DraftSource::Set {
-            code: set_code.clone(),
-        },
-        set_code,
-        kind: draft_kind,
-        pod_size: seat_names.len() as u8,
-        cards_per_pack: 14,
-        pack_count: 3,
-        min_deck_size: 40,
-        addable_cards: DeckAddableCards::standard_basics(),
-        rng_seed: seed as u64,
-        tournament_format: TournamentFormat::default(),
-        pod_policy: PodPolicy::default(),
-        spectator_visibility: SpectatorVisibility::default(),
-    };
-
-    let seats: Vec<DraftSeat> = seat_names
-        .iter()
-        .enumerate()
-        .map(|(i, name)| DraftSeat::Human {
-            player_id: engine::types::player::PlayerId(i as u8),
-            display_name: name.clone(),
-        })
-        .collect();
-
-    let draft_code = format!("draft-{seed:08x}");
-    let mut draft_session = DraftSession::new(config, seats, draft_code);
-    let pack_gen = PackGenerator::new(set_pool);
-
-    session::apply(&mut draft_session, DraftAction::StartDraft, Some(&pack_gen))
-        .map_err(|e| JsValue::from_str(&format!("Failed to start draft: {e}")))?;
-
-    let view = filter_for_player(&draft_session, 0);
-
-    DRAFT_SESSION.with(|cell| cell.set(Some(draft_session)));
-    PACK_GEN.with(|cell| cell.set(Some(pack_gen)));
-    RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(seed as u64))));
-
-    Ok(to_js(&view))
-}
 
 /// Submit a pick for any seat (host proxies guest picks).
 ///
@@ -666,6 +647,9 @@ pub fn export_draft_session() -> Result<String, JsValue> {
 pub fn import_draft_session(json: &str, difficulty: u8) -> Result<JsValue, JsValue> {
     let session: DraftSession = serde_json::from_str(json)
         .map_err(|e| JsValue::from_str(&format!("Failed to deserialize draft session: {e}")))?;
+    session
+        .validate_sealed_snapshot()
+        .map_err(|e| JsValue::from_str(&format!("Invalid draft snapshot: {e}")))?;
 
     let offset = session.current_pack_number as u64 * session.config.cards_per_pack as u64
         + session.pick_number as u64;
@@ -759,15 +743,15 @@ enum PoolInput {
 }
 
 /// Create a multiplayer draft session. Used by the P2P host to initialize a
-/// Premier or Traditional draft with human + bot seats from either a Set pool
+/// Premier, Traditional, or Sealed draft with human + bot seats from either a Set pool
 /// or a custom Cube list.
 ///
 /// - `pool_input_json`: serialized `PoolInput` discriminated union
 ///   (`{ "type": "Set" | "Cube", "data": { ... } }`)
 /// - `seats_json`: JSON array of SeatDescriptors
-/// - `kind`: 0=Quick, 1=Premier, 2=Traditional. The user-selected DraftKind
+/// - `kind`: 0=Quick, 1=Premier, 2=Traditional, 3=Sealed.
 ///   flows through to `DraftConfig.kind` unchanged. Tournament match format
-///   (Bo1 for Premier, Bo3 for Traditional) is identical to set drafts.
+///   (Bo1 for Premier and Sealed, Bo3 for Traditional) is identical to set drafts.
 /// - `seed`: RNG seed for deterministic pack generation
 /// - `draft_code`: unique room identifier
 ///
@@ -820,8 +804,11 @@ fn create_multiplayer_draft_inner(
         0 => DraftKind::Quick,
         1 => DraftKind::Premier,
         2 => DraftKind::Traditional,
+        3 => DraftKind::Sealed,
         _ => {
-            return Err("kind must be 0 (Quick), 1 (Premier), or 2 (Traditional)".to_string());
+            return Err(
+                "kind must be 0 (Quick), 1 (Premier), 2 (Traditional), or 3 (Sealed)".to_string(),
+            );
         }
     };
 
@@ -869,7 +856,11 @@ fn create_multiplayer_draft_inner(
                 kind: draft_kind,
                 pod_size: seats.len() as u8,
                 cards_per_pack: 14,
-                pack_count: 3,
+                pack_count: if draft_kind == DraftKind::Sealed {
+                    6
+                } else {
+                    3
+                },
                 min_deck_size: 40,
                 addable_cards: DeckAddableCards::standard_basics(),
                 rng_seed: seed as u64,
@@ -897,6 +888,9 @@ fn create_multiplayer_draft_inner(
             cube_name,
             cube_draft_settings: settings,
         } => {
+            if draft_kind == DraftKind::Sealed {
+                return Err("Sealed events require a Set pool".to_string());
+            }
             let entries = parse_cube_list(&cube_list_text).map_err(|errors| {
                 format!(
                     "Failed to parse cube list: {}",

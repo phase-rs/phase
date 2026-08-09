@@ -248,7 +248,7 @@ export class P2PDraftHost {
       handler: (conn: DataConnection) => void,
     ) => () => void,
     private readonly poolInput: PoolInput,
-    private readonly kind: "Premier" | "Traditional",
+    private readonly kind: "Premier" | "Traditional" | "Sealed",
     private readonly podSize: number,
     private readonly hostDisplayName: string,
     private readonly tournamentFormat: TournamentFormat,
@@ -560,7 +560,10 @@ export class P2PDraftHost {
     this.draftCode = draftCode;
     this.activePodSize = seats.length;
     this.picksThisRound.clear();
-    await this.resolveBotPicks({ emit: false, persist: false });
+    const startView = await this.adapter.getViewForSeat(0);
+    if (startView.status === "Drafting") {
+      await this.resolveBotPicks({ emit: false, persist: false });
+    }
 
     // Send each guest their filtered view
     for (const [seat, session] of this.guestSessions) {
@@ -575,7 +578,9 @@ export class P2PDraftHost {
     this.persistSession();
     const freshHostView = await this.adapter.getViewForSeat(0);
     this.emit({ type: "draftStarted", view: freshHostView });
-    this.startPickTimer(0);
+    if (freshHostView.status === "Drafting") {
+      this.startPickTimer(0);
+    }
   }
 
   /**

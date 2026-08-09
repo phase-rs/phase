@@ -16,7 +16,7 @@
 
 import { create } from "zustand";
 
-import type { CubeDraftSettings, TournamentFormat, PodPolicy } from "../adapter/draft-adapter";
+import type { CubeDraftSettings, TournamentFormat, PodPolicy, DraftKind as CoreDraftKind } from "../adapter/draft-adapter";
 import type { DraftPodHostConfig } from "../adapter/draftPodHostAdapter";
 import type { DraftPodGuestConfig } from "../adapter/draftPodGuestAdapter";
 import {
@@ -28,7 +28,7 @@ import { useMultiplayerDraftStore } from "./multiplayerDraftStore";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
-export type DraftKind = "Premier" | "Traditional";
+export type DraftKind = Exclude<CoreDraftKind, "Quick">;
 
 export type PoolMode = "set" | "cube";
 
@@ -137,6 +137,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
     setConfig: (partial) => {
       set((prev) => ({
         config: normalizePodConfig({ ...prev.config, ...partial }),
+        poolMode: partial.kind === "Sealed" ? "set" : prev.poolMode,
         configError: null,
       }));
     },

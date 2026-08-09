@@ -11,7 +11,7 @@
  */
 
 import { DraftAdapter } from "./draft-adapter";
-import type { DraftPlayerView, PairingView, PodPolicy, PoolInput, SeatPublicView, TournamentFormat } from "./draft-adapter";
+import type { DraftKind, DraftPlayerView, PairingView, PodPolicy, PoolInput, SeatPublicView, TournamentFormat } from "./draft-adapter";
 import type { MatchScore } from "./types";
 import { P2PDraftHost, type DraftHostEvent } from "./p2p-draft-host";
 import { hostRoom, type HostResult } from "../network/connection";
@@ -105,7 +105,7 @@ function hostStatusForView(view: DraftPlayerView): DraftPodHostStatus {
 
 export interface DraftPodHostConfig {
   poolInput: PoolInput;
-  kind: "Premier" | "Traditional";
+  kind: Exclude<DraftKind, "Quick">;
   podSize: number;
   hostDisplayName: string;
   /** Swiss (3 rounds) or Single Elimination bracket. */

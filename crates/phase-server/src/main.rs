@@ -1270,7 +1270,11 @@ async fn serve() {
                             let register_req =
                                 server_core::persist::restored_draft_lobby_register_request(&ps);
                             let timer_ms = ps.timer_remaining_ms;
-                            dsm.restore_session(ps);
+                            if let Err(error) = dsm.restore_persisted_session(ps) {
+                                warn!(draft = %draft_code, error = %error, "invalid persisted draft session, deleting");
+                                let _ = game_db.delete_draft_session(draft_code);
+                                continue;
+                            }
                             if let Some(req) = register_req {
                                 lob.register_game(draft_code, req, &SysEnv);
                             }
@@ -6864,6 +6868,18 @@ async fn handle_client_message(
                 return;
             }
 
+            if tournament_format == draft_core::types::TournamentFormat::SingleElimination
+                && pod_size != 8
+            {
+                let msg = ServerMessage::DraftActionRejected {
+                    reason: "Single-elimination draft events require exactly 8 seats".to_string(),
+                };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
+
             let config = draft_core::types::DraftConfig {
                 source: draft_core::types::DraftSource::Set {
                     code: set_code.clone(),
@@ -6872,7 +6888,11 @@ async fn handle_client_message(
                 kind,
                 pod_size,
                 cards_per_pack: 14,
-                pack_count: 3,
+                pack_count: if kind == draft_core::types::DraftKind::Sealed {
+                    6
+                } else {
+                    3
+                },
                 min_deck_size: 40,
                 addable_cards: draft_core::types::DeckAddableCards::standard_basics(),
                 rng_seed: rand::random(),

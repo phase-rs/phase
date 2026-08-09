@@ -60,6 +60,8 @@ pub enum DraftKind {
     Premier,
     /// Traditional Draft: 8 humans, Bo3 matches.
     Traditional,
+    /// Sealed: each player receives six unopened packs directly, Bo1 matches.
+    Sealed,
 }
 
 impl DraftKind {
@@ -72,14 +74,14 @@ impl DraftKind {
     pub fn human_seats(self) -> u8 {
         match self {
             DraftKind::Quick => 1,
-            DraftKind::Premier | DraftKind::Traditional => 8,
+            DraftKind::Premier | DraftKind::Traditional | DraftKind::Sealed => 8,
         }
     }
 
     /// Match configuration for this draft kind.
     pub fn match_config(self) -> MatchConfig {
         match self {
-            DraftKind::Quick | DraftKind::Premier => MatchConfig {
+            DraftKind::Quick | DraftKind::Premier | DraftKind::Sealed => MatchConfig {
                 match_type: MatchType::Bo1,
                 ..MatchConfig::default()
             },
@@ -440,6 +442,12 @@ pub enum DraftError {
     SeatAlreadyPickedThisRound { seat: u8 },
     #[error("seat {seat} is a bot — operation not applicable")]
     SeatIsBot { seat: u8 },
+    #[error("sealed events require a set source")]
+    SealedRequiresSetSource,
+    #[error("invalid sealed configuration: {reason}")]
+    InvalidSealedConfiguration { reason: String },
+    #[error("invalid sealed snapshot: {reason}")]
+    InvalidSealedSnapshot { reason: String },
 }
 
 /// Configuration for a draft session.
@@ -580,6 +588,7 @@ mod tests {
         assert_eq!(DraftKind::Quick.default_pod_size(), 8);
         assert_eq!(DraftKind::Premier.default_pod_size(), 8);
         assert_eq!(DraftKind::Traditional.default_pod_size(), 8);
+        assert_eq!(DraftKind::Sealed.default_pod_size(), 8);
     }
 
     #[test]
@@ -587,6 +596,7 @@ mod tests {
         assert_eq!(DraftKind::Quick.human_seats(), 1);
         assert_eq!(DraftKind::Premier.human_seats(), 8);
         assert_eq!(DraftKind::Traditional.human_seats(), 8);
+        assert_eq!(DraftKind::Sealed.human_seats(), 8);
     }
 
     #[test]
@@ -597,6 +607,7 @@ mod tests {
             DraftKind::Traditional.match_config().match_type,
             MatchType::Bo3
         );
+        assert_eq!(DraftKind::Sealed.match_config().match_type, MatchType::Bo1);
     }
 
     #[test]
@@ -623,7 +634,12 @@ mod tests {
 
     #[test]
     fn serde_roundtrip_draft_kind() {
-        for kind in [DraftKind::Quick, DraftKind::Premier, DraftKind::Traditional] {
+        for kind in [
+            DraftKind::Quick,
+            DraftKind::Premier,
+            DraftKind::Traditional,
+            DraftKind::Sealed,
+        ] {
             let json = serde_json::to_string(&kind).unwrap();
             let back: DraftKind = serde_json::from_str(&json).unwrap();
             assert_eq!(kind, back);

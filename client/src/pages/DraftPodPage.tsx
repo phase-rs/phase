@@ -61,9 +61,11 @@ function PodSetup() {
   const poolMode = useDraftPodStore((s) => s.poolMode);
   const setPoolMode = useDraftPodStore((s) => s.setPoolMode);
   const setCubeForm = useDraftPodStore((s) => s.setCubeForm);
-  const kindDescription = config.kind === "Premier"
-    ? t("podSetup.kindPremierDesc")
-    : t("podSetup.kindTraditionalDesc");
+  const kindDescription = {
+    Premier: t("podSetup.kindPremierDesc"),
+    Traditional: t("podSetup.kindTraditionalDesc"),
+    Sealed: t("podSetup.kindSealedDesc"),
+  }[config.kind];
   const tournamentDescription = config.tournamentFormat === "Swiss"
     ? t("podSetup.tournamentSwissDesc")
     : t("podSetup.tournamentEliminationDesc");
@@ -185,6 +187,16 @@ function PodSetup() {
               />
               {t("podSetup.kindTraditional")}
             </label>
+            <label className="flex items-center gap-2 text-sm text-white/70">
+              <input
+                type="radio"
+                name="draftKind"
+                checked={config.kind === "Sealed"}
+                onChange={() => setConfig({ kind: "Sealed" })}
+                className="accent-emerald-400"
+              />
+              {t("podSetup.kindSealed")}
+            </label>
           </div>
           <p className="text-xs text-white/40">{kindDescription}</p>
         </div>
@@ -283,6 +295,7 @@ function PodSetup() {
           <button
             type="button"
             onClick={() => setPoolMode("cube")}
+            disabled={config.kind === "Sealed"}
             className={
               poolMode === "cube"
                 ? "border-b-2 border-emerald-400 px-4 py-2 text-sm font-medium text-white"
@@ -293,7 +306,7 @@ function PodSetup() {
           </button>
         </div>
 
-        {poolMode === "set" ? (
+        {poolMode === "set" || config.kind === "Sealed" ? (
           <>
             {/* Set selector — reuse the Quick Draft component */}
             <div className="rounded-[16px] border border-white/8 bg-white/3 px-4 py-3 text-sm text-white/45">

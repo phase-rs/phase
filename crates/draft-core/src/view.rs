@@ -49,7 +49,7 @@ pub struct SeatPublicView {
 pub struct DraftPlayerView {
     /// Current draft status
     pub status: DraftStatus,
-    /// Draft kind (Quick/Premier/Traditional)
+    /// Draft kind (Quick/Premier/Traditional/Sealed)
     pub kind: DraftKind,
     /// Which pack round (0, 1, 2)
     pub current_pack_number: u8,
