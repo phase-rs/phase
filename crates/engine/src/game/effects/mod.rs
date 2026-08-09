@@ -4297,6 +4297,9 @@ pub fn resolve_effect(
         }
         Effect::ChooseCard { .. } => choose_card::resolve(state, ability, events),
         Effect::PutCounter { .. } => counters::resolve_add(state, ability, events),
+        Effect::ReproduceEventCounters { .. } => {
+            counters::resolve_reproduce_event_counters(state, ability, events)
+        }
         Effect::PutCounterAll { .. } => counters::resolve_add_all(state, ability, events),
         Effect::MultiplyCounter { .. } => counters::resolve_multiply(state, ability, events),
         Effect::DoublePT { .. } => pump::resolve_double_pt(state, ability, events),
@@ -5201,6 +5204,7 @@ fn affected_objects_from_events(
         Effect::PutCounter { .. }
         | Effect::PutCounterAll { .. }
         | Effect::MultiplyCounter { .. }
+        | Effect::ReproduceEventCounters { .. }
         | Effect::MoveCounters { .. } => events
             .iter()
             .filter_map(|event| match event {
@@ -5378,6 +5382,7 @@ fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> b
         Effect::PutCounter { .. }
         | Effect::PutCounterAll { .. }
         | Effect::MultiplyCounter { .. }
+        | Effect::ReproduceEventCounters { .. }
         | Effect::MoveCounters { .. } => events
             .iter()
             .any(|event| matches!(event, GameEvent::CounterAdded { .. })),
@@ -9407,6 +9412,7 @@ fn resolve_chain_body(
                 state.push_optional_effect_frame(OptionalEffectFrame {
                     ability: Box::new(ability_with_event_context_targets(state, ability)),
                     trigger_event: state.current_trigger_event.clone(),
+                    trigger_events: state.current_trigger_events.clone(),
                     trigger_match_count: state.current_trigger_match_count,
                 });
                 state.waiting_for = WaitingFor::OpponentMayChoice {
@@ -9487,6 +9493,10 @@ fn resolve_chain_body(
             // optional ("may") trigger's effect resolves `TriggeringPlayer` and
             // other event-context refs exactly as a non-optional trigger would.
             trigger_event: state.current_trigger_event.clone(),
+            // CR 603.2c + CR 608.2: capture the PLURAL event batch in lockstep so
+            // a "you may" reproduction (Captain Marvel, Apex Avenger) folds every
+            // `CounterAdded` occurrence when the decision resumes.
+            trigger_events: state.current_trigger_events.clone(),
             // CR 603.2c + CR 608.2: mirror the batched-trigger subject count so a
             // "you may" sub-ability of a batched trigger (Ur-Dragon's optional
             // permanent-from-hand sub-effect) resumes with the same

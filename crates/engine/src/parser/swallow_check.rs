@@ -356,10 +356,10 @@ fn detect_replacement(
     // FALSE POSITIVES pool-wide: chocobo camp, kumano faces kakkazan, osteomancer adept,
     // summon: fenrir, yuna.
     //
-    // It must be probed via the tree-global typed evidence, NOT via the structural
-    // `effect_is_replacement_carrier` walk: that walk descends `sub_ability` / `else_ability`
-    // / `mode_abilities` only, so it cannot see a carrier nested inside an EFFECT — and
-    // Yuna's carrier lives inside `Effect::CreateDelayedTrigger`'s inner definition.
+    // It must be probed via tree-global typed evidence, not the structural
+    // `effect_is_replacement_carrier` matcher: that deliberately finite matcher does
+    // not enumerate these CR 614.1c carrier variants. Typed evidence reaches all
+    // fields, including Yuna's `Effect::CreateDelayedTrigger` inner definition.
     if evidence.any_static_mode(|m| {
         matches!(
             m,
@@ -893,6 +893,11 @@ fn def_tree_has_target_replacement(def: &AbilityDefinition) -> bool {
         } if flip_branch_has_target_replacement(win_effect, lose_effect) => return true,
         _ => {}
     }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_target_replacement(effect) {
+            return true;
+        }
+    }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_target_replacement(sub) {
             return true;
@@ -1030,6 +1035,11 @@ fn def_tree_has_unimplemented(def: &AbilityDefinition) -> bool {
     if matches!(*def.effect, Effect::Unimplemented { .. }) {
         return true;
     }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_unimplemented(effect) {
+            return true;
+        }
+    }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_unimplemented(sub) {
             return true;
@@ -1120,6 +1130,11 @@ fn def_tree_has_exile_parent_rider(def: &AbilityDefinition) -> bool {
     {
         return true;
     }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_exile_parent_rider(effect) {
+            return true;
+        }
+    }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_exile_parent_rider(sub) {
             return true;
@@ -1163,6 +1178,11 @@ fn def_tree_has_cast_graveyard_redirect_rider(def: &AbilityDefinition) -> bool {
             .is_some_and(def_is_graveyard_redirect_to_parent))
     {
         return true;
+    }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_cast_graveyard_redirect_rider(effect) {
+            return true;
+        }
     }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_cast_graveyard_redirect_rider(sub) {
@@ -1223,6 +1243,11 @@ fn def_tree_has_parent_target_cant_gain_life(def: &AbilityDefinition) -> bool {
             return true;
         }
     }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_parent_target_cant_gain_life(effect) {
+            return true;
+        }
+    }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_parent_target_cant_gain_life(sub) {
             return true;
@@ -1274,6 +1299,11 @@ fn def_tree_has_parent_target_discard(def: &AbilityDefinition) -> bool {
         }
     ) {
         return true;
+    }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_parent_target_discard(effect) {
+            return true;
+        }
     }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_parent_target_discard(sub) {
@@ -1335,6 +1365,11 @@ fn def_tree_has_graveyard_cast_from_zone(def: &AbilityDefinition) -> bool {
             return true;
         }
     }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_graveyard_cast_from_zone(effect) {
+            return true;
+        }
+    }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_graveyard_cast_from_zone(sub) {
             return true;
@@ -1383,6 +1418,11 @@ fn def_tree_has_instead_condition(def: &AbilityDefinition) -> bool {
         .is_some_and(condition_has_instead_semantics)
     {
         return true;
+    }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_instead_condition(effect) {
+            return true;
+        }
     }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_instead_condition(sub) {
@@ -1479,6 +1519,11 @@ fn def_tree_has_replacement_carrier(def: &AbilityDefinition) -> bool {
     if effect_is_replacement_carrier(&def.effect) || def_is_represented_instead_branch(def) {
         return true;
     }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_replacement_carrier(effect) {
+            return true;
+        }
+    }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_replacement_carrier(sub) {
             return true;
@@ -1567,6 +1612,11 @@ fn def_tree_has_conditional_mana_spell_grant(def: &AbilityDefinition) -> bool {
             return true;
         }
     }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_conditional_mana_spell_grant(effect) {
+            return true;
+        }
+    }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_conditional_mana_spell_grant(sub) {
             return true;
@@ -1603,6 +1653,11 @@ fn def_tree_has_cast_from_zone_alt_ability_cost(def: &AbilityDefinition) -> bool
         }
     ) {
         return true;
+    }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_cast_from_zone_alt_ability_cost(effect) {
+            return true;
+        }
     }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_cast_from_zone_alt_ability_cost(sub) {
@@ -1789,11 +1844,17 @@ fn parsed_has_conditional_modal_max(parsed: &ParsedAbilities) -> bool {
 }
 
 fn def_tree_has_conditional_modal_max(def: &AbilityDefinition) -> bool {
-    def.modal.as_ref().is_some_and(modal_has_conditional_max)
-        || def
-            .sub_ability
-            .as_ref()
-            .is_some_and(|sub| def_tree_has_conditional_modal_max(sub))
+    if def.modal.as_ref().is_some_and(modal_has_conditional_max) {
+        return true;
+    }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_conditional_modal_max(effect) {
+            return true;
+        }
+    }
+    def.sub_ability
+        .as_ref()
+        .is_some_and(|sub| def_tree_has_conditional_modal_max(sub))
         || def
             .else_ability
             .as_ref()
@@ -1862,6 +1923,11 @@ fn unit_has_end_of_turn_mana_expiry(parsed: &ParsedAbilities) -> bool {
         } = &*def.effect
         {
             if mana_expiry_is_end_of_turn(expiry) {
+                return true;
+            }
+        }
+        if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+            if def_has(effect) {
                 return true;
             }
         }
@@ -1955,6 +2021,11 @@ fn def_tree_has_activation_limit(def: &AbilityDefinition) -> bool {
     {
         return true;
     }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_activation_limit(effect) {
+            return true;
+        }
+    }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_activation_limit(sub) {
             return true;
@@ -1996,6 +2067,11 @@ fn def_tree_has_apnap_ordering(def: &AbilityDefinition) -> bool {
     // variant's presence IS the ordering fact.
     if matches!(&*def.effect, Effect::Vote { .. }) {
         return true;
+    }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_apnap_ordering(effect) {
+            return true;
+        }
     }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_apnap_ordering(sub) {
@@ -2685,6 +2761,11 @@ fn def_tree_has_plotted_grant(def: &AbilityDefinition) -> bool {
     {
         return true;
     }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_plotted_grant(effect) {
+            return true;
+        }
+    }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_plotted_grant(sub) {
             return true;
@@ -2721,6 +2802,11 @@ fn plotted_grant_linkage_is_only_if_marker(stripped: &str) -> bool {
 fn def_tree_has_dig(def: &AbilityDefinition) -> bool {
     if matches!(&*def.effect, Effect::Dig { .. }) {
         return true;
+    }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_dig(effect) {
+            return true;
+        }
     }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_dig(sub) {
@@ -2791,6 +2877,11 @@ fn def_tree_has_exile_resolving_rider(def: &AbilityDefinition) -> bool {
         Effect::ExileResolvingSpellInsteadOfGraveyard { on_exile: Some(_) }
     ) {
         return true;
+    }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_exile_resolving_rider(effect) {
+            return true;
+        }
     }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_exile_resolving_rider(sub) {
@@ -5891,6 +5982,18 @@ mod tests {
              If this spell was kicked, prevent the next 6 damage this way instead.",
             "Pollen Remedy",
             &["Instant"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Replacement_Instead"));
+    }
+
+    #[test]
+    fn replacement_instead_accepts_power_pack_delayed_payload_rider() {
+        let parsed = parse_named(
+            "Flying, vigilance, trample, haste\n\
+             Whenever Power Pack deals combat damage to a player, exile target instant or sorcery card from your graveyard chosen at random. At the beginning of your next upkeep, you may cast that card without paying its mana cost. If that spell would be put into your graveyard, exile it instead.",
+            "Power Pack",
+            &["Creature"],
         );
 
         assert!(!has_swallowed_detector(&parsed, "Replacement_Instead"));

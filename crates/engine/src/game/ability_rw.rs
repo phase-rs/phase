@@ -1955,6 +1955,7 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::SourceIsTapped
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
+        | StaticCondition::AnyPlayerAttackedYouLastTurn
         | StaticCondition::SourceMatchesFilter { .. }
         | StaticCondition::TopOfLibraryMatches { .. }
         | StaticCondition::UnlessPay { .. }
@@ -2872,6 +2873,9 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::GrantCastingPermission { target, .. }
         | Effect::AddTargetReplacement { target, .. }
         | Effect::DiscardCard { target, .. }
+        // CR 122.1 + CR 603.2c: only the reproduction target carries a legacy tag;
+        // the per-kind magnitude is a plain enum with no batch-prompt semantics.
+        | Effect::ReproduceEventCounters { target, .. }
         | Effect::Animate { target, .. } => legacy_target_filter(target),
 
         Effect::PutOnTopOrBottom { target, chooser } => {
@@ -4396,6 +4400,18 @@ fn rw_effect(
             if let Some(c) = count {
                 p.merge(rw_quantity_expr(c));
             }
+            (p, sc)
+        }
+        // CR 122.1 + CR 603.2c + CR 608.2h: writes ObjectCounters on the target;
+        // the reproduced kind+count multiset is read from the triggering event
+        // batch (`state.current_trigger_events`) — a live event-context read, not
+        // a read of any object's counter map.
+        Effect::ReproduceEventCounters {
+            target,
+            per_kind_count: _,
+        } => {
+            let (mut p, sc) = obj(StateKind::ObjectCounters, target);
+            p.merge(reads_event_live());
             (p, sc)
         }
         Effect::Bolster { count } => {
@@ -6291,6 +6307,14 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         }
         StaticCondition::SpellCastWithVariantThisTurn { .. } => {
             reads_player_of(StateKind::JournalCast)
+        }
+        // CR 508.6 + CR 514.2: reads the cleanup-time attack-history snapshot
+        // (`attacked_defenders_last_turn`), which changes only at turn boundaries.
+        // `TurnStructure` is the sequencing kind written by cleanup/turn advance;
+        // conservatively depending on it invalidates the cached gate whenever the
+        // turn sequence changes.
+        StaticCondition::AnyPlayerAttackedYouLastTurn => {
+            reads_player_of(StateKind::TurnStructure)
         }
         StaticCondition::SourceMatchesFilter { filter: _ } => reads_src_of(StateKind::ObjectPt),
         // CR 401/402: reads the controller's library top card (contents + order).

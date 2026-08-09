@@ -1021,6 +1021,45 @@ pub fn resolve_and_apply_trigger_collection(
     Ok(())
 }
 
+/// CR 603.2g + CR 603.2 + CR 603.4: The batched-trigger candidate survival test —
+/// the single authority for "does this simultaneous-event candidate become a
+/// firing candidate for `trig_def`". Three checks, in order:
+///   1. CR 603.2g: the candidate is not suppressed by an active
+///      replacement-style suppress-trigger static.
+///   2. CR 603.2: the candidate matches this trigger's event-shape matcher.
+///   3. CR 603.4: the candidate satisfies the intervening-if condition, evaluated
+///      against THIS specific candidate event so a per-candidate "it" binds to it.
+///
+/// Shared by `matching_batched_trigger_events` (all-in-one batch) and
+/// `matching_counter_added_events_by_recipient` (per-recipient grouping) so the
+/// two apply an identical filter chain; they differ only in how survivors are
+/// grouped and whether `contextual_batched_trigger_event` is layered on top.
+fn candidate_passes_batched_filters(
+    state: &GameState,
+    candidate: &GameEvent,
+    trig_def: &TriggerDefinition,
+    source_context: &TriggerSourceContext,
+    controller: PlayerId,
+    matcher: TriggerMatcher,
+    active_suppress_triggers: &[ActiveSuppressTriggerStatic],
+) -> bool {
+    if event_is_suppressed_by_static_triggers_cached(state, candidate, active_suppress_triggers) {
+        return false;
+    }
+    if !matcher(candidate, trig_def, source_context, state) {
+        return false;
+    }
+    trig_def.condition.as_ref().is_none_or(|condition| {
+        check_trigger_condition_with_source(
+            state,
+            condition,
+            controller,
+            Some(source_context),
+            Some(candidate),
+        )
+    })
+}
+
 fn matching_batched_trigger_events(
     state: &GameState,
     event_batch: &[GameEvent],
@@ -1033,28 +1072,93 @@ fn matching_batched_trigger_events(
     event_batch
         .iter()
         .filter(|candidate| {
-            !event_is_suppressed_by_static_triggers_cached(
+            candidate_passes_batched_filters(
                 state,
                 candidate,
+                trig_def,
+                source_context,
+                controller,
+                matcher,
                 active_suppress_triggers,
             )
-        })
-        .filter(|candidate| matcher(candidate, trig_def, source_context, state))
-        .filter(|candidate| {
-            trig_def.condition.as_ref().is_none_or(|condition| {
-                check_trigger_condition_with_source(
-                    state,
-                    condition,
-                    controller,
-                    Some(source_context),
-                    Some(candidate),
-                )
-            })
         })
         .filter_map(|candidate| {
             contextual_batched_trigger_event(state, candidate, trig_def, source_context)
         })
         .collect()
+}
+
+/// CR 603.2c: "Whenever you put one or more counters on a creature" triggers
+/// once per recipient creature — but a single counter-placement event may place
+/// several kinds of counters (one `GameEvent::CounterAdded` per kind) on several
+/// creatures at once (proliferate). Group each recipient's kind-events into one
+/// firing so the intervening-"if it" binds to that single recipient and the
+/// per-recipient multiset fold (`Effect::ReproduceEventCounters`) reproduces
+/// exactly what was placed on it. Applies the identical filter chain as
+/// `matching_batched_trigger_events` (static suppression → matcher →
+/// per-candidate intervening-if), then groups the survivors by `object_id`
+/// preserving first-seen order. No empty inner batches are produced.
+///
+/// The per-candidate survival test is the shared `candidate_passes_batched_filters`
+/// (identical to `matching_batched_trigger_events`); this function layers only the
+/// two genuine deltas on top — grouping survivors by `object_id` and the
+/// deliberate omission of `contextual_batched_trigger_event` (a no-op passthrough
+/// for `CounterAdded` events anyway, since it only narrows attack-family events).
+fn matching_counter_added_events_by_recipient(
+    state: &GameState,
+    event_batch: &[GameEvent],
+    trig_def: &TriggerDefinition,
+    source_context: &TriggerSourceContext,
+    controller: PlayerId,
+    matcher: TriggerMatcher,
+    active_suppress_triggers: &[ActiveSuppressTriggerStatic],
+) -> Vec<Vec<GameEvent>> {
+    let mut groups: Vec<(ObjectId, Vec<GameEvent>)> = Vec::new();
+    for candidate in event_batch {
+        let GameEvent::CounterAdded { object_id, .. } = candidate else {
+            continue;
+        };
+        if !candidate_passes_batched_filters(
+            state,
+            candidate,
+            trig_def,
+            source_context,
+            controller,
+            matcher,
+            active_suppress_triggers,
+        ) {
+            continue;
+        }
+        match groups.iter_mut().find(|(id, _)| id == object_id) {
+            Some((_, events)) => events.push(candidate.clone()),
+            None => groups.push((*object_id, vec![candidate.clone()])),
+        }
+    }
+    groups.into_iter().map(|(_, events)| events).collect()
+}
+
+/// CR 603.2c: Whether a `CounterAdded` trigger fires once PER RECIPIENT object
+/// rather than once for the whole simultaneous batch.
+///
+/// This is a property of the TRIGGER PHRASING, not of the effect. The only
+/// phrasing that marks a `CounterAdded` trigger `batched` is the kind-agnostic
+/// "one or more counters on a <singular recipient>" form (set by
+/// `try_parse_counter_trigger`, re-gated off for still-`Unimplemented` effects by
+/// `lower_trigger_ir`). Under CR 603.2c a single event that places counters on
+/// several recipients "contains multiple occurrences", so the ability triggers
+/// once for EACH recipient — while a multi-KIND placement on ONE recipient folds
+/// into a single occurrence. `matching_counter_added_events_by_recipient`
+/// realizes exactly that granularity (group by `object_id`), so the per-recipient
+/// intervening-if ("if it's not a Kree") binds "it" to a single recipient and any
+/// effect — reproduction, draw, damage — resolves once per recipient.
+///
+/// Gating this on the trigger structure keeps the firing-granularity decision
+/// class-level. Keying it on a specific `Effect` leaf (e.g. only
+/// `ReproduceEventCounters`) would silently fall same-phrasing cards with a
+/// non-reproduction effect through to the all-in-one arm, collapsing their
+/// per-recipient occurrences into a single wrong firing (CR 603.2c violation).
+fn counter_added_fires_per_recipient(trig_def: &TriggerDefinition) -> bool {
+    trig_def.batched && matches!(trig_def.mode, TriggerMode::CounterAdded)
 }
 
 /// CR 508.1 + CR 603.2: Split an attack declaration into the singleton event
@@ -2105,7 +2209,28 @@ fn collect_matching_triggers_inner(
                 .as_ref()
                 .map(|exec| (exec.modal.clone(), exec.mode_abilities.clone()))
                 .unwrap_or_default();
-            let trigger_event_batches = if trig_def.batched {
+            let trigger_event_batches = if counter_added_fires_per_recipient(trig_def) {
+                // CR 603.2c: the "one or more counters on a <singular recipient>"
+                // class fires once per recipient object, folding that recipient's
+                // whole kind-multiset into one firing. This is a class-level
+                // property of the trigger phrasing (see
+                // `counter_added_fires_per_recipient`), NOT of the effect leaf, so
+                // every batched `CounterAdded` trigger — reproduction, draw, or
+                // damage — routes here and binds its per-recipient "it" correctly.
+                let batches = matching_counter_added_events_by_recipient(
+                    state,
+                    event_batch,
+                    trig_def,
+                    &source_context,
+                    controller,
+                    matcher,
+                    active_suppress_triggers,
+                );
+                if batches.is_empty() {
+                    continue;
+                }
+                batches
+            } else if trig_def.batched {
                 let trigger_events = matching_batched_trigger_events(
                     state,
                     event_batch,
@@ -21445,11 +21570,13 @@ pub mod tests {
                 object_id: countered,
                 counter_type: CounterType::Lore,
                 count: 1,
+                actor: PlayerId(0),
             },
             GameEvent::CounterAdded {
                 object_id: countered,
                 counter_type: CounterType::Plus1Plus1,
                 count: 1,
+                actor: PlayerId(0),
             },
         ];
 

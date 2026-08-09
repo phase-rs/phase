@@ -79,6 +79,7 @@ use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
 use super::oracle_nom::bridge::nom_on_lower;
+use super::oracle_nom::condition::parse_reflexive_conditional_connector;
 use super::oracle_nom::error::OracleResult;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
@@ -164,10 +165,276 @@ pub(crate) use crate::parser::oracle_ir::context::{
 };
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseIr,
-    ClauseIrBuilder, DieResultBranchIr, EffectChainIr, OtherwiseKind, PlayerScopeRewrite,
-    PriorModifier, ReplaceMeaningKind, ReplicateKind, ResidualConditionPolicy, ShellStage,
+    ClauseIrBuilder, ClausePlacement, DieResultBranchIr, EffectChainIr, OtherwiseKind,
+    PlayerScopeRewrite, PriorModifier, ReplaceMeaningKind, ReplicateKind, ResidualConditionPolicy,
+    ShellStage,
 };
 use crate::types::mana::ManaExpiry;
+
+/// CR 608.2c + CR 400.7: what, if anything, a delayed trigger's payload
+/// introduces — the referent a following continuation's anaphor can bind to.
+///
+/// Scans the payload's own `sub_ability` chain head-to-tail and returns the first
+/// minting variant found; `None` if the scan finds none. The effect's `target` —
+/// and every other field — is never consulted. The scan does not descend into
+/// `else_ability`, `mode_abilities`, or a nested delayed-trigger payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PayloadMint {
+    /// CR 111.1: a token brought into existence by the payload.
+    Token,
+    /// CR 707.1: a copy brought into existence by the payload.
+    Copy,
+    /// CR 608.2d: a value chosen during the payload's resolution.
+    ChosenValue(ChoiceType),
+    /// CR 400.7: objects the payload itself selects out of a zone.
+    SelectedFromZone,
+    /// CR 705.1: a randomized outcome produced by the payload.
+    RandomOutcome,
+    /// CR 601.2: a spell put onto the stack by the payload's own cast.
+    CastSpell,
+}
+
+/// A still-open delayed payload and the typed antecedents its continuation may
+/// consume. This parser-local registry is scoped to one effect chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DelayedPayloadAntecedent {
+    /// What the payload introduced; `None` means it introduced nothing relevant.
+    mint: Option<PayloadMint>,
+    /// CR 603.7a: the payload's own reflexive-result gate, if it has one.
+    /// `Option<AbilityCondition>` — never a bool.
+    result: Option<AbilityCondition>,
+}
+
+/// Which arm of the delayed-payload continuation decision fired.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ContinuationVerdict {
+    /// Nest into the most recent open payload.
+    Nest,
+    /// Stay a sibling; `veto` says which veto, if any, applied.
+    Emit { veto: Option<ContinuationVeto> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ContinuationVeto {
+    PeerDelayedTrigger,
+    ReplacementShield,
+    CastTimeCostCondition,
+}
+
+/// Scan only the payload's own definition spine for the first typed mint.
+fn payload_mint(payload: &AbilityDefinition) -> Option<PayloadMint> {
+    let mut current = Some(payload);
+    while let Some(definition) = current {
+        let mint = match definition.effect.as_ref() {
+            Effect::Token { .. } | Effect::CopyTokenOf { .. } => Some(PayloadMint::Token),
+            Effect::CopySpell { .. } => Some(PayloadMint::Copy),
+            Effect::Choose { choice_type, .. } => {
+                Some(PayloadMint::ChosenValue(choice_type.clone()))
+            }
+            Effect::ExileFromTopUntil { .. } | Effect::ExileTop { .. } => {
+                Some(PayloadMint::SelectedFromZone)
+            }
+            Effect::FlipCoin { .. } => Some(PayloadMint::RandomOutcome),
+            Effect::CastFromZone { .. } => Some(PayloadMint::CastSpell),
+            _ => None,
+        };
+        if mint.is_some() {
+            return mint;
+        }
+        current = definition.sub_ability.as_deref();
+    }
+    None
+}
+
+/// CR 603.7a: obtain the payload for either delayed-trigger producer shape.
+fn clause_delayed_payload(clause: &ClauseIr, kind: AbilityKind) -> Option<AbilityDefinition> {
+    match clause.parsed.effect {
+        Effect::CreateDelayedTrigger { ref effect, .. } => Some((**effect).clone()),
+        _ if clause.delayed_condition.is_some() => {
+            let mut payload = AbilityDefinition::new(kind, clause.parsed.effect.clone());
+            payload.sub_ability = clause.parsed.sub_ability.clone();
+            Some(payload)
+        }
+        _ => None,
+    }
+}
+
+/// V2 is deliberately pinned to the two actual delayed-trigger producer fields.
+fn clause_installs_delayed_trigger(clause: &ClauseIr) -> bool {
+    matches!(clause.parsed.effect, Effect::CreateDelayedTrigger { .. })
+        || clause.delayed_condition.is_some()
+}
+
+/// CR 614.1 + CR 615.1: whether a clause installs a replacement or prevention
+/// shield that must remain a top-level sibling.
+fn effect_installs_replacement_shield(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::AddTargetReplacement { .. }
+            | Effect::AddPendingETBCounters { .. }
+            | Effect::PreventDamage { .. }
+            | Effect::CreateDamageReplacement { .. }
+            | Effect::CreateDrawReplacement { .. }
+            | Effect::CreatePlaneswalkReplacement { .. }
+            | Effect::Regenerate { .. }
+    )
+}
+
+/// CR 601.2b: cast-time conditions are decided before a delayed trigger exists.
+fn clause_has_cast_time_cost_condition(clause: &ClauseIr) -> bool {
+    clause.condition.as_ref().is_some_and(|condition| {
+        matches!(
+            condition,
+            AbilityCondition::AdditionalCostPaid { .. }
+                | AbilityCondition::AdditionalCostPaidInstead
+                | AbilityCondition::AlternativeManaCostPaid
+                | AbilityCondition::CastVariantPaid { .. }
+                | AbilityCondition::CastVariantPaidInstead { .. }
+        )
+    })
+}
+
+/// Reuse the shared connector authority to distinguish a reflexive result gate
+/// from any other `AbilityCondition` carried by a clause.
+fn clause_reflexive_result(clause: &ClauseIr) -> Option<AbilityCondition> {
+    let source = clause.source.fragment()?;
+    let lower = source.to_lowercase();
+    nom_on_lower(source, &lower, parse_reflexive_conditional_connector)
+        .map(|(condition, _)| condition)
+}
+
+/// CR 608.2c: decide where one candidate continuation clause attaches, given
+/// the delayed payloads still open in this chain.
+fn classify_continuation_clause(
+    clause: &ClauseIr,
+    open: &[DelayedPayloadAntecedent],
+) -> ContinuationVerdict {
+    if clause_installs_delayed_trigger(clause) {
+        return ContinuationVerdict::Emit {
+            veto: Some(ContinuationVeto::PeerDelayedTrigger),
+        };
+    }
+    if effect_installs_replacement_shield(&clause.parsed.effect) {
+        return ContinuationVerdict::Emit {
+            veto: Some(ContinuationVeto::ReplacementShield),
+        };
+    }
+    if clause_has_cast_time_cost_condition(clause) {
+        return ContinuationVerdict::Emit {
+            veto: Some(ContinuationVeto::CastTimeCostCondition),
+        };
+    }
+
+    let Some(antecedent) = open.iter().next_back() else {
+        return ContinuationVerdict::Emit { veto: None };
+    };
+    let result = clause_reflexive_result(clause);
+    if result.as_ref().is_some_and(|result| {
+        antecedent
+            .result
+            .as_ref()
+            .is_none_or(|payload_result| payload_result == result)
+    }) || antecedent.mint.is_some()
+    {
+        return ContinuationVerdict::Nest;
+    }
+    ContinuationVerdict::Emit { veto: None }
+}
+
+/// CR 608.2c: the controller "follows its instructions in the order written", so which delayed
+/// payload a clause continues into is a property of the clause's POSITION IN THE FINISHED SEQUENCE —
+/// not of which producer in the chunk loop happened to emit it. Every producer appends through
+/// `ClauseIrBuilder::push`, so one fold over the built sequence sees each clause exactly once.
+///
+/// The registry transitions, stated exactly. `classify_continuation_clause` owns the verdict; this
+/// fold owns only the transition:
+/// - a non-`Emit` clause CLEARS, unconditionally, before the classifier is consulted;
+/// - a delayed-trigger installer OPENS an antecedent;
+/// - a replacement-shield or cast-time-cost veto PRESERVES without opening;
+/// - `Nest` promotes only when it immediately follows the installer or a prior promotion;
+///   otherwise it CLEARS because the emitted top-level clause between them breaks the assembly run;
+/// - `Emit { veto: None }` — the only classifier-side clear — CLEARS.
+///
+/// What that deliberately does NOT say: the registry is *not* "cleared by every other clause". While
+/// the most recent open antecedent carries a `PayloadMint`, `classify_continuation_clause`
+/// short-circuits on `antecedent.mint.is_some()` and returns `Nest` for EVERY non-vetoed `Emit`
+/// clause. An earlier mint-carrying antecedent does not prevent a classifier-side clear once a newer
+/// mint-less installer is open: the classifier consults only the most recent antecedent. An unrelated
+/// or unimplemented emitted clause does NOT clear while that most recent antecedent carries a mint —
+/// it nests, and is itself relocated into the payload. That short-circuit is
+/// `classify_continuation_clause`'s own pre-existing rule and is unchanged here; this fold only widens
+/// the population of clauses that reach it (plan-r18 §R18.3).
+///
+/// This replaces a transition that lived after the canonical terminal `.push()`. The rationale for
+/// deciding AFTER the push is unchanged and still applies: the decision reads a built `ClauseIr`, and
+/// promoting it in place is the documented mid-chain patch channel (`ClauseIrBuilder::clauses_mut`).
+/// Only the channel's ARITY changed — from `last_mut()` at one push site to the whole slice — because
+/// 35 other producers `continue` (or, at one site, `break`) past the entire loop tail and can never be
+/// reached by any statement placed inside the loop body.
+///
+/// Runs before `ClauseIrBuilder::finish` so that no post-loop pass has yet removed or rewritten a
+/// clause (`try_fold_loses_other_sibling` removes one; the leading-host-lifetime pass rewrites
+/// `parsed`): the sequence this fold reads is exactly the sequence the chunk loop built.
+fn resolve_delayed_payload_placements(clauses: &mut [ClauseIr], kind: AbilityKind) {
+    let mut open: Vec<DelayedPayloadAntecedent> = Vec::new();
+    let mut last_contiguous_clause = None;
+    for (clause_index, clause) in clauses.iter_mut().enumerate() {
+        // CR 603.7a: a continuation is relocated as a DEFINITION into the payload, so only a clause
+        // that assembly emits as an independent sibling definition can be promoted. Every other
+        // disposition is absorbed into, replaces, or patches a neighbour and emits no definition of
+        // its own — promoting one would record a relocation range that
+        // `relocate_clause_defs_into_delayed_payload` must refuse, and would trip the
+        // `handled_as_special` tripwire in `assembly.rs`. Such a clause is also "every other clause"
+        // for the registry, so it closes the open run.
+        if !matches!(clause.disposition, ClauseDisposition::Emit { .. }) {
+            open.clear();
+            last_contiguous_clause = None;
+            continue;
+        }
+        let verdict = classify_continuation_clause(clause, &open);
+        // V2 → V3 → V4 → P-a/P-b: the classifier owns the decision; this table owns only the
+        // registry transition. V2 opens an antecedent; the two vetoes preserve it but leave an
+        // emitted top-level definition, so a later `Nest` must pass the contiguous-run check.
+        // `Emit { veto: None }` clears. Note that arm is unreachable while a mint-carrying
+        // antecedent is open (see the fn doc) — in that regime the non-`Emit` gate above or a
+        // failed contiguous-run check clears.
+        match verdict {
+            ContinuationVerdict::Emit {
+                veto: Some(ContinuationVeto::PeerDelayedTrigger),
+            } => {
+                let payload = clause_delayed_payload(clause, kind)
+                    .expect("V2 only classifies delayed-trigger installer clauses");
+                open.push(DelayedPayloadAntecedent {
+                    mint: payload_mint(&payload),
+                    result: clause_reflexive_result(clause),
+                });
+                last_contiguous_clause = Some(clause_index);
+            }
+            ContinuationVerdict::Emit {
+                veto:
+                    Some(
+                        ContinuationVeto::ReplacementShield
+                        | ContinuationVeto::CastTimeCostCondition,
+                    ),
+            } => {}
+            ContinuationVerdict::Nest => {
+                if last_contiguous_clause.is_some_and(|last| last + 1 == clause_index) {
+                    clause.placement = ClausePlacement::NestedInDelayedPayload;
+                    last_contiguous_clause = Some(clause_index);
+                } else {
+                    // A veto stays top-level, so it breaks the contiguous run the assembly
+                    // locator requires. Clearing here prevents a later clause from skipping it.
+                    open.clear();
+                    last_contiguous_clause = None;
+                }
+            }
+            ContinuationVerdict::Emit { veto: None } => {
+                open.clear();
+                last_contiguous_clause = None;
+            }
+        }
+    }
+}
 
 /// CR 608.2k: True when `text` is a standalone object pronoun referring to
 /// the trigger/spell subject. Used by effect-target parsers that need to
@@ -15535,10 +15802,19 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     if clause.duration.is_none() {
         clause.duration = duration;
     }
-    // CR 115.1d: Post-parse fixup for PutCounter "up to N" multi_target.
-    // The multi_target is lost in the AST→Effect lowering chain, so we re-extract it
-    // from the original text when the effect is PutCounter with a targeted filter.
-    if matches!(clause.effect, Effect::PutCounter { .. }) && clause.multi_target.is_none() {
+    // CR 115.1d: Post-parse fixup for the "…counter(s) on up to N target …" shape.
+    // The multi_target is lost in the AST→Effect lowering chain, so we re-extract
+    // it from the original text. `PutCounter` and `ReproduceEventCounters` share
+    // the identical target-side placement grammar (Aragorn, Company Leader: "put
+    // one of each of those kinds of counters on up to one other target creature"),
+    // so both recover their optional cardinality through the same dedicated
+    // extractor. Without the reproduction arm the "up to one" bound is dropped and
+    // Aragorn's target binds as mandatory (min=1) instead of optional (min=0).
+    if matches!(
+        clause.effect,
+        Effect::PutCounter { .. } | Effect::ReproduceEventCounters { .. }
+    ) && clause.multi_target.is_none()
+    {
         clause.multi_target = extract_put_counter_multi_target(text);
     }
     // CR 601.2c: Post-parse fixup for exact-count multi-target text. The
@@ -16307,6 +16583,27 @@ fn try_parse_verb_and_target<'a>(
     if tag::<_, _, OracleError<'_>>("put ").parse(lower).is_ok()
         && scan_contains_phrase(lower, "counter")
     {
+        // CR 122.1 + CR 603.2c: reproduce the triggering event's counters ("put
+        // the same number and kind of counters" / "put one of each of those
+        // kinds of counters"). Detected before the generic put-counter path so
+        // the reproduction phrasing is not mis-read as a literal counter name.
+        if let Some((effect @ Effect::ReproduceEventCounters { .. }, rem, _multi_target)) =
+            counter::try_parse_reproduce_event_counters(lower, text, ctx)
+        {
+            return Some((
+                TargetedImperativeAst::ZoneCounterProxy(Box::new(match effect {
+                    Effect::ReproduceEventCounters {
+                        target,
+                        per_kind_count,
+                    } => ZoneCounterImperativeAst::ReproduceEventCounters {
+                        target,
+                        per_kind_count,
+                    },
+                    _ => unreachable!("guarded by the match arm above"),
+                })),
+                rem,
+            ));
+        }
         if let Some((
             Effect::PutCounter {
                 counter_type,
@@ -16798,13 +17095,31 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     // Vesuva ("...on each of up to one target land and up to one target
     // creature") would be wrongly mandatory. Re-derive it from the consumed
     // primary-clause prefix via the same building block that produced it.
-    let primary_multi_target = if matches!(&primary_effect, Effect::PutCounter { .. }) {
-        let primary_clause = &text[..text.len() - remainder.len()];
-        let primary_lower = primary_clause.to_ascii_lowercase();
-        counter::try_parse_put_counter(&primary_lower, primary_clause, &mut ctx.clone())
+    // CR 122.1: `ReproduceEventCounters` shares the identical target-side "…on up
+    // to N target …" grammar as `PutCounter` and is discarded the same way on the
+    // `ZoneCounterProxy` route, so a COMPOUND reproduction primary ("put one of
+    // each of those kinds of counters on up to one other target creature and
+    // <effect>") reaches this splitter and must recover its bound here too — the
+    // direct-clause fixup in `lower_imperative_clause` never runs for the compound
+    // return. Re-derive from the same building block that produced the effect.
+    let primary_multi_target = match &primary_effect {
+        Effect::PutCounter { .. } => {
+            let primary_clause = &text[..text.len() - remainder.len()];
+            let primary_lower = primary_clause.to_ascii_lowercase();
+            counter::try_parse_put_counter(&primary_lower, primary_clause, &mut ctx.clone())
+                .and_then(|(_, _, multi)| multi)
+        }
+        Effect::ReproduceEventCounters { .. } => {
+            let primary_clause = &text[..text.len() - remainder.len()];
+            let primary_lower = primary_clause.to_ascii_lowercase();
+            counter::try_parse_reproduce_event_counters(
+                &primary_lower,
+                primary_clause,
+                &mut ctx.clone(),
+            )
             .and_then(|(_, _, multi)| multi)
-    } else {
-        None
+        }
+        _ => None,
     };
 
     Some(ParsedEffectClause {
@@ -29773,7 +30088,6 @@ pub(crate) fn parse_effect_chain_ir(
     // recipient through it) rather than boundary-cleared, preventing leak into
     // an unrelated later sentence.
     let mut chain_parent_target_controller_scope: Option<ControllerRef> = None;
-
     for (chunk_idx, chunk) in chunks.iter().enumerate() {
         let normalized_text = strip_leading_sequence_connector(&chunk.text).trim();
         if normalized_text.is_empty() {
@@ -33158,6 +33472,12 @@ pub(crate) fn parse_effect_chain_ir(
 
     // Merge per-chunk diagnostics and any pre-loop diagnostics into the outer ctx.
     ctx.diagnostics.extend(chunk_diagnostics);
+
+    // CR 608.2c + CR 603.7: resolve delayed-payload placement over the finished clause sequence.
+    // Must stay ABOVE `builder.finish()`: `try_fold_loses_other_sibling` removes a clause and the
+    // leading-host-lifetime pass rewrites every `parsed`, so a later position would fold a different
+    // sequence than the chunk loop built.
+    resolve_delayed_payload_placements(builder.clauses_mut(), kind);
 
     // CR 113.10 + chunk-splitter normalization: Bronzehide Lion's "and it loses
     // all other abilities" was pre-split by
