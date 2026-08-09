@@ -25,7 +25,6 @@
 //!
 //! CR 401.1: each player's deck becomes their own library (one library per
 //! player).
-//! CR 101.4: the `player_scope: All` fan-out iterates players in APNAP order.
 //! CR 406.3: the cards are exiled face down.
 
 use engine::ai_support::legal_actions;
@@ -59,10 +58,10 @@ fn zone_of(runner: &GameRunner, id: ObjectId) -> Zone {
         .zone
 }
 
-/// CR 401.1 + CR 101.4: Extract Power exiles the top card of EVERY player's
-/// library. Three players, each library seeded with a distinct known top card
-/// and a distinct second card. After resolution every player's TOP card is in
-/// exile and every player's SECOND card is untouched in the library.
+/// CR 401.1: Extract Power exiles the top card of EVERY player's library.
+/// Three players, each library seeded with a distinct known top card and a
+/// distinct second card. After resolution every player's TOP card is in exile
+/// and every player's SECOND card is untouched in the library.
 ///
 /// DISCRIMINATING ASSERTION: `zone_of(p1_top) == Exile` and
 /// `zone_of(p2_top) == Exile`. Reverting either parser edit drops
