@@ -8,16 +8,16 @@
 
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{ShieldKind, TargetRef};
+use engine::types::ability::{ReplacementDefinition, ShieldKind, TargetFilter, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
+use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
 const BRAINSPOIL_ORACLE: &str = "Destroy target creature that isn't enchanted. It can't be regenerated.\n\
 Transmute {1}{B}{B} ({1}{B}{B}, Discard this card: Search your library for a card with the same mana value as this card, reveal it, put it into your hand, then shuffle. Transmute only as a sorcery.)";
-const REGENERATE_ORACLE: &str = "Regenerate target creature.";
 const PLAIN_DESTROY_ORACLE: &str = "Destroy target creature.";
 
 /// Wire both sides of an attachment exactly as the engine's attach actions do.
@@ -34,9 +34,24 @@ fn attach(runner: &mut GameRunner, attachment: ObjectId, host: ObjectId) {
         .push(attachment);
 }
 
-/// Cast the canonical Regenerate card through the production action path.
-fn cast_regenerate(runner: &mut GameRunner, regenerate: ObjectId, target: ObjectId) {
-    runner.cast(regenerate).target_object(target).resolve();
+/// Install the engine's actual one-shot regeneration replacement definition.
+///
+/// CR 701.19a: this is the same replacement object created by
+/// `effects::regenerate::resolve`; the separate Regenerate-card regression covers
+/// that spell's cast pipeline. This fixture isolates Brainspoil's rider and its
+/// interaction with an already-live shield.
+fn install_live_regeneration_shield(runner: &mut GameRunner, target: ObjectId) {
+    let shield = ReplacementDefinition::new(ReplacementEvent::Destroy)
+        .valid_card(TargetFilter::SelfRef)
+        .description("Regenerate".to_string())
+        .regeneration_shield();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&target)
+        .expect("regeneration target must exist")
+        .replacement_definitions
+        .push(shield);
 }
 
 /// Begins a Brainspoil cast and leaves its target-selection prompt open.
@@ -153,12 +168,6 @@ fn brainspoil_cant_regenerate_rider_bypasses_a_real_regeneration_shield() {
     scenario.at_phase(Phase::PreCombatMain);
     let brainspoil_victim = scenario.add_creature(P0, "Brainspoil Victim", 2, 2).id();
     let control_victim = scenario.add_creature(P0, "Control Victim", 2, 2).id();
-    let regenerate_brainspoil = scenario
-        .add_spell_to_hand_from_oracle(P0, "Regenerate", false, REGENERATE_ORACLE)
-        .id();
-    let regenerate_control = scenario
-        .add_spell_to_hand_from_oracle(P0, "Regenerate", false, REGENERATE_ORACLE)
-        .id();
     let brainspoil = scenario
         .add_spell_to_hand_from_oracle(P0, "Brainspoil", false, BRAINSPOIL_ORACLE)
         .id();
@@ -167,8 +176,8 @@ fn brainspoil_cant_regenerate_rider_bypasses_a_real_regeneration_shield() {
         .id();
     let mut runner = scenario.build();
 
-    cast_regenerate(&mut runner, regenerate_brainspoil, brainspoil_victim);
-    cast_regenerate(&mut runner, regenerate_control, control_victim);
+    install_live_regeneration_shield(&mut runner, brainspoil_victim);
+    install_live_regeneration_shield(&mut runner, control_victim);
     assert!(
         runner.state().objects[&brainspoil_victim]
             .replacement_definitions
