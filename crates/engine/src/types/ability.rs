@@ -19667,6 +19667,11 @@ pub enum EffectOutcomeSignal {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AbilityCondition {
+    /// CR 608.2c + CR 400.7: Resolution-time rider on a dies trigger: the
+    /// triggering creature was dealt damage this turn by this exact source
+    /// incarnation. Unlike an intervening-if, this is checked only while the
+    /// effect resolves.
+    TriggerEventTargetDamagedBySourceThisTurn,
     /// CR 702.33d + CR 702.33f + CR 608.2c: An optional additional cost was paid
     /// during casting. Parameterized for kicker variant gating:
     ///

@@ -10774,7 +10774,7 @@ fn damage_record_source_incarnation_matches(
         == Some(recorded_incarnation)
 }
 
-fn damage_record_matches_dying_object(
+pub(crate) fn damage_record_matches_dying_object(
     state: &GameState,
     record: &DamageRecord,
     object_id: ObjectId,

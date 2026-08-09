@@ -3178,6 +3178,21 @@ pub(super) fn strip_suffix_conditional(
     };
 
     let condition_text = lower[if_pos + " if ".len()..].trim_end_matches('.').trim();
+    // CR 608.2c + CR 603.4: trailing "if ~ dealt damage to it this turn" is
+    // a resolution-time rider, not an intervening-if. The event target is
+    // carried by the resolving trigger entry.
+    if ctx.in_trigger
+        && all_consuming(tag::<_, _, OracleError<'_>>(
+            "~ dealt damage to it this turn",
+        ))
+        .parse(condition_text)
+        .is_ok()
+    {
+        return (
+            Some(AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn),
+            text[..if_pos].trim().to_string(),
+        );
+    }
     // CR 608.2d: "it has " is in NON_REHOMEABLE_CONDITION_PREFIXES, so this
     // source-referential mana-symbol eligibility check must be recognized BEFORE
     // the rehomeable bail or it would never run. effect_prefix/effect_text are

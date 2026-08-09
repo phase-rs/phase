@@ -11505,6 +11505,35 @@ pub(crate) fn evaluate_condition(
     ability: &ResolvedAbility,
 ) -> bool {
     match condition {
+        AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn => {
+            let Some(dying_object) =
+                state
+                    .current_trigger_event
+                    .as_ref()
+                    .and_then(|event| match event {
+                        GameEvent::CreatureDestroyed { object_id }
+                        | GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
+                        _ => None,
+                    })
+            else {
+                return false;
+            };
+            let source_incarnation = ability
+                .trigger_source_incarnation()
+                .or(ability.source_incarnation);
+            state.damage_dealt_this_turn.iter().any(|record| {
+                record.source_id == ability.source_id
+                    && record
+                        .source_incarnation
+                        .is_none_or(|recorded| source_incarnation == Some(recorded))
+                    && crate::game::triggers::damage_record_matches_dying_object(
+                        state,
+                        record,
+                        dying_object,
+                        state.current_trigger_event.as_ref(),
+                    )
+            })
+        }
         // CR 702.33d + CR 702.33f + CR 608.2c: Parameterized additional-cost
         // gating. The default shape (`variant: None`, `min_count: 1`) reads the
         // legacy single-bool flag used by Gift / Buyback / Bargain / Evidence /

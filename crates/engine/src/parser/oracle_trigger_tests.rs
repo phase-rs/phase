@@ -18641,10 +18641,16 @@ fn trigger_dies_trailing_if_dealt_damage_stays_resolution_time() {
         def.condition, None,
         "a trailing resolution-time `if` must NOT be hoisted to an intervening-if (CR 603.4)"
     );
-    assert!(matches!(
-        def.execute.as_deref().map(|a| a.effect.as_ref()),
-        Some(Effect::Draw { .. })
-    ));
+    let execute = def
+        .execute
+        .as_deref()
+        .expect("trailing rider must parse an execute");
+    assert!(matches!(execute.effect.as_ref(), Effect::Draw { .. }));
+    assert_eq!(
+        execute.condition,
+        Some(AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn),
+        "the trailing condition must stay on the resolving effect"
+    );
 }
 
 #[test]
