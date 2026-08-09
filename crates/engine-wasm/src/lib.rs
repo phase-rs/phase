@@ -143,10 +143,95 @@ fn decode_restored_game_state(json_str: &str) -> Result<DecodedRestoredGameState
     let state = serde_json::from_value::<PersistedGameState>(serialized)
         .map(PersistedGameState::into_game_state)
         .map_err(|error| format!("Failed to deserialize GameState: {error}"))?;
+    state
+        .format_config
+        .reject_unimplemented_range_of_influence()
+        .map_err(|error| format!("Failed to restore GameState: {error}"))?;
     Ok(DecodedRestoredGameState {
         state,
         debug_permitted_was_serialized,
     })
+}
+
+fn validate_external_format_config(config: &FormatConfig, player_count: u8) -> Result<(), String> {
+    config.validate_for_player_count(player_count)?;
+    config.reject_unimplemented_range_of_influence()
+}
+
+fn parse_initialize_format_config(
+    decoded: Result<FormatConfig, String>,
+) -> Result<FormatConfig, serde_json::Value> {
+    decoded.map_err(|error| {
+        serde_json::json!({
+            "error": true,
+            "reasons": [format!("Format config deserialization failed: {error}")],
+        })
+    })
+}
+
+#[cfg(test)]
+mod external_format_config_tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use engine::types::format::RangeOfInfluenceConfig;
+
+    #[test]
+    fn external_initialization_rejects_limited_range_configuration() {
+        let mut config = FormatConfig::standard();
+        config.range_of_influence = Some(Box::new(RangeOfInfluenceConfig {
+            default_range: 0,
+            player_overrides: BTreeMap::new(),
+        }));
+
+        assert!(validate_external_format_config(&config, 2)
+            .expect_err("limited range must remain disabled at the WASM boundary")
+            .contains("not supported"));
+    }
+
+    #[test]
+    fn malformed_initialize_format_config_returns_an_error_envelope() {
+        let malformed_js_config = serde_json::json!(42);
+        let decoded = serde_json::from_value::<FormatConfig>(malformed_js_config)
+            .map_err(|error| error.to_string());
+
+        let error = parse_initialize_format_config(decoded)
+            .expect_err("malformed JS config must not fall back to Standard");
+
+        assert_eq!(error["error"], true);
+        assert!(error["reasons"][0]
+            .as_str()
+            .expect("error reason is a string")
+            .contains("Format config deserialization failed"));
+    }
+
+    #[test]
+    fn restored_state_with_limited_range_is_rejected_before_rehydration() {
+        let mut state = GameState::new_two_player(42);
+        state.format_config.range_of_influence = Some(Box::new(RangeOfInfluenceConfig {
+            default_range: 0,
+            player_overrides: BTreeMap::new(),
+        }));
+        let json = serde_json::to_string(&state).expect("state serializes");
+
+        assert!(decode_restored_game_state(&json)
+            .expect_err("limited range must remain disabled at the restore boundary")
+            .contains("not supported"));
+    }
+
+    #[test]
+    fn legacy_scalar_range_restore_reaches_the_feature_gate() {
+        let mut serialized =
+            serde_json::to_value(GameState::new_two_player(42)).expect("state serializes");
+        serialized["format_config"]["range_of_influence"] = serde_json::json!(1);
+        let json = serde_json::to_string(&serialized).expect("legacy state serializes");
+
+        let error = decode_restored_game_state(&json)
+            .expect_err("legacy enabled range must be rejected after migration");
+
+        assert!(error.contains("not supported"));
+        assert!(!error.contains("deserialize"));
+    }
 }
 
 /// Bind the engine's interaction authority for the one game this module hosts.
@@ -952,14 +1037,19 @@ pub fn initialize_game(
     let seed = seed.map(|s| s as u64).unwrap_or(42);
 
     let format_config = if !format_config_js.is_null() && !format_config_js.is_undefined() {
-        serde_wasm_bindgen::from_value::<FormatConfig>(format_config_js)
-            .unwrap_or_else(|_| FormatConfig::standard())
+        match parse_initialize_format_config(
+            serde_wasm_bindgen::from_value::<FormatConfig>(format_config_js)
+                .map_err(|error| error.to_string()),
+        ) {
+            Ok(config) => config,
+            Err(error) => return to_js(&error),
+        }
     } else {
         FormatConfig::standard()
     };
     let count = player_count.unwrap_or(2);
     let game_format = format_config.format;
-    if let Err(reason) = format_config.validate_for_player_count(count) {
+    if let Err(reason) = validate_external_format_config(&format_config, count) {
         return to_js(&serde_json::json!({
             "error": true,
             "reasons": [reason],
@@ -2926,6 +3016,31 @@ mod tests {
     fn proposal_outcome(token: &str, actor: PlayerId, action: &GameAction) -> serde_json::Value {
         serde_wasm_bindgen::from_value(submit_ai_action_proposal(token, actor.0, to_js(action)))
             .expect("proposal outcome must serialize")
+    }
+
+    #[test]
+    fn initialize_game_returns_error_for_malformed_format_config_without_standard_fallback() {
+        clear_game_state();
+        let malformed_format_config = serde_wasm_bindgen::to_value(&serde_json::json!(42))
+            .expect("malformed JSON value converts to a JS input");
+
+        let result = initialize_game(
+            JsValue::NULL,
+            Some(42.0),
+            malformed_format_config,
+            JsValue::NULL,
+            Some(2),
+            None,
+        );
+        let error: serde_json::Value =
+            serde_wasm_bindgen::from_value(result).expect("initializer error is a JS object");
+
+        assert_eq!(error["error"], true);
+        assert!(error["reasons"][0]
+            .as_str()
+            .expect("error reason is a string")
+            .contains("Format config deserialization failed"));
+        assert!(GAME_STATE.with(|cell| cell.replace(None).is_none()));
     }
 
     /// Installs a real engine state and returns the production finite decision

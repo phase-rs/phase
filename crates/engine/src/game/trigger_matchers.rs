@@ -2591,6 +2591,7 @@ pub(super) fn match_becomes_target(
     let GameEvent::BecomesTarget {
         target,
         source_id: targeting_spell_id,
+        ..
     } = event
     else {
         return false;
@@ -12163,6 +12164,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
         // No valid_card, so fallback: event.object_id == source_id param
         assert!(match_becomes_target(
@@ -12190,6 +12192,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
         assert!(match_becomes_target(
             &event,
@@ -12210,6 +12213,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
+            source_controller: PlayerId(0),
         };
         assert!(!match_becomes_target(
             &event,
@@ -12270,6 +12274,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
+            source_controller: PlayerId(0),
         };
         assert!(match_becomes_target(
             &event,
@@ -12294,6 +12299,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
+            source_controller: PlayerId(0),
         };
         assert!(!match_becomes_target(
             &event,
@@ -12314,6 +12320,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
+            source_controller: PlayerId(0),
         };
         assert!(match_becomes_target(
             &event,
@@ -12340,6 +12347,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
         assert!(match_becomes_target(
             &event,
@@ -12366,6 +12374,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
         assert!(!match_becomes_target(
             &event,
@@ -12391,6 +12400,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
         assert!(match_becomes_target(
             &event,
@@ -12417,6 +12427,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
         assert!(!match_becomes_target(
             &event,
@@ -12442,6 +12453,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
+            source_controller: PlayerId(0),
         };
         assert!(match_becomes_target(
             &event,
@@ -12467,6 +12479,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
+            source_controller: PlayerId(0),
         };
         assert!(!match_becomes_target(
             &event,
@@ -12493,6 +12506,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Player(PlayerId(0)),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
 
         assert!(match_becomes_target(
@@ -12520,6 +12534,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Player(PlayerId(1)),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
 
         assert!(!match_becomes_target(
@@ -12547,6 +12562,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Player(PlayerId(0)),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
 
         assert!(!match_becomes_target(
@@ -12611,6 +12627,7 @@ mod tests {
         let obj_event = GameEvent::BecomesTarget {
             target: TargetRef::Object(permanent),
             source_id: ability_id,
+            source_controller: PlayerId(0),
         };
         assert!(
             match_becomes_target(
@@ -12627,6 +12644,7 @@ mod tests {
         let player_event = GameEvent::BecomesTarget {
             target: TargetRef::Player(PlayerId(1)),
             source_id: ability_id,
+            source_controller: PlayerId(0),
         };
         assert!(
             match_becomes_target(
@@ -12667,6 +12685,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(permanent),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
         assert!(
             !match_becomes_target(
@@ -12707,6 +12726,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(permanent),
             source_id: ability_id,
+            source_controller: PlayerId(0),
         };
         assert!(
             !match_becomes_target(
@@ -12750,6 +12770,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(graveyard_card),
             source_id: ability_id,
+            source_controller: PlayerId(0),
         };
         assert!(
             !match_becomes_target(
@@ -12796,6 +12817,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Player(PlayerId(1)),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
         assert!(
             !match_becomes_target(&event, &trigger, &test_trigger_source_context(&state, rotpriest), &state),
@@ -12813,6 +12835,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
         assert!(match_becomes_target(
             &event,
@@ -12832,6 +12855,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
         assert!(!match_becomes_target(
             &event,
@@ -12851,6 +12875,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
+            source_controller: PlayerId(0),
         };
         assert!(!match_becomes_target(
             &event,
@@ -12870,6 +12895,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
         assert!(match_becomes_target(
             &event,
@@ -12889,6 +12915,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
         assert!(match_becomes_target(
             &event,
@@ -12908,6 +12935,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
         assert!(!match_becomes_target(
             &event,
@@ -12927,6 +12955,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
+            source_controller: PlayerId(0),
         };
         assert!(!match_becomes_target(
             &event,
@@ -12971,6 +13000,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
+            source_controller: PlayerId(0),
         };
         assert!(!match_becomes_target(
             &event,
@@ -13012,6 +13042,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
+            source_controller: PlayerId(0),
         };
         assert!(match_becomes_target(
             &event,
@@ -13072,6 +13103,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
+            source_controller: PlayerId(0),
         };
         // Should NOT fire because the ability (entry.id = ability_id) is controlled by PlayerId(1)
         // The other entry with different controller should not be considered
@@ -13137,6 +13169,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: pw_id,
+            source_controller: PlayerId(0),
         };
         // Should NOT fire because the ability (entry.source_id = pw_id) is controlled by PlayerId(0)
         // The trigger requires opponent control
@@ -13208,6 +13241,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: innkeepers_talent_id,
+            source_controller: PlayerId(0),
         };
         // Should NOT fire because the triggered ability is controlled by PlayerId(0)
         // The trigger requires opponent control
