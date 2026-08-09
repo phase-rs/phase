@@ -45,6 +45,7 @@
     "expand": "Rozwiń postęp rozwiązywania"
   },
   "debugCreate": {
+    "copies": "Kopie",
     "tokenPower": "Power",
     "tokenToughness": "Toughness",
     "tokenPowerPlaceholder": "Power",

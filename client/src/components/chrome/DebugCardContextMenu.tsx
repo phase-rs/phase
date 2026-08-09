@@ -8,7 +8,6 @@ import type {
   ObjectId,
   Zone,
 } from "../../adapter/types";
-import { formatCounterType } from "../../viewmodel/cardProps";
 import { useGameStore } from "../../stores/gameStore";
 import { useUiStore } from "../../stores/uiStore";
 import { useGameDispatch } from "../../hooks/useGameDispatch";
@@ -252,7 +251,7 @@ function DebugCardContextMenuInner({
                 ? [
                     <CounterRow
                       key={counterType}
-                      label={formatCounterType(counterType)}
+                      label={counterType}
                       objectId={objectId}
                       counterType={counterType}
                       current={current}

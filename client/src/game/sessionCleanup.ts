@@ -31,6 +31,7 @@ export function clearPromptOverlayState(): void {
   useUiStore.getState().setAttachmentFanHost(null);
   useUiStore.getState().setMobileHandGesture(null);
   useUiStore.getState().resetDiceRoll();
+  useUiStore.getState().resetScryOutcome();
   // The per-game "Manual mana" toggle must never leak into the next game.
   useUiStore.getState().setManualManaOverride(false);
   // The ephemeral hand hide-filter is a per-game focus aid — reset it too.

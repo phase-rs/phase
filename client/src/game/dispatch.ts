@@ -9,7 +9,7 @@ import type { AnimationStep } from "../animation/types";
 import { audioManager } from "../audio/AudioManager";
 import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { debugLog } from "./debugLog";
-import { flashInGameRolls } from "./diceContest";
+import { flashCompletedScry, flashInGameRolls } from "./diceContest";
 import i18n from "../i18n";
 import { useAnimationStore } from "../stores/animationStore";
 import { useAppNotificationStore } from "../stores/appToastStore";
@@ -505,6 +505,7 @@ async function processAction(
   // way the turn banner bypasses the animation queue. These events are marked
   // NON_VISUAL so normalizeEvents skips them below.
   flashInGameRolls(events);
+  flashCompletedScry(events);
 
   // 6. Normalize events into animation steps
   const pacingMultipliers = usePreferencesStore.getState().pacingMultipliers;

@@ -2424,6 +2424,17 @@ export type PlanarDieFace = "Planeswalk" | "Chaos" | "Blank";
 
 // ── Game Events (discriminated union, tag="type", content="data") ────────
 
+/** Exact serde spellings of the engine's `PlayerActionKind` enum. */
+export type PlayerActionKind =
+  | "AcceptedOptionalEffect"
+  | "SearchedLibrary"
+  | "Scry"
+  | "Surveil"
+  | "CollectEvidence"
+  | "ShuffledLibrary"
+  | "Proliferate"
+  | "Investigate";
+
 export type GameEvent =
   | { type: "GameStarted" }
   | {
@@ -2470,7 +2481,7 @@ export type GameEvent =
       type: "PlayerPerformedAction";
       data: {
         player_id: PlayerId;
-        action: string;
+        action: PlayerActionKind;
         look_count?: number;
         scry_bottom_count?: number;
         scry_top_count?: number;

@@ -131,4 +131,18 @@ describe("mergeDeckCollections", () => {
       { id: "cloud-folder", name: "Cloud", order: 0 },
     ]);
   });
+
+  it("does not merge malformed cloud folder or deck metadata entries", () => {
+    const local = backup({ Local: "local" });
+    local.deckMetadata = JSON.stringify({ Local: { addedAt: 1 } });
+    local.deckFolders = JSON.stringify([{ id: "local-folder", name: "Local", order: 0 }]);
+    const cloud = backup({ Remote: "remote" });
+    cloud.deckMetadata = JSON.stringify({ Remote: null });
+    cloud.deckFolders = JSON.stringify([{ id: 42, name: "Invalid", order: 0 }]);
+
+    const merged = mergeDeckCollections(local, cloud);
+
+    expect(merged.deckMetadata).toBe(local.deckMetadata);
+    expect(merged.deckFolders).toBe(local.deckFolders);
+  });
 });
