@@ -24,6 +24,7 @@ export function GameCardPreview() {
 
   const inspectedObjectId = useUiStore((s) => s.inspectedObjectId);
   const inspectedFaceIndex = useUiStore((s) => s.inspectedFaceIndex);
+  const previewPlacement = useUiStore((s) => s.previewPlacement);
   const isDragging = useUiStore((s) => s.isDragging);
   const shiftHeld = useUiStore((s) => s.shiftHeld);
   // Card-preview behavior preference. In "shift" mode the preview only renders
@@ -59,7 +60,7 @@ export function GameCardPreview() {
       cardName={previewSuppressed ? null : inspectedCardName}
       objectId={inspectedObj?.id ?? null}
       backFaceName={previewSuppressed ? null : inspectedOtherFaceName}
-      dockSide={cardPreviewMode === "side"}
+      dockSide={cardPreviewMode === "side" || previewPlacement === "side"}
       handSourceObjectId={inspectedObj?.zone === "Hand" ? inspectedObj.id : null}
     />
   );

@@ -9,7 +9,7 @@ members = ["crates/*"]
 exclude = ["client/src-tauri", "lobby-worker/broker-wasm"]
 
 [workspace.package]
-version = "0.44.0"
+version = "0.48.0"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
@@ -52,23 +52,20 @@ split-debuginfo = "unpacked"
 # Measured on the linked artifact:
 #   readelf --debug-dump=info target/debug/ai-gate | grep -A1 'GNU C23'
 # reported `-O0` for exactly that file before this override and `-O2` after it.
-# This is NOT a no-op on the gates' payloads, and the honest statement of why is worth
-# more than a clean claim. The AI reads the wall clock on its live decision path:
-# `phase-ai/src/projection.rs:110` is `TIME_CAP = 15ms` and `:139-142` bails on it, and
-# unlike `search.rs`'s and `planner/mod.rs`'s deadlines it is NOT gated on measurement
-# mode. It is reachable at the gate's default `AiDifficulty::Medium` — registry.rs
-# registers `EvasionRemovalPriorityPolicy` unconditionally, and its `velocity_score`
-# calls `AiSession::get_or_project` → `project_to`, with the `projection_min_budget_ms`
-# guard bypassed because a measurement-mode `Deadline` reports no remaining budget to
-# compare against. A bail scores 0.0 where a completed projection scores up to +3.0, and
-# that term picks the removal target. So making allocation faster lets more projections
-# finish, which can change a target, a board, a winner and every counter downstream.
-# That hazard is pre-existing and profile-wide (it fires on any faster or slower host);
-# this override does not create it and cannot avoid it. It is recorded here because the
-# obvious "allocator changes are invisible" claim is false, and the fix — gating
-# `TIME_CAP` on measurement mode the way `search.rs:2012` does — belongs in its own
-# change with its own baseline sign-off. `RandomState` (#4878) is a separate,
-# already-documented source and is seeded from OS randomness, not allocation addresses.
+# This override is still not *provably* payload-neutral, but the one known
+# mechanism is now closed. The AI used to read the wall clock on its live decision
+# path: `phase-ai/src/projection.rs` bailed a projection after a 15 ms wall-clock
+# budget, and — unlike `search.rs`'s and `planner/mod.rs`'s deadlines — that
+# budget was the one still missing the measurement-mode carve-out, so a faster
+# allocator let more projections finish and could change a target, a board, a
+# winner and every counter downstream. That is fixed:
+# `projection::projection_deadline` returns `Deadline::none()` under
+# `ExecutionMode::Measurement`, mirroring the other two, so the gates' payloads no
+# longer contain a decision-affecting wall-clock read that allocation speed can
+# move. What remains host-variable on the measurement path is `RandomState`
+# iteration order (#4878), which is seeded from OS randomness, not allocation
+# addresses. This block is kept because the obvious "allocator changes are
+# invisible" claim was false once and the record is worth more than a clean claim.
 # Scoped to the one package so nothing else loses debug fidelity.
 [profile.dev.package.libmimalloc-sys]
 opt-level = 2

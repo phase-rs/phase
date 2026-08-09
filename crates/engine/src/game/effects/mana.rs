@@ -707,6 +707,23 @@ fn resolve_mana_types_impl(
                 (None, None) => Vec::new(),
             }
         }
+        // CR 106.1b + CR 106.5: Jeweled Amulet — "Add one mana of this
+        // artifact's last noted type." Unlike `ChosenColor` (a
+        // player-prompted `ManaColor`), the noted value is engine-set
+        // (`Effect::NoteManaSpent`) and `ManaType`-valued (colorless is a
+        // real noted type per the card's ruling). A card in this class always
+        // notes exactly one type — its cost's own generic mana is spent as a
+        // single unit-worth of one type — so, mirroring `AnyOneColor`'s
+        // repeat-by-count idiom, the first noted type repeats `count` times.
+        // No noted type (never activated the noting ability, or a fresh
+        // incarnation after a zone change) produces no mana.
+        ManaProduction::NotedType { count } => {
+            let amount = resolve_count(count, state, ability, controller, source_id);
+            match noted_mana_type_for(state, source_id) {
+                Some(mana_type) => vec![mana_type; amount],
+                None => Vec::new(),
+            }
+        }
         // CR 106.7: Produce mana of any color that a land an opponent controls could produce.
         // Delegates to mana_sources::opponent_land_color_options for the shared computation.
         ManaProduction::OpponentLandColors { count } => {
@@ -996,6 +1013,21 @@ pub(crate) fn chosen_color_for_mana(
                     _ => None,
                 })
         })
+}
+
+/// CR 106.1b: The first mana type noted by a past `Effect::NoteManaSpent`
+/// resolution on `source_id` ("this artifact's last noted type" — Jeweled
+/// Amulet). Unlike `chosen_color_for_mana`, this is never player-prompted —
+/// engine-set state only, with no `last_named_choice` fallback.
+pub(crate) fn noted_mana_type_for(
+    state: &GameState,
+    source_id: crate::types::identifiers::ObjectId,
+) -> Option<ManaType> {
+    state
+        .objects
+        .get(&source_id)
+        .and_then(|obj| obj.noted_mana_spent())
+        .and_then(|types| types.first().copied())
 }
 
 /// Convert a ManaColor to the runtime ManaType.

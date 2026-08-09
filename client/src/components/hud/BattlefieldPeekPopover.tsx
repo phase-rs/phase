@@ -58,6 +58,9 @@ export function BattlefieldPeekPopover({
   // Threaded into groupByName so the peek renders `∞` (not `×N`) exactly like the
   // main board (see buildPlayerBattlefieldView in gameStateView.ts).
   const unboundedPile = useGameStore((s) => s.gameState?.derived?.unbounded_pile);
+  // CR 122.1: the engine's counter-display projection is part of the group IDENTITY, so the peek
+  // splits exactly where the main board does. Store-owned ref or `undefined` — no allocation.
+  const counterDisplay = useGameStore((s) => s.gameState?.derived?.counter_display);
   if (!battlefield || !objects) return null;
 
   const owned = battlefield
@@ -82,7 +85,7 @@ export function BattlefieldPeekPopover({
     .map((id) => objects[id])
     .filter((obj): obj is NonNullable<typeof obj> => obj != null);
   const unboundedPileIds = new Set(unboundedPile ?? []);
-  const groups = groupByName(candidateObjects, undefined, unboundedPileIds);
+  const groups = groupByName(candidateObjects, undefined, unboundedPileIds, counterDisplay);
   // Sort legal targets to the front during targeting so the cap can never
   // hide a card the player needs to see. In idle mode the order from
   // `partitionByType` (creatures → planeswalkers → support) is preserved

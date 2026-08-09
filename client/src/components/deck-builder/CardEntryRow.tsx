@@ -5,7 +5,7 @@ import type { DeckEntry } from "../../services/deckParser";
 import type { ParsedItem, UnsupportedCard } from "../../services/deckCompatibility";
 import { hasAlternatePrintingsSync, resolveOracleIdSync } from "../../services/scryfall";
 import { usePrintingsLoaded } from "../../hooks/usePrintingsLoaded";
-import { mouseHoverPreview } from "./hoverPreview";
+import { mouseHoverPreview, type CardHoverHandler } from "./hoverPreview";
 
 const CATEGORY_COLORS: Record<string, string> = {
   keyword: "text-sky-400",
@@ -57,7 +57,7 @@ export interface CardEntryRowProps {
    *  permitting the increment so a not-yet-loaded limit never blocks a legal
    *  add. */
   canIncrement?: (name: string) => boolean;
-  onCardHover?: (cardName: string | null) => void;
+  onCardHover?: CardHoverHandler;
   unsupported?: UnsupportedCard;
   onChooseArt?: (cardName: string, x: number, y: number) => void;
   /** When defined and the card is commander-eligible in the current format,
@@ -117,6 +117,7 @@ export function CardEntryRow({
   const printingsLoaded = usePrintingsLoaded();
   const oracleId = printingsLoaded ? resolveOracleIdSync(entry.name) : null;
   const hasAlternates = oracleId ? hasAlternatePrintingsSync(oracleId) : false;
+  const hoverInfo = { name: entry.name, sourcePrinting: entry.sourcePrinting };
   // Labelled "→ {target}" pill when the destination name is known (deck
   // builder); bare directional arrow otherwise (BO3 sideboard modal). The
   // labelled variant widens to fit text, so it overrides the square sizing.
@@ -147,8 +148,8 @@ export function CardEntryRow({
             own actions. */}
         <span
           className={`${unsupported ? "text-amber-200/80" : "text-gray-300"} ${onCardHover ? "cursor-pointer" : ""}`}
-          onClick={() => onCardHover?.(entry.name)}
-          {...mouseHoverPreview(onCardHover, entry.name)}
+          onClick={() => onCardHover?.(hoverInfo)}
+          {...mouseHoverPreview(onCardHover, hoverInfo)}
         >
           <span className="mr-1 text-gray-500">{entry.count}x</span>
           {entry.name}

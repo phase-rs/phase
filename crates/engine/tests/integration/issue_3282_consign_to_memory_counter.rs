@@ -99,6 +99,7 @@ fn stack_with_counter_targets() -> (GameState, ObjectId, ObjectId, ObjectId, Obj
             source_name: String::new(),
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         },
     });
 

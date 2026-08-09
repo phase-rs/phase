@@ -38,6 +38,10 @@ pub fn resolve(
         .take(count)
         .copied()
         .collect::<Vec<_>>();
+    state.remember_card_identities(
+        crate::game::turn_control::decision_audience_for_player(state, player),
+        &cards,
+    );
 
     if count == 1 {
         // Only one card — must manifest it (no choice needed)

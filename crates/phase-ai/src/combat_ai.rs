@@ -17,10 +17,10 @@ use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
-use crate::config::AiProfile;
+use crate::config::{AiConfig, AiProfile, ExecutionMode};
 use crate::damage_reflection::has_damage_reflection_to_controller;
 use crate::eval::{evaluate_creature, threat_level};
-use crate::projection::{project_to, Projection, ProjectionHorizon};
+use crate::projection::{project_to, projection_deadline, Projection, ProjectionHorizon};
 use crate::session::AiSession;
 
 /// Block-legality static slices collected once per combat decision and threaded
@@ -74,6 +74,45 @@ enum CombatObjective {
     Stabilize,
     PreserveAdvantage,
     Race,
+}
+
+/// Whether the attacker heuristic may spend an opponent-turn projection on
+/// crackback analysis, and the execution regime that projection runs under.
+///
+/// The regime travels with the permission so the two cannot drift: a caller
+/// cannot enable lookahead without stating a regime, and a caller that disables
+/// it never has to invent one (`search::deterministic_combat_choice` has no
+/// `AiConfig` at all). Replaces a `combat_lookahead: bool` that could express
+/// only half the decision.
+///
+/// Carries `ExecutionMode`, NOT a `Deadline`, deliberately: a `Deadline`
+/// snapshots an absolute instant at construction, and this value is built as an
+/// argument at `search::deterministic_choice` — before this function's opponent
+/// enumeration, must-attack sweep, `adversarial_swarm_witness` reducer replay,
+/// block-legality collection and per-candidate `defender_best_block` loop have
+/// run. Anchoring the 15 ms budget there would let that prologue consume it and
+/// silently disable CEDH crackback lookahead on a large board. The `Deadline` is
+/// therefore constructed at the point of use, below.
+#[derive(Debug, Clone, Copy)]
+pub enum CombatLookahead {
+    Disabled,
+    Enabled { execution_mode: ExecutionMode },
+}
+
+impl CombatLookahead {
+    /// `AiConfig::combat_lookahead` decides permission; `execution_mode` travels
+    /// with it so the measurement carve-out reaches the projection. Only CEDH
+    /// enables this today, but `cargo ai-gate --difficulty cedh` is a supported
+    /// invocation, so the carve-out must hold here too.
+    pub fn from_config(config: &AiConfig) -> Self {
+        if config.combat_lookahead {
+            Self::Enabled {
+                execution_mode: config.execution_mode,
+            }
+        } else {
+            Self::Disabled
+        }
+    }
 }
 
 fn emit_attack_trace(
@@ -142,7 +181,7 @@ pub fn choose_attackers_with_targets(
         state,
         player,
         &AiProfile::default(),
-        false,
+        CombatLookahead::Disabled,
         None,
         None,
         None,
@@ -153,7 +192,7 @@ pub fn choose_attackers_with_targets_with_profile(
     state: &GameState,
     player: PlayerId,
     profile: &AiProfile,
-    combat_lookahead: bool,
+    lookahead: CombatLookahead,
     valid_attacker_ids: Option<&[ObjectId]>,
     valid_attack_targets: Option<&[AttackTarget]>,
     session: Option<&AiSession>,
@@ -340,32 +379,43 @@ pub fn choose_attackers_with_targets_with_profile(
         // crackback_damage sees scaled creatures (Ouroboroid class) and
         // attack-trigger pumps (Battle Cry, Mentor). Failure to project
         // falls through to current state — matches pre-projection behavior.
-        let projection: Option<Arc<Projection>> = if combat_lookahead {
-            match session {
-                // Session present: route through the per-game projection cache
-                // (turn-scoped key; identical result to project_to on a miss,
-                // cached on subsequent identical combat decisions this turn).
-                Some(session) => session
-                    .get_or_project(
+        let projection: Option<Arc<Projection>> = match lookahead {
+            CombatLookahead::Disabled => None,
+            CombatLookahead::Enabled { execution_mode } => {
+                // Constructed HERE, not at the caller: `Deadline::after` snapshots
+                // an absolute instant, and everything above in this function
+                // (must-attack sweep, adversarial_swarm_witness reducer replay,
+                // block-legality slices, per-candidate defender_best_block) would
+                // otherwise run inside the 15 ms projection budget.
+                let deadline = projection_deadline(execution_mode);
+                match session {
+                    // Session present: route through the per-game projection cache
+                    // (turn-scoped key; identical result to project_to on a miss,
+                    // cached on subsequent identical combat decisions this turn).
+                    Some(session) => session
+                        .get_or_project(
+                            state,
+                            player,
+                            opponents[0],
+                            ProjectionHorizon::OpponentAttackersDeclared,
+                            deadline,
+                        )
+                        .ok(),
+                    // No session: the planner's production quiescence loop, the
+                    // public `choose_attackers_with_targets` wrapper, and tests.
+                    // Fall back to the free projection, wrapped in Arc to unify
+                    // the branch type.
+                    None => project_to(
                         state,
                         player,
                         opponents[0],
                         ProjectionHorizon::OpponentAttackersDeclared,
+                        deadline,
                     )
-                    .ok(),
-                // No session (public wrappers, tests): fall back to the free
-                // projection, wrapped in Arc to unify the branch type.
-                None => project_to(
-                    state,
-                    player,
-                    opponents[0],
-                    ProjectionHorizon::OpponentAttackersDeclared,
-                )
-                .ok()
-                .map(Arc::new),
+                    .ok()
+                    .map(Arc::new),
+                }
             }
-        } else {
-            None
         };
         let cb_damage = crackback_damage(
             state,
@@ -3505,7 +3555,7 @@ mod tests {
             runner.state(),
             PlayerId(0),
             &AiProfile::default(),
-            false,
+            CombatLookahead::Disabled,
             Some(&valid_attacker_ids),
             Some(&valid_attack_targets),
             None,
@@ -3571,7 +3621,7 @@ mod tests {
             runner.state(),
             PlayerId(0),
             &AiProfile::default(),
-            false,
+            CombatLookahead::Disabled,
             Some(&valid_attacker_ids),
             Some(&valid_attack_targets),
             None,
@@ -3646,7 +3696,7 @@ mod tests {
                 runner.state(),
                 PlayerId(0),
                 &AiProfile::default(),
-                false,
+                CombatLookahead::Disabled,
                 Some(&valid_attacker_ids),
                 Some(&valid_attack_targets),
                 None,
@@ -3699,7 +3749,7 @@ mod tests {
                 runner.state(),
                 PlayerId(0),
                 &AiProfile::default(),
-                false,
+                CombatLookahead::Disabled,
                 Some(&valid_attacker_ids),
                 Some(&valid_attack_targets),
                 None,
@@ -3782,7 +3832,7 @@ mod tests {
                 runner.state(),
                 PlayerId(0),
                 &AiProfile::default(),
-                false,
+                CombatLookahead::Disabled,
                 Some(&valid_attacker_ids),
                 Some(&valid_attack_targets),
                 None,
@@ -3839,7 +3889,7 @@ mod tests {
                 runner.state(),
                 PlayerId(0),
                 &AiProfile::default(),
-                false,
+                CombatLookahead::Disabled,
                 Some(&valid_attacker_ids),
                 Some(&valid_attack_targets),
                 None,
@@ -3867,7 +3917,7 @@ mod tests {
             &state,
             PlayerId(0),
             &AiProfile::default(),
-            false,
+            CombatLookahead::Disabled,
             None,
             Some(&targets),
             None,
@@ -3902,7 +3952,7 @@ mod tests {
             &state,
             PlayerId(0),
             &AiProfile::default(),
-            false,
+            CombatLookahead::Disabled,
             None,
             Some(&targets),
             None,
@@ -3928,7 +3978,7 @@ mod tests {
             &state,
             PlayerId(0),
             &AiProfile::default(),
-            false,
+            CombatLookahead::Disabled,
             None,
             Some(&targets),
             None,
@@ -3957,7 +4007,7 @@ mod tests {
             &state,
             PlayerId(0),
             &AiProfile::default(),
-            false,
+            CombatLookahead::Disabled,
             None,
             Some(&targets),
             None,
@@ -3987,7 +4037,7 @@ mod tests {
             &state,
             PlayerId(0),
             &AiProfile::default(),
-            false,
+            CombatLookahead::Disabled,
             None,
             Some(&targets),
             None,
@@ -4037,7 +4087,10 @@ mod tests {
             &state,
             PlayerId(0),
             &profile,
-            /* combat_lookahead = */ true,
+            /* lookahead = */
+            CombatLookahead::Enabled {
+                execution_mode: ExecutionMode::Interactive,
+            },
             None,
             None,
             Some(&session),
@@ -4078,7 +4131,7 @@ mod tests {
             &state,
             PlayerId(0),
             &profile,
-            /* combat_lookahead = */ false,
+            /* lookahead = */ CombatLookahead::Disabled,
             None,
             None,
             Some(&session),
@@ -4103,7 +4156,10 @@ mod tests {
             &state,
             PlayerId(0),
             &profile,
-            /* combat_lookahead = */ true,
+            /* lookahead = */
+            CombatLookahead::Enabled {
+                execution_mode: ExecutionMode::Interactive,
+            },
             None,
             None,
             Some(&AiSession::empty()),
@@ -4112,7 +4168,10 @@ mod tests {
             &state,
             PlayerId(0),
             &profile,
-            /* combat_lookahead = */ true,
+            /* lookahead = */
+            CombatLookahead::Enabled {
+                execution_mode: ExecutionMode::Interactive,
+            },
             None,
             None,
             None,
@@ -4121,6 +4180,73 @@ mod tests {
         assert_eq!(
             with_session, without_session,
             "session-cached projection must yield the identical attacker decision as the free path"
+        );
+    }
+
+    /// T5a + T5b — `CombatLookahead::from_config` binds two authorities into one
+    /// value, and each must survive the binding.
+    ///
+    /// T5a (regime survives): the CEDH preset is the only one enabling combat
+    /// lookahead, so it is the only config that can carry a regime here. Its
+    /// measurement variant must arrive as `Enabled { execution_mode }` with the
+    /// measurement regime intact — `from_config` hardcoding
+    /// `ExecutionMode::Interactive` turns this red, and that is exactly the bug
+    /// that would leave the gate reading the wall clock at `--difficulty cedh`.
+    ///
+    /// T5b (permission dominates): with `combat_lookahead == false` the result
+    /// is `Disabled` in BOTH regimes, so measurement mode cannot smuggle a
+    /// projection into a tier that never takes one.
+    #[test]
+    fn combat_lookahead_from_config_carries_execution_mode() {
+        use crate::config::{create_config, AiDifficulty, Platform};
+
+        // T5a.
+        let cedh = create_config(AiDifficulty::CEDH, Platform::Native);
+        assert!(
+            cedh.combat_lookahead,
+            "T5a precondition: CEDH must be the tier that enables combat lookahead — if this \
+             preset changes, this test is measuring the wrong config"
+        );
+        let measured = CombatLookahead::from_config(&cedh.clone().into_measurement(1));
+        assert!(
+            matches!(
+                measured,
+                CombatLookahead::Enabled { execution_mode } if execution_mode.is_measurement()
+            ),
+            "a measurement CEDH config must produce Enabled carrying the measurement regime; \
+             got {measured:?}"
+        );
+        let interactive = CombatLookahead::from_config(&cedh);
+        assert!(
+            matches!(
+                interactive,
+                CombatLookahead::Enabled { execution_mode } if !execution_mode.is_measurement()
+            ),
+            "an interactive CEDH config must produce Enabled carrying the interactive regime; \
+             got {interactive:?}"
+        );
+
+        // T5b — the permission axis dominates in both regimes.
+        let medium = create_config(AiDifficulty::Medium, Platform::Native);
+        assert!(
+            !medium.combat_lookahead,
+            "T5b precondition: Medium must NOT enable combat lookahead — a future preset flip \
+             must fail loudly here rather than pass silently"
+        );
+        assert!(
+            matches!(
+                CombatLookahead::from_config(&medium),
+                CombatLookahead::Disabled
+            ),
+            "combat_lookahead == false must map to Disabled in interactive mode"
+        );
+        assert!(
+            matches!(
+                CombatLookahead::from_config(&medium.into_measurement(1)),
+                CombatLookahead::Disabled
+            ),
+            "combat_lookahead == false must map to Disabled in measurement mode too — \
+             measurement must not enable a projection the tier never takes"
         );
     }
 }

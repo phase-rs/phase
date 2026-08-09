@@ -13,6 +13,8 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { PrintingEntry } from "../scryfall.ts";
+
 const REPO_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../../../..",
@@ -1071,7 +1073,9 @@ curl() {
 ${mvDef}${validatorDef}scryfall_download "https://example.invalid/data.json" "${dest}"${validatorArg} 2> "${stderr}"
 echo "RC=$?"
 echo "MV_CALLED=\${MV_CALLED:-0}"
-echo "TMP_COUNT=$(ls -1 "${dest}".* 2>/dev/null | wc -l)"
+# BSD wc -l left-pads its count ("       0") where GNU wc -l does not, so strip
+# the padding here to keep the TMP_COUNT= assertions exact on macOS and Linux.
+echo "TMP_COUNT=$(ls -1 "${dest}".* 2>/dev/null | wc -l | tr -d '[:space:]')"
 `;
 
     const out = execFileSync("bash", ["-c", finalScript], {
@@ -1329,4 +1333,172 @@ esac
       });
     },
   );
+});
+
+describe("localized card art", () => {
+  // Real five-segment `cards.scryfall.io` shape. As with the size-derivation
+  // suite above, the `makeLocalDataMap` fixture is deliberately NOT reused: its
+  // one-segment `https://img.example/<Name>.jpg` URLs are not localizable, so
+  // every assertion here would pass vacuously against them.
+  const EN_ID = "0dbac7ce-a6fa-466e-b6ba-173cf2dec98e";
+  const DE_ID = "345a1cf0-e4de-42a9-9c72-ed16826b9067";
+  const UNMAPPED_ID = "11111111-2222-3333-4444-555555555555";
+
+  const cardUrl = (id: string, size = "normal", face = "front", query = "") =>
+    `https://cards.scryfall.io/${size}/${face}/${id[0]}/${id[1]}/${id}.jpg${query}`;
+
+  const printing = (id: string, query = ""): PrintingEntry => ({
+    id,
+    set: "mid",
+    set_name: "Innistrad: Midnight Hunt",
+    collector_number: "7",
+    released_at: "2021-09-24",
+    border_color: "black",
+    frame_effects: [],
+    full_art: false,
+    faces: [
+      { normal: cardUrl(id, "normal", "front", query), art_crop: cardUrl(id, "art_crop") },
+      { normal: cardUrl(id, "normal", "back", query), art_crop: cardUrl(id, "art_crop", "back") },
+    ],
+  });
+
+  function stubLocaleArt(map: Record<string, string>) {
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(map), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("swaps the image to the localized printing, keeping the chosen printing", async () => {
+    const mod = await loadScryfallModule();
+    stubLocaleArt({ [EN_ID]: DE_ID });
+    await mod.loadLocaleArt("de");
+
+    const resolved = mod.resolvePrintingImageUrl(printing(EN_ID), 0, "normal");
+
+    expect(resolved).toBe(cardUrl(DE_ID));
+    // Non-vacuity: a no-op `localizeImageUrl` would return the English URL.
+    expect(resolved).not.toBe(cardUrl(EN_ID));
+  });
+
+  it("keeps English art when the printing has no localized sibling", async () => {
+    const mod = await loadScryfallModule();
+    stubLocaleArt({ [EN_ID]: DE_ID });
+    await mod.loadLocaleArt("de");
+
+    // Reach guard FIRST: prove the map actually loaded and the lookup runs.
+    // Without this, a failed fetch (empty map) would make the real assertion
+    // below pass for entirely the wrong reason.
+    expect(mod.resolvePrintingImageUrl(printing(EN_ID), 0, "normal")).toBe(cardUrl(DE_ID));
+
+    expect(mod.resolvePrintingImageUrl(printing(UNMAPPED_ID), 0, "normal")).toBe(
+      cardUrl(UNMAPPED_ID),
+    );
+  });
+
+  it("localizes the back face and the art crop", async () => {
+    const mod = await loadScryfallModule();
+    stubLocaleArt({ [EN_ID]: DE_ID });
+    await mod.loadLocaleArt("de");
+
+    // A localized Scryfall id addresses the whole printing; front/back is a path
+    // segment, so one mapping covers both faces of a DFC.
+    expect(mod.resolvePrintingImageUrl(printing(EN_ID), 1, "normal")).toBe(
+      cardUrl(DE_ID, "normal", "back"),
+    );
+    expect(mod.resolvePrintingImageUrl(printing(EN_ID), 0, "art_crop")).toBe(
+      cardUrl(DE_ID, "art_crop"),
+    );
+  });
+
+  it("is a no-op for English", async () => {
+    const mod = await loadScryfallModule();
+    stubLocaleArt({ [EN_ID]: DE_ID });
+    await mod.loadLocaleArt("de");
+    expect(mod.resolvePrintingImageUrl(printing(EN_ID), 0, "normal")).toBe(cardUrl(DE_ID));
+
+    // Assert the *gate*, not just the reset. `useCardImage` skips the load
+    // entirely when this reports ready, so an unconditionally-ready English
+    // would strand the German map installed and keep serving German art —
+    // `loadLocaleArt("en")` below would never run in production.
+    expect(mod.isLocaleArtReady("en")).toBe(false);
+
+    // Switching back to English must drop the map, not keep serving German art.
+    await mod.loadLocaleArt("en");
+    expect(mod.isLocaleArtReady("en")).toBe(true);
+    expect(mod.resolvePrintingImageUrl(printing(EN_ID), 0, "normal")).toBe(cardUrl(EN_ID));
+  });
+
+  it("never rewrites the card back or the placeholder", async () => {
+    const mod = await loadScryfallModule();
+    // Map the placeholder's and card back's own ids too, so the guard is doing
+    // the work rather than a lookup simply missing.
+    stubLocaleArt({ [EN_ID]: DE_ID, soon: DE_ID, "0aeebaf5-8c7d-4636-9e82-8c27447861f7": DE_ID });
+    await mod.loadLocaleArt("de");
+    expect(mod.resolvePrintingImageUrl(printing(EN_ID), 0, "normal")).toBe(cardUrl(DE_ID));
+
+    // `deriveImageUrl` is the exported probe for the same `splitSizedImageUrl`
+    // guard `localizeImageUrl` relies on; a URL it rejects is one localization
+    // also leaves alone. The placeholder must stay byte-identical or
+    // `isPlaceholderImageUrl`'s `===` stops gating the printing fallback.
+    for (const input of [mod.CARD_BACK_URL, "https://errors.scryfall.com/soon.jpg"]) {
+      expect(mod.imageUrlSize(input)).toBeNull();
+      expect(mod.deriveImageUrl(input, "small")).toBe(input);
+    }
+  });
+
+  it("reports readiness and tolerates a missing locale file", async () => {
+    const mod = await loadScryfallModule();
+    expect(mod.isLocaleArtReady("en")).toBe(true);
+    expect(mod.isLocaleArtReady("de")).toBe(false);
+
+    global.fetch = vi.fn().mockResolvedValue(new Response("", { status: 404 }));
+    await mod.loadLocaleArt("de");
+
+    // A 404 still counts as resolved — otherwise `useCardImage` would refetch on
+    // every render. Every card simply keeps its English art.
+    expect(mod.isLocaleArtReady("de")).toBe(true);
+    expect(mod.resolvePrintingImageUrl(printing(EN_ID), 0, "normal")).toBe(cardUrl(EN_ID));
+  });
+
+  it("dedupes concurrent loads of one locale into a single fetch", async () => {
+    const mod = await loadScryfallModule();
+    let settle: ((r: Response) => void) | undefined;
+    const fetchMock = vi.fn(
+      () => new Promise<Response>((resolve) => {
+        settle = resolve;
+      }),
+    );
+    global.fetch = fetchMock as unknown as typeof global.fetch;
+
+    // Both callers start while the request is still in flight. Several tiles
+    // mounting at once is the normal case, so the second must join the pending
+    // promise rather than opening its own request.
+    const first = mod.loadLocaleArt("de");
+    const second = mod.loadLocaleArt("de");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    settle!(
+      new Response(JSON.stringify({ [EN_ID]: DE_ID }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    const [mapA, mapB] = await Promise.all([first, second]);
+
+    // Same Map instance, so the body was parsed once and both callers observe
+    // one shared map rather than two equal copies.
+    expect(mapA).toBe(mapB);
+    expect(mapA.get(EN_ID)).toBe(DE_ID);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Reach guard: the deduped map is the one that actually got installed, so
+    // the identity assertions above are not describing a map nobody uses.
+    expect(mod.resolvePrintingImageUrl(printing(EN_ID), 0, "normal")).toBe(cardUrl(DE_ID));
+  });
 });

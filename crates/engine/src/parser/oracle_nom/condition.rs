@@ -1248,6 +1248,11 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
             StaticCondition::HasCityBlessing,
             tag("you have the city's blessing"),
         ),
+        // CR 702.195a-b: Storied grants the enduring story player designation.
+        value(
+            StaticCondition::HasEnduringStory,
+            tag("you have an enduring story"),
+        ),
         // CR 702.178a / CR 702.179f: Speed conditions.
         value(
             StaticCondition::HasMaxSpeed,
@@ -8032,11 +8037,31 @@ fn parse_exiled_with_source_self_ref(input: &str) -> OracleResult<'_, &str> {
     .parse(input)
 }
 
+/// CR 406.6 + CR 607.2a + CR 603.4: presence/absence gate over the source's
+/// linked-exile pool. Two grammatical surfaces, one axis:
+///   subject-first  — "a card is exiled with ~" / "one or more cards are exiled with ~"  → count >= 1
+///   existential    — "there are cards exiled with ~"                                    → count >= 1
+///                    "there are no cards exiled with ~"                                 → count == 0
+/// The bare plural existential reads as "one or more" (GE 1); the "no" pole is
+/// the exact-absence check (EQ 0). Counted existentials ("there are three or
+/// more cards exiled with ~") are NOT handled here — they parse via
+/// `parse_there_are_conditions`' number path, which this arm cannot shadow
+/// (its "there are cards " / "there are no cards " tags require the literal
+/// noun immediately after "there are ").
 fn parse_card_exiled_with_source_condition(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((tag("a card is "), tag("one or more cards are "))).parse(input)?;
+    let (rest, (comparator, n)) = alt((
+        value((Comparator::GE, 1u32), tag("a card is ")),
+        value((Comparator::GE, 1u32), tag("one or more cards are ")),
+        value((Comparator::EQ, 0u32), tag("there are no cards ")),
+        value((Comparator::GE, 1u32), tag("there are cards ")),
+    ))
+    .parse(input)?;
     let (rest, _) = tag("exiled with ").parse(rest)?;
     let (rest, _) = parse_exiled_with_source_self_ref(rest)?;
-    Ok((rest, make_quantity_ge(QuantityRef::CardsExiledBySource, 1)))
+    Ok((
+        rest,
+        make_quantity_comparison(QuantityRef::CardsExiledBySource, comparator, n),
+    ))
 }
 
 /// CR 202.3 + CR 607.2a: Parse
@@ -12266,6 +12291,86 @@ mod tests {
         }
     }
 
+    // CR 406.6 + CR 607.2a + CR 603.4: bare existential-there surface of the
+    // linked-exile presence gate (Valakut Exploration, Evercoat Ursine) —
+    // "there are cards exiled with ~" reads as "one or more" (GE 1).
+    #[test]
+    fn test_there_are_cards_exiled_with_source_bare_existential() {
+        let (rest, c) = parse_inner_condition("there are cards exiled with ~").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CardsExiledBySource,
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {}
+            other => panic!("expected CardsExiledBySource GE 1, got {other:?}"),
+        }
+        // Negative sibling (reach-guarded by the positive parse above): a
+        // NON-self source is outside the linked-exile self-reference family
+        // (CR 607.2a links the pool to the source object itself).
+        assert!(
+            parse_inner_condition("there are cards exiled with that creature").is_err(),
+            "non-self source must not parse via the exiled-with-source arm"
+        );
+    }
+
+    // CR 406.6 + CR 607.2a: the "no" pole — exact absence, EQ 0 (Search the
+    // City's "Then if there are no cards exiled with this enchantment, ...").
+    #[test]
+    fn test_there_are_no_cards_exiled_with_source() {
+        let (rest, c) = parse_inner_condition("there are no cards exiled with ~").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CardsExiledBySource,
+                    },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            } => {}
+            other => panic!("expected CardsExiledBySource EQ 0, got {other:?}"),
+        }
+        // Negative siblings (reach-guarded by the positive parse above): the
+        // different-zone existential family "there are no cards in your
+        // graveyard/library" (Gorilla Titan, Immortal Coil, Living Conundrum)
+        // shares the "there are no cards " prefix but fails the "exiled with "
+        // anchor, so nom backtracks and the phrase stays coverage-honest
+        // (unparsed) instead of being silently mis-claimed.
+        assert!(
+            parse_inner_condition("there are no cards in your graveyard").is_err(),
+            "graveyard-zone existential must not be claimed by the exiled-with arm"
+        );
+        assert!(
+            parse_inner_condition("there are no cards in your library").is_err(),
+            "library-zone existential must not be claimed by the exiled-with arm"
+        );
+    }
+
+    // Adjacent-grammar sibling guard: "there are no <type>s on the
+    // battlefield" still routes to `parse_no_on_battlefield` (ObjectCount
+    // EQ 0), untouched by the exiled-with prefix axis.
+    #[test]
+    fn test_there_are_no_zombies_on_battlefield_still_routes_to_no_on_battlefield() {
+        let (rest, c) = parse_inner_condition("there are no zombies on the battlefield").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { .. },
+                    },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            } => {}
+            other => panic!("expected ObjectCount EQ 0 via parse_no_on_battlefield, got {other:?}"),
+        }
+    }
+
     // -- Combat-state predicate tests (CR 508.1k / CR 509.1g / CR 509.1h) --
 
     #[test]
@@ -13858,6 +13963,13 @@ mod tests {
         let (rest, c) = parse_inner_condition("you have the city's blessing").unwrap();
         assert_eq!(rest, "");
         assert_eq!(c, StaticCondition::HasCityBlessing);
+    }
+
+    #[test]
+    fn test_enduring_story() {
+        let (rest, condition) = parse_inner_condition("you have an enduring story").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(condition, StaticCondition::HasEnduringStory);
     }
 
     #[test]
@@ -18266,36 +18378,19 @@ mod tests {
     /// directly into the test surface.
     struct AggregateProperty(crate::types::ability::ObjectProperty);
 
-    /// CR 208.1 + CR 107.3e: Betor's first tier — "if creatures you control
-    /// have total toughness 10 or greater" must parse to a Sum-Toughness
-    /// QuantityComparison so the trigger-level intervening-if hoist works.
+    /// CR 208.1 + CR 107.3e: Betor's three tiers — "if creatures you control have
+    /// total toughness N or greater" must parse to a Sum-Toughness
+    /// QuantityComparison at every threshold, so the trigger-level intervening-if
+    /// hoist works for each tier.
     #[test]
-    fn test_creatures_you_control_have_total_toughness_ge() {
-        assert_total_property_ge(
-            "creatures you control have total toughness 10 or greater",
-            AggregateProperty(crate::types::ability::ObjectProperty::Toughness),
-            10,
-        );
-    }
-
-    /// CR 208.1: Betor's second tier — same shape with threshold 20.
-    #[test]
-    fn test_creatures_you_control_have_total_toughness_ge_20() {
-        assert_total_property_ge(
-            "creatures you control have total toughness 20 or greater",
-            AggregateProperty(crate::types::ability::ObjectProperty::Toughness),
-            20,
-        );
-    }
-
-    /// CR 208.1: Betor's third tier — same shape with threshold 40.
-    #[test]
-    fn test_creatures_you_control_have_total_toughness_ge_40() {
-        assert_total_property_ge(
-            "creatures you control have total toughness 40 or greater",
-            AggregateProperty(crate::types::ability::ObjectProperty::Toughness),
-            40,
-        );
+    fn test_creatures_you_control_have_total_toughness_ge_tiers() {
+        for threshold in [10, 20, 40] {
+            assert_total_property_ge(
+                &format!("creatures you control have total toughness {threshold} or greater"),
+                AggregateProperty(crate::types::ability::ObjectProperty::Toughness),
+                threshold,
+            );
+        }
     }
 
     /// CR 208.1: Building-block coverage — total power must parse via the same

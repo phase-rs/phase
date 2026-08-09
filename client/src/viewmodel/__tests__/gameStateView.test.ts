@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { ExileLinkKind, GameAction, GameObject, GameState, PlayerId, WaitingFor } from "../../adapter/types";
+import type { GameAction, GameObject, GameState, PlayerId, WaitingFor } from "../../adapter/types";
 import {
   buildGameObject,
   buildGameObjectWithCoreTypes,
@@ -699,11 +699,6 @@ describe("getOpponentIds", () => {
   });
 });
 
-// Issue #2889: single-player renders the raw, unredacted state, so a
-// Hideaway/Foretell face-down exile's real `name`/`printed_ref` sit on the
-// object regardless of viewer. This helper is the client-side half of the
-// engine's `hidden_facedown_exile_ids` look-permission gate
-// (crates/engine/src/game/visibility.rs, CR 406.3 + CR 702.75a + CR 702.143e).
 describe("isFaceDownExileCardVisibleToViewer", () => {
   function faceDownObject(overrides: Partial<GameObject> = {}): GameObject {
     return buildGameObjectWithCoreTypes(["Creature"], {
@@ -720,54 +715,17 @@ describe("isFaceDownExileCardVisibleToViewer", () => {
     });
   }
 
-  function stateWithSourceAndExiled(
-    source: GameObject,
-    exiled: GameObject,
-    kind: ExileLinkKind,
-  ): GameState {
-    return buildGameState({
-      objects: buildObjectMap(source, exiled),
-      exile_links: [{ exiled_id: exiled.id, source_id: source.id, kind }],
-    });
-  }
-
   it("is false for a card that isn't face down", () => {
-    const obj = faceDownObject({ face_down: false });
+    const obj = faceDownObject({ face_down: false, display_visible_to_viewer: true });
     expect(isFaceDownExileCardVisibleToViewer(buildGameState({ objects: {} }), obj, 1)).toBe(false);
   });
 
-  it("is true for the controller of the Hideaway permanent that exiled it", () => {
-    const source: GameObject = { ...faceDownObject(), id: 1, zone: "Battlefield", face_down: false };
-    const exiled = faceDownObject();
-    const state = stateWithSourceAndExiled(source, exiled, "HideawayLookable");
-    expect(isFaceDownExileCardVisibleToViewer(state, exiled, 1)).toBe(true);
-  });
+  it("uses only the engine-projected display bit", () => {
+    const visible = faceDownObject({ display_visible_to_viewer: true });
+    const hidden = faceDownObject({ display_visible_to_viewer: false, foretold: true });
+    const state = buildGameState({ objects: buildObjectMap(visible, hidden) });
 
-  it("is false for an opponent of the Hideaway permanent's controller", () => {
-    const source: GameObject = { ...faceDownObject(), id: 1, zone: "Battlefield", face_down: false };
-    const exiled = faceDownObject();
-    const state = stateWithSourceAndExiled(source, exiled, "HideawayLookable");
-    expect(isFaceDownExileCardVisibleToViewer(state, exiled, 0)).toBe(false);
-  });
-
-  it("is false for a plain TrackedBySource link even for the source's controller", () => {
-    // Bomat Courier ("(You can't look at it.)") tracks its face-down exile by
-    // source for later retrieval but grants no look-permission.
-    const source: GameObject = { ...faceDownObject(), id: 1, zone: "Battlefield", face_down: false };
-    const exiled = faceDownObject();
-    const state = stateWithSourceAndExiled(source, exiled, "TrackedBySource");
-    expect(isFaceDownExileCardVisibleToViewer(state, exiled, 1)).toBe(false);
-  });
-
-  it("is true for the owner of a foretold card", () => {
-    const exiled = faceDownObject({ owner: 0, controller: 0, foretold: true });
-    const state = buildGameState({ objects: buildObjectMap(exiled), exile_links: [] });
-    expect(isFaceDownExileCardVisibleToViewer(state, exiled, 0)).toBe(true);
-  });
-
-  it("is false for an opponent of a foretold card's owner", () => {
-    const exiled = faceDownObject({ owner: 0, controller: 0, foretold: true });
-    const state = buildGameState({ objects: buildObjectMap(exiled), exile_links: [] });
-    expect(isFaceDownExileCardVisibleToViewer(state, exiled, 1)).toBe(false);
+    expect(isFaceDownExileCardVisibleToViewer(state, visible, 1)).toBe(true);
+    expect(isFaceDownExileCardVisibleToViewer(state, hidden, 0)).toBe(false);
   });
 });

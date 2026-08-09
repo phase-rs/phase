@@ -10,7 +10,7 @@ use super::mtgjson::Ruling;
 use crate::types::card::{CardFace, CardRules, LayoutKind, PrintedCardRef};
 use crate::types::card_type::CoreType;
 
-use std::io::BufReader;
+use std::io::{BufReader, Read};
 
 #[derive(Default)]
 pub struct CardDatabase {
@@ -71,7 +71,15 @@ impl CardDatabase {
     pub fn from_export(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let file = std::fs::File::open(path)?;
         let reader = BufReader::new(file);
-        let entries: HashMap<String, CardExportEntry> = serde_json::from_reader(reader)?;
+        Self::from_export_reader(reader)
+    }
+
+    /// Load a pre-processed card-data export from an already-open reader.
+    /// Keeps compressed test fixtures on the same deserialization path as the
+    /// production file loader without changing production's buffered-file flow.
+    pub fn from_export_reader<R: Read>(reader: R) -> Result<Self, Box<dyn std::error::Error>> {
+        let entries: HashMap<String, CardExportEntry> =
+            serde_json::from_reader(BufReader::new(reader))?;
         Ok(Self::from_export_entries(entries))
     }
 

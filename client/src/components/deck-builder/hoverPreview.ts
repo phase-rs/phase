@@ -1,4 +1,7 @@
 import type { PointerEvent } from "react";
+import type { CardHoverInfo } from "../card/CardPreview";
+
+export type CardHoverHandler = (card: CardHoverInfo | null) => void;
 
 /**
  * Hover-to-preview handlers for the deck-builder card surfaces (list, stack,
@@ -21,12 +24,12 @@ import type { PointerEvent } from "react";
  *    immune: its preview is `pointer-events-none` and never the relatedTarget.)
  */
 export function mouseHoverPreview(
-  onCardHover: ((name: string | null) => void) | undefined,
-  name: string,
+  onCardHover: CardHoverHandler | undefined,
+  card: CardHoverInfo,
 ) {
   return {
     onPointerEnter: (e: PointerEvent) => {
-      if (e.pointerType === "mouse") onCardHover?.(name);
+      if (e.pointerType === "mouse") onCardHover?.(card);
     },
     onPointerLeave: (e: PointerEvent) => {
       if (e.pointerType !== "mouse") return;

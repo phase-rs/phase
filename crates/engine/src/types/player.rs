@@ -145,7 +145,8 @@ pub struct Player {
     /// CR 702.179d: The inherent speed trigger can increase speed only once each turn.
     #[serde(default)]
     pub speed_trigger_used_this_turn: bool,
-    /// CR 710.2: Number of crimes committed this turn.
+    /// CR 700.13: Whether this player has committed a crime this turn (stored
+    /// as 0 or 1 for `QuantityRef` condition evaluation).
     #[serde(default)]
     pub crimes_committed_this_turn: u32,
     /// CR 704.5b: Set when this player attempted to draw from an empty library.
@@ -163,12 +164,19 @@ pub struct Player {
     pub is_eliminated: bool,
 
     /// Avatar crossover: which bending types this player has performed this turn.
-    #[serde(default)]
+    #[serde(
+        default,
+        serialize_with = "crate::types::deterministic_serde::hash_set"
+    )]
     pub bending_types_this_turn: HashSet<BendingType>,
 
     /// CR 122.1: Player counters (experience, rad, ticket, etc.).
     /// Poison counters route to the dedicated `poison_counters` field via method accessors.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "HashMap::is_empty",
+        serialize_with = "crate::types::deterministic_serde::hash_map"
+    )]
     pub player_counters: HashMap<PlayerCounterKind, u32>,
 
     /// Phasing status. Default `Active`. While `PhasedOut`, the player is

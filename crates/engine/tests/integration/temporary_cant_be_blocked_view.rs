@@ -87,10 +87,18 @@ fn derives_only_the_live_until_end_of_turn_cant_be_blocked_attribution() {
         "the first matching live UET AddStaticMode attribution carries its battlefield source"
     );
     assert!(
+        views.cant_be_blocked.contains(&recipient),
+        "the semantic view must surface the applicable temporary CantBeBlocked grant"
+    );
+    assert!(
         !views
             .temporary_cant_be_blocked
             .contains_key(&permanent_recipient),
         "a permanent CantBeBlocked grant must not be presented as temporary"
+    );
+    assert!(
+        views.cant_be_blocked.contains(&permanent_recipient),
+        "a permanent CantBeBlocked grant remains semantically unblockable"
     );
 }
 

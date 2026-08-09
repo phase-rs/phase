@@ -83,6 +83,8 @@ describe("restoreGameState", () => {
         phase: "PreCombatMain",
         category: "Game",
         segments: [{ type: "Text", value: "old log" }],
+        // Deliberately legacy: a restored session may contain persisted log
+        // rows authored before presentation metadata existed.
       }],
       nextLogSeq: 1,
       stateHistory: [oldState],

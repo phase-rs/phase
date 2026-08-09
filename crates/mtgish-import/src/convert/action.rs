@@ -311,6 +311,7 @@ fn rewrite_bound_x_in_mana_production(
         | ManaProduction::AnyCombination { count, .. }
         | ManaProduction::AnyCombinationOfObjectColors { count, .. }
         | ManaProduction::ChosenColor { count, .. }
+        | ManaProduction::NotedType { count }
         | ManaProduction::OpponentLandColors { count }
         | ManaProduction::AnyTypeProduceableBy { count, .. }
         | ManaProduction::AnyInCommandersColorIdentity { count, .. } => {
@@ -403,6 +404,9 @@ fn rewrite_bound_x_in_ability_cost(cost: &mut AbilityCost, binding: &QuantityExp
         // CR 118.9: the borrowed keyword cost is read at runtime from the cast
         // spell's keyword — it carries no X-bound `QuantityExpr` to rewrite.
         | AbilityCost::KeywordCostOfCastSpell { .. }
+        // CR 702.21a: `count` is a fixed `u32`, not a `QuantityExpr` — no
+        // X-bound amount to rewrite.
+        | AbilityCost::GetPlayerCounters { .. }
         | AbilityCost::Unimplemented { .. } => 0,
     }
 }

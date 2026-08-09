@@ -6,13 +6,16 @@ import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { manaCostToShards } from "../../viewmodel/costLabel.ts";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
+import { AmountInput, parseAmount } from "./AmountInput.tsx";
 import { ManaSymbol } from "./ManaSymbol.tsx";
 
 /**
  * Overlay for the `WaitingFor::ChooseXValue` state.
  *
- * CR 107.1b + CR 601.2f: X must be chosen as part of determining total cost,
- * before mana is paid. The engine computes the upper bound (`max`) from the
+ * CR 107.3a + CR 601.2b: the controller of the spell chooses and announces X as part of
+ * casting it; CR 601.2f then locks in the total cost that X feeds, so the value must be
+ * settled before mana is paid. CR 107.1b (a negative number can't be chosen) is why the
+ * lower bound is never below 0. The engine computes the upper bound (`max`) from the
  * player's pool + untapped free-to-tap producers; this component is a pure
  * display layer that dispatches the caster's chosen value via `ChooseX`.
  */
@@ -31,16 +34,20 @@ export function ChooseXValueUI() {
   const pendingCast = isChooseX ? waitingFor.data.pending_cast : null;
   const xCostPreviews = isChooseX ? waitingFor.data.x_cost_previews : undefined;
 
-  const [value, setValue] = useState(0);
-  const clampedValue = Math.min(Math.max(value, min), max);
+  const [raw, setRaw] = useState(String(defaultValue));
+  const amount = parseAmount(raw, min, max);
 
   const pendingCostShards = useMemo(() => {
     if (!pendingCast) return null;
-    const previewCost = xCostPreviews?.find(([x]) => x === clampedValue)?.[1];
+    // While the entry is invalid there is no chosen X, so there is no cost to preview. Falling
+    // back to `min` here would render the mana cost of an X the caster never typed — the same
+    // defect on the display side that the commit guard below fixes on the dispatch side.
+    if (amount === null) return null;
+    const previewCost = xCostPreviews?.find(([x]) => x === amount)?.[1];
     const cost = previewCost ?? pendingCast.cost;
     const shards = manaCostToShards(cost);
     return shards.length > 0 ? shards : null;
-  }, [pendingCast, xCostPreviews, clampedValue]);
+  }, [pendingCast, xCostPreviews, amount]);
 
   const cardName = useMemo(() => {
     if (!gameState || !pendingCast) return null;
@@ -48,35 +55,36 @@ export function ChooseXValueUI() {
   }, [gameState, pendingCast]);
 
   useEffect(() => {
-    if (isChooseX) setValue(defaultValue);
-  }, [isChooseX, defaultValue]);
-
-  const clampValue = useCallback(
-    (nextValue: number) => Math.min(Math.max(nextValue, min), max),
-    [max, min],
-  );
-
-  const handleValueChange = useCallback(
-    (nextValue: number) => {
-      if (!Number.isFinite(nextValue)) return;
-      setValue(Math.min(nextValue, max));
-    },
-    [max],
-  );
+    if (isChooseX) setRaw(String(defaultValue));
+    // `pendingCast?.object_id` keys the reset on prompt IDENTITY, not just its window: a
+    // successor ChooseXValue for a DIFFERENT spell with the same [min, max] would otherwise
+    // leave `raw` holding the X chosen for the previous spell.
+    // `max` is a dependency even though it does not appear in the body: re-entering ChooseXValue
+    // with a NARROWER max but an unchanged min leaves `defaultValue` identical, so without it the
+    // effect would not fire and a now-out-of-range entry would persist with no way to self-heal.
+    // Both sibling prompts already key their reset on their full window plus their own identity
+    // fields; this closes that asymmetry. (An earlier version enumerated those arrays here — the
+    // same commit that added the seat deps made the enumeration wrong, so it names the shape
+    // instead of the members.)
+  }, [isChooseX, defaultValue, max, pendingCast?.object_id]);
 
   const handleCommit = useCallback(() => {
+    // Sanitization gate: an out-of-range X is REJECTED, not clamped. Typing 99 under max=5
+    // used to silently cast for 5 — a value the caster never chose. CR 107.3a: the controller
+    // "chooses and announces the value of X"; CR 601.2f governs total cost, not that choice.
+    if (amount === null) return;
     dispatch({
       type: "ChooseX",
-      data: { value: clampedValue },
+      data: { value: amount },
     });
-  }, [clampedValue, dispatch]);
+  }, [amount, dispatch]);
 
   const handleCancel = useCallback(() => {
     dispatch({ type: "CancelCast" });
   }, [dispatch]);
 
-  // CR 601.2f: X is chosen by the caster; opponents observe via the stack
-  // ghost entry, not an interactive panel.
+  // CR 107.3a: X is chosen and announced by the spell's controller, so only that player gets
+  // this panel; opponents observe via the stack ghost entry, not an interactive panel.
   if (!isChooseX || !canAct || !hasValidBounds) return null;
 
   return (
@@ -107,74 +115,34 @@ export function ChooseXValueUI() {
             </div>
           )}
 
-          <div className="mb-4 px-2">
-            <label className="flex items-center gap-3 text-sm text-gray-200">
-              <span className="shrink-0 font-mono text-base text-cyan-300">
-                {t("mana.xEquals", { value: clampedValue })}
-              </span>
-              <input
-                type="range"
-                min={min}
-                max={max}
-                value={clampedValue}
-                onChange={(e) => setValue(clampValue(Number(e.target.value)))}
-                className="h-2 w-full cursor-pointer appearance-none rounded-full bg-gray-700 accent-cyan-500"
-                aria-label={t("mana.chooseXAria")}
-              />
-              <span className="shrink-0 text-xs text-gray-500">
-                {min > 0 ? t("mana.minMax", { min, max }) : t("mana.maxOnly", { max })}
-              </span>
-            </label>
-            <div className="mt-3 flex items-center justify-center gap-2">
-              <button
-                type="button"
-                onClick={() => handleValueChange(clampedValue - 1)}
-                disabled={clampedValue <= min}
-                aria-label={t("mana.decreaseX")}
-                className={gameButtonClass({
-                  tone: "neutral",
-                  size: "xs",
-                  disabled: clampedValue <= min,
-                  className: "h-9 w-9 px-0 text-base",
-                })}
-              >
-                −
-              </button>
-              <input
-                type="number"
-                min={min}
-                max={max}
-                step={1}
-                inputMode="numeric"
-                value={value}
-                onChange={(e) => handleValueChange(Number(e.target.value))}
-                onBlur={() => setValue(clampedValue)}
-                aria-label={t("mana.chooseXInputAria")}
-                className="h-9 w-20 rounded-lg border border-cyan-400/30 bg-gray-950/80 px-2 text-center font-mono text-base font-semibold text-cyan-100 shadow-inner outline-none transition focus:border-cyan-300 focus:ring-2 focus:ring-cyan-400/30"
-              />
-              <button
-                type="button"
-                onClick={() => handleValueChange(clampedValue + 1)}
-                disabled={clampedValue >= max}
-                aria-label={t("mana.increaseX")}
-                className={gameButtonClass({
-                  tone: "neutral",
-                  size: "xs",
-                  disabled: clampedValue >= max,
-                  className: "h-9 w-9 px-0 text-base",
-                })}
-              >
-                +
-              </button>
-            </div>
-          </div>
+          <AmountInput
+            raw={raw}
+            onRawChange={setRaw}
+            min={min}
+            max={max}
+            onSubmit={handleCommit}
+            labels={{
+              input: t("mana.chooseXInputAria"),
+              decrease: t("mana.decreaseX"),
+              increase: t("mana.increaseX"),
+            }}
+          />
 
           <div className="flex justify-center gap-3">
             <button
               onClick={handleCommit}
-              className={gameButtonClass({ tone: "emerald", size: "md" })}
+              disabled={amount === null}
+              className={gameButtonClass({
+                tone: "emerald",
+                size: "md",
+                disabled: amount === null,
+              })}
             >
-              {t("mana.confirmX", { value: clampedValue })}
+              {/* No chosen X yet ⇒ name the action without a value. `amount ?? min` here would
+                  label the button "Confirm X = <min>" while the player has 99 typed. */}
+              {amount === null
+                ? t("mana.confirmAmount")
+                : t("mana.confirmX", { value: amount })}
             </button>
             <button
               onClick={handleCancel}
