@@ -1231,10 +1231,12 @@ fn build_populated_state(reverse: bool) -> GameState {
         .into_iter()
         .map(|player| (player, inner_order.into_iter().collect()))
         .collect();
-    state.attacked_defenders_last_turn = outer_order
-        .into_iter()
-        .map(|player| (player, inner_order.into_iter().collect()))
-        .collect();
+    state.attacked_defenders_last_turn = Box::new(
+        outer_order
+            .into_iter()
+            .map(|player| (player, inner_order.into_iter().collect()))
+            .collect(),
+    );
     state.steps_to_skip = vec![
         [
             (engine::types::Phase::PostCombatMain, 2),
@@ -1574,7 +1576,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
             [PlayerId(0), PlayerId(1)].into_iter().collect(),
         ),
     ]);
-    state.attacked_defenders_last_turn = HashMap::from([
+    state.attacked_defenders_last_turn = Box::new(HashMap::from([
         (
             PlayerId(0),
             [PlayerId(1), PlayerId(0)].into_iter().collect(),
@@ -1583,7 +1585,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
             PlayerId(1),
             [PlayerId(0), PlayerId(1)].into_iter().collect(),
         ),
-    ]);
+    ]));
     state.creature_attacked_defenders_this_turn = HashMap::from([
         (
             ObjectId(1),

@@ -14971,7 +14971,7 @@ declare_game_state! {
     /// analog of `attacked_defenders_this_turn` powering "attacked you during their
     /// last turn" (`StaticCondition::AnyPlayerAttackedYouLastTurn`).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub attacked_defenders_last_turn: HashMap<PlayerId, HashSet<PlayerId>>,
+    pub attacked_defenders_last_turn: Box<HashMap<PlayerId, HashSet<PlayerId>>>,
     /// CR 508.6 + CR 508.1b: For each creature declared as an attacker this
     /// turn, the defending players it attacked. This is the source-specific
     /// counterpart to `attacked_defenders_this_turn` for text like "each player
@@ -19455,7 +19455,7 @@ impl GameState {
             players_attacked_this_turn: HashSet::new(),
             attacking_creatures_this_turn: HashMap::new(),
             attacked_defenders_this_turn: HashMap::new(),
-            attacked_defenders_last_turn: HashMap::new(),
+            attacked_defenders_last_turn: Box::default(),
             creature_attacked_defenders_this_turn: HashMap::new(),
             combat_phases_started_this_turn: 0,
             end_steps_started_this_turn: 0,
