@@ -15991,12 +15991,12 @@ mod stage2_injector_tests {
                 // `:6210/:6287/:9475 => :6212/:6289/:9477`. The producers remain byte-identical.
                 // #7018 adds the 16-line distinct-player-scope continuation gate above all
                 // three producers: `:6212/:6289/:9477 => :6228/:6305/:9493`.
-                // Main's three-frame debug-entry resumer and #6976's three
-                // conditional-branch exclusions each shift all three by +3;
-                // neither creates an `OptionalEffect` prompt.
-                "game/effects/mod.rs:6234".to_string(),
-                "game/effects/mod.rs:6311".to_string(),
-                "game/effects/mod.rs:9499".to_string(),
+                // Main's debug-entry (+3) and counter-reproduction (+5/+10)
+                // shifts combine with #6976's three conditional-branch exclusions.
+                // None creates an `OptionalEffect` prompt.
+                "game/effects/mod.rs:6239".to_string(),
+                "game/effects/mod.rs:6316".to_string(),
+                "game/effects/mod.rs:9509".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
@@ -16639,6 +16639,7 @@ mod stage2_injector_tests {
         state.push_optional_effect_frame(crate::types::resolution::OptionalEffectFrame {
             ability: Box::new(optional),
             trigger_event: None,
+            trigger_events: Vec::new(),
             trigger_match_count: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {

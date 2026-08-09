@@ -4239,7 +4239,7 @@ fn where_x_named_cards_in_all_graveyards_uses_named_graveyard_count() {
 
 #[test]
 fn where_x_times_kicked_uses_kicker_count() {
-    let expr = parse_where_x_quantity_expression("the number of times Zethi was kicked")
+    let expr = parse_where_x_quantity_expression("the number of times this spell was kicked")
         .expect("where-X quantity");
     assert_eq!(
         expr,
@@ -50191,6 +50191,44 @@ fn glen_elendras_answer_counter_all_conjunction_parses_single_or() {
             .iter()
             .any(|s| s.mode == StaticMode::CantBeCountered),
         "CantBeCountered static must remain"
+    );
+}
+
+/// The `EnchantedPlayer` relative-player scope produced by an "attack enchanted
+/// player" trigger must bind a bare player anaphor to the defender captured at
+/// attack declaration uniformly across every "that player"/"them"
+/// resolver. `enchanted_player_anaphor_filter` is the single authority; this
+/// pins that it maps `EnchantedPlayer → DefendingPlayer` and nothing else, and that
+/// the library-owner sibling resolver (`that_player_library_filter`, the sibling
+/// of the subject.rs and damage-recipient resolvers) consults it — so "that
+/// player's library" in this trigger class belongs to that attacked player, not
+/// the attacker. Building-block guard for a latent class (no shipping card uses
+/// the library body yet).
+#[test]
+fn enchanted_player_anaphor_binding_is_shared_across_resolvers() {
+    use crate::parser::oracle_ir::context::ParseContext;
+    use crate::types::ability::{ControllerRef, TargetFilter};
+
+    // Shared authority: EnchantedPlayer → DefendingPlayer; every other scope → None.
+    assert_eq!(
+        super::subject::enchanted_player_anaphor_filter(Some(&ControllerRef::EnchantedPlayer)),
+        Some(TargetFilter::DefendingPlayer)
+    );
+    assert_eq!(
+        super::subject::enchanted_player_anaphor_filter(Some(&ControllerRef::TriggeringPlayer)),
+        None
+    );
+    assert_eq!(super::subject::enchanted_player_anaphor_filter(None), None);
+
+    // Library-owner sibling resolver honors the shared binding.
+    let ctx = ParseContext {
+        relative_player_scope: Some(ControllerRef::EnchantedPlayer),
+        ..Default::default()
+    };
+    assert_eq!(
+        super::imperative::that_player_library_filter(&ctx),
+        TargetFilter::DefendingPlayer,
+        "'that player's library' under an attack-enchanted-player scope must use the captured defender"
     );
 }
 

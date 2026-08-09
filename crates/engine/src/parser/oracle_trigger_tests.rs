@@ -9139,6 +9139,162 @@ fn trigger_intervening_if_discarded_card_has_madness() {
     );
 }
 
+/// CR 603.4 + CR 205.3: "if it's [not] a <subtype>" derives its core type from
+/// the subtype, NOT a hardcoded creature lock. Registered on the GENERAL
+/// intervening-if path, the recognizer intercepts non-creature subjects too, so a
+/// non-creature subtype ("Equipment" → artifact, "Aura" → enchantment) must build
+/// a filter with the MATCHING core type. A creature lock would make the inner
+/// filter unsatisfiable (an Equipment is never a creature) and a negated clause
+/// `Not(<never-true>)` would invert to always-true — firing FOR the very subtype
+/// it was meant to exclude. Both the negated and plain forms are checked.
+#[test]
+fn trigger_intervening_if_noncreature_subtype_derives_core_type() {
+    // Negated artifact subtype: filter must carry Artifact (not Creature) so the
+    // Not-gate is satisfiable.
+    let (_, condition) = extract_if_condition("if it's not an Equipment, draw a card");
+    let Some(TriggerCondition::Not { condition }) = condition else {
+        panic!("expected negated intervening-if, got {condition:?}");
+    };
+    let TriggerCondition::EventObjectMatchesFilter {
+        filter: TargetFilter::Typed(tf),
+    } = condition.as_ref()
+    else {
+        panic!("expected EventObjectMatchesFilter, got {condition:?}");
+    };
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Artifact),
+        "Equipment must derive the Artifact core type, not a creature lock: {:?}",
+        tf.type_filters
+    );
+    assert!(
+        !tf.type_filters.contains(&TypeFilter::Creature),
+        "Equipment filter must not be locked to Creature: {:?}",
+        tf.type_filters
+    );
+    assert!(
+        tf.type_filters
+            .contains(&TypeFilter::Subtype("Equipment".to_string())),
+        "Equipment subtype must be preserved: {:?}",
+        tf.type_filters
+    );
+
+    // Plain (non-negated) enchantment subtype: same core-type derivation.
+    let (_, condition) = extract_if_condition("if it's an Aura, draw a card");
+    let Some(TriggerCondition::EventObjectMatchesFilter {
+        filter: TargetFilter::Typed(tf),
+    }) = condition
+    else {
+        panic!("expected EventObjectMatchesFilter, got {condition:?}");
+    };
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Enchantment),
+        "Aura must derive the Enchantment core type: {:?}",
+        tf.type_filters
+    );
+    assert!(
+        !tf.type_filters.contains(&TypeFilter::Creature),
+        "Aura filter must not be locked to Creature: {:?}",
+        tf.type_filters
+    );
+}
+
+/// CR 603.4 + CR 205.3: A genuine creature subtype ("Kree", Captain Marvel) still
+/// derives the Creature core type — the core-type derivation must not regress the
+/// creature-recipient case that motivated the recognizer.
+#[test]
+fn trigger_intervening_if_creature_subtype_still_creature() {
+    let (_, condition) = extract_if_condition("if it's not a Kree, draw a card");
+    let Some(TriggerCondition::Not { condition }) = condition else {
+        panic!("expected negated intervening-if, got {condition:?}");
+    };
+    let TriggerCondition::EventObjectMatchesFilter {
+        filter: TargetFilter::Typed(tf),
+    } = condition.as_ref()
+    else {
+        panic!("expected EventObjectMatchesFilter, got {condition:?}");
+    };
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Creature),
+        "Kree must derive the Creature core type: {:?}",
+        tf.type_filters
+    );
+    assert!(
+        tf.type_filters
+            .contains(&TypeFilter::Subtype("Kree".to_string())),
+        "Kree subtype must be preserved: {:?}",
+        tf.type_filters
+    );
+}
+
+/// CR 603.4: A TRAILING subtype conditional ("<effect> ... if it's a <subtype>
+/// card" — Oathkeeper, Takeno's Daisho: "return that card ... if it's a Samurai
+/// card") is a resolution-time effect gate, NOT an intervening-if. The subtype
+/// recognizer must only fire at the leading position; a trailing clause must be
+/// left in the effect text (returned unchanged) with no trigger condition
+/// extracted, so the ability still triggers and goes on the stack unconditionally.
+#[test]
+fn trigger_trailing_subtype_conditional_is_not_intervening_if() {
+    let effect = "return that card to the battlefield under your control if it's a samurai card";
+    let (without_if, condition) = extract_if_condition(effect);
+    assert!(
+        condition.is_none(),
+        "trailing '... if it's a Samurai card' must not be lifted to a trigger \
+         condition, got {condition:?}",
+    );
+    assert_eq!(
+        without_if, effect,
+        "trailing conditional must remain in the effect text for the resolution-time gate",
+    );
+}
+
+/// CR 603.4 + CR 603.10: A recognized "if it's [not] a <subtype>" intervening-if
+/// must lower to the evaluator whose authority matches the TRIGGER KIND. For a
+/// zone-change trigger (dies/leaves — Otherworldly Escort: "when this dies, if
+/// it's not a Spirit") the subject "it" must be judged from the EVENT SNAPSHOT via
+/// `ZoneChangeObjectMatchesFilter`; for a non-zone event (Captain Marvel's
+/// `CounterAdded` "if it's not a Kree") it is judged live via
+/// `EventObjectMatchesFilter`. Routing a zone-change subject through the live
+/// matcher would judge a same-ID re-entrant, not the object that left.
+#[test]
+fn subtype_intervening_if_dispatches_by_trigger_kind() {
+    use crate::types::zones::Zone;
+
+    // Non-zone event (no trigger_zone_change): live `EventObjectMatchesFilter`.
+    let (_, non_zone) = extract_if_condition("if it's not a kree, draw a card");
+    let Some(TriggerCondition::Not { condition }) = non_zone else {
+        panic!("expected negated condition, got {non_zone:?}");
+    };
+    assert!(
+        matches!(
+            *condition,
+            TriggerCondition::EventObjectMatchesFilter { .. }
+        ),
+        "non-zone event must use the live EventObjectMatchesFilter, got {condition:?}",
+    );
+
+    // Zone-change trigger (dies): event-snapshot `ZoneChangeObjectMatchesFilter`.
+    let (_, zone_change) = extract_if_condition_with_card_name(
+        "if it's not a spirit, draw a card",
+        "",
+        None,
+        Some((Zone::Battlefield, Zone::Graveyard)),
+    );
+    let Some(TriggerCondition::Not { condition }) = zone_change else {
+        panic!("expected negated condition, got {zone_change:?}");
+    };
+    assert!(
+        matches!(
+            *condition,
+            TriggerCondition::ZoneChangeObjectMatchesFilter {
+                destination: Zone::Graveyard,
+                ..
+            }
+        ),
+        "zone-change trigger must use the event-snapshot ZoneChangeObjectMatchesFilter, \
+         got {condition:?}",
+    );
+}
+
 /// Issue #551 — The Raven Man: "At the beginning of each end step, if a
 /// player discarded a card this turn, create a 1/1 black Bird ...". The
 /// "a player" (any player) intervening-if must be hoisted as an all-players
@@ -27017,6 +27173,110 @@ fn elder_brain_they_draw_binds_to_defending_player() {
         }
         other => panic!("expected Draw, got {other:?}"),
     }
+}
+
+#[test]
+fn archnemesis_you_attack_enchanted_player_drains_enchanted_player() {
+    // CR 303.4b + CR 508.1a: "Whenever you attack enchanted player,
+    // that player loses 2 life. You draw a card and gain 2 life." must parse as a
+    // DEFENDER-scoped attack trigger (fires only when the controller attacks the
+    // enchanted player), and the "that player" anaphor in the body must resolve to
+    // the enchanted (attached) player — NOT the attacking controller. Before the
+    // fix this was a bare `YouAttack` trigger with `LoseLife { TriggeringPlayer }`,
+    // draining the controller on every attack.
+    use crate::types::ability::{Effect, QuantityExpr, TargetFilter};
+    use crate::types::triggers::AttackTargetFilter;
+    let def = parse_trigger_line(
+        "Whenever you attack enchanted player, that player loses 2 life. You draw a card and gain 2 life.",
+        "Archnemesis",
+    );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    assert_eq!(def.valid_source, Some(TargetFilter::Controller));
+    assert_eq!(def.valid_target, Some(TargetFilter::AttachedTo));
+    assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player));
+
+    let execute = def.execute.expect("execute");
+    let Effect::LoseLife { amount, target } = execute.effect.as_ref() else {
+        panic!("expected LoseLife head, got {:?}", execute.effect);
+    };
+    assert!(
+        matches!(amount, QuantityExpr::Fixed { value: 2 }),
+        "expected 2 life, got {amount:?}"
+    );
+    assert_eq!(
+        target.as_ref(),
+        Some(&TargetFilter::DefendingPlayer),
+        "'that player' must drain the captured defender, not the attacker"
+    );
+
+    // The "You draw a card and gain 2 life" tail stays on the controller.
+    let draw = execute.sub_ability.as_ref().expect("draw sub-ability");
+    assert!(
+        matches!(
+            draw.effect.as_ref(),
+            Effect::Draw {
+                target: TargetFilter::Controller,
+                ..
+            }
+        ),
+        "expected Draw{{Controller}}, got {:?}",
+        draw.effect
+    );
+    let gain = draw.sub_ability.as_ref().expect("gain-life sub-ability");
+    assert!(
+        matches!(
+            gain.effect.as_ref(),
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                ..
+            }
+        ),
+        "expected GainLife{{Controller}}, got {:?}",
+        gain.effect
+    );
+}
+
+#[test]
+fn attack_enchanted_player_binds_damage_to_them_to_declared_defender() {
+    // The "attack enchanted player" trigger
+    // class must bind a bare "them"/"they" damage recipient in the effect body to
+    // the defender captured at attack declaration, not the attacker — the same
+    // anaphor binding used for the "that player loses N life" subject form
+    // (Archnemesis, above). This exercises the damage-recipient sibling resolver
+    // (`resolve_player_anaphor_damage_recipient`, oracle_effect/lower.rs): before
+    // the shared `enchanted_player_anaphor_filter` binding it had no EnchantedPlayer
+    // arm and fell through to the trigger's "you"/Controller subject, misbinding
+    // "them" to the ATTACKER. Latent-class guard (no shipping card uses this body
+    // yet), so the assertion pins the building block, not one card.
+    use crate::types::ability::{Effect, TargetFilter};
+    let def = parse_trigger_line(
+        "Whenever you attack enchanted player, this creature deals 2 damage to them.",
+        "Testcurse",
+    );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    assert_eq!(def.valid_target, Some(TargetFilter::AttachedTo));
+
+    let execute = def.execute.expect("execute");
+    let Effect::DealDamage { target, .. } = execute.effect.as_ref() else {
+        panic!("expected DealDamage head, got {:?}", execute.effect);
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::DefendingPlayer,
+        "'them' must bind to the captured defender, not the attacker"
+    );
+}
+
+#[test]
+fn bare_you_attack_trigger_stays_you_attack_without_defender_scope() {
+    // Negative sibling of the Archnemesis fix: a bare "Whenever you attack" (any
+    // defender) must remain a `YouAttack` trigger with no `AttachedTo` defender
+    // scope — Edit 1's " enchanted player" tail guard must not over-capture the
+    // ordinary case.
+    let def = parse_trigger_line("Whenever you attack, draw a card.", "Bare Attacker");
+    assert_eq!(def.mode, TriggerMode::YouAttack);
+    assert_eq!(def.valid_target, None);
+    assert_eq!(def.attack_target_filter, None);
 }
 
 // ---------------------------------------------------------------------------

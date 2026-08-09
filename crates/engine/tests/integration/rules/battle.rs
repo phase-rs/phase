@@ -232,7 +232,7 @@ fn battle_attack_defending_player_is_protector() {
 }
 
 // ---------------------------------------------------------------------------
-// CR 310.10 + CR 704.5w + CR 704.5x: SBA protector reassignment.
+// CR 310.11 + CR 704.5w + CR 704.5x: SBA protector reassignment.
 // Multi-candidate (3+ player) branch must pause with
 // `WaitingFor::BattleProtectorChoice`; singleton (2-player) must auto-apply.
 // ---------------------------------------------------------------------------
@@ -260,7 +260,7 @@ fn battle_protector_auto_applies_with_single_candidate_2p() {
     assert!(runner.state().battlefield.contains(&battle));
 }
 
-/// CR 310.10 + CR 704.5w + CR 704.5x: In a 3-player game the controller has two
+/// CR 310.11 + CR 704.5w + CR 704.5x: In a 3-player game the controller has two
 /// legal opponents, so the SBA must pause with `BattleProtectorChoice`. Submitting
 /// `ChooseBattleProtector` assigns the chosen player via `ChosenAttribute::Player`
 /// and resumes the game.
@@ -310,7 +310,7 @@ fn battle_protector_pauses_for_choice_with_multiple_candidates_3p() {
     ));
 }
 
-/// CR 310.10: Submitting a protector that isn't in the candidate list is rejected.
+/// CR 310.11: Submitting a protector that isn't in the candidate list is rejected.
 #[test]
 fn battle_protector_choice_rejects_invalid_candidate() {
     const P2: PlayerId = PlayerId(2);
@@ -345,12 +345,12 @@ fn battle_protector_choice_rejects_invalid_candidate() {
     assert_eq!(runner.state().objects[&battle].protector(), Some(P2));
 }
 
-/// CR 310.10 / CR 704.5w: When no legal candidate exists, the battle is put
+/// CR 310.11 / CR 704.5w: When no legal candidate exists, the battle is put
 /// into its owner's graveyard. This preserves the existing 0-candidate fallback.
 #[test]
 fn battle_with_no_legal_protector_goes_to_graveyard() {
     // 2-player Siege whose only opponent (P1) has been eliminated — no legal
-    // protector exists, so CR 310.10 sends the battle to the graveyard.
+    // protector exists, so CR 310.11 sends the battle to the graveyard.
     let (mut runner, battle) = prime_siege(P0, P0, "Abandoned Siege", 3);
     runner.state_mut().eliminated_players.push(P1);
 
@@ -451,7 +451,7 @@ fn battle_protector_narrowing_to_one_auto_applies_silently() {
 }
 
 /// R4l arm 3 — the `→ 0` crossing: with every opponent phased out there is no appropriate
-/// player, and CR 310.10 / CR 704.5w put the battle into its owner's graveyard.
+/// player, and CR 310.11 / CR 704.5w put the battle into its owner's graveyard.
 ///
 /// Reached by PHASING rather than by elimination on purpose: eliminating every opponent
 /// also ends the game (`waiting_for = GameOver`), which would confound the assertions with
@@ -473,7 +473,7 @@ fn battle_protector_narrowing_to_zero_sends_the_battle_to_the_graveyard() {
     assert!(
         !matches!(runner.state().waiting_for, WaitingFor::GameOver { .. }),
         "the table must still be LIVE — reaching 0 by phasing rather than by elimination \
-         is what keeps this arm about CR 310.10 instead of about the game ending"
+         is what keeps this arm about CR 310.11 instead of about the game ending"
     );
 }
 
@@ -509,7 +509,7 @@ fn phased_protector_board(phase_out: &[PlayerId]) -> (GameRunner, ObjectId) {
     (runner, battle)
 }
 
-/// CR 310.10 + CR 704.5w: AI routing — when the 3-player SBA pauses with a
+/// CR 310.11 + CR 704.5w: AI routing — when the 3-player SBA pauses with a
 /// protector choice, `legal_actions` emits one `ChooseBattleProtector` candidate
 /// per legal opponent, so the AI has a deterministic decision surface.
 #[test]

@@ -4,8 +4,8 @@ use crate::game::game_object::GameObject;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     AbilityTag, CounterMoveSelection, CounterTransferMode, DelayedTriggerCondition, Duration,
-    Effect, EffectError, EffectKind, QuantityExpr, ResolvedAbility, TargetChoiceTiming,
-    TargetFilter, TargetRef,
+    Effect, EffectError, EffectKind, EventCounterReproductionCount, QuantityExpr, ResolvedAbility,
+    TargetChoiceTiming, TargetFilter, TargetRef,
 };
 #[cfg(test)]
 use crate::types::counter::parse_counter_type;
@@ -895,6 +895,9 @@ pub(crate) fn apply_counter_addition(
         object_id,
         counter_type,
         count,
+        // CR 122.1 + CR 603.2c: record who placed the counters so actor-gated
+        // "whenever you/an opponent put counters" triggers can match.
+        actor,
     });
 }
 
@@ -1477,13 +1480,106 @@ fn emit_evolved_event_for_counter_addition(
             GameEvent::CounterAdded {
                 object_id: added_to,
                 counter_type: CounterType::Plus1Plus1,
-                count
+                count,
+                ..
             } if *added_to == object_id && *count > 0
         )
     });
     if evolved {
         events.push(GameEvent::Evolved { object_id });
     }
+}
+
+/// CR 122.1 + CR 603.2c + CR 608.2h: Reproduce onto the effect's target(s) the
+/// counters that the triggering counter-placement event just put onto the
+/// recipient creature ("put the same number and kind of counters" / "put one of
+/// each of those kinds of counters"). The kind→count multiset is read from
+/// `state.current_trigger_events` — which, under the per-recipient firing model
+/// (`matching_counter_added_events_by_recipient`), holds exactly one recipient's
+/// `GameEvent::CounterAdded` occurrences (one per kind placed on it). Unlike
+/// `resolve_move` this reads the DELTA the event placed, not the recipient's
+/// total counter map. The multiset is snapshotted from the firing's events
+/// (CR 608.2h), so later changes to the recipient's counters don't affect it.
+pub fn resolve_reproduce_event_counters(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let per_kind_count = match &ability.effect {
+        Effect::ReproduceEventCounters { per_kind_count, .. } => *per_kind_count,
+        _ => return Ok(()),
+    };
+
+    // Fold the firing's `CounterAdded` occurrences into a kind→count multiset,
+    // preserving first-seen kind order for deterministic placement/event order.
+    let mut reproduced: Vec<(CounterType, u32)> = Vec::new();
+    for event in &state.current_trigger_events {
+        let GameEvent::CounterAdded {
+            counter_type,
+            count,
+            ..
+        } = event
+        else {
+            continue;
+        };
+        // CR 122.1: "one of each of those kinds" (PerKind) ignores the event's
+        // per-kind magnitude; "the same number and kind" (SameNumber) reproduces
+        // exactly what the event placed, summing repeated kinds.
+        let amount = match per_kind_count {
+            EventCounterReproductionCount::SameNumber => *count,
+            EventCounterReproductionCount::PerKind(n) => n,
+        };
+        if amount == 0 {
+            continue;
+        }
+        match reproduced.iter_mut().find(|(kind, _)| kind == counter_type) {
+            Some((_, existing)) => match per_kind_count {
+                // SameNumber sums repeated kinds; PerKind is a flat per-kind
+                // count, so a repeated kind stays at `n` (already recorded).
+                EventCounterReproductionCount::SameNumber => *existing += amount,
+                EventCounterReproductionCount::PerKind(_) => {}
+            },
+            None => reproduced.push((counter_type.clone(), amount)),
+        }
+    }
+
+    if reproduced.is_empty() {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
+
+    let targets = resolve_defined_or_targets(state, ability);
+    let additions: Vec<PendingCounterAddition> = targets
+        .into_iter()
+        .flat_map(|obj_id| {
+            reproduced.iter().map(move |(kind, amount)| {
+                object_counter_addition(ability.controller, obj_id, kind.clone(), *amount)
+            })
+        })
+        .collect();
+
+    let completion =
+        PendingEffectResolved::new(EffectKind::from(&ability.effect), ability.source_id);
+    for (index, addition) in additions.iter().cloned().enumerate() {
+        if !apply_object_counter_addition(state, addition, events) {
+            // CR 614: a replacement choice paused placement — stash the rest so
+            // the continuation drains them after the choice resolves.
+            stash_pending_counter_additions(state, additions[index + 1..].to_vec(), completion);
+            return Ok(());
+        }
+    }
+
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::from(&ability.effect),
+        source_id: ability.source_id,
+        subject: None,
+    });
+
+    Ok(())
 }
 
 /// CR 122.1: Place counters on all battlefield objects matching a filter (no targeting).
@@ -1751,6 +1847,10 @@ fn resolve_defined_or_targets(
     let target_spec = match &ability.effect {
         Effect::MultiplyCounter { target, .. }
         | Effect::RemoveCounter { target, .. }
+        // CR 122.1 + CR 603.2c: reproduction targets exactly like `PutCounter` —
+        // `SelfRef` short-circuits to the source (Captain Marvel), a real target
+        // falls through to the chosen-target return (Aragorn).
+        | Effect::ReproduceEventCounters { target, .. }
         | Effect::PutCounter { target, .. } => Some(target),
         _ => None,
     };
@@ -4471,6 +4571,7 @@ mod tests {
                 object_id,
                 counter_type: CounterType::Plus1Plus1,
                 count: 2,
+                ..
             } if *object_id == dest_id
         )));
     }

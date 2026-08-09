@@ -4587,16 +4587,19 @@ fn parse_enters_counter_for_each_suffix(after_counter: &str) -> Option<QuantityE
     let (rest, _) = opt(tag::<_, _, OracleError<'_>>("s"))
         .parse(after_counter)
         .ok()?;
-    // CR 614.12: the self-referential recipient is "it" for a single permanent
-    // and "them" for a distributive subject (e.g. Gev, Scaled Scorch's "Other
-    // creatures you control enter with … counter on them for each …"). Both
-    // forms precede the per-each scaling clause identically.
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>(" on it for each "),
-        tag(" on them for each "),
-    ))
-    .parse(rest)
-    .ok()?;
+    // CR 614.1c + CR 614.12: "[this permanent] enters with … counter on <pronoun>"
+    // is a replacement effect placing counters on the entering permanent(s). The
+    // self-referential recipient (it/them/him/her — Batroc the Leaper uses "him")
+    // precedes the per-each scaling clause identically for every pronoun in the
+    // set. Routed through `nom_primitives::parse_object_recipient_pronoun` (the
+    // single authority for the recipient-pronoun set) so it cannot drift.
+    let (rest, _) = (
+        tag::<_, _, OracleError<'_>>(" on "),
+        nom_primitives::parse_object_recipient_pronoun,
+        tag(" for each "),
+    )
+        .parse(rest)
+        .ok()?;
     if let Ok((rest, qty)) = parse_for_each_convoked_creature_clause(rest) {
         if rest.trim().is_empty() {
             return Some(qty);
@@ -4640,17 +4643,18 @@ fn parse_enters_base_plus_additional_for_each(
     };
 
     // Consume the optional plural "s" of the base counter word, then the base
-    // recipient ("on it"/"on them") and the " plus " bridge to the additional
-    // clause.
+    // recipient (any pronoun in `nom_primitives::parse_object_recipient_pronoun`)
+    // and the " plus " bridge to the additional clause.
     let (rest, _) = opt(tag::<_, _, OracleError<'_>>("s"))
         .parse(after_counter)
         .ok()?;
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>(" on it plus "),
-        tag(" on them plus "),
-    ))
-    .parse(rest)
-    .ok()?;
+    let (rest, _) = (
+        tag::<_, _, OracleError<'_>>(" on "),
+        nom_primitives::parse_object_recipient_pronoun,
+        tag(" plus "),
+    )
+        .parse(rest)
+        .ok()?;
 
     // Per-each multiplier M: "an additional" (M = 1) or "<N> additional" (M > 1).
     let (rest, multiplier) = alt((
@@ -9807,12 +9811,10 @@ fn parse_damage_heal_self_replacement(
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
     fn self_ref(i: &str) -> OracleResult<'_, &str> {
+        // `~` or the shared recipient-pronoun set (single authority).
         alt((
             tag::<_, _, OracleError<'_>>("~"),
-            tag("him"),
-            tag("her"),
-            tag("it"),
-            tag("them"),
+            nom_primitives::parse_object_recipient_pronoun,
         ))
         .parse(i)
     }
@@ -16191,6 +16193,67 @@ mod tests {
                 },
                 ..
             } if matches!(**inner, QuantityExpr::Ref { qty: QuantityRef::KickerCount })
+        ));
+    }
+
+    #[test]
+    fn enters_with_counter_on_him_for_each_kicked_uses_kicker_count() {
+        // Batroc the Leaper (verbatim Oracle text): a named creature that
+        // self-references with a gendered pronoun ("on him … he was kicked").
+        // The count must be the dynamic kicker count, not `Fixed { 1 }`.
+        let def = parse_replacement_line(
+            "Batroc enters with a +1/+1 counter on him for each time he was kicked.",
+            "Batroc the Leaper",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::PutCounter {
+                ref counter_type,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::KickerCount
+                },
+                target: TargetFilter::SelfRef,
+            } if *counter_type == CounterType::Plus1Plus1
+        ));
+    }
+
+    #[test]
+    fn enters_with_counter_on_her_for_each_she_kicked_uses_kicker_count() {
+        // Feminine sibling of the gendered-pronoun recipient class.
+        let def = parse_replacement_line(
+            "This creature enters with a +1/+1 counter on her for each time she was kicked.",
+            "Gendered Multikicker",
+        )
+        .unwrap();
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::PutCounter {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::KickerCount
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn enters_with_counter_on_them_for_each_they_kicked_uses_kicker_count() {
+        // Gender-neutral singular recipient ("on them … they were kicked").
+        let def = parse_replacement_line(
+            "This creature enters with a +1/+1 counter on them for each time they were kicked.",
+            "Neutral Multikicker",
+        )
+        .unwrap();
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::PutCounter {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::KickerCount
+                },
+                ..
+            }
         ));
     }
 

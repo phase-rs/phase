@@ -2560,7 +2560,7 @@ pub fn candidate_actions_broad_with_probe(
             TacticalClass::Selection,
             Some(*player),
         )],
-        // CR 310.10 + CR 704.5w + CR 704.5x: controller chooses a new protector.
+        // CR 310.11 + CR 704.5w + CR 704.5x: controller chooses a new protector.
         WaitingFor::BattleProtectorChoice {
             player, candidates, ..
         } => candidates
@@ -6255,7 +6255,7 @@ mod tests {
             .static_definitions
             .push(StaticDefinition::new(
                 crate::types::statics::StaticMode::MustAttackPlayer {
-                    player: PlayerId(1),
+                    player: PlayerId(1).into(),
                 },
             ));
         let goaded = make_creature(&mut state, 2);

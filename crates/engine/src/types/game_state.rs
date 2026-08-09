@@ -11383,7 +11383,7 @@ pub enum WaitingFor {
         /// The zone the commander is currently in (Graveyard, Exile, Hand, or Library).
         current_zone: Zone,
     },
-    /// CR 310.10 + CR 704.5w + CR 704.5x: A battle that isn't being attacked has no
+    /// CR 310.11 + CR 310.12a + CR 704.5w + CR 704.5x: A battle that isn't being attacked has no
     /// protector, an illegal protector, or (for Sieges) a protector equal to its
     /// controller. The battle's controller (`player`) chooses a legal protector from
     /// `candidates`. Emitted only when `candidates.len() > 1`; the SBA auto-applies
@@ -12359,7 +12359,7 @@ impl WaitingFor {
         self.has_pending_cast() && !matches!(self, WaitingFor::ManaSourceSelection { .. })
     }
 
-    /// CR 603.3b / CR 603.3d / CR 603.5 + CR 608.2d / CR 903.9a / CR 704.5j / CR 310.10 /
+    /// CR 603.3b / CR 603.3d / CR 603.5 + CR 608.2d / CR 903.9a / CR 704.5j / CR 310.11 /
     /// CR 703.1 + CR 117.3a + CR 704.3: the windows the ENGINE forces open before the
     /// next grant of priority. Two sources feed the class — the windows that open
     /// between (or during) a resolution and the next priority, and the turn-based
@@ -12391,9 +12391,9 @@ impl WaitingFor {
     /// * [`WaitingFor::ChooseLegend`] — CR 704.5j, the legend rule ("that player chooses
     ///   one of them") *is* a state-based action, answered inside the same CR 704.3
     ///   fixpoint before priority is granted.
-    /// * [`WaitingFor::BattleProtectorChoice`] — CR 310.10 (which says in so many words
-    ///   "This is a state-based action") + CR 704.5w / CR 704.5x, likewise answered
-    ///   inside the CR 704.3 fixpoint.
+    /// * [`WaitingFor::BattleProtectorChoice`] — CR 310.11 ("its controller chooses an
+    ///   appropriate player to be its protector ... This is a state-based action")
+    ///   + CR 704.5w / CR 704.5x, likewise answered inside the CR 704.3 fixpoint.
     ///
     /// Those SBA members (the commander-zone, legend and battle-protector choices) are
     /// the COMPLETE set of player-choice pauses `game::sba` opens inside the SBA
@@ -14996,6 +14996,18 @@ declare_game_state! {
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_map_of_hash_set")]
     pub attacked_defenders_this_turn: HashMap<PlayerId, HashSet<PlayerId>>,
+    /// CR 508.6 + CR 514.2: For each player, the defending players they declared
+    /// attackers against during that player's MOST RECENT completed turn.
+    /// Snapshotted from `attacked_defenders_this_turn` at cleanup
+    /// (`execute_cleanup`), keyed by the ending active player, overwriting so a
+    /// no-attack turn clears that player's entry while every other player's entry
+    /// persists. CR 800.4i: A departed player's entry survives until their skipped
+    /// next-turn boundary, where `start_next_turn` expires it. The "last turn"
+    /// analog of `attacked_defenders_this_turn` powering "attacked you during their
+    /// last turn" (`StaticCondition::AnyPlayerAttackedYouLastTurn`).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_map_of_hash_set")]
+    pub attacked_defenders_last_turn: Box<HashMap<PlayerId, HashSet<PlayerId>>>,
     /// CR 508.6 + CR 508.1b: For each creature declared as an attacker this
     /// turn, the defending players it attacked. This is the source-specific
     /// counterpart to `attacked_defenders_this_turn` for text like "each player
@@ -19238,6 +19250,16 @@ impl GameState {
             .is_some_and(|defenders| defenders.contains(&defender))
     }
 
+    /// CR 508.6: True if `attacker` declared one or more creatures attacking
+    /// `defender` during `attacker`'s most recent completed turn. Reads the
+    /// cleanup-time snapshot (`attacked_defenders_last_turn`); the "last turn"
+    /// analog of `has_attacked`.
+    pub fn player_attacked_player_last_turn(&self, attacker: PlayerId, defender: PlayerId) -> bool {
+        self.attacked_defenders_last_turn
+            .get(&attacker)
+            .is_some_and(|defenders| defenders.contains(&defender))
+    }
+
     /// CR 508.6: True if `attacker` was declared attacking `defender` this turn.
     pub fn creature_attacked_player_this_turn(
         &self,
@@ -19499,6 +19521,7 @@ impl GameState {
             players_attacked_this_turn: HashSet::new(),
             attacking_creatures_this_turn: HashMap::new(),
             attacked_defenders_this_turn: HashMap::new(),
+            attacked_defenders_last_turn: Box::default(),
             creature_attacked_defenders_this_turn: HashMap::new(),
             combat_phases_started_this_turn: 0,
             end_steps_started_this_turn: 0,
@@ -21202,6 +21225,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         players_attacked_this_turn: _,
         attacking_creatures_this_turn: _,
         attacked_defenders_this_turn: _,
+        attacked_defenders_last_turn: _,
         creature_attacked_defenders_this_turn: _,
         combat_phases_started_this_turn: _,
         end_steps_started_this_turn: _,
@@ -21498,6 +21522,7 @@ impl PartialEq for GameState {
             && self.players_attacked_this_turn == other.players_attacked_this_turn
             && self.attacking_creatures_this_turn == other.attacking_creatures_this_turn
             && self.attacked_defenders_this_turn == other.attacked_defenders_this_turn
+            && self.attacked_defenders_last_turn == other.attacked_defenders_last_turn
             && self.creature_attacked_defenders_this_turn
                 == other.creature_attacked_defenders_this_turn
             && self.combat_phases_started_this_turn == other.combat_phases_started_this_turn
@@ -21873,7 +21898,7 @@ mod forced_cascade_window_tests {
     }
 
     /// CR 603.3b / CR 603.3d / CR 603.5 + CR 608.2d / CR 903.9a / CR 704.5j /
-    /// CR 310.10 / CR 703.1 + CR 117.3a: the membership matrix for
+    /// CR 310.11 / CR 703.1 + CR 117.3a: the membership matrix for
     /// [`WaitingFor::is_forced_cascade_window`], asserted in BOTH directions —
     /// thirteen members and eight non-members, each named.
     ///
@@ -21983,7 +22008,7 @@ mod forced_cascade_window_tests {
                 },
             ),
             (
-                "BattleProtectorChoice (CR 310.10 + CR 704.5w / CR 704.5x — likewise an SBA)",
+                "BattleProtectorChoice (CR 310.11 + CR 704.5w / CR 704.5x — likewise an SBA)",
                 WaitingFor::BattleProtectorChoice {
                     player: PlayerId(0),
                     battle_id: ObjectId(5),
@@ -26019,7 +26044,7 @@ mod tests {
         );
         object.static_definitions.push(
             StaticDefinition::new(StaticMode::MustAttackPlayer {
-                player: PlayerId(1),
+                player: PlayerId(1).into(),
             })
             .affected(TargetFilter::SelfRef)
             .source_object(ObjectId(800)),
@@ -26034,7 +26059,7 @@ mod tests {
             .get_mut(&ObjectId(500))
             .unwrap()
             .static_definitions = vec![StaticDefinition::new(StaticMode::MustAttackPlayer {
-            player: PlayerId(1),
+            player: PlayerId(1).into(),
         })
         .affected(TargetFilter::SelfRef)
         .source_object(ObjectId(801))]

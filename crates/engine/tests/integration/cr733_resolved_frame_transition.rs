@@ -153,6 +153,7 @@ fn optional_effect_frame_cannot_survive_into_search_choice_parent_insertion() {
         .push_inner(ResolutionFrame::OptionalEffect(OptionalEffectFrame {
             ability: optional_ability,
             trigger_event: None,
+            trigger_events: Vec::new(),
             trigger_match_count: None,
         }));
     state.waiting_for = WaitingFor::SearchChoice {

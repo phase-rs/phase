@@ -353,6 +353,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::ChoosePermanent { .. }
         | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::ChooseCard { .. }
+        | Effect::ReproduceEventCounters { .. }
         | Effect::PutCounterAll { .. }
         | Effect::MultiplyCounter { .. }
         | Effect::DoublePT { .. }

@@ -7388,18 +7388,22 @@ fn parse_for_each_object_copy_parts(
 /// repeat an earlier choice (confirmed by the "Offering" cycle ruling —
 /// Benevolent/Infernal/Intellectual/Sylvan Offering — issue #6381). Either
 /// way, the engine index is derived from chain position, not the ordinal.
-/// CR 102.3 + CR 608.2d: Recognize the "with the most life [among
+/// CR 102.2 / CR 102.3 + CR 608.2d: Recognize the "with the most life [among
 /// your opponents]" qualifier on a "choose an opponent" instruction and lower it
 /// to the equivalent `PlayerFilter::PlayerAttribute` restriction: each candidate
 /// opponent whose life total is `>=` the maximum life total across all opponents.
-/// CR 102.3 scopes the candidate set to opponents; CR 608.2d lets the controller
-/// pick ONE qualifying opponent (resolving ties) when multiple share the maximum.
+/// CR 102.2 (two-player) / CR 102.3 (team multiplayer) scope the candidate set to
+/// opponents. For the resolution-time "choose an opponent …" consumers, CR 608.2d
+/// lets the controller pick ONE qualifying opponent (resolving ties) when multiple
+/// share the maximum. (The static forced-attack consumer reuses this SAME filter
+/// but is not a resolution-time choice — there a most-life tie is resolved under
+/// CR 508.1b/d at declare-attackers; see `parse_required_defender_selector`.)
 /// The candidate's life is read PER-CANDIDATE (`PlayerScope::ScopedPlayer`); the
 /// `value` threshold is the controller-relative max (`PlayerScope::Opponent {
 /// aggregate: Max }`), composed from existing typed enums rather than a bespoke
 /// `MostLife` sibling. Consumes the qualifier text; returns the parsed
 /// restriction so the caller can attach it to `ChoiceType::Opponent`.
-fn parse_opponent_most_life_restriction(input: &str) -> OracleResult<'_, PlayerFilter> {
+pub(crate) fn parse_opponent_most_life_restriction(input: &str) -> OracleResult<'_, PlayerFilter> {
     let (input, _) = preceded(
         tag(" with the most life"),
         opt(tag(" among your opponents")),
@@ -15461,10 +15465,19 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     if clause.duration.is_none() {
         clause.duration = duration;
     }
-    // CR 115.1d: Post-parse fixup for PutCounter "up to N" multi_target.
-    // The multi_target is lost in the AST→Effect lowering chain, so we re-extract it
-    // from the original text when the effect is PutCounter with a targeted filter.
-    if matches!(clause.effect, Effect::PutCounter { .. }) && clause.multi_target.is_none() {
+    // CR 115.1d: Post-parse fixup for the "…counter(s) on up to N target …" shape.
+    // The multi_target is lost in the AST→Effect lowering chain, so we re-extract
+    // it from the original text. `PutCounter` and `ReproduceEventCounters` share
+    // the identical target-side placement grammar (Aragorn, Company Leader: "put
+    // one of each of those kinds of counters on up to one other target creature"),
+    // so both recover their optional cardinality through the same dedicated
+    // extractor. Without the reproduction arm the "up to one" bound is dropped and
+    // Aragorn's target binds as mandatory (min=1) instead of optional (min=0).
+    if matches!(
+        clause.effect,
+        Effect::PutCounter { .. } | Effect::ReproduceEventCounters { .. }
+    ) && clause.multi_target.is_none()
+    {
         clause.multi_target = extract_put_counter_multi_target(text);
     }
     // CR 601.2c: Post-parse fixup for exact-count multi-target text. The
@@ -16233,6 +16246,27 @@ fn try_parse_verb_and_target<'a>(
     if tag::<_, _, OracleError<'_>>("put ").parse(lower).is_ok()
         && scan_contains_phrase(lower, "counter")
     {
+        // CR 122.1 + CR 603.2c: reproduce the triggering event's counters ("put
+        // the same number and kind of counters" / "put one of each of those
+        // kinds of counters"). Detected before the generic put-counter path so
+        // the reproduction phrasing is not mis-read as a literal counter name.
+        if let Some((effect @ Effect::ReproduceEventCounters { .. }, rem, _multi_target)) =
+            counter::try_parse_reproduce_event_counters(lower, text, ctx)
+        {
+            return Some((
+                TargetedImperativeAst::ZoneCounterProxy(Box::new(match effect {
+                    Effect::ReproduceEventCounters {
+                        target,
+                        per_kind_count,
+                    } => ZoneCounterImperativeAst::ReproduceEventCounters {
+                        target,
+                        per_kind_count,
+                    },
+                    _ => unreachable!("guarded by the match arm above"),
+                })),
+                rem,
+            ));
+        }
         if let Some((
             Effect::PutCounter {
                 counter_type,
@@ -16724,13 +16758,31 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     // Vesuva ("...on each of up to one target land and up to one target
     // creature") would be wrongly mandatory. Re-derive it from the consumed
     // primary-clause prefix via the same building block that produced it.
-    let primary_multi_target = if matches!(&primary_effect, Effect::PutCounter { .. }) {
-        let primary_clause = &text[..text.len() - remainder.len()];
-        let primary_lower = primary_clause.to_ascii_lowercase();
-        counter::try_parse_put_counter(&primary_lower, primary_clause, &mut ctx.clone())
+    // CR 122.1: `ReproduceEventCounters` shares the identical target-side "…on up
+    // to N target …" grammar as `PutCounter` and is discarded the same way on the
+    // `ZoneCounterProxy` route, so a COMPOUND reproduction primary ("put one of
+    // each of those kinds of counters on up to one other target creature and
+    // <effect>") reaches this splitter and must recover its bound here too — the
+    // direct-clause fixup in `lower_imperative_clause` never runs for the compound
+    // return. Re-derive from the same building block that produced the effect.
+    let primary_multi_target = match &primary_effect {
+        Effect::PutCounter { .. } => {
+            let primary_clause = &text[..text.len() - remainder.len()];
+            let primary_lower = primary_clause.to_ascii_lowercase();
+            counter::try_parse_put_counter(&primary_lower, primary_clause, &mut ctx.clone())
+                .and_then(|(_, _, multi)| multi)
+        }
+        Effect::ReproduceEventCounters { .. } => {
+            let primary_clause = &text[..text.len() - remainder.len()];
+            let primary_lower = primary_clause.to_ascii_lowercase();
+            counter::try_parse_reproduce_event_counters(
+                &primary_lower,
+                primary_clause,
+                &mut ctx.clone(),
+            )
             .and_then(|(_, _, multi)| multi)
-    } else {
-        None
+        }
+        _ => None,
     };
 
     Some(ParsedEffectClause {

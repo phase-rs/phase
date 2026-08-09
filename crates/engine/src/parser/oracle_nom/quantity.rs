@@ -1315,14 +1315,15 @@ fn parse_number_of_counters_it_had(input: &str) -> OracleResult<'_, QuantityRef>
 /// him" / "on her" / "on them" refers to that same source object's counters
 /// (Red Hulk's Enrage reflex). The gendered/plural objective pronouns are
 /// interchangeable with the neuter "it" for the source — same rationale as
-/// `parse_self_possessive`.
+/// `parse_self_possessive`. The it/them/him/her set is routed through the
+/// single-authority `parse_object_recipient_pronoun` combinator (composed with
+/// the self-reference token `~`) so it cannot drift from the other sites.
 fn parse_counter_object_scope(input: &str) -> OracleResult<'_, ObjectScope> {
     alt((
-        value(ObjectScope::Source, tag("it")),
-        value(ObjectScope::Source, tag("~")),
-        value(ObjectScope::Source, tag("him")),
-        value(ObjectScope::Source, tag("her")),
-        value(ObjectScope::Source, tag("them")),
+        value(
+            ObjectScope::Source,
+            alt((tag("~"), super::primitives::parse_object_recipient_pronoun)),
+        ),
         value(ObjectScope::Target, tag("that creature")),
         value(ObjectScope::Target, tag("that permanent")),
         value(ObjectScope::Target, tag("that artifact")),
@@ -3733,6 +3734,39 @@ pub fn parse_for_each(input: &str) -> OracleResult<'_, QuantityRef> {
     parse_for_each_clause_ref(rest)
 }
 
+/// Parse a complete self-referential kicker-count clause after `for each`.
+/// Only the spell itself can supply `QuantityRef::KickerCount`; accepting an
+/// arbitrary subject would silently read the source spell's kick count.
+pub fn parse_kicker_count_time_clause(input: &str) -> OracleResult<'_, QuantityRef> {
+    preceded(tag("time "), parse_kicker_count_subject_was_kicked).parse(input)
+}
+
+/// Parse a self-referential kicker subject and its past-tense verb.
+fn parse_kicker_count_subject_was_kicked(input: &str) -> OracleResult<'_, QuantityRef> {
+    value(
+        QuantityRef::KickerCount,
+        all_consuming((
+            alt((
+                tag("~"),
+                tag("this spell"),
+                tag("it"),
+                tag("he"),
+                tag("she"),
+                tag("they"),
+            )),
+            alt((tag(" was kicked"), tag(" were kicked"))),
+        )),
+    )
+    .parse(input)
+}
+
+/// Parse a complete `where X is the number of times <self> was kicked` clause.
+pub fn parse_kicker_count_where_x_expression(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("the number of times ").parse(input)?;
+    let (_, quantity) = parse_kicker_count_subject_was_kicked(rest)?;
+    Ok(("", quantity))
+}
+
 /// Parse the inner content after "for each ".
 pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     parse_for_each_clause_ref_with_they_controller(input, ControllerRef::ScopedPlayer)
@@ -4011,7 +4045,9 @@ fn parse_for_each_counter_object_scope(input: &str) -> OracleResult<'_, ObjectSc
 /// object. The trailing word-boundary guard keeps "it" from swallowing the head
 /// of "its" and "her" from matching inside a longer word.
 fn parse_deferred_counter_pronoun(input: &str) -> OracleResult<'_, ObjectScope> {
-    let (rest, _) = alt((tag("it"), tag("them"), tag("him"), tag("her"))).parse(input)?;
+    // Routed through the shared recipient-pronoun combinator (single authority
+    // for the it/them/him/her set); the word-boundary guard below is retained.
+    let (rest, _) = super::primitives::parse_object_recipient_pronoun(input)?;
     if rest
         .chars()
         .next()
@@ -4328,15 +4364,16 @@ pub(crate) fn parse_mana_spent_self_subject(input: &str) -> OracleResult<'_, Cas
         value(CastManaObjectScope::SelfObject, tag("this spell")),
         value(CastManaObjectScope::SelfObject, tag("this creature")),
         value(CastManaObjectScope::SelfObject, tag("this permanent")),
-        value(CastManaObjectScope::SelfObject, tag("it")),
-        value(CastManaObjectScope::SelfObject, tag("them")),
-        // CR 400.7d: gendered self-anaphora — Oracle text for a legendary
-        // creature refers to the spell as "her"/"him" (Toph, Greatest
-        // Earthbender: "where X is the amount of mana spent to cast her").
-        // Same self-object axis as "it"/"them"; only the pronoun differs.
-        value(CastManaObjectScope::SelfObject, tag("her")),
-        value(CastManaObjectScope::SelfObject, tag("him")),
-        value(CastManaObjectScope::SelfObject, tag("~")),
+        // CR 400.7d: bare self-anaphora — the spell refers to itself as
+        // "it"/"them"/"her"/"him"/"~" (Toph, Greatest Earthbender: "where X is
+        // the amount of mana spent to cast her"). Same self-object axis
+        // regardless of pronoun, so the it/them/him/her set is routed through
+        // the single-authority `parse_object_recipient_pronoun` combinator
+        // (composed with `~`) rather than redefined here.
+        value(
+            CastManaObjectScope::SelfObject,
+            alt((tag("~"), super::primitives::parse_object_recipient_pronoun)),
+        ),
     ))
     .parse(input)
 }
