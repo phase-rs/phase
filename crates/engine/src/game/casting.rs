@@ -14285,11 +14285,18 @@ fn can_cast_prepared_now_with_probe(
         }
     }
 
-    // CR 118.9 + CR 601.2f + CR 119.8: Graveyard/exile cast-permission statics
-    // that carry a pay-life extra-cost rider (Valgavoth alternative; Festival of
-    // Embers additional) must afford the life payment for the cast to be legal.
-    // The remove-counters extra-cost (Dawnhand) carries no life payment, so
-    // `find_pay_life_cost` returns `None` and this gate is a no-op for it.
+    // CR 118.3 + CR 118.9 + CR 601.2f + CR 601.2h + CR 119.8: Graveyard/exile
+    // cast-permission statics that carry a non-mana extra-cost rider (Valgavoth
+    // alternative pay-life; Festival of Embers additional pay-life; Dragon Man,
+    // Reformed Robot additional discard) must be able to pay that cost in full for
+    // the cast to be legal. Use the general affordability authority
+    // (`AbilityCost::is_payable`, mirroring the Flashback gate above) rather than a
+    // pay-life special case: `is_payable`'s PayLife arm calls the same
+    // `can_pay_life_cast_or_activation_cost`, so pay-life legality is unchanged,
+    // while discard/sacrifice/remove-counter riders are now correctly gated so
+    // legal actions never offer an unpayable cast (e.g. Dragon Man from an empty
+    // hand). Mode-agnostic: an unpayable Alternative or Additional cost both make
+    // the cast illegal.
     {
         // CR 601.2a: Bind the exile extra-cost rider to the source this cast
         // commits to — the recorded `ExilePermission` source if elected, else the
@@ -14313,11 +14320,8 @@ fn can_cast_prepared_now_with_probe(
             _ => None,
         };
         if let Some(extra) = static_extra {
-            if let Some(amount) = find_pay_life_cost(&extra.cost, state, player, prepared.object_id)
-            {
-                if !super::life_costs::can_pay_life_cast_or_activation_cost(state, player, amount) {
-                    return false;
-                }
+            if !extra.cost.is_payable(state, player, prepared.object_id) {
+                return false;
             }
         }
     }
