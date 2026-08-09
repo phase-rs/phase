@@ -3787,6 +3787,7 @@ async fn handle_full_game_submission(
     submission: GameSubmission,
     socket: &mut WebSocket,
     state: &SharedState,
+    db: &SharedDb,
     draft_state: &SharedDraftState,
     connections: &SharedConnections,
     game_db: &SharedGameDb,
@@ -3840,7 +3841,9 @@ async fn handle_full_game_submission(
         let lock_start = std::time::Instant::now();
         let mut mgr = state.lock().await;
         let applied = match submission {
-            GameSubmission::Action(action) => mgr.handle_action(&game_code, &player_token, action),
+            GameSubmission::Action(action) => {
+                mgr.handle_action_with_card_db(&game_code, &player_token, action, Some(db.as_ref()))
+            }
             GameSubmission::Interaction(submission) => {
                 mgr.handle_interaction(&game_code, &player_token, submission)
             }
@@ -4453,6 +4456,7 @@ async fn handle_client_message(
                 GameSubmission::Action(action),
                 socket,
                 state,
+                db,
                 draft_state,
                 connections,
                 game_db,
@@ -4467,6 +4471,7 @@ async fn handle_client_message(
                 GameSubmission::Interaction(submission),
                 socket,
                 state,
+                db,
                 draft_state,
                 connections,
                 game_db,

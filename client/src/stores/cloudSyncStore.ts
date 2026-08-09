@@ -1,6 +1,11 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import { applyBackup, buildBackup, type PhaseBackup } from "../services/backup";
+import {
+  applyBackup,
+  buildBackup,
+  mergeDeckCollections,
+  type PhaseBackup,
+} from "../services/backup";
 import {
   getCloudSyncProvider,
   SyncConflictError,
@@ -31,7 +36,7 @@ const AUTO_SYNC_DEBOUNCE_MS = 3000;
 export const PROFILE_REPLACED_EVENT = "phase:profile-replaced";
 
 export type SyncStatus = "idle" | "syncing" | "synced" | "conflict" | "error";
-export type ConflictChoice = "cloud" | "local";
+export type ConflictChoice = "cloud" | "local" | "merge";
 
 interface CloudSyncState {
   /** True when a provider is configured for this deployment. */
@@ -60,7 +65,7 @@ interface CloudSyncState {
    * by another device. Answers "when did this device last sync?" honestly.
    */
   lastSyncedAt: string | null;
-  /** Pending remote snapshot awaiting a user keep-cloud/keep-local decision. */
+  /** Pending remote snapshot awaiting a user reconciliation decision. */
   conflict: RemoteSnapshot | null;
   /** Per-envelope-section diff summary for the current conflict, or null. */
   conflictDiff: ConflictDiffSummary | null;
@@ -439,10 +444,20 @@ export const useCloudSyncStore = create<CloudSyncState>()(
           applyRemote(set, conflict);
           return;
         }
-        // Keep this device: fast-forward over the remote we just pulled.
+
+        const local = buildBackup();
+        const next = choice === "merge"
+          ? mergeDeckCollections(local, conflict.backup)
+          : local;
+
+        // Publish first so the local profile cannot appear reconciled before
+        // the remote CAS write accepts the selected result.
         set({ status: "syncing", conflict: null, conflictDiff: null });
         try {
-          const meta = await provider.push(buildBackup(), conflict.meta.revision);
+          const meta = await provider.push(next, conflict.meta.revision);
+          if (choice === "merge") {
+            applyMergedDeckCollection(next);
+          }
           set({
             status: "synced",
             dirty: false,
@@ -495,6 +510,15 @@ function applyRemote(
   // Preferences is the only Zustand-persisted slice carried in the backup
   // envelope; multiplayerStore is session-scoped and not synced. If the
   // envelope ever grows to include another persisted store, rehydrate it here.
+  void usePreferencesStore.persist.rehydrate();
+  window.dispatchEvent(new CustomEvent(PROFILE_REPLACED_EVENT));
+}
+
+/** Apply the already-published local/cloud deck reconciliation without a reload. */
+function applyMergedDeckCollection(backup: PhaseBackup): void {
+  withStorageWatchSuppressed(() => {
+    applyBackup(backup, "overwrite");
+  });
   void usePreferencesStore.persist.rehydrate();
   window.dispatchEvent(new CustomEvent(PROFILE_REPLACED_EVENT));
 }

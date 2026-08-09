@@ -920,6 +920,9 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
         ResolutionFrame::CopyToken(_) => {
             token_copy::drain_pending_copy_token_resolution(state, events);
         }
+        ResolutionFrame::DebugCardEntries(_) => {
+            crate::game::engine_debug::drain_pending_debug_card_entries(state, events);
+        }
         ResolutionFrame::EachPlayerCopyChosen(_) => {
             each_player_copy_chosen::drain_pending(state, events);
         }
@@ -14312,6 +14315,7 @@ mod tests {
             action: crate::types::events::PlayerActionKind::SearchedLibrary,
             look_count: None,
             scry_bottom_count: None,
+            scry_top_count: None,
         });
         let ability = ResolvedAbility::new(
             Effect::Draw {

@@ -258,6 +258,7 @@ fn complete_cost_payment(
         action: PlayerActionKind::CollectEvidence,
         look_count: None,
         scry_bottom_count: None,
+        scry_top_count: None,
     });
 
     match resume {
