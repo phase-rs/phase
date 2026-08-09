@@ -5735,11 +5735,17 @@ fn split_choice_list_items(input: &str) -> Option<Vec<&str>> {
 /// `or`. Unlike an explicit "your choice of" payload, an unmarked `and`
 /// conjunction means all listed counters are applied by the ordinary counter
 /// parser, not that one branch is chosen.
+///
+/// CR 608.2c + CR 608.2d: Normal English determines whether counters apply
+/// together or as a disjunctive instruction, and an `or` choice is made while
+/// the effect resolves.
 fn split_bare_disjunctive_choice_list_items(input: &str) -> Option<Vec<&str>> {
     let (rest, mut items) = separated_list1(tag(", "), parse_choice_list_item)
         .parse(input)
         .ok()?;
-    let (rest, _) = alt((tag(", or "), tag(" or "))).parse(rest).ok()?;
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>(", or "), tag(" or ")))
+        .parse(rest)
+        .ok()?;
     let (rest, last_item) = parse_choice_list_item(rest).ok()?;
     eof::<_, OracleError<'_>>(rest).ok()?;
     items.push(last_item);
