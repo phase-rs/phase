@@ -52871,3 +52871,312 @@ fn assimilate_without_a_graveyard_target_stays_unimplemented() {
         "reach-guard: the printed phrasing must lower to a ChangeZone, got {real:?}"
     );
 }
+
+const CODIE_CONTINUATION_TEXT: &str = "Add {W}{U}{B}{R}{G}. When you next cast a spell this turn, \
+exile cards from the top of your library until you exile an instant or sorcery card with lesser mana \
+value. Until end of turn, you may cast that card without paying its mana cost. Put each other card \
+exiled this way on the bottom of your library in a random order.";
+
+/// T-B1 (plan-r18 §R18.1): a NON-`Emit` clause between a delayed installer and its
+/// continuations must close the open-payload run. In the adopted code the intervening
+/// clause is emitted by an early-exit producer that `continue`s past the registry block,
+/// so the mint-carrying antecedent stays open and `classify_continuation_clause`'s
+/// `|| antecedent.mint.is_some()` short-circuit nests both continuations anyway.
+///
+/// Text is two real printed sentences composed: Codie, Vociferous Codex's activated
+/// ability (the adopted `CODIE_CONTINUATION_TEXT`) with Kathril, Aspect Warper's
+/// "Repeat this process for ..." sentence spliced in after the installer. That sentence
+/// routes to the text-local producer at `mod.rs:30356`, which pushes
+/// `ClauseDisposition::ReplicatePerKeyword` and `continue`s (`:30367`/`:30368`).
+///
+/// PARSE-TIME ONLY. The composition is not a playable card — `ReplicatePerKeyword` is
+/// relational at lowering and Codie's installer is not a keyword-counter antecedent.
+/// Do NOT extend this test to `assemble_effect_chain`.
+#[test]
+fn a_non_emitted_clause_between_installer_and_continuation_closes_the_payload_run() {
+    const KATHRIL_REPEAT_SENTENCE: &str = "Repeat this process for first strike, double strike, \
+deathtouch, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance. ";
+
+    // Splice the non-`Emit` sentence in after the installer sentence, i.e. immediately
+    // before the first continuation. Located by content, not by a byte offset.
+    const FIRST_CONTINUATION: &str = "Until end of turn, you may cast that card";
+    let split_at = CODIE_CONTINUATION_TEXT
+        .find(FIRST_CONTINUATION)
+        .expect("T-B1 fixture: the adopted Codie constant must contain its first continuation");
+    let intervened_text = format!(
+        "{}{KATHRIL_REPEAT_SENTENCE}{}",
+        &CODIE_CONTINUATION_TEXT[..split_at],
+        &CODIE_CONTINUATION_TEXT[split_at..]
+    );
+
+    let mut intervened_context = ParseContext::default();
+    let intervened = parse_effect_chain_ir(
+        &intervened_text,
+        AbilityKind::Activated,
+        &mut intervened_context,
+    );
+
+    // Shape preconditions. A failure here means the fixture no longer routes as traced
+    // (plan-r18 §R18.1.3/§R18.1.4) — re-derive the fixture. Do NOT relax the assertion
+    // below to accommodate it.
+    assert_eq!(
+        intervened
+            .clauses
+            .iter()
+            .filter(|clause| matches!(clause.parsed.effect, Effect::CreateDelayedTrigger { .. }))
+            .count(),
+        1,
+        "T-B1 precondition: the splice must leave exactly one delayed installer: {intervened:#?}"
+    );
+    assert_eq!(
+        intervened
+            .clauses
+            .iter()
+            .filter(|clause| !matches!(clause.disposition, ClauseDisposition::Emit { .. }))
+            .count(),
+        1,
+        "T-B1 precondition: the spliced sentence must be the chain's only non-emitted \
+         clause (producer mod.rs:30356 → ReplicatePerKeyword): {intervened:#?}"
+    );
+
+    let intervened_promoted = intervened
+        .clauses
+        .iter()
+        .filter(|clause| clause.placement == ClausePlacement::NestedInDelayedPayload)
+        .count();
+
+    // Paired positive reach-guard: the same text WITHOUT the intervening clause must
+    // still promote, so a 0 above cannot be a parse failure masquerading as a pass.
+    let mut baseline_context = ParseContext::default();
+    let baseline = parse_effect_chain_ir(
+        CODIE_CONTINUATION_TEXT,
+        AbilityKind::Activated,
+        &mut baseline_context,
+    );
+    let baseline_promoted = baseline
+        .clauses
+        .iter()
+        .filter(|clause| clause.placement == ClausePlacement::NestedInDelayedPayload)
+        .count();
+    assert!(
+        baseline_promoted > 0,
+        "T-B1 reach-guard: the un-intervened chain must still reach the promotion path"
+    );
+
+    assert_eq!(
+        intervened_promoted, 0,
+        "T-B1: a non-emitted clause must close the open-payload run, so no later clause \
+         may be promoted (plan-r18 §R18.1). Baseline promoted {baseline_promoted}; got \
+         {intervened_promoted}: {intervened:#?}"
+    );
+}
+
+#[test]
+fn delayed_payload_continuation_binds_the_nearest_open_installer() {
+    const DELAYED_INSTALLER: &str =
+        "When you next cast a spell this turn, exile cards from the top of \
+your library until you exile an instant or sorcery card with lesser mana value.";
+    const CONTINUATION: &str =
+        "Until end of turn, you may cast that card without paying its mana cost.";
+    let text = format!(
+        "Add {{W}}{{U}}{{B}}{{R}}{{G}}. {DELAYED_INSTALLER} {DELAYED_INSTALLER} {CONTINUATION}"
+    );
+    let mut context = ParseContext::default();
+    let chain = parse_effect_chain_ir(&text, AbilityKind::Activated, &mut context);
+
+    let installers: Vec<_> = chain
+        .clauses
+        .iter()
+        .filter(|clause| matches!(clause.parsed.effect, Effect::CreateDelayedTrigger { .. }))
+        .collect();
+    assert_eq!(
+        installers.len(),
+        2,
+        "T-PEER precondition: the fixture must produce two delayed installers: {chain:#?}"
+    );
+    assert_eq!(
+        installers[0].placement,
+        ClausePlacement::Sibling,
+        "T-PEER: the earlier installer stays a sibling while the continuation binds the nearer one"
+    );
+    let promoted = chain
+        .clauses
+        .iter()
+        .filter(|clause| clause.placement == ClausePlacement::NestedInDelayedPayload)
+        .count();
+    assert_eq!(
+        promoted, 1,
+        "T-PEER: exactly the continuation binds the nearest open delayed payload: {chain:#?}"
+    );
+}
+
+#[test]
+fn delayed_payload_placement_defaults_to_siblings_and_promotes_only_continuations() {
+    let mut ordinary_context = ParseContext::default();
+    let ordinary = parse_effect_chain_ir(
+        "Draw a card. You gain 3 life.",
+        AbilityKind::Spell,
+        &mut ordinary_context,
+    );
+    assert!(
+        ordinary
+            .clauses
+            .iter()
+            .all(|clause| clause.placement == ClausePlacement::Sibling),
+        "T-PL1: an ordinary chain must retain the construction default"
+    );
+
+    let mut codie_context = ParseContext::default();
+    let codie = parse_effect_chain_ir(
+        CODIE_CONTINUATION_TEXT,
+        AbilityKind::Activated,
+        &mut codie_context,
+    );
+    let promoted = codie
+        .clauses
+        .iter()
+        .filter(|clause| clause.placement == ClausePlacement::NestedInDelayedPayload)
+        .count();
+    assert_eq!(
+        promoted, 2,
+        "T-PL1 positive control: Codie's two payload continuations must be observable"
+    );
+}
+
+#[test]
+fn delayed_payload_placement_requires_an_emitted_clause() {
+    let mut codie_context = ParseContext::default();
+    let codie = parse_effect_chain_ir(
+        CODIE_CONTINUATION_TEXT,
+        AbilityKind::Activated,
+        &mut codie_context,
+    );
+    let mut flickerform_context = ParseContext::default();
+    let flickerform = parse_effect_chain_ir(
+        "Exile enchanted creature and all Auras attached to it. At the beginning of the next end step, \
+         return that card to the battlefield under its owner's control. If you do, return the other cards \
+         exiled this way to the battlefield under their owners' control attached to that creature.",
+        AbilityKind::Activated,
+        &mut flickerform_context,
+    );
+    let mut ordinary_context = ParseContext::default();
+    let ordinary = parse_effect_chain_ir(
+        "Draw a card. You gain 3 life.",
+        AbilityKind::Spell,
+        &mut ordinary_context,
+    );
+
+    for chain in [&codie, &flickerform, &ordinary] {
+        assert!(
+            chain.clauses.iter().all(|clause| {
+                clause.placement != ClausePlacement::NestedInDelayedPayload
+                    || matches!(clause.disposition, ClauseDisposition::Emit { .. })
+            }),
+            "T-DP1: nested placement is valid only on an emitted clause: {chain:#?}"
+        );
+    }
+    assert_eq!(
+        codie
+            .clauses
+            .iter()
+            .filter(|clause| clause.placement == ClausePlacement::NestedInDelayedPayload)
+            .count(),
+        2,
+        "T-DP1 positive control: the universal must observe promoted clauses"
+    );
+}
+
+#[test]
+fn absorbed_nested_chain_recomputes_delayed_payload_placement_in_its_outer_context() {
+    let mut nested_context = ParseContext::default();
+    let nested = parse_effect_chain_ir(
+        CODIE_CONTINUATION_TEXT,
+        AbilityKind::Spell,
+        &mut nested_context,
+    );
+    assert!(
+        nested
+            .clauses
+            .iter()
+            .any(|clause| clause.placement == ClausePlacement::NestedInDelayedPayload),
+        "T-DP2 positive control: the nested body must reach the promotion path"
+    );
+
+    let mut outer_context = ParseContext::default();
+    let outer = parse_effect_chain_ir(
+        &format!("If you control an artifact, {CODIE_CONTINUATION_TEXT}"),
+        AbilityKind::Spell,
+        &mut outer_context,
+    );
+    let nested_promoted = nested
+        .clauses
+        .iter()
+        .filter(|clause| clause.placement == ClausePlacement::NestedInDelayedPayload)
+        .count();
+    let outer_promoted = outer
+        .clauses
+        .iter()
+        .filter(|clause| clause.placement == ClausePlacement::NestedInDelayedPayload)
+        .count();
+    assert_eq!(
+        outer_promoted, nested_promoted,
+        "T-DP2′: an absorbed nested chain's continuations must be re-promoted against the OUTER \
+         registry (plan-r17 §R17.4.1; closes the leading-if deferral at assembly.rs:2781)"
+    );
+}
+
+/// A replacement shield remains an emitted top-level definition, so a following
+/// continuation cannot be relocated past it into the preceding delayed payload.
+/// This composes Codie's delayed installer and cast continuation with Riot
+/// Control's printed damage-prevention rider to drive parse and assembly end-to-end.
+#[test]
+fn replacement_shield_between_installer_and_continuation_stays_a_sibling() {
+    const DELAYED_INSTALLER: &str =
+        "When you next cast a spell this turn, exile cards from the top of your library until you exile an instant or sorcery card with lesser mana value.";
+    const REPLACEMENT_SHIELD: &str = "Prevent all damage that would be dealt to you this turn.";
+    const CONTINUATION: &str =
+        "Until end of turn, you may cast that card without paying its mana cost.";
+    let text = format!("{DELAYED_INSTALLER} {REPLACEMENT_SHIELD} {CONTINUATION}");
+    let mut context = ParseContext::default();
+    let chain = parse_effect_chain_ir(&text, AbilityKind::Spell, &mut context);
+
+    assert_eq!(
+        chain
+            .clauses
+            .iter()
+            .filter(|clause| matches!(clause.parsed.effect, Effect::CreateDelayedTrigger { .. }))
+            .count(),
+        1,
+        "fixture must produce exactly one delayed installer: {chain:#?}"
+    );
+    let shield_index = chain
+        .clauses
+        .iter()
+        .position(|clause| effect_installs_replacement_shield(&clause.parsed.effect))
+        .expect("fixture must produce an emitted replacement-shield clause");
+    assert!(
+        matches!(
+            chain.clauses[shield_index].disposition,
+            ClauseDisposition::Emit { .. }
+        ),
+        "fixture's shield must remain a top-level emitted definition: {chain:#?}"
+    );
+    let continuation = chain
+        .clauses
+        .get(shield_index + 1)
+        .expect("fixture must retain a continuation after the shield");
+    assert!(
+        matches!(continuation.parsed.effect, Effect::CastFromZone { .. }),
+        "fixture's post-shield clause must be the intended cast continuation: {chain:#?}"
+    );
+
+    // The adopted placement marks this continuation as nested. Assembly must then
+    // reject the relocation because the shield, not the installer, precedes it.
+    let _ = lower_effect_chain_ir(&chain);
+
+    assert_eq!(
+        continuation.placement,
+        ClausePlacement::Sibling,
+        "an emitted replacement shield breaks the relocation run"
+    );
+}
