@@ -1344,6 +1344,10 @@ pub enum GameEvent {
     CityBlessingGained {
         player_id: PlayerId,
     },
+    /// A player gained an enduring story.
+    EnduringStoryGained {
+        player_id: PlayerId,
+    },
     /// CR 706: A die was rolled. `result` is `None` when the roll has no numeric
     /// face value — the symbolic planar die (CR 901.9d / CR 706.7): the
     /// `RolledDie` trigger still fires, but numeric-result consumers ignore it.

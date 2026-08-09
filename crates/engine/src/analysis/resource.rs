@@ -1325,6 +1325,15 @@ fn map_delta<K: Ord + Copy>(
 /// normalized. It does not consult a board predicate, but it DOES require the frames it
 /// compares to be homogeneous in turn position, which is what "homogeneous" above now means
 /// in full.
+///
+/// ⚠ SCOPE OF THAT REQUIREMENT — what this function READS, versus where the frames' sameness
+/// comes from. It reads exactly two things: `ResourceVector::snapshot(&f.normalized)` and
+/// `window_scope_from_cover_frames(..).phase_invariant`, and `phase_invariant` is
+/// `turn_number` + `phase` + `extra_phases.is_empty()`. The sampler gate that mints the frames
+/// also makes them homogeneous in `waiting_for`/`priority_player`, but THIS function never
+/// looks at those two — basis A does, via `loop_states_equal_modulo_resources` ⇒
+/// `loop_states_equal` ⇒ `impl PartialEq for GameState`. Do not cite `ring_delta_signature` as
+/// the consumer of either field.
 pub(crate) fn ring_delta_signature(state: &GameState) -> Option<(u32, ResourceVector)> {
     let frames = state.loop_detect_ring.len();
     // 2k + 1 with k >= 1.
@@ -1871,22 +1880,15 @@ fn window_scope_from_cover_frames<'a>(
         && pb.extra_phases.is_empty())
     .then_some(pa.phase);
 
-    // (s1) BOTH sequences non-empty — the `(Some, Some)` arm; (s2) one controller
-    // across BOTH sequences.
-    let sole_driver = match (
-        pa.last_loop_action_sequence.first(),
-        pb.last_loop_action_sequence.first(),
-    ) {
-        (Some(first), Some(_)) => {
-            let driver = first.controller;
-            pa.last_loop_action_sequence
-                .iter()
-                .chain(pb.last_loop_action_sequence.iter())
-                .all(|ctx| ctx.controller == driver)
-                .then_some(driver)
-        }
-        _ => None,
-    };
+    // (s1) BOTH sequences non-empty; (s2) one controller across BOTH sequences. Both conjuncts
+    // are exactly [`GameState::loop_period_controller`] applied per frame — "whose period is
+    // this", the single authority every routing site reads — with the two answers required to
+    // agree. Stating it that way rather than re-deriving `first().controller` + `all()` here is
+    // the point of hoisting that authority: a two-frame twin of the same question cannot drift
+    // from the one-frame form it duplicates.
+    let sole_driver = pa
+        .loop_period_controller()
+        .filter(|driver| pb.loop_period_controller() == Some(*driver));
 
     LoopWindowScope {
         phase_invariant,
@@ -2351,7 +2353,25 @@ pub(crate) fn loop_states_cover_modulo_growth_pinned<'a>(
 /// nothing". `Some(vec![])` would assert the latter and relieve EVERY conditioned
 /// self-cost static — relief in the forbidden direction. `None` = scan everything.
 /// Pinned by `empty_loop_action_sequence_proves_nothing_about_casting`.
-fn window_cast_card_ids(state: &GameState) -> Option<Vec<CardId>> {
+///
+/// FAIL-CLOSED ON A FOREIGN PERIOD, for the same reason one level up (CR 732.2a). A recorded
+/// period is evidence about the seat that recorded it and no one else, so when the caller names
+/// a `proposer` only THAT seat's own period is proof of what this window casts. Otherwise an
+/// opponent's choice of WHICH CARD TO ACTIVATE would select which soundness relief applies to
+/// the proposer's certification — the same "relief in the forbidden direction" the emptiness
+/// contract above rules out, arriving through a different door. This became reachable when the
+/// bounded mint's step (1b) went seat-relative: before that, a bounded offer could not be minted
+/// with any sequence present, so the question never arose.
+///
+/// `is_some_and`, NOT `is_some`: the proposer-less 2-arg entry
+/// [`loop_states_cover_modulo_growth`] builds a `PeriodVerdicts::unproven` container used by the
+/// object-growth detection covers in `analysis::loop_check`, which have no proposer to bind. When
+/// the container names none, this is byte-identical to the pre-fix behaviour; requiring
+/// `Some(proposer)` there would strip relief from that whole class.
+fn window_cast_card_ids(state: &GameState, proposer: Option<PlayerId>) -> Option<Vec<CardId>> {
+    if proposer.is_some_and(|p| state.loop_period_controller() != Some(p)) {
+        return None;
+    }
     let ids: Vec<CardId> = state
         .last_loop_action_sequence
         .iter()
@@ -2455,7 +2475,12 @@ pub(crate) fn loop_states_cover_modulo_growth_scoped<'a>(
     // (5) Off-stack fail-closed fire-time condition guard (the second read surface).
     // CR 601.2f: `cast_ids` is bound BEFORE `projected_scope` so NLL keeps the borrow
     // live across the call (`LoopWindowScope::cast_card_ids` is `Option<&'a [CardId]>`).
-    let cast_ids = window_cast_card_ids(current);
+    //
+    // SITE E (CR 732.2a): the window's cast-set proof is scoped to the seat this container is
+    // bound to, so a period recorded by ANOTHER seat cannot select which relief applies here.
+    // `verdicts.proposer()` is `None` for the proposer-less 2-arg entry, where this stays
+    // byte-identical to the unscoped read.
+    let cast_ids = window_cast_card_ids(current, verdicts.proposer());
     // All four fields written explicitly — no functional-update base, so there is no
     // `LoopWindowScope<'static>` -> `LoopWindowScope<'_>` variance question to reason
     // about, and a future FIFTH field is a compile error that forces a decision rather
@@ -2934,9 +2959,13 @@ enum CounterGrowthDisposition {
 /// of the counter-growth cover (charge / burden / oil / quest)? This `match` IS the
 /// SINGLE-SOURCE per-`CounterType` classification table, WILDCARD-FREE by
 /// construction, so a new `CounterType` variant will not compile until it is
-/// explicitly classified here. Shared by BOTH `classify_generic_counter_growth` (the
-/// ω-cover direction gate) and `grown_generic_counter_targets` (the display
-/// re-derivation) so the two can never drift out of lockstep. Kept in lockstep with
+/// explicitly classified here. Scoped to the ω-COVER DIRECTION GATE alone
+/// (`classify_generic_counter_growth`) — it is NOT the display partition. Sharing one
+/// partition between the cover and the ∞ display channel WAS the bug: it made every
+/// non-`Generic` beneficial counter loop (+1/+1, loyalty, defense) collapse correctly
+/// while rendering no `∞` pill at all. The display and batched-collapse channels use
+/// `counter_is_beneficial_materializable` instead, and the two partitions are now
+/// deliberately different rather than accidentally shared. Kept in lockstep with
 /// `CounterType::is_monotone_loop_resource`, which governs the projection: monotone
 /// P/T / loyalty / defense counters are `project_out_resources`'d away, the
 /// non-`Generic` preserved counters gate SBAs/durations and so must compare
@@ -3010,45 +3039,6 @@ fn classify_generic_counter_growth(
     }
 }
 
-/// CR 122.1 + CR 701.34a + CR 732.2a: the per-object `(ObjectId, CounterType)` pairs
-/// whose PRESERVED `Generic` counters STRICTLY GREW across one cycle (`current` vs
-/// `prior`) — the concrete DISPLAY targets of an accepted counter-growth loop
-/// (proliferate charge on Pentad Prism, burden on The One Ring). The offer
-/// certificate's unbounded axis is object-AGNOSTIC (`Counter(Other, Other)`), so the
-/// specific object id / counter type is NOT recoverable from the axis; this
-/// re-derives them by diffing each SHARED object's growable counters — the display
-/// analog of `classify_generic_counter_growth`, sharing its SAME wildcard-free
-/// `generic_counter_is_growable` partition (single-source, so they can't drift).
-///
-/// Iterates the CURRENT side only: strict growth requires `a > b >= 0`, so a grown
-/// counter is necessarily present in `current`'s map — this both captures every
-/// grown pair (no false negatives) and is duplicate-free (unlike a two-sided key
-/// chain). An object absent from `prior` is caught by the object-set cover, not this
-/// axis, so only SHARED objects contribute. DISPLAY-ONLY: the caller renders `∞`
-/// from these pairs without mutating the real counter count (CR 701.34a still adds a
-/// real counter each cycle; the `∞` is a render of the certified-unbounded loop).
-pub(crate) fn grown_generic_counter_targets(
-    prior: &GameState,
-    current: &GameState,
-) -> Vec<(ObjectId, CounterType)> {
-    let mut targets = Vec::new();
-    for (id, co) in current.objects.iter() {
-        let Some(po) = prior.objects.get(id) else {
-            continue;
-        };
-        for (ct, &a) in co.counters.iter() {
-            if !generic_counter_is_growable(ct) {
-                continue;
-            }
-            let b = po.counters.get(ct).copied().unwrap_or(0);
-            if a > b {
-                targets.push((*id, ct.clone()));
-            }
-        }
-    }
-    targets
-}
-
 /// CR 122.1 + CR 732.2a: the wildcard-free partition of `CounterType`s whose per-cycle
 /// growth is a BENEFICIAL persistent artifact materializable N×δ at the CR 500.5 boundary
 /// (the batched-collapse path). SEPARATE from `generic_counter_is_growable` (the cover
@@ -3085,13 +3075,15 @@ pub(crate) fn counter_is_beneficial_materializable(ct: &CounterType) -> bool {
     }
 }
 
-/// CR 122.1 + CR 732.2a: the per-object `(ObjectId, CounterType, delta)` triples whose
-/// BENEFICIAL-materializable counters strictly grew across one accepted period (`current`
-/// vs `prior`) — the batched-collapse δ source. The beneficial analog of
-/// `grown_generic_counter_targets` (Generic-only for the DISPLAY channel); this widens to
-/// +1/+1 / loyalty / defense via `counter_is_beneficial_materializable`. A CLONE, not a
-/// refactor: the display/cover Generic partition must stay narrow. Iterates the CURRENT
-/// side (strict growth ⇒ the grown counter is present in `current`); only SHARED objects
+/// CR 122.1 + CR 732.2a: THE per-object counter derivation of an accepted period — the
+/// `(ObjectId, CounterType, delta)` triples whose BENEFICIAL-materializable counters strictly
+/// grew across it (`current` vs `prior`), feeding BOTH the batched-collapse δ stash AND (projected
+/// to `(object, counter)`) the `∞` DISPLAY channel. ONE derivation, two consumers, so the pills
+/// and the growth that lands cannot disagree; the display channel used to run its own Generic-only
+/// diff, which is why beneficial non-`Generic` loops collapsed without ever rendering `∞`.
+/// Partitioned by `counter_is_beneficial_materializable` (`Generic(_)` / +1/+1 / loyalty /
+/// defense), deliberately WIDER than the ω-cover's `generic_counter_is_growable`. Iterates the
+/// CURRENT side (strict growth ⇒ the grown counter is present in `current`); only SHARED objects
 /// contribute (a fresh object is caught by the object-set cover, not this axis).
 pub(crate) fn grown_beneficial_counter_deltas(
     prior: &GameState,
@@ -6403,6 +6395,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         }
     }
@@ -6514,6 +6507,7 @@ mod tests {
                 // these rows test.
                 subject_match_count: Some(1),
                 die_result: None,
+                provenance: None,
             },
         }
     }
@@ -10597,6 +10591,7 @@ mod tests {
                     may_trigger_origin: None,
                     subject_match_count: None,
                     die_result: None,
+                    provenance: None,
                 },
             )
         };
@@ -11385,7 +11380,7 @@ mod tests {
         let mut state = GameState::new_two_player(7);
         assert!(state.last_loop_action_sequence.is_empty());
         assert_eq!(
-            window_cast_card_ids(&state),
+            window_cast_card_ids(&state, None),
             None,
             "(1) an empty driving sequence is NO PROOF — `Some(vec![])` would assert \
              `this window casts nothing` and relieve every conditioned self-cost static"
@@ -11404,9 +11399,84 @@ mod tests {
             pins: Vec::new(),
         }];
         assert_eq!(
-            window_cast_card_ids(&state),
+            window_cast_card_ids(&state, None),
             Some(vec![CardId(64)]),
             "(2) a one-entry sequence yields exactly that card id"
+        );
+    }
+
+    /// X4-5 — [`window_cast_card_ids`]'s PROPOSER SCOPING (CR 732.2a), the sibling contract to
+    /// X4-4's emptiness one, called DIRECTLY for the same anti-domination reason.
+    ///
+    /// A recorded period is evidence about the seat that recorded it. Once the bounded mint's
+    /// step (1b) went seat-relative, a certification could be taken with a FOREIGN period sitting
+    /// in state — and an unscoped read would then let an OPPONENT'S choice of which card to
+    /// activate decide which conditioned self-cost static gets relieved for THIS proposer.
+    ///
+    /// THREE-WAY AND EACH ARM IS LOAD-BEARING, so no constant implementation passes:
+    /// * `None` (the proposer-less 2-arg entry) ⇒ unscoped, byte-identical to pre-fix. Dropping
+    ///   the `Option` guard — the UNCONDITIONAL-MATCH form `if state.loop_period_controller() !=
+    ///   proposer { return None; }` — refuses the unbound container and FAILS (1); this is the arm
+    ///   that protects `loop_check`'s object-growth detection covers. (MEASURED, and it corrects
+    ///   this row's own earlier claim: the `is_some`-instead-of-`is_some_and` swap does NOT fail
+    ///   (1) — with `proposer == None` it never returns early — it fails (2), by refusing the
+    ///   seat that DID record the period.)
+    /// * `Some(owner)` ⇒ proof. An always-`None` implementation FAILS (2), as does the `is_some`
+    ///   swap above.
+    /// * `Some(other)` ⇒ no proof. The pre-fix unscoped implementation FAILS (3).
+    ///
+    /// (4) pins the fail-closed homogeneity clause: a two-seat run is nobody's period, so it is
+    /// proof for NEITHER seat — an implementation testing only `seq[0].controller` FAILS it.
+    #[test]
+    fn a_foreign_driving_period_proves_nothing_about_this_proposers_casting() {
+        use crate::types::game_state::{BuybackUsage, LoopAction, LoopActionContext};
+
+        let owner = PlayerId(0);
+        let other = PlayerId(1);
+        let step = |controller: PlayerId, card_id: CardId| LoopActionContext {
+            card_id,
+            controller,
+            action: LoopAction::Recast {
+                from_zone: Zone::Hand,
+                uses_buyback: BuybackUsage::Used,
+            },
+            convoke: None,
+            pins: Vec::new(),
+        };
+
+        let mut state = GameState::new_two_player(7);
+        state.last_loop_action_sequence = vec![step(owner, CardId(64))];
+
+        assert_eq!(
+            window_cast_card_ids(&state, None),
+            Some(vec![CardId(64)]),
+            "(1) an UNBOUND container (the proposer-less 2-arg entry `loop_check` uses) reads \
+             the period unscoped — `is_some_and`, not `is_some`, or the object-growth detection \
+             covers lose their relief"
+        );
+        assert_eq!(
+            window_cast_card_ids(&state, Some(owner)),
+            Some(vec![CardId(64)]),
+            "(2) the seat that RECORDED the period is proved by it"
+        );
+        assert_eq!(
+            window_cast_card_ids(&state, Some(other)),
+            None,
+            "(3) CR 732.2a: another seat's independent activation describes no sequence THIS \
+             proposer takes, so it is no proof about this window's cast set — relieving on it \
+             would hand an opponent the choice of which soundness relief applies"
+        );
+
+        // (4) the fail-closed homogeneity clause: nobody's period.
+        state.last_loop_action_sequence = vec![step(owner, CardId(64)), step(other, CardId(90))];
+        assert_eq!(
+            (
+                window_cast_card_ids(&state, Some(owner)),
+                window_cast_card_ids(&state, Some(other)),
+            ),
+            (None, None),
+            "(4) a heterogeneous run belongs to no seat, so it proves nothing for EITHER — \
+             reading only `seq[0].controller` would wrongly prove it for the first"
         );
     }
 
@@ -13138,6 +13208,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: match_count,
                 die_result: None,
+                provenance: None,
             },
         }
     }
@@ -13507,6 +13578,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         }
     }
@@ -14613,6 +14685,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         }
     }
@@ -15224,6 +15297,7 @@ mod tests {
                     source_name: String::new(),
                     subject_match_count: None,
                     die_result: None,
+                    provenance: None,
                 },
             }
         };
@@ -15895,6 +15969,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         }
     }

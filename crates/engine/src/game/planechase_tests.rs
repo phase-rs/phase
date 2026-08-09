@@ -655,6 +655,7 @@ fn phenomenon_encounter_then_sba_planeswalk() {
             source_name: String::new(),
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         },
     });
 

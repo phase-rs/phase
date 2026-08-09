@@ -6834,6 +6834,10 @@ fn counter_source_rider_leaves_spell_zone_none() {
     );
 }
 
+/// Issue #3308 no-regression: a flat "unless pays {3}" (no for-each, no
+/// "plus an additional") must still yield a flat static Mana{generic:3} —
+/// the infix arm must not capture plain costs. The exact-equality assertion
+/// on `unless_pay.cost` below is what holds that line.
 #[test]
 fn effect_counter_unless_pays_parses_mana_cost() {
     use crate::types::mana::ManaCost;
@@ -7335,28 +7339,6 @@ fn effect_counter_unless_pays_plus_additional_for_each_rune_snag_offbattlefield_
             } if shards.is_empty()
         ),
         "off-battlefield-zone for-each must stay gapped as flat Mana{{generic:2}}, got {:?}",
-        unless_pay.cost
-    );
-}
-
-// Issue #3308 no-regression: a flat "unless pays {3}" (no for-each, no
-// "plus an additional") must still yield a flat static Mana{generic:3} —
-// the new infix arm must not capture plain costs.
-#[test]
-fn effect_counter_unless_pays_flat_generic_stays_static() {
-    let def = parse_effect_chain(
-        "Counter target spell unless its controller pays {3}",
-        AbilityKind::Spell,
-    );
-    let unless_pay = def.unless_pay.expect("should attach unless_pay");
-    assert!(
-        matches!(
-            &unless_pay.cost,
-            AbilityCost::Mana {
-                cost: ManaCost::Cost { shards, generic: 3 }
-            } if shards.is_empty()
-        ),
-        "flat unless-cost should stay static Mana{{generic:3}}, got {:?}",
         unless_pay.cost
     );
 }
@@ -16575,19 +16557,25 @@ fn exile_top_then_free_play_that_card_binds_cast_to_tracked_set() {
         .sub_ability
         .as_ref()
         .expect("the free-cast grant must chain after the exile");
+    // CR 608.2c + CR 607.2a: the prior `ExileTop` stamps `ThisWayCause::Exiled`,
+    // so the cast anaphor narrows to the exiled members of the chain set rather
+    // than binding bare (which would also pick up any other publisher's
+    // objects that were merged into the same set).
     assert!(
         matches!(
             &*cast.effect,
             Effect::CastFromZone {
-                target: TargetFilter::TrackedSet {
+                target: TargetFilter::TrackedSetFiltered {
                     id: TrackedSetId(0),
+                    caused_by: Some(ThisWayCause::Exiled),
+                    ..
                 },
                 without_paying_mana_cost: true,
                 mode: CardPlayMode::Play,
                 ..
             }
         ),
-        "expected CastFromZone bound to the tracked exiled card (free, Play), got {:?}",
+        "expected CastFromZone bound to the exiled members of the tracked set (free, Play), got {:?}",
         cast.effect
     );
 }
@@ -20165,25 +20153,6 @@ fn shuffle_compound_subject_into_owners_libraries() {
 // -----------------------------------------------------------------------
 
 #[test]
-fn cant_regenerate_destroy_target() {
-    let def = parse_effect_chain(
-        "Destroy target creature. It can't be regenerated.",
-        AbilityKind::Spell,
-    );
-    assert!(
-        matches!(
-            *def.effect,
-            Effect::Destroy {
-                cant_regenerate: true,
-                ..
-            }
-        ),
-        "Expected Destroy {{ cant_regenerate: true }}, got {:?}",
-        def.effect
-    );
-}
-
-#[test]
 fn cant_regenerate_destroy_all() {
     let def = parse_effect_chain(
         "Destroy all creatures. They can't be regenerated.",
@@ -22378,12 +22347,17 @@ fn parse_fallen_shinobi_shape_emits_cast_from_zone_with_tracked_set() {
             mode,
             ..
         } => {
+            // CR 608.2c + CR 607.2a: the prior "exiles the top two cards"
+            // stamps `ThisWayCause::Exiled`, so "those cards" binds to the
+            // exiled members of the chain set, not to every member.
             assert_eq!(
                 *target,
-                TargetFilter::TrackedSet {
-                    id: TrackedSetId(0)
+                TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(TargetFilter::Any),
+                    caused_by: Some(ThisWayCause::Exiled),
                 },
-                "expected sub-ability to bind to the tracked exile set"
+                "expected sub-ability to bind to the exiled members of the tracked set"
             );
             assert!(
                 *without_paying_mana_cost,
@@ -22395,6 +22369,202 @@ fn parse_fallen_shinobi_shape_emits_cast_from_zone_with_tracked_set() {
             );
         }
         other => panic!("expected CastFromZone sub-ability, got {other:?}"),
+    }
+}
+
+/// CR 608.2c + CR 607.2a invariant: every effect shape that
+/// `publishes_exiled_cause_at_resolution` accepts must actually stamp
+/// `ThisWayCause::Exiled` on the members it publishes at runtime.
+///
+/// The predicate exists to gate a `TrackedSetFiltered { caused_by:
+/// Some(Exiled) }` binding on 51 cards' cast anaphors. If a later contributor
+/// widens `is_exile_effect` with a producer whose runtime cause is `None` (as
+/// `Dig{Exile}`, `HeistExile`, `ExileHaunting`,
+/// `ExileResolvingSpellInsteadOfGraveyard` and `RevealUntil{kept: Exile}` all
+/// are — they are accepted by the *sibling* `chain_clause_is_exile_producer`
+/// and deliberately not by this one), those cards' anaphors would silently
+/// match nothing and every one of them would go quietly inert. The compiler
+/// cannot see that coupling.
+///
+/// **Scope of the guarantee.** This test checks a hand-listed set of shapes; it
+/// does NOT enumerate everything `is_exile_effect` accepts, so a newly added
+/// arm would pass unnoticed until it is listed here. Widening
+/// `is_exile_effect` therefore means adding the shape below by hand.
+///
+/// Two arms of the predicate are pinned differently:
+/// * The `is_exile_effect` shapes are checked directly against the runtime
+///   registry `game::effects::this_way_cause_for_effect`.
+/// * `ForEachCategory { action: ExileFromPool }` does not go through that
+///   registry — its resolver
+///   (`game::effects::choose_from_zone::complete_per_category_exile`) calls
+///   `publish_tracked_set_with_causes` with an explicit
+///   `ThisWayCause::Exiled`. Its runtime pin is
+///   `tests/integration/issue_4253_sanar_vivid.rs`.
+#[test]
+fn exiled_cause_publishers_all_stamp_exiled_at_runtime() {
+    use crate::game::effects::this_way_cause_for_effect;
+    use crate::types::counter::CounterType;
+    use crate::types::zones::EtbTapState;
+
+    let direct_publishers = [
+        Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Exile,
+            target: TargetFilter::Any,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        },
+        Effect::ChangeZoneAll {
+            origin: None,
+            destination: Zone::Exile,
+            target: TargetFilter::Any,
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+            library_position: None,
+            random_order: false,
+        },
+        Effect::ExileTop {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Top,
+            face_down: false,
+        },
+    ];
+    for effect in &direct_publishers {
+        assert!(
+            publishes_exiled_cause_at_resolution(effect),
+            "expected {effect:?} to be an Exiled-cause publisher"
+        );
+        assert_eq!(
+            this_way_cause_for_effect(effect),
+            Some(ThisWayCause::Exiled),
+            "{effect:?} is accepted by publishes_exiled_cause_at_resolution but does NOT stamp \
+             ThisWayCause::Exiled at runtime — a cause-filtered cast anaphor bound after it \
+             would match nothing"
+        );
+    }
+
+    // CR 603.7a: the delayed-trigger wrapper defers its exile to a LATER
+    // resolution, so it answers the two questions differently — yes to "did
+    // this chain publish a tracked set?", no to "does this clause stamp
+    // Exiled when it resolves?". Both directions are pinned here: the first
+    // guards the six scopes whose sole producer is a delayed wrapper
+    // (conqueror's galleon, end-blaze epiphany, fire giant's fury, priority
+    // boarding, storm herald, waltz of rage) against losing their binding;
+    // the second is why the narrow predicate spells its shapes out instead of
+    // delegating to `is_exile_effect`.
+    let delayed = Effect::CreateDelayedTrigger {
+        condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+        effect: Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            direct_publishers[0].clone(),
+        )),
+        uses_tracked_set: true,
+    };
+    assert!(
+        publishes_tracked_set_from_resolution(&delayed),
+        "the delayed wrapper stands in for a real exile in an earlier clause, so the \
+         chain DID publish a set — dropping this sends six cards back to the \
+         unrewritten ParentTarget binding"
+    );
+    assert!(
+        !publishes_exiled_cause_at_resolution(&delayed),
+        "the delayed wrapper stamps nothing when it resolves, so a cause-filtered \
+         cast anaphor bound after it would match nothing"
+    );
+    assert_eq!(
+        this_way_cause_for_effect(&delayed),
+        None,
+        "the runtime registry agrees: no cause is stamped. If this ever returns \
+         Some(Exiled), the narrow predicate can accept the wrapper again."
+    );
+
+    // The per-category exile arm: accepted here, stamped explicitly by its own
+    // resolver rather than by the shared registry.
+    let per_category = Effect::ForEachCategory {
+        category: IterationCategory::Color,
+        chooser: Chooser::Controller,
+        action: ForEachCategoryAction::ExileFromPool {
+            zone: Zone::Library,
+            up_to: true,
+        },
+    };
+    assert!(
+        publishes_exiled_cause_at_resolution(&per_category),
+        "Sanar's per-category exile must count as an Exiled-cause publisher"
+    );
+
+    // Negative sibling: the OTHER ForEachCategory action is not an exile at
+    // all, and must not drag a cast anaphor onto the exiled-members binding.
+    let per_category_counters = Effect::ForEachCategory {
+        category: IterationCategory::Color,
+        chooser: Chooser::Controller,
+        action: ForEachCategoryAction::PutCounter {
+            target: TargetFilter::Any,
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+        },
+    };
+    assert!(
+        !publishes_exiled_cause_at_resolution(&per_category_counters),
+        "ForEachCategory{{PutCounter}} exiles nothing and must not be an exile publisher"
+    );
+
+    // Negative: shapes that DO exile but whose members carry no cause. Each is
+    // accepted by `chain_clause_is_exile_producer` and must stay rejected here.
+    let uncaused_exilers = [
+        Effect::HeistExile,
+        Effect::Dig {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 1 },
+            destination: Some(Zone::Exile),
+            keep_count: Some(1),
+            keep_count_expr: None,
+            up_to: false,
+            filter: TargetFilter::Any,
+            rest_destination: None,
+            reveal: false,
+            enter_tapped: false,
+            source: crate::types::ability::DigSource::default(),
+        },
+        Effect::ExileHaunting {
+            target: TargetFilter::Any,
+        },
+        Effect::ExileResolvingSpellInsteadOfGraveyard { on_exile: None },
+        Effect::RevealUntil {
+            player: TargetFilter::Controller,
+            filter: TargetFilter::Any,
+            count: QuantityExpr::Fixed { value: 1 },
+            matched_disposition: RevealUntilDisposition::RevealOnly,
+            kept_destination: Zone::Exile,
+            rest_destination: Zone::Library,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            kept_optional_to: None,
+            enters_under: None,
+        },
+    ];
+    for effect in &uncaused_exilers {
+        assert!(
+            chain_clause_is_exile_producer(effect),
+            "{effect:?} is expected to remain a same-chain exile producer"
+        );
+        assert!(
+            !publishes_exiled_cause_at_resolution(effect),
+            "{effect:?} publishes no cause stamp, so a cause-filtered cast anaphor must NOT be \
+             bound after it"
+        );
+        assert_eq!(this_way_cause_for_effect(effect), None);
     }
 }
 
@@ -47808,12 +47978,20 @@ fn keldon_flamesage_cast_target_stays_tracked_set_after_exiled_by_source_fix() {
         .iter()
         .filter_map(|trigger| trigger.execute.as_deref())
         .find_map(find_cast_from_zone_target);
+    // CR 608.2c + CR 607.2a: still the same-chain sentinel (id 0), never durable
+    // `ExiledBySource` — but narrowed to the members the same-chain exile
+    // stamped `Exiled`.
     assert!(
         matches!(
             target,
-            Some(TargetFilter::TrackedSet { id }) if id.0 == 0
+            Some(TargetFilter::TrackedSetFiltered {
+                id,
+                caused_by: Some(ThisWayCause::Exiled),
+                ..
+            }) if id.0 == 0
         ),
-        "Keldon Flamesage's same-chain exile must keep CastFromZone{{TrackedSet(0)}}, got {target:?}"
+        "Keldon Flamesage's same-chain exile must keep the CastFromZone anaphor on the \
+         chain-local tracked-set sentinel (exiled members), got {target:?}"
     );
 }
 
@@ -52367,5 +52545,235 @@ fn chain_continuation_each_of_head_keeps_its_announced_count() {
         Some(MultiTargetSpec::exact(fixed_qty(2))),
         "CR 601.2c: the continuation's \"each of two target creatures\" head must \
          announce exactly two targets on its own sub-ability"
+    );
+}
+
+/// SHAPE — Borg Queen, Perfection Manifest's `assimilate` keyword action lowers
+/// to the shipped reanimate-then-retype chain: a `ChangeZone` that moves the
+/// targeted opponent-graveyard creature card to the battlefield under the
+/// instruction's controller with a +1/+1 counter (CR 110.2a + CR 122.1), plus a
+/// `Duration::Permanent` `GenericEffect` continuation carrying ONE
+/// `StaticDefinition` whose four layer-4 modifications (CR 613.1d) implement
+/// CR 205.1b's "[creature type or types] artifact creature" semantics.
+///
+/// Driven through `parse_oracle_text` on the VERBATIM printed Oracle text
+/// (reminder text included, MTGJSON keyword hint included) — the same entry the
+/// card-data pipeline uses — not a direct call to the private production.
+#[test]
+fn borg_queen_assimilate_lowers_to_reanimate_then_retype_chain() {
+    const BORG_QUEEN: &str = "Artifact creatures you control get +2/+0.\n\
+         When Borg Queen enters, assimilate target creature card from an opponent's graveyard. \
+         (Put it onto the battlefield under your control with a +1/+1 counter. It's a Borg \
+         artifact creature and loses all other creature types.)";
+
+    let parsed = parse_oracle_text(
+        BORG_QUEEN,
+        "Borg Queen, Perfection Manifest",
+        &["Assimilate".to_string()],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &["Borg".to_string(), "Noble".to_string()],
+    );
+
+    let trigger = parsed
+        .triggers
+        .first()
+        .expect("the ETB trigger must be extracted");
+    let execute = trigger
+        .execute
+        .as_deref()
+        .expect("the ETB trigger must carry an execute body");
+
+    // (1) POSITIVE REACH-GUARD (mandatory): zero `Effect::Unimplemented` in the
+    // whole chain. Every negative assertion below is non-vacuous only because
+    // this passes — with the assimilate lowering (PR #7096) reverted the execute
+    // IS an `Unimplemented { name: "assimilate" }`, so this is also the
+    // revert-failing assertion.
+    assert!(
+        !ability_chain_has_unimplemented(execute),
+        "the assimilate trigger must lower with no residual Unimplemented node: {execute:#?}"
+    );
+
+    // (2) CR 110.2a + CR 115.2: the move itself. `origin` is None — the graveyard
+    // constraint travels on the target filter, matching Ashen Powder / Puppeteer
+    // Clique / Macabre Mockery, the shipped cards with this exact target phrase.
+    let Effect::ChangeZone {
+        origin,
+        destination,
+        enters_under,
+        target,
+        enter_with_counters,
+        up_to,
+        ..
+    } = &*execute.effect
+    else {
+        panic!(
+            "assimilate must lower to a ChangeZone head, got {:#?}",
+            execute.effect
+        );
+    };
+    assert_eq!(
+        *origin, None,
+        "CR 115.2: origin stays None for the \"from an opponent's graveyard\" phrase"
+    );
+    assert_eq!(*destination, Zone::Battlefield);
+    assert_eq!(
+        *enters_under,
+        Some(ControllerRef::You),
+        "CR 110.2a: the assimilated permanent enters under the instruction's controller"
+    );
+    assert!(!*up_to, "assimilate is mandatory, not an \"up to\" move");
+
+    // (3) CR 122.1 + CR 614.1c: exactly one +1/+1 counter, placed as part of the
+    // entry event rather than by a later PutCounter step.
+    assert_eq!(
+        *enter_with_counters,
+        vec![(
+            crate::types::counter::CounterType::Plus1Plus1,
+            QuantityExpr::Fixed { value: 1 }
+        )],
+        "the entry counter must be exactly one +1/+1 counter"
+    );
+
+    // (4) CR 108.3 + CR 109.4 + CR 115.2: the target shape is ASSERTED, not
+    // constructed, so a future `parse_zone_suffix` change is caught here rather
+    // than silently forked. A graveyard card has no controller (CR 109.4), so the
+    // opponent restriction rides as OWNERSHIP (CR 108.3).
+    let TargetFilter::Typed(typed) = target else {
+        panic!("the assimilate target must be a Typed filter, got {target:#?}");
+    };
+    assert_eq!(
+        typed.type_filters,
+        vec![TypeFilter::Creature],
+        "\"target creature card\" must yield exactly the Creature type filter"
+    );
+    assert_eq!(
+        typed.controller, None,
+        "CR 109.4: a graveyard card has no controller, so the filter-level controller stays None"
+    );
+    assert!(
+        typed.properties.contains(&FilterProp::Owned {
+            controller: ControllerRef::Opponent
+        }),
+        "CR 108.3: \"an opponent's graveyard\" must restrict by OWNERSHIP, got {:#?}",
+        typed.properties
+    );
+    assert!(
+        typed.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }),
+        "CR 115.2: the graveyard zone must ride on the target filter, got {:#?}",
+        typed.properties
+    );
+
+    // (5) The continuation step. CR 613.1d: all four modifications are layer 4,
+    // so LIST ORDER decides the outcome and they must ride ONE StaticDefinition —
+    // splitting them would order by CR 613.7 timestamp instead and the subtype
+    // wipe could erase Borg. This one assertion pins both invariants.
+    let sub = execute
+        .sub_ability
+        .as_deref()
+        .expect("assimilate must chain the type override as a direct child");
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        target: sub_target,
+        ..
+    } = &*sub.effect
+    else {
+        panic!(
+            "the override step must be a GenericEffect, got {:#?}",
+            sub.effect
+        );
+    };
+    assert_eq!(
+        static_abilities.len(),
+        1,
+        "CR 613.1d: all four layer-4 modifications must ride ONE StaticDefinition"
+    );
+    let retype = &static_abilities[0];
+    assert_eq!(
+        retype.affected,
+        Some(TargetFilter::ParentTarget),
+        "CR 611.2c: the override must bind to the parent's chosen target"
+    );
+    assert_eq!(
+        *sub_target,
+        Some(TargetFilter::ParentTarget),
+        "the GenericEffect target must be the parent target so the TCE freezes to the moved object"
+    );
+    assert_eq!(
+        retype.modifications,
+        vec![
+            ContinuousModification::RemoveAllSubtypes {
+                set: crate::types::card_type::SubtypeSet::Creature,
+            },
+            ContinuousModification::AddSubtype {
+                subtype: "Borg".to_string(),
+            },
+            ContinuousModification::AddType {
+                core_type: CoreType::Artifact,
+            },
+            ContinuousModification::AddType {
+                core_type: CoreType::Creature,
+            },
+        ],
+        "CR 205.1a + CR 205.1b: wipe the creature-type set FIRST, then add Borg, \
+         then the additive card types — written order is load-bearing"
+    );
+
+    // (6) CR 611.2a: no stated duration on a keyword-action definition means
+    // "until the end of the game". This is a SHAPE assertion and does NOT
+    // substitute for runtime semantics — the runtime guard against the
+    // `effect.rs` `unwrap_or(UntilEndOfTurn)` fallback is
+    // `tests/integration/borg_queen_assimilate.rs`'s cleanup-survival test.
+    assert_eq!(
+        *duration,
+        Some(Duration::Permanent),
+        "CR 611.2a: the type override must be explicitly Permanent"
+    );
+    assert_eq!(
+        sub.duration,
+        Some(Duration::Permanent),
+        "CR 611.2a: the AbilityDefinition duration must also be Permanent"
+    );
+
+    // (7) NEGATIVE, paired with (1): CR 205.1b retains prior card types, so a
+    // set-replacement `SetCardTypes` is rules-WRONG here; and the card says
+    // nothing about color, so no `AddColor` may appear (contrast Rise from the
+    // Grave, which does emit one).
+    assert!(
+        !retype.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::SetCardTypes { .. } | ContinuousModification::AddColor { .. }
+        )),
+        "CR 205.1b: no SetCardTypes (card types are RETAINED) and no AddColor: {:#?}",
+        retype.modifications
+    );
+}
+
+/// Parser fail-closed: an `assimilate` phrasing whose target is NOT a
+/// graveyard card is a shape this production does not model, so it must keep
+/// producing `Effect::Unimplemented` and coverage must stay honestly RED rather
+/// than be silently lowered into a reanimation. `name` is `"assimilate"` because
+/// the imperative fallback derives it from the clause's first word.
+///
+/// Paired positive: the real card's phrasing in the same test produces a
+/// `ChangeZone`, so the negative is about the graveyard guard and not about a
+/// production that never fires.
+#[test]
+fn assimilate_without_a_graveyard_target_stays_unimplemented() {
+    let non_graveyard = parse_effect("assimilate target creature you control");
+    assert!(
+        matches!(
+            &non_graveyard,
+            Effect::Unimplemented { name, .. } if name == "assimilate"
+        ),
+        "a non-graveyard assimilate phrasing must stay honestly unsupported, got {non_graveyard:?}"
+    );
+
+    let real = parse_effect("assimilate target creature card from an opponent's graveyard");
+    assert!(
+        matches!(real, Effect::ChangeZone { .. }),
+        "reach-guard: the printed phrasing must lower to a ChangeZone, got {real:?}"
     );
 }

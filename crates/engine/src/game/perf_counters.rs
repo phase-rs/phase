@@ -3,6 +3,19 @@ use std::cell::Cell;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PerfCounterSnapshot {
     pub state_clone_for_legality: u64,
+    pub generation_state_clones: u64,
+    pub strict_fast_path_state_clones: u64,
+    pub strict_fast_path_mana_readiness_state_clones: u64,
+    pub raw_validation_state_clones: u64,
+    pub grouped_mana_readiness_state_clones: u64,
+    pub post_apply_auto_payment_core_state_clones: u64,
+    pub priority_cast_probe_state_clones: u64,
+    pub auto_payment_borrowed_wrapper_calls: u64,
+    pub auto_payment_owned_state_clones: u64,
+    pub generation_auto_payment_wrapper_calls: u64,
+    pub strict_fast_path_auto_payment_wrapper_calls: u64,
+    pub post_apply_auto_payment_core_calls: u64,
+    pub post_apply_uncached_source_collections: u64,
     pub static_full_scans: u64,
     pub spell_keyword_grant_scans: u64,
     pub layers_full_eval: u64,
@@ -47,6 +60,19 @@ thread_local! {
     /// `AtomicU64`: that reintroduces the parallel-test flakiness this replaces.
     static COUNTERS: Cell<PerfCounterSnapshot> = const { Cell::new(PerfCounterSnapshot {
         state_clone_for_legality: 0,
+        generation_state_clones: 0,
+        strict_fast_path_state_clones: 0,
+        strict_fast_path_mana_readiness_state_clones: 0,
+        raw_validation_state_clones: 0,
+        grouped_mana_readiness_state_clones: 0,
+        post_apply_auto_payment_core_state_clones: 0,
+        priority_cast_probe_state_clones: 0,
+        auto_payment_borrowed_wrapper_calls: 0,
+        auto_payment_owned_state_clones: 0,
+        generation_auto_payment_wrapper_calls: 0,
+        strict_fast_path_auto_payment_wrapper_calls: 0,
+        post_apply_auto_payment_core_calls: 0,
+        post_apply_uncached_source_collections: 0,
         static_full_scans: 0,
         spell_keyword_grant_scans: 0,
         layers_full_eval: 0,
@@ -76,6 +102,33 @@ thread_local! {
         sba_battlefield_snapshot_builds: 0,
         sba_empty_battlefield_short_circuits: 0,
     }) };
+    static LEGALITY_CLONE_PHASE: Cell<Option<LegalityClonePhase>> = const { Cell::new(None) };
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LegalityClonePhase {
+    Generation,
+    StrictFastPath,
+    RawValidation,
+    GroupedManaReadiness,
+    PostApplyCore,
+}
+
+pub(crate) struct LegalityClonePhaseGuard {
+    previous: Option<LegalityClonePhase>,
+}
+
+impl LegalityClonePhaseGuard {
+    pub(crate) fn enter(phase: LegalityClonePhase) -> Self {
+        let previous = LEGALITY_CLONE_PHASE.with(|current| current.replace(Some(phase)));
+        Self { previous }
+    }
+}
+
+impl Drop for LegalityClonePhaseGuard {
+    fn drop(&mut self) {
+        LEGALITY_CLONE_PHASE.with(|current| current.set(self.previous));
+    }
 }
 
 fn with_mut(f: impl FnOnce(&mut PerfCounterSnapshot)) {
@@ -88,6 +141,78 @@ fn with_mut(f: impl FnOnce(&mut PerfCounterSnapshot)) {
 
 pub fn record_state_clone_for_legality() {
     with_mut(|s| s.state_clone_for_legality += 1);
+}
+
+fn record_phase_owned_state_clone_for(
+    snapshot: &mut PerfCounterSnapshot,
+    phase: Option<LegalityClonePhase>,
+) {
+    match phase {
+        Some(LegalityClonePhase::Generation) => snapshot.generation_state_clones += 1,
+        Some(LegalityClonePhase::StrictFastPath) => snapshot.strict_fast_path_state_clones += 1,
+        Some(LegalityClonePhase::RawValidation) => snapshot.raw_validation_state_clones += 1,
+        Some(LegalityClonePhase::GroupedManaReadiness) => {
+            snapshot.grouped_mana_readiness_state_clones += 1;
+        }
+        Some(LegalityClonePhase::PostApplyCore) => {
+            snapshot.post_apply_auto_payment_core_state_clones += 1;
+        }
+        None => {}
+    }
+}
+
+pub(crate) fn record_phase_owned_state_clone() {
+    let phase = LEGALITY_CLONE_PHASE.with(Cell::get);
+    with_mut(|snapshot| record_phase_owned_state_clone_for(snapshot, phase));
+}
+
+pub(crate) fn record_mana_readiness_state_clone() {
+    let phase = LEGALITY_CLONE_PHASE.with(Cell::get);
+    with_mut(|snapshot| {
+        record_phase_owned_state_clone_for(snapshot, phase);
+        if phase == Some(LegalityClonePhase::StrictFastPath) {
+            snapshot.strict_fast_path_mana_readiness_state_clones += 1;
+        }
+    });
+}
+
+pub(crate) fn record_auto_payment_borrowed_wrapper() {
+    let phase = LEGALITY_CLONE_PHASE.with(Cell::get);
+    with_mut(|s| {
+        s.auto_payment_borrowed_wrapper_calls += 1;
+        s.auto_payment_owned_state_clones += 1;
+        match phase {
+            Some(LegalityClonePhase::Generation) => {
+                s.generation_auto_payment_wrapper_calls += 1;
+            }
+            Some(LegalityClonePhase::StrictFastPath) => {
+                s.strict_fast_path_auto_payment_wrapper_calls += 1;
+            }
+            Some(
+                LegalityClonePhase::RawValidation
+                | LegalityClonePhase::GroupedManaReadiness
+                | LegalityClonePhase::PostApplyCore,
+            )
+            | None => {}
+        }
+    });
+    record_phase_owned_state_clone();
+}
+
+pub(crate) fn record_priority_cast_probe_state_clone() {
+    with_mut(|s| s.priority_cast_probe_state_clones += 1);
+}
+
+pub(crate) fn record_post_apply_auto_payment_core_call() {
+    if LEGALITY_CLONE_PHASE.with(Cell::get) == Some(LegalityClonePhase::PostApplyCore) {
+        with_mut(|s| s.post_apply_auto_payment_core_calls += 1);
+    }
+}
+
+pub(crate) fn record_post_apply_uncached_source_collection() {
+    if LEGALITY_CLONE_PHASE.with(Cell::get) == Some(LegalityClonePhase::PostApplyCore) {
+        with_mut(|s| s.post_apply_uncached_source_collections += 1);
+    }
 }
 
 /// Counts every whole-battlefield / command-zone static sweep done for legality

@@ -5,7 +5,7 @@ import { getSeatColor } from "../../hooks/useSeatColor.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getPlayerDisplayName } from "../../stores/multiplayerStore.ts";
 import { assertNever } from "../../utils/assertNever.ts";
-import { categoryColorClass } from "../../viewmodel/logFormatting.ts";
+import { logPresentation, toneClass } from "../../viewmodel/logFormatting.ts";
 
 interface LogEntryProps {
   entry: GameLogEntry;
@@ -82,11 +82,12 @@ function renderSegment(
 // preserved through the filter pipeline) and onInspectObject is a stable store
 // action, so memo lets unchanged rows skip re-rendering on those panel updates.
 export const LogEntry = memo(function LogEntry({ entry, onInspectObject }: LogEntryProps) {
-  const colorClass = categoryColorClass(entry);
+  const presentation = logPresentation(entry);
+  const colorClass = toneClass(presentation.tone);
   const seatOrder = useGameStore((s) => s.gameState?.seat_order);
 
   return (
-    <div className={`border-b border-gray-800 py-0.5 font-mono text-[10px] ${colorClass}`}>
+    <div data-tone={presentation.tone} className={`border-b border-l border-gray-800 py-0.5 pl-1 font-mono text-[10px] ${colorClass}`}>
       {entry.segments.map((segment, index) =>
         renderSegment(segment, index, seatOrder, onInspectObject),
       )}

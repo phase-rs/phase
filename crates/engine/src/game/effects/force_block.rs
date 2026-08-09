@@ -53,15 +53,10 @@ pub fn resolve(
         // object cannot be rediscovered from its raw id.
         Some(attacker)
             if state.combat.as_ref().is_some_and(|combat| {
-                combat.attackers.iter().any(|info| {
-                    info.object_id == attacker.object_id
-                        && state
-                            .objects
-                            .get(&attacker.object_id)
-                            .is_some_and(|object| {
-                                ObjectIncarnationRef::from_object(object) == attacker
-                            })
-                })
+                combat
+                    .attackers
+                    .iter()
+                    .any(|info| info.object_id == attacker.object_id && attacker.is_current(state))
             }) =>
         {
             StaticMode::MustBlockAttacker { attacker }

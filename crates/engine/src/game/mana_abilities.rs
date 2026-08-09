@@ -5,6 +5,9 @@ use crate::types::ability::{
     QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, REMOVE_COUNTER_COST_ALL,
     REMOVE_COUNTER_COST_ANY_NUMBER,
 };
+use crate::types::ability_visit::{
+    visit_ability_def_costs_scoped, visit_ability_def_scoped, ResolutionScope,
+};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
@@ -21,6 +24,7 @@ use crate::types::player::PlayerId;
 use crate::types::statics::StaticModeKind;
 use crate::types::zones::Zone;
 use std::collections::HashSet;
+use std::ops::ControlFlow;
 
 use super::cost_payability::{eligible_exile_cost_objects, exile_cost_effective_zone};
 use super::effects::mana::resolve_restrictions;
@@ -33,13 +37,28 @@ use super::mana_sources::{mana_color_to_type, mana_type_to_color};
 use super::sacrifice;
 use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
-/// Check if a typed ability definition represents a mana ability (CR 605).
-/// CR 605.3: Mana abilities produce mana and resolve immediately without using the stack.
+/// CR 605.1a, criteria (1)-(3) ONLY — no target (CR 115.6), the root effect adds
+/// mana, and it's not a loyalty ability (CR 606.2). Deliberately EXCLUDES the
+/// fourth criterion ("its cost and effect don't move any card to or from a
+/// library"), which is why this is NOT the mana-ability test and must never be
+/// used for activation routing — use [`is_mana_ability`] for that.
+///
+/// This exists because [`is_renewable_mana_ability`] asks a different question:
+/// "is this permanent part of a standing manabase?" A Millikin
+/// ("{T}, Mill a card: Add {C}") stops being a rules mana ability under the
+/// library clause but does not stop being a manabase permanent. Composing the
+/// development predicate on the rules predicate would delete Millikin, Deranged
+/// Assistant, and Codie from `phase-ai`'s `is_intrinsic_mana_source` ->
+/// `card_value::mana_role` -> mulligan `keep_tier`, for a reason unrelated to
+/// manabase development.
+///
+/// CR 605.3b: Mana abilities produce mana and resolve immediately without using
+/// the stack.
 /// CR 605.1a: A mana ability cannot have targets. `Effect::Mana` carries a
 /// `ManaTargetRole` naming its recipient and/or count-source player targets;
 /// any declared role means the ability targets and must use the stack. The
 /// `multi_target` mechanism is checked alongside it.
-pub fn is_mana_ability(ability_def: &AbilityDefinition) -> bool {
+fn produces_mana_on_activation(ability_def: &AbilityDefinition) -> bool {
     // CR 605.1a: A mana ability "doesn't require a target." Read the ROLE's
     // declared filters: ANY declared role — recipient or count source — means
     // the ability names a target and therefore uses the stack (Jeska's Will
@@ -71,6 +90,101 @@ pub fn is_mana_ability(ability_def: &AbilityDefinition) -> bool {
         return false;
     }
     true
+}
+
+/// CR 605.1a + CR 608.2c: does any effect this ability executes during its OWN
+/// resolution move a card to or from a library? Walks the head effect, the
+/// cost's embedded effects, and the `sub_ability` / `else_ability` /
+/// `mode_abilities` chain, stopping at the CR 603.3 boundary owned by
+/// [`ResolutionScope::OwnResolutionOnly`] — so a payload that is merely
+/// *registered* to resolve later (a CR 603.7a delayed trigger, a CR 603.12
+/// reflexive trigger, a CR 614.1 replacement, an emblem, a token's granted
+/// abilities) is not attributed to this ability.
+fn chain_moves_card_to_or_from_library(ability_def: &AbilityDefinition) -> bool {
+    visit_ability_def_scoped(
+        ability_def,
+        ResolutionScope::OwnResolutionOnly,
+        &mut |effect| {
+            if effect.moves_card_to_or_from_library() {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        },
+    )
+    .is_break()
+}
+
+/// CR 605.1a "its cost": the root activation cost (CR 602.1a — "the activation
+/// cost is everything before the colon"), PLUS every cost paid during this
+/// ability's own resolution, which CR 118.12a -> CR 118.12 classifies as a cost
+/// ("the action [do something] is a cost, paid when the spell or ability
+/// resolves") and CR 608.2c therefore places under "its effect":
+/// `unless_pay.cost` and the `cost` on every `sub_ability` / `else_ability` /
+/// `mode_abilities` link.
+///
+/// This CANNOT be folded into [`chain_moves_card_to_or_from_library`]: that
+/// walk's visitor is `FnMut(&Effect)`, and `AbilityCost::Mill` / `Exile` /
+/// `ExileWithAggregate` / `ReturnToHand` carry no nested `Effect` at all, so they
+/// are structurally invisible to it. That is a type-level gap, not a missing
+/// match arm — see `ability_visit::visit_ability_def_costs_scoped`.
+fn cost_moves_card_to_or_from_library(ability_def: &AbilityDefinition) -> bool {
+    visit_ability_def_costs_scoped(
+        ability_def,
+        ResolutionScope::OwnResolutionOnly,
+        &mut |cost| {
+            if cost.moves_card_to_or_from_library() {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        },
+    )
+    .is_break()
+}
+
+/// CR 605.1a: the single authority for "is this activated ability a mana
+/// ability?" — all four criteria.
+///
+/// CR 605.1a (final sentence): "Do not take into account replacement effects
+/// that may apply, other than self-replacement effects, when evaluating these
+/// criteria." This function is a pure function of the printed
+/// `AbilityDefinition` AST — it takes no `&GameState` and therefore CANNOT
+/// observe a replacement effect. That purity IS the implementation of the
+/// clause, not an accident of the signature: do NOT add a `&GameState`
+/// parameter or consult the replacement registry here. Self-replacement effects
+/// (CR 614.15), which the rule DOES admit, are printed on the ability itself and
+/// so are already in the AST this function reads — see the
+/// `Effect::Counter { countered_spell_zone }` arm of
+/// `Effect::moves_card_to_or_from_library`, which counts Memory Lapse's
+/// "instead" precisely because it is a self-replacement effect.
+///
+/// CR 605.2 is the second reason the signature must stay pure: "A mana ability
+/// remains a mana ability even if the game state doesn't allow it to produce
+/// mana." A classification that could read game state would invite exactly the
+/// state-dependent answer CR 605.2 forbids. (This is also why `Effect::Dig` is
+/// unconditionally true: its only non-moving configuration is state-dependent.)
+pub fn is_mana_ability(ability_def: &AbilityDefinition) -> bool {
+    produces_mana_on_activation(ability_def)
+        // CR 605.1a: "...and its cost and effect don't move any card to or from
+        // a library." Chromatic Sphere ("{1}, {T}, Sacrifice this artifact: Add
+        // one mana of any color. Draw a card.") is the canonical effect case;
+        // Millikin ("{T}, Mill a card: Add {C}") is the cost-side case.
+        //
+        // The cost axis runs off its OWN walk, not the root cost alone: CR
+        // 602.1a scopes "its cost" to the activation cost, but CR 118.12a ->
+        // CR 118.12 makes an `unless [player] pays` action a cost paid AT
+        // RESOLUTION, which CR 608.2c places under "its effect" — as are the
+        // costs on chain links.
+        //
+        // NOT reclassified, and each for a different CR reason:
+        //  - Chromatic Star  — the draw is a separate ChangesZone trigger.
+        //  - Barbed Sextant  — CR 603.7a, a delayed triggered ability.
+        //  - Shaun & Rebecca — CR 603.12, a reflexive triggered ability.
+        //  - Gilanra         — CR 603.3, a TriggerOnSpend mana-spend grant.
+        //  - The Secret Lair — CR 701.22a, Scry reorders WITHIN a library.
+        && !cost_moves_card_to_or_from_library(ability_def)
+        && !chain_moves_card_to_or_from_library(ability_def)
 }
 
 /// CR 701.21a: Detects when this ability's cost sacrifices **the source itself**.
@@ -112,8 +226,9 @@ fn cost_removes_self_from_battlefield(cost: &Option<AbilityCost>) -> bool {
     })
 }
 
-/// CR 605.1a + CR 701.21: a *renewable* mana ability — one that produces mana
-/// (per [`is_mana_ability`]) without consuming its own source to do it.
+/// CR 605.1a criteria (1)-(3) + CR 701.21: a *renewable* mana ability — one that
+/// produces mana (per [`produces_mana_on_activation`]) without consuming its own
+/// source to do it.
 ///
 /// This is the **development** predicate: it answers "is this permanent part of a
 /// standing manabase," not "can this produce mana right now." A Treasure, Gold,
@@ -125,11 +240,27 @@ fn cost_removes_self_from_battlefield(cost: &Option<AbilityCost>) -> bool {
 /// genuinely is one mana available right now, which is why the two predicates must
 /// not be unified.
 ///
+/// **DELIBERATELY COMPOSED ON [`produces_mana_on_activation`], NOT ON
+/// [`is_mana_ability`] — do not "simplify" this back.** The two predicates answer
+/// different questions, so the CR 605.1a library criterion (criterion 4) must NOT
+/// reach this one. A **Millikin** or **Deranged Assistant** (`{T}, Mill a card:
+/// Add {C}`) and **Codie, Vociferous Codex** stop being rules mana abilities
+/// under the library clause, but they do not stop being manabase permanents:
+/// they still turn a tap into mana every turn without consuming themselves.
+/// Composing the development predicate on the rules predicate would demote all
+/// three to `ManaRole::None` through `phase-ai`'s `is_intrinsic_mana_source` ->
+/// `card_value::mana_role` -> `plan::controlled_mana_sources`, deleting them from
+/// manabase development and from the `mana_behind` deficit that drives mulligan
+/// `keep_tier` — an AI-strength regression for a reason that has nothing to do
+/// with manabase development. This composition keeps the value **unchanged for
+/// every input** across the CR 605.1a amendment.
+///
 /// Takes a single ability so callers compose with `.any()`; a permanent counts if
 /// **at least one** of its mana abilities is renewable (Crystal Vein carries both
 /// a renewable `{T}: Add {C}` and a self-sac `{T}, Sac: Add {C}{C}`).
 pub fn is_renewable_mana_ability(ability_def: &AbilityDefinition) -> bool {
-    is_mana_ability(ability_def) && !cost_removes_self_from_battlefield(&ability_def.cost)
+    produces_mana_on_activation(ability_def)
+        && !cost_removes_self_from_battlefield(&ability_def.cost)
 }
 
 /// CR 605.1b: A triggered ability is a mana ability iff all three hold:
@@ -1578,6 +1709,7 @@ fn can_activate_mana_ability_by_simulation(
     ability_def: &AbilityDefinition,
 ) -> bool {
     crate::game::perf_counters::record_state_clone_for_legality();
+    crate::game::perf_counters::record_mana_readiness_state_clone();
     let mut simulated = state.clone();
     activate_mana_ability(
         &mut simulated,
@@ -3103,9 +3235,14 @@ where
                 }
             }
         }
-        // CR 605.1a + CR 701.17a: Bare `Mill` mana-ability cost. The Millikin
-        // `{T}, Mill a card: Add {C}` shape routes through the Composite arm; this
-        // arm covers a hypothetical mill-only mana ability for completeness.
+        // CR 605.1a (2026 amendment): unreachable by construction — an activated
+        // ability whose cost moves a card to or from a library is no longer a mana
+        // ability, so no `Mill` cost reaches this payer. Retained rather than
+        // deleted because the `match` over `AbilityCost` is exhaustive and this is
+        // the shared mana-ability cost payer; deleting the arm would require
+        // inventing an error path for a case the classifier already prevents. If
+        // `is_mana_ability` is ever relaxed, this arm is already correct.
+        // CR 701.17a: mill puts cards from the top of a library into a graveyard.
         Some(AbilityCost::Mill { count }) => mill_for_mana_cost(state, player, *count, events)?,
         Some(AbilityCost::PayLife { amount }) => {
             // CR 119.4 + CR 903.4: QuantityExpr resolves against the activator's
@@ -3376,9 +3513,15 @@ fn ability_cost_sacrifices_source(cost: &AbilityCost) -> bool {
 /// graveyard. Routes through the replacement pipeline (mirroring `mill::resolve`
 /// and the rad-counter handler) so graveyard-redirect replacements (Rest in
 /// Peace / Leyline of the Void) apply and "a card was put into a graveyard"
-/// triggers see the milled cards. Millikin (`{T}, Mill a card: Add {C}`) is the
-/// canonical case — mill is a non-mana cost component and the {C} is produced
-/// unconditionally.
+/// triggers see the milled cards.
+///
+/// Millikin (`{T}, Mill a card: Add {C}`) **was** the canonical case and is no
+/// longer a mana ability under CR 605.1a's 2026 library criterion, so this
+/// function is unreachable from the mana fast path — see the
+/// `Some(AbilityCost::Mill { .. })` arm of the mana-ability cost payer above,
+/// which records why the arm is retained rather than deleted. The mill mechanics
+/// below remain correct for a relaxed classifier or a future non-library mill
+/// cost.
 fn mill_for_mana_cost(
     state: &mut GameState,
     player: PlayerId,
@@ -4520,6 +4663,1222 @@ mod tests {
             TargetFilter::Typed(TypedFilter::new(TypeFilter::Subtype("Goblin".to_string()))),
             1,
         )))
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // CR 605.1a (2026 amendment) — the library-movement criterion.
+    //
+    // "An activated ability is a mana ability if ... its cost and effect don't
+    // move any card to or from a library."
+    //
+    // Rows V1-V13 of the plan's verification matrix. Every negative below is
+    // paired with a positive reach-guard in the SAME test, built from the SAME
+    // builder with the minimal one-node delta, so a fixture that never reaches
+    // the seam cannot pass vacuously.
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// `{T}: Add {C}` — the minimal mana ability every row below perturbs.
+    fn colorless_tap_mana_ability() -> AbilityDefinition {
+        make_mana_ability(ManaProduction::Colorless {
+            count: QuantityExpr::Fixed { value: 1 },
+        })
+    }
+
+    /// `{T}: Add {C}` with the root activation cost replaced (CR 602.1a).
+    fn mana_ability_with_cost(cost: AbilityCost) -> AbilityDefinition {
+        colorless_tap_mana_ability().cost(cost)
+    }
+
+    /// A bare chain link carrying `effect` and no cost.
+    fn link(effect: Effect) -> AbilityDefinition {
+        AbilityDefinition::new(AbilityKind::Activated, effect)
+    }
+
+    /// `{T}: Add {C}` with `effect` chained as the `sub_ability` — an
+    /// instruction this ability follows during its own resolution (CR 608.2c).
+    fn mana_ability_with_sub_effect(effect: Effect) -> AbilityDefinition {
+        let mut def = colorless_tap_mana_ability();
+        def.sub_ability = Some(Box::new(link(effect)));
+        def
+    }
+
+    /// `{T}: Add {C}` with a fully-specified chain link.
+    fn mana_ability_with_sub(sub: AbilityDefinition) -> AbilityDefinition {
+        let mut def = colorless_tap_mana_ability();
+        def.sub_ability = Some(Box::new(sub));
+        def
+    }
+
+    fn draw_one() -> Effect {
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        }
+    }
+
+    fn surveil_one() -> Effect {
+        Effect::Surveil {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        }
+    }
+
+    fn scry_one() -> Effect {
+        Effect::Scry {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        }
+    }
+
+    fn exile_cost(zone: Option<Zone>) -> AbilityCost {
+        AbilityCost::Exile {
+            count: 1,
+            zone,
+            filter: None,
+        }
+    }
+
+    fn pay_life_one() -> AbilityCost {
+        AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+        }
+    }
+
+    /// A `CreateDelayedTrigger` wrapping `effect` — CR 603.7a, a separate
+    /// ability that resolves later (CR 603.3).
+    fn delayed(effect: Effect) -> Effect {
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::Upkeep,
+            },
+            effect: Box::new(link(effect)),
+            uses_tracked_set: false,
+        }
+    }
+
+    /// V1 — CR 605.1a + CR 701.17a: a **root** cost-side `Mill` disqualifies.
+    /// Millikin / Deranged Assistant: `{T}, Mill a card: Add {C}`.
+    #[test]
+    fn mill_cost_is_not_a_mana_ability() {
+        let millikin = mana_ability_with_cost(AbilityCost::Composite {
+            costs: vec![AbilityCost::Tap, AbilityCost::Mill { count: 1 }],
+        });
+        assert!(
+            !is_mana_ability(&millikin),
+            "CR 605.1a: a Mill cost moves a card from a library"
+        );
+
+        // Reach-guard, same builder, one-node delta: swap Mill for PayLife.
+        let paid = mana_ability_with_cost(AbilityCost::Composite {
+            costs: vec![AbilityCost::Tap, pay_life_one()],
+        });
+        assert!(
+            is_mana_ability(&paid),
+            "the identical shape with a non-library cost IS a mana ability"
+        );
+    }
+
+    /// V2 — cost recursion reaches `Composite`, `OneOf`, and `PerCounter.base`.
+    /// The last two are exactly what `mana_sources::cost_has_component` cannot
+    /// see, which is why this criterion has its own recursive predicate.
+    #[test]
+    fn nested_cost_shapes_reach_the_library_predicate() {
+        let composite = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+                AbilityCost::Tap,
+                AbilityCost::Mill { count: 1 },
+            ],
+        };
+        let one_of = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::OneOf {
+                    costs: vec![
+                        AbilityCost::Mill { count: 1 },
+                        AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+                    ],
+                },
+            ],
+        };
+        let per_counter = AbilityCost::PerCounter {
+            counter: CounterType::Generic("charge".to_string()),
+            target: TargetFilter::SelfRef,
+            base: Box::new(AbilityCost::Mill { count: 1 }),
+        };
+        for (label, cost) in [
+            ("Composite", composite),
+            ("OneOf nested in Composite", one_of),
+            ("PerCounter base", per_counter),
+        ] {
+            assert!(
+                !is_mana_ability(&mana_ability_with_cost(cost)),
+                "{label}: nested Mill must disqualify"
+            );
+        }
+
+        // Reach-guards: the same three shapes with PayLife in place of Mill.
+        let composite_ok = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+                AbilityCost::Tap,
+                pay_life_one(),
+            ],
+        };
+        let one_of_ok = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::OneOf {
+                    costs: vec![
+                        pay_life_one(),
+                        AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+                    ],
+                },
+            ],
+        };
+        let per_counter_ok = AbilityCost::PerCounter {
+            counter: CounterType::Generic("charge".to_string()),
+            target: TargetFilter::SelfRef,
+            base: Box::new(pay_life_one()),
+        };
+        for (label, cost) in [
+            ("Composite", composite_ok),
+            ("OneOf nested in Composite", one_of_ok),
+            ("PerCounter base", per_counter_ok),
+        ] {
+            assert!(
+                is_mana_ability(&mana_ability_with_cost(cost)),
+                "{label}: the non-library twin must stay a mana ability"
+            );
+        }
+    }
+
+    /// V2b — a cost on a **nested chain link** disqualifies. A root-only
+    /// application of the cost criterion passes all three of these wrongly,
+    /// because a `Mill` cost is not an `Effect` and no effect-shaped visitor can
+    /// ever see it (CR 605.1a "its cost and effect" + CR 608.2c).
+    #[test]
+    fn mill_cost_on_a_chain_link_is_not_a_mana_ability() {
+        let mill_link = || link(Effect::NoOp).cost(AbilityCost::Mill { count: 1 });
+        let paid_link = || link(Effect::NoOp).cost(pay_life_one());
+
+        let mut sub = colorless_tap_mana_ability();
+        sub.sub_ability = Some(Box::new(mill_link()));
+        assert!(!is_mana_ability(&sub), "sub_ability link cost");
+
+        let mut els = colorless_tap_mana_ability();
+        els.else_ability = Some(Box::new(mill_link()));
+        assert!(!is_mana_ability(&els), "else_ability link cost");
+
+        let mut modal = colorless_tap_mana_ability();
+        modal.mode_abilities = vec![mill_link()];
+        assert!(!is_mana_ability(&modal), "mode_abilities link cost");
+
+        // Reach-guards: the same three links with a non-library cost. These
+        // prove the walker reaches nested links at all, so the negatives above
+        // are prunes of a real read rather than a miss.
+        let mut sub_ok = colorless_tap_mana_ability();
+        sub_ok.sub_ability = Some(Box::new(paid_link()));
+        assert!(is_mana_ability(&sub_ok), "sub_ability link reached");
+
+        let mut else_ok = colorless_tap_mana_ability();
+        else_ok.else_ability = Some(Box::new(paid_link()));
+        assert!(is_mana_ability(&else_ok), "else_ability link reached");
+
+        let mut modal_ok = colorless_tap_mana_ability();
+        modal_ok.mode_abilities = vec![paid_link()];
+        assert!(is_mana_ability(&modal_ok), "mode_abilities link reached");
+    }
+
+    /// V2c — an `unless_pay` cost disqualifies. CR 118.12a routes the "unless
+    /// [a player does something]" form into CR 118.12, which supplies "the
+    /// action [do something] is a cost, **paid when the spell or ability
+    /// resolves**" — so this arrives under CR 605.1a's *effect* limb via
+    /// CR 608.2c, not under the CR 602.1a *activation cost* limb. Bare CR 118.12
+    /// is the wrong citation for an "unless" form.
+    #[test]
+    fn unless_pay_mill_cost_is_not_a_mana_ability() {
+        let mill_unless = crate::types::ability::UnlessPayModifier {
+            cost: AbilityCost::Mill { count: 1 },
+            payer: TargetFilter::Opponent,
+        };
+        let paid_unless = crate::types::ability::UnlessPayModifier {
+            cost: pay_life_one(),
+            payer: TargetFilter::Opponent,
+        };
+
+        assert!(
+            !is_mana_ability(&colorless_tap_mana_ability().unless_pay(mill_unless.clone())),
+            "CR 118.12a -> CR 118.12: an unless-pay Mill is a cost paid at resolution"
+        );
+        assert!(
+            is_mana_ability(&colorless_tap_mana_ability().unless_pay(paid_unless.clone())),
+            "reach-guard: the unless_pay leg is walked"
+        );
+
+        // Nested: an `unless_pay` on a chain link is reached too.
+        assert!(!is_mana_ability(&mana_ability_with_sub(
+            link(Effect::NoOp).unless_pay(mill_unless)
+        )));
+        assert!(is_mana_ability(&mana_ability_with_sub(
+            link(Effect::NoOp).unless_pay(paid_unless)
+        )));
+    }
+
+    /// V2e — the three **conditional** cost arms read their typed zone fields.
+    ///
+    /// This is the highest-consequence surface in the criterion, and it is the
+    /// only one that fails DANGEROUS. Every other conditional fails safe (an
+    /// ability wrongly keeps mana-ability status; zero cards affected today).
+    /// These three fail by STRIPPING status: writing
+    /// `AbilityCost::Exile { .. } => true` — dropping the zone read, a one-token
+    /// slip — strips mana-ability status from 13 shipping cards: Elvish Spirit
+    /// Guide, Simian Spirit Guide, Food Chain, Black Tulip, Cadaverous Bloom,
+    /// Ether, Jack-o'-Lantern, Mirrored Lotus, Molt Tender, Rubble Rouser,
+    /// Sunken Palace, Thornvault Forager, Titans' Nest.
+    ///
+    /// Both mutation directions are covered, and which assertion catches which
+    /// is not symmetric:
+    ///  - the **library** assertions fail under the `=> false` mutation;
+    ///  - the **non-library** assertions fail under the `=> true` mutation.
+    #[test]
+    fn cost_axis_conditional_arms_read_their_typed_zone_fields() {
+        // Library == disqualifying. Revert-failing for `=> false`.
+        assert!(!is_mana_ability(&mana_ability_with_cost(exile_cost(Some(
+            Zone::Library
+        )))));
+        assert!(!is_mana_ability(&mana_ability_with_cost(
+            AbilityCost::ExileWithAggregate {
+                filter: TargetFilter::SelfRef,
+                function: crate::types::ability::AggregateFunction::Sum,
+                property: crate::types::ability::ObjectProperty::ManaValue,
+                comparator: Comparator::GE,
+                value: 1,
+                zone: Zone::Library,
+            }
+        )));
+        assert!(!is_mana_ability(&mana_ability_with_cost(
+            AbilityCost::ReturnToHand {
+                count: 1,
+                filter: None,
+                from_zone: Some(Zone::Library),
+            }
+        )));
+
+        // Non-library == still a mana ability. Revert-failing for `=> true`,
+        // the strip-status direction, and therefore the PRIMARY guard for the
+        // dangerous mutation — not optional decoration.
+        //
+        // `zone: None` is asserted EXPLICITLY and is the modal corpus value
+        // (Black Tulip / Ether / Food Chain / Mirrored Lotus). It is `false`
+        // because the classifier is static and cannot decide a missing zone on
+        // EITHER payment path: `cost_payability::exile_cost_effective_zone` is
+        // the authority for non-self costs only, and the `TargetFilter::SelfRef`
+        // path short-circuits before it and resolves to the source's own current
+        // zone (game state, which CR 605.2 forbids this classifier from
+        // reading).
+        for zone in [
+            None,                    // black tulip / ether / food chain / mirrored lotus
+            Some(Zone::Hand),        // elvish spirit guide / simian spirit guide
+            Some(Zone::Graveyard),   // jack-o'-lantern / molt tender / titans' nest
+            Some(Zone::Battlefield), // no shipping card, but the inferred default
+        ] {
+            assert!(
+                is_mana_ability(&mana_ability_with_cost(exile_cost(zone))),
+                "Exile {{ zone: {zone:?} }} must KEEP mana-ability status"
+            );
+        }
+        assert!(is_mana_ability(&mana_ability_with_cost(
+            AbilityCost::ExileWithAggregate {
+                filter: TargetFilter::SelfRef,
+                function: crate::types::ability::AggregateFunction::Sum,
+                property: crate::types::ability::ObjectProperty::ManaValue,
+                comparator: Comparator::GE,
+                value: 1,
+                zone: Zone::Graveyard,
+            }
+        )));
+        // Grinning Ignus: `from_zone: None` means BATTLEFIELD.
+        assert!(is_mana_ability(&mana_ability_with_cost(
+            AbilityCost::ReturnToHand {
+                count: 1,
+                filter: None,
+                from_zone: None,
+            }
+        )));
+    }
+
+    /// V3 — effect-side at the root `sub_ability` link. Chromatic Sphere:
+    /// `{1}, {T}, Sacrifice this artifact: Add one mana of any color. Draw a
+    /// card.`
+    #[test]
+    fn draw_in_sub_ability_is_not_a_mana_ability() {
+        assert!(!is_mana_ability(&mana_ability_with_sub_effect(draw_one())));
+        // Reach-guard: the identical fixture with Draw replaced by NoOp.
+        assert!(is_mana_ability(&mana_ability_with_sub_effect(Effect::NoOp)));
+    }
+
+    /// V4 — effect-side at a **nested** `sub_ability` (depth >= 2). Deleting the
+    /// recursive chain arm makes this pass wrongly.
+    #[test]
+    fn draw_at_nested_sub_ability_depth_is_not_a_mana_ability() {
+        let mut inner = link(Effect::NoOp);
+        inner.sub_ability = Some(Box::new(link(draw_one())));
+        assert!(!is_mana_ability(&mana_ability_with_sub(inner)));
+
+        let mut inner_ok = link(Effect::NoOp);
+        inner_ok.sub_ability = Some(Box::new(link(Effect::NoOp)));
+        assert!(is_mana_ability(&mana_ability_with_sub(inner_ok)));
+    }
+
+    /// V5 — effect-side at an `else_ability` link.
+    #[test]
+    fn draw_in_else_branch_is_not_a_mana_ability() {
+        let mut def = colorless_tap_mana_ability();
+        def.else_ability = Some(Box::new(link(draw_one())));
+        assert!(!is_mana_ability(&def));
+
+        let mut ok = colorless_tap_mana_ability();
+        ok.else_ability = Some(Box::new(link(Effect::NoOp)));
+        assert!(is_mana_ability(&ok));
+    }
+
+    /// V5b — effect-side in a `mode_abilities` entry.
+    #[test]
+    fn draw_in_a_mode_is_not_a_mana_ability() {
+        let mut def = colorless_tap_mana_ability();
+        def.mode_abilities = vec![link(draw_one())];
+        assert!(!is_mana_ability(&def));
+
+        let mut ok = colorless_tap_mana_ability();
+        ok.mode_abilities = vec![link(Effect::NoOp)];
+        assert!(is_mana_ability(&ok));
+    }
+
+    /// V6 — the criterion does NOT narrow ordinary mana abilities. This guards
+    /// the over-narrowing direction across every shape the corpus actually
+    /// carries, including a real `Exile`-cost card.
+    #[test]
+    fn library_criterion_does_not_narrow_ordinary_mana_abilities() {
+        // Plain `{T}: Add {C}`.
+        assert!(is_mana_ability(&colorless_tap_mana_ability()));
+        // "Sacrifice a Goblin: Add {R}" — the existing builder.
+        assert!(is_mana_ability(&skirk_prospector_mana_ability()));
+        // Loot, the Pathfinder: `Exhaust — {G}, {T}: Add three mana of any one
+        // color.` The only mana ability in the corpus carrying an `ability_tag`.
+        let loot = make_mana_ability(ManaProduction::AnyOneColor {
+            count: QuantityExpr::Fixed { value: 3 },
+            color_options: ManaColor::ALL.to_vec(),
+            contribution: ManaContribution::Base,
+        })
+        .cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+                AbilityCost::Tap,
+            ],
+        });
+        assert!(is_mana_ability(&loot));
+
+        // Elvish Spirit Guide: "Exile this creature from your hand: Add {G}."
+        // NOTE the wording — "this **creature**", not "this card"; "Exile this
+        // card from your hand" is SIMIAN Spirit Guide. Same AST shape either
+        // way: `Exile { zone: Some(Hand), filter: Some(SelfRef) }`.
+        let spirit_guide = |zone: Option<Zone>| {
+            make_mana_ability(ManaProduction::Fixed {
+                colors: vec![ManaColor::Green],
+                contribution: ManaContribution::Base,
+            })
+            .cost(AbilityCost::Exile {
+                count: 1,
+                zone,
+                filter: Some(TargetFilter::SelfRef),
+            })
+        };
+        assert!(
+            is_mana_ability(&spirit_guide(Some(Zone::Hand))),
+            "Elvish Spirit Guide must remain a mana ability"
+        );
+        // Minimal one-field delta, so the pair isolates the zone read itself.
+        assert!(
+            !is_mana_ability(&spirit_guide(Some(Zone::Library))),
+            "the same cost with zone=Library is disqualifying"
+        );
+
+        // Paired negative for each positive shape: add a Mill cost.
+        for def in [
+            colorless_tap_mana_ability(),
+            skirk_prospector_mana_ability(),
+            loot,
+        ] {
+            let base_cost = def.cost.clone().unwrap_or(AbilityCost::Tap);
+            let milled = def.cost(AbilityCost::Composite {
+                costs: vec![base_cost, AbilityCost::Mill { count: 1 }],
+            });
+            assert!(
+                !is_mana_ability(&milled),
+                "a Mill cost disqualifies every shape"
+            );
+        }
+    }
+
+    /// V7 — `Scry` does NOT disqualify, but `Surveil` does. The two keyword
+    /// actions differ on exactly the axis under test, which is why they must
+    /// never share an arm: CR 701.22a scry puts cards on the bottom or top of
+    /// **your library** (every card starts and ends in the same library), while
+    /// CR 701.25a surveil can put them **into your graveyard**.
+    ///
+    /// A real shipping card depends on this: The Secret Lair, `{T}, Say the
+    /// secret word: Add one mana of any color. Scry 1. You gain 1 life.`
+    #[test]
+    fn scry_does_not_disqualify_but_surveil_does() {
+        assert!(
+            is_mana_ability(&mana_ability_with_sub_effect(scry_one())),
+            "CR 701.22a: scry reorders WITHIN a library — The Secret Lair"
+        );
+        assert!(
+            !is_mana_ability(&mana_ability_with_sub_effect(surveil_one())),
+            "CR 701.25a: surveil can put cards into a graveyard"
+        );
+    }
+
+    /// V8 — library-adjacent effects that move nothing to or from a library.
+    #[test]
+    fn library_reorder_reveal_and_other_decks_do_not_disqualify() {
+        let benign = [
+            // CR 701.24a: "randomize the cards WITHIN it".
+            Effect::Shuffle {
+                target: TargetFilter::Controller,
+            },
+            // CR 701.20b: "Revealing a card doesn't cause it to leave the zone
+            // it's in."
+            Effect::RevealTop {
+                player: TargetFilter::Controller,
+                count: 1,
+            },
+            // CR 701.30a: the top card goes to the bottom or stays on top — of
+            // its own library either way.
+            Effect::Clash,
+            // CR 901.4: plane and phenomenon cards remain in the COMMAND ZONE.
+            Effect::ArrangePlanarDeckTop {
+                count: QuantityExpr::Fixed { value: 2 },
+                keep_on_top: QuantityExpr::Fixed { value: 1 },
+            },
+            // CR 701.51b + CR 717.2: the Attraction deck is in the command zone.
+            Effect::OpenAttractions { count: 1 },
+        ];
+        for effect in benign {
+            assert!(
+                is_mana_ability(&mana_ability_with_sub_effect(effect.clone())),
+                "{effect:?} moves no card to or from a library"
+            );
+        }
+        // Paired negative in the same test: a Mill link in the same position.
+        assert!(!is_mana_ability(&mana_ability_with_sub_effect(
+            Effect::Mill {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                destination: Zone::Graveyard,
+            }
+        )));
+    }
+
+    /// V9 — the registered-later boundary holds at a chain-link root. Barbed
+    /// Sextant / Brass Infiniscope put their draw inside a delayed triggered
+    /// ability (CR 603.7a), which goes on the stack later as its own object
+    /// (CR 603.3), so it is not an instruction THIS ability follows (CR 608.2c).
+    #[test]
+    fn delayed_trigger_payload_is_not_this_abilitys_effect() {
+        assert!(
+            is_mana_ability(&mana_ability_with_sub_effect(delayed(draw_one()))),
+            "CR 603.7a: a delayed trigger's payload is a separate ability"
+        );
+        // Reach-guard: Chromatic Sphere — the SAME Draw, not wrapped.
+        assert!(
+            !is_mana_ability(&mana_ability_with_sub_effect(draw_one())),
+            "the unwrapped Draw in the same position DOES disqualify"
+        );
+    }
+
+    /// V9b — the boundary holds at DEPTH >= 1. This is the central falsifier: a
+    /// design that prunes only at chain-link roots and then delegates to an
+    /// unscoped walker reaches the delayed trigger's payload through any inline
+    /// branch carrier and wrongly disqualifies.
+    #[test]
+    fn boundary_holds_under_an_inline_choice_carrier() {
+        let wrapped = delayed(draw_one());
+
+        let carriers: Vec<(&str, Effect)> = vec![
+            (
+                "ChooseOneOf",
+                Effect::ChooseOneOf {
+                    chooser: PlayerFilter::Controller,
+                    branches: vec![link(wrapped.clone())],
+                },
+            ),
+            (
+                "FlipCoin win branch",
+                Effect::FlipCoin {
+                    win_effect: Some(Box::new(link(wrapped.clone()))),
+                    lose_effect: None,
+                    flipper: TargetFilter::Controller,
+                },
+            ),
+            (
+                "RollDie result branch",
+                Effect::RollDie {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    sides: 20,
+                    results: vec![crate::types::ability::DieResultBranch {
+                        min: 1,
+                        max: 20,
+                        effect: Box::new(link(wrapped.clone())),
+                    }],
+                    modifier: None,
+                },
+            ),
+            (
+                "RevealFromHand on_decline",
+                Effect::RevealFromHand {
+                    filter: TargetFilter::Controller,
+                    on_decline: Some(Box::new(link(wrapped.clone()))),
+                },
+            ),
+        ];
+        for (label, carrier) in &carriers {
+            assert!(
+                is_mana_ability(&mana_ability_with_sub_effect(carrier.clone())),
+                "{label}: the boundary must hold one level down"
+            );
+        }
+
+        // `AbilityCost::EffectCost` re-enters the effect walk from the cost
+        // axis, so the scope must be threaded there too.
+        assert!(is_mana_ability(&mana_ability_with_cost(
+            AbilityCost::EffectCost {
+                effect: Box::new(wrapped),
+            }
+        )));
+
+        // Reach-guards: the same carriers with a BARE Draw, no wrapper. These
+        // prove each carrier is descended at all, so the positives above are
+        // boundary prunes rather than unreached subtrees.
+        let bare_carriers: Vec<(&str, Effect)> = vec![
+            (
+                "ChooseOneOf",
+                Effect::ChooseOneOf {
+                    chooser: PlayerFilter::Controller,
+                    branches: vec![link(draw_one())],
+                },
+            ),
+            (
+                "FlipCoin win branch",
+                Effect::FlipCoin {
+                    win_effect: Some(Box::new(link(draw_one()))),
+                    lose_effect: None,
+                    flipper: TargetFilter::Controller,
+                },
+            ),
+            (
+                "RollDie result branch",
+                Effect::RollDie {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    sides: 20,
+                    results: vec![crate::types::ability::DieResultBranch {
+                        min: 1,
+                        max: 20,
+                        effect: Box::new(link(draw_one())),
+                    }],
+                    modifier: None,
+                },
+            ),
+            (
+                "RevealFromHand on_decline",
+                Effect::RevealFromHand {
+                    filter: TargetFilter::Controller,
+                    on_decline: Some(Box::new(link(draw_one()))),
+                },
+            ),
+        ];
+        for (label, carrier) in &bare_carriers {
+            assert!(
+                !is_mana_ability(&mana_ability_with_sub_effect(carrier.clone())),
+                "{label}: reach-guard — the carrier IS descended"
+            );
+        }
+        assert!(!is_mana_ability(&mana_ability_with_cost(
+            AbilityCost::EffectCost {
+                effect: Box::new(draw_one()),
+            }
+        )));
+    }
+
+    /// V9c — the boundary covers the replacement family, the emblem, and the
+    /// token's granted abilities. Each REGISTERS something rather than moving a
+    /// card during this resolution: CR 614.1 primary (a replacement applying to
+    /// a later event or to another object is NOT a self-replacement effect under
+    /// CR 614.15, so CR 605.1a's carve-out does not reach it), CR 114.1 for the
+    /// emblem, CR 111.1 for the token, CR 611.2 for
+    /// a granted continuous effect.
+    #[test]
+    fn replacement_emblem_and_token_payloads_are_not_this_abilitys_effect() {
+        fn granting_static(effect: Effect) -> StaticDefinition {
+            let mut def = StaticDefinition::new(StaticMode::Continuous);
+            def.modifications = vec![ContinuousModification::GrantAbility {
+                definition: Box::new(link(effect)),
+            }];
+            def
+        }
+
+        let wrapped: Vec<(&str, Effect)> = vec![
+            (
+                "CreateDrawReplacement",
+                Effect::CreateDrawReplacement {
+                    replacement_effect: Box::new(draw_one()),
+                },
+            ),
+            (
+                "CreateEmblem",
+                Effect::CreateEmblem {
+                    statics: vec![granting_static(draw_one())],
+                    triggers: vec![],
+                },
+            ),
+            (
+                "GenericEffect granted ability",
+                Effect::GenericEffect {
+                    static_abilities: vec![granting_static(draw_one())],
+                    duration: Some(Duration::UntilEndOfTurn),
+                    target: None,
+                    end_cost: None,
+                },
+            ),
+            (
+                "Token granted ability",
+                Effect::Token {
+                    name: "Test".to_string(),
+                    power: crate::types::ability::PtValue::Fixed(1),
+                    toughness: crate::types::ability::PtValue::Fixed(1),
+                    types: vec!["Creature".to_string()],
+                    colors: vec![],
+                    keywords: vec![],
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    owner: TargetFilter::Controller,
+                    attach_to: None,
+                    enters_attacking: false,
+                    supertypes: vec![],
+                    static_abilities: vec![granting_static(Effect::Mill {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                        destination: Zone::Graveyard,
+                    })],
+                    enter_with_counters: vec![],
+                },
+            ),
+        ];
+        for (label, effect) in &wrapped {
+            assert!(
+                is_mana_ability(&mana_ability_with_sub_effect(effect.clone())),
+                "{label}: the registered payload belongs to a later resolution \
+                 or to another object"
+            );
+        }
+
+        // Reach-guards: the unwrapped mover in the same chain position.
+        assert!(!is_mana_ability(&mana_ability_with_sub_effect(draw_one())));
+        assert!(!is_mana_ability(&mana_ability_with_sub_effect(
+            Effect::Mill {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                destination: Zone::Graveyard,
+            }
+        )));
+    }
+
+    /// V9d — inline carriers are STILL descended (guards over-pruning). These
+    /// are branches of this resolution (CR 608.2c), not separate abilities.
+    #[test]
+    fn inline_carriers_are_still_descended() {
+        let movers: Vec<(&str, Effect)> = vec![
+            (
+                "ChooseOneOf",
+                Effect::ChooseOneOf {
+                    chooser: PlayerFilter::Controller,
+                    branches: vec![link(draw_one()), link(Effect::NoOp)],
+                },
+            ),
+            (
+                "FlipCoin lose branch",
+                Effect::FlipCoin {
+                    win_effect: None,
+                    lose_effect: Some(Box::new(link(draw_one()))),
+                    flipper: TargetFilter::Controller,
+                },
+            ),
+            (
+                "SeparateIntoPiles chosen pile",
+                Effect::SeparateIntoPiles {
+                    partition_subject: crate::types::ability::VoterScope::AllPlayers,
+                    object_filter: TargetFilter::Controller,
+                    chooser: PlayerScope::Controller,
+                    chosen_pile_effect: Box::new(link(draw_one())),
+                    pile_source: crate::types::ability::PileSource::Battlefield,
+                    unchosen_pile_effect: None,
+                },
+            ),
+            (
+                "Vote outcome template",
+                Effect::Vote {
+                    choices: vec!["a".to_string(), "b".to_string()],
+                    per_choice_effect: vec![
+                        Box::new(link(draw_one())),
+                        Box::new(link(Effect::NoOp)),
+                    ],
+                    starting_with: ControllerRef::You,
+                    voter_scope: crate::types::ability::VoterScope::AllPlayers,
+                    tally_mode: crate::types::ability::VoteTally::PerVote,
+                    subject: crate::types::ability::VoteSubject::Named,
+                    visibility: crate::types::ability::VoteVisibility::Open,
+                },
+            ),
+        ];
+        for (label, effect) in &movers {
+            assert!(
+                !is_mana_ability(&mana_ability_with_sub_effect(effect.clone())),
+                "{label}: an inline branch is part of THIS resolution"
+            );
+        }
+
+        // Reach-guards: the same carriers with NoOp in place of Draw.
+        let benign: Vec<Effect> = vec![
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![link(Effect::NoOp), link(Effect::NoOp)],
+            },
+            Effect::FlipCoin {
+                win_effect: None,
+                lose_effect: Some(Box::new(link(Effect::NoOp))),
+                flipper: TargetFilter::Controller,
+            },
+            Effect::SeparateIntoPiles {
+                partition_subject: crate::types::ability::VoterScope::AllPlayers,
+                object_filter: TargetFilter::Controller,
+                chooser: PlayerScope::Controller,
+                chosen_pile_effect: Box::new(link(Effect::NoOp)),
+                pile_source: crate::types::ability::PileSource::Battlefield,
+                unchosen_pile_effect: None,
+            },
+            Effect::Vote {
+                choices: vec!["a".to_string(), "b".to_string()],
+                per_choice_effect: vec![Box::new(link(Effect::NoOp)), Box::new(link(Effect::NoOp))],
+                starting_with: ControllerRef::You,
+                voter_scope: crate::types::ability::VoterScope::AllPlayers,
+                tally_mode: crate::types::ability::VoteTally::PerVote,
+                subject: crate::types::ability::VoteSubject::Named,
+                visibility: crate::types::ability::VoteVisibility::Open,
+            },
+        ];
+        for effect in benign {
+            assert!(is_mana_ability(&mana_ability_with_sub_effect(effect)));
+        }
+    }
+
+    /// V10 — CR 603.12 reflexive links are excluded. Shaun & Rebecca, Agents:
+    /// `{T}: Add {C}. When you do, mill two cards.` A reflexive triggered
+    /// ability follows the rules for delayed triggered abilities (CR 603.7) and
+    /// goes on the stack the next time a player would receive priority
+    /// (CR 603.3) — the CR 603.12 exception is about WHEN the trigger condition
+    /// is checked, not about when the ability resolves.
+    #[test]
+    fn reflexive_when_you_do_link_is_a_separate_ability() {
+        let mill_two = || {
+            link(Effect::Mill {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+                destination: Zone::Graveyard,
+            })
+        };
+
+        let reflexive = mill_two().condition(AbilityCondition::WhenYouDo);
+        assert!(
+            is_mana_ability(&mana_ability_with_sub(reflexive)),
+            "CR 603.12 -> CR 603.7 -> CR 603.3: a 'when you do' link is a \
+             SEPARATE triggered ability"
+        );
+
+        // Reach-guard: the same chain with no condition at all.
+        assert!(
+            !is_mana_ability(&mana_ability_with_sub(mill_two())),
+            "an unconditioned Mill link is part of this resolution"
+        );
+
+        // And the guard must key on `WhenYouDo` ALONE. "If you do, ..." is
+        // CR 608.2c — one instruction conditional on another within the SAME
+        // resolution — and must keep being descended. Widening the guard to the
+        // engine's broader reflexive predicate (which unions the two because it
+        // answers the skip-on-decline question) fails this assertion.
+        let if_you_do = mill_two().condition(AbilityCondition::EffectOutcome {
+            signal: crate::types::ability::EffectOutcomeSignal::OptionalEffectPerformed,
+        });
+        assert!(
+            !is_mana_ability(&mana_ability_with_sub(if_you_do)),
+            "an 'if you do' rider is CR 608.2c, not CR 603.12"
+        );
+    }
+
+    /// V10b — the reflexive boundary holds on the COST axis too, because both
+    /// walkers consult ONE authority (`scope_prunes_nested_ability`). Removing
+    /// that call from the cost walker fails this row while leaving V10 green.
+    #[test]
+    fn reflexive_link_cost_is_also_excluded() {
+        let reflexive_cost = link(Effect::NoOp)
+            .cost(AbilityCost::Mill { count: 1 })
+            .condition(AbilityCondition::WhenYouDo);
+        assert!(
+            is_mana_ability(&mana_ability_with_sub(reflexive_cost)),
+            "the reflexive link's cost is the SEPARATE ability's cost"
+        );
+
+        // Reach-guard: the identical link without the condition (V2b's shape),
+        // proving the cost walker reaches nested links at all — so the positive
+        // above is a prune, not a miss.
+        let plain_cost = link(Effect::NoOp).cost(AbilityCost::Mill { count: 1 });
+        assert!(!is_mana_ability(&mana_ability_with_sub(plain_cost)));
+    }
+
+    /// V11 — `Effect::Mana`'s `grants` are deliberately NOT descended. Gilanra,
+    /// Caller of Wirewood: `{T}: Add {G}. When you spend this mana to cast a
+    /// spell with mana value 6 or greater, draw a card.` The rider is a
+    /// `ManaSpellGrant::TriggerOnSpend` — CR 603.3, a separate triggered ability
+    /// that fires when the mana is LATER spent, in a different resolution.
+    ///
+    /// `Effect::Mana` is the root of 100% of this classifier's inputs, so a
+    /// "helpful" descent into `grants` here would misclassify Gilanra and
+    /// Path of Ancestry. A future descent fails this test.
+    #[test]
+    fn mana_spend_grant_rider_is_a_separate_ability() {
+        let gilanra = {
+            let mut def = make_mana_ability(ManaProduction::Fixed {
+                colors: vec![ManaColor::Green],
+                contribution: ManaContribution::Base,
+            });
+            if let Effect::Mana { grants, .. } = &mut *def.effect {
+                grants.push(crate::types::mana::ManaSpellGrant::TriggerOnSpend {
+                    filter: TargetFilter::Any,
+                    ability: Box::new(link(draw_one())),
+                });
+            } else {
+                panic!("make_mana_ability must build an Effect::Mana");
+            }
+            def
+        };
+        assert!(
+            is_mana_ability(&gilanra),
+            "CR 603.3: a TriggerOnSpend rider is a separate triggered ability"
+        );
+
+        // Reach-guard: the SAME Draw moved from `grants` to a plain chain link.
+        assert!(!is_mana_ability(&mana_ability_with_sub_effect(draw_one())));
+    }
+
+    /// V12 — the zone-conditional effect arms read their typed fields, and
+    /// `Effect::Dig` is UNCONDITIONAL.
+    ///
+    /// `DigSource` is **not** a library-vs-not axis: under `PriorLook` the cards
+    /// are still in `player.library` (the look-only pass takes an iterator slice
+    /// and returns without removing them), so the library is the origin under
+    /// BOTH variants. A `source ==` test here — or a test on
+    /// `destination`/`rest_destination` — reproduces the same error on a
+    /// different field.
+    #[test]
+    fn zone_conditional_arms_read_their_typed_fields() {
+        fn dig(source: crate::types::ability::DigSource) -> Effect {
+            Effect::Dig {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+                destination: None,
+                keep_count: Some(1),
+                keep_count_expr: None,
+                up_to: false,
+                filter: TargetFilter::Any,
+                rest_destination: None,
+                reveal: false,
+                enter_tapped: false,
+                source,
+            }
+        }
+        fn change_zone(origin: Option<Zone>, destination: Zone, target: TargetFilter) -> Effect {
+            Effect::ChangeZone {
+                origin,
+                destination,
+                target,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            }
+        }
+        fn search(source_zones: Vec<Zone>) -> Effect {
+            Effect::SearchLibrary {
+                source_zones,
+                filter: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: None,
+                selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
+                split: None,
+            }
+        }
+        fn counter(
+            zone: Option<crate::types::ability::SpellStackToGraveyardReplacement>,
+        ) -> Effect {
+            Effect::Counter {
+                target: TargetFilter::Any,
+                source_rider: None,
+                countered_spell_zone: zone,
+            }
+        }
+        fn pay_cost(cost: AbilityCost) -> Effect {
+            Effect::PayCost {
+                cost,
+                scale: None,
+                payer: TargetFilter::Controller,
+            }
+        }
+
+        // Library-touching configurations disqualify.
+        let disqualifying: Vec<(&str, Effect)> = vec![
+            ("SearchLibrary[Library]", search(vec![Zone::Library])),
+            (
+                "ChangeZone destination=Library",
+                change_zone(None, Zone::Library, TargetFilter::SelfRef),
+            ),
+            (
+                "ChangeZone origin=Library",
+                change_zone(Some(Zone::Library), Zone::Graveyard, TargetFilter::SelfRef),
+            ),
+            (
+                "ChangeZone origin=None, zone in the filter",
+                change_zone(
+                    None,
+                    Zone::Battlefield,
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(vec![
+                        FilterProp::InZone {
+                            zone: Zone::Library,
+                        },
+                    ])),
+                ),
+            ),
+            (
+                "Counter countered_spell_zone=Library",
+                counter(Some(
+                    crate::types::ability::SpellStackToGraveyardReplacement::Library {
+                        position: crate::types::ability::LibraryPosition::Top,
+                    },
+                )),
+            ),
+            ("PayCost{Mill}", pay_cost(AbilityCost::Mill { count: 1 })),
+            (
+                "Dig{Library}",
+                dig(crate::types::ability::DigSource::Library),
+            ),
+            (
+                "Dig{PriorLook}",
+                dig(crate::types::ability::DigSource::PriorLook),
+            ),
+        ];
+        for (label, effect) in &disqualifying {
+            assert!(
+                !is_mana_ability(&mana_ability_with_sub_effect(effect.clone())),
+                "{label} moves a card to or from a library"
+            );
+        }
+
+        // Each CONDITIONAL arm with its non-library value — the reach-guards
+        // that prove the arms are evaluated rather than hardcoded.
+        let keeps: Vec<(&str, Effect)> = vec![
+            ("SearchLibrary[Graveyard]", search(vec![Zone::Graveyard])),
+            (
+                "ChangeZone graveyard->battlefield",
+                change_zone(Some(Zone::Graveyard), Zone::Battlefield, TargetFilter::Any),
+            ),
+            ("Counter{None}", counter(None)),
+            ("PayCost{PayLife}", pay_cost(pay_life_one())),
+            // For `Dig` the reach-guard is `Scry` — a genuine look-at-a-library
+            // WITHOUT moving anything, which is the axis Dig actually differs
+            // on. Round 2 used `Dig{PriorLook} => true` as this guard; that
+            // pinned the wrong answer and is deliberately NOT reinstated.
+            ("Scry", scry_one()),
+        ];
+        for (label, effect) in &keeps {
+            assert!(
+                is_mana_ability(&mana_ability_with_sub_effect(effect.clone())),
+                "{label} must keep mana-ability status"
+            );
+        }
+    }
+
+    /// V12b — exactly ONE of `SpellStackToGraveyardReplacement`'s four carriers
+    /// is read, and the asymmetry is the design.
+    ///
+    /// CR 605.1a scopes the criterion to "**its** cost and effect", so the
+    /// question is not "does this field mention a library" but "whose resolution
+    /// does the movement happen in".
+    ///  - `Counter.countered_spell_zone` IS read. CR 608.2c cites Memory Lapse's
+    ///    exact text ("Counter target spell. If that spell is countered this
+    ///    way, put it on top of its owner's library instead of into its owner's
+    ///    graveyard") as its OWN worked example of instructions this ability
+    ///    follows; CR 701.6a puts the countered spell in the graveyard during
+    ///    this resolution and the rider redirects that same event. Per CR 614.15
+    ///    it is a SELF-replacement effect, which CR 605.1a's closing sentence
+    ///    explicitly does NOT exclude.
+    ///  - `FreeCastFromZones.graveyard_replacement` and
+    ///    `CastingPermission::ExileWithAltCost.graveyard_replacement` are NOT
+    ///    read. Each replaces the CAST SPELL'S OWN LATER RESOLUTION at its
+    ///    CR 608.2n graveyard step ("as the final part of an instant or sorcery
+    ///    spell's resolution"). That later resolution belongs to a different
+    ///    object, so the rider is not this ability's own effect, so it is not a
+    ///    self-replacement effect under CR 614.15, so CR 605.1a's closing
+    ///    sentence says do not take it into account.
+    ///
+    /// Making the three arms symmetric fails this test, which is exactly its
+    /// purpose. The configuration has ZERO cards today, so no census, coverage
+    /// report, or card-level test can see it — this row is what makes the
+    /// verdict durable against a later round re-deriving it.
+    #[test]
+    fn only_counter_reads_the_stack_to_graveyard_replacement() {
+        use crate::types::ability::{
+            CastingPermission, LibraryPosition, SpellStackToGraveyardReplacement,
+        };
+
+        let library_rider = || SpellStackToGraveyardReplacement::Library {
+            position: LibraryPosition::Top,
+        };
+        let exile_with_alt_cost = |graveyard_replacement: Option<
+            SpellStackToGraveyardReplacement,
+        >| CastingPermission::ExileWithAltCost {
+            cost: ManaCost::generic(0),
+            cast_transformed: false,
+            constraint: None,
+            granted_to: None,
+            resolution_cleanup: None,
+            duration: None,
+            graveyard_replacement,
+            enters_with_counter: None,
+            enters_with_modifications: vec![],
+            mana_spend_permission: None,
+        };
+        let grant = |graveyard_replacement: Option<SpellStackToGraveyardReplacement>| {
+            Effect::GrantCastingPermission {
+                permission: exile_with_alt_cost(graveyard_replacement),
+                target: TargetFilter::Any,
+                grantee: crate::types::ability::PermissionGrantee::AbilityController,
+            }
+        };
+        let free_cast =
+            |zones: Vec<Zone>, graveyard_replacement: Option<SpellStackToGraveyardReplacement>| {
+                Effect::FreeCastFromZones {
+                    count: 1,
+                    max_total_mv: None,
+                    filter: TargetFilter::Any,
+                    zones,
+                    graveyard_replacement,
+                }
+            };
+
+        // (1) `Counter`'s rider IS read: this ability's own resolution moves the
+        // card from the stack to a library.
+        assert!(!is_mana_ability(&mana_ability_with_sub_effect(
+            Effect::Counter {
+                target: TargetFilter::Any,
+                source_rider: None,
+                countered_spell_zone: Some(library_rider()),
+            }
+        )));
+        // ... and its positive control: the same node with no rider.
+        assert!(is_mana_ability(&mana_ability_with_sub_effect(
+            Effect::Counter {
+                target: TargetFilter::Any,
+                source_rider: None,
+                countered_spell_zone: None,
+            }
+        )));
+
+        // (2) `FreeCastFromZones` reads `zones` ONLY.
+        assert!(
+            is_mana_ability(&mana_ability_with_sub_effect(free_cast(
+                vec![Zone::Graveyard],
+                Some(library_rider())
+            ))),
+            "graveyard_replacement is a rider on the CAST SPELL's later resolution"
+        );
+        // Positive control via the `zones` leg — proves the arm is reached and
+        // genuinely discriminating rather than hardcoded `false`.
+        assert!(
+            !is_mana_ability(&mana_ability_with_sub_effect(free_cast(
+                vec![Zone::Library],
+                None
+            ))),
+            "the `zones` leg IS read"
+        );
+
+        // (3) `GrantCastingPermission` is not descended: the same answer with
+        // and without the field, proving it is genuinely not consulted rather
+        // than accidentally agreeing.
+        assert!(is_mana_ability(&mana_ability_with_sub_effect(grant(Some(
+            library_rider()
+        )))));
+        assert!(is_mana_ability(&mana_ability_with_sub_effect(grant(None))));
+
+        // `GrantCastingPermission` is UNCONDITIONALLY false, so no input to it
+        // can ever produce a `false` — both halves of the pair above assert
+        // `true` and would also pass on a malformed fixture that never reached
+        // the walked tree at all. This same-position control closes that hole:
+        // a library mover at the identical depth MUST disqualify.
+        assert!(
+            !is_mana_ability(&mana_ability_with_sub_effect(
+                Effect::PutAtLibraryPosition {
+                    target: TargetFilter::SelfRef,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    position: LibraryPosition::Top,
+                }
+            )),
+            "positive control: the chain position the grant occupies IS walked"
+        );
+    }
+
+    /// V13 — `is_renewable_mana_ability` is NOT narrowed by the library
+    /// criterion. The divergence IS the assertion: a Millikin stops being a
+    /// rules mana ability (CR 605.1a criterion 4) while remaining a manabase
+    /// permanent, which is why the development predicate composes on
+    /// `produces_mana_on_activation` and not on `is_mana_ability`.
+    #[test]
+    fn renewable_predicate_survives_the_library_criterion() {
+        let millikin = mana_ability_with_cost(AbilityCost::Composite {
+            costs: vec![AbilityCost::Tap, AbilityCost::Mill { count: 1 }],
+        });
+        assert!(
+            !is_mana_ability(&millikin),
+            "CR 605.1a criterion 4: Millikin's Mill cost disqualifies it"
+        );
+        assert!(
+            is_renewable_mana_ability(&millikin),
+            "but Millikin is still a standing manabase permanent — composing \
+             the development predicate on the rules predicate would delete it \
+             from manabase development and mulligan keep_tier"
+        );
     }
 
     /// Row 4a — CR 701.21: one-shot self-sacrificing mana sources are NOT
@@ -5731,6 +7090,13 @@ mod tests {
     /// (`Unsupported mana ability sub-cost: Mill`), so the readiness simulation
     /// in `can_activate_mana_ability_now` failed and the ability was never
     /// offered — the user could not tap Millikin for mana.
+    ///
+    /// **Premise note (CR 605.1a 2026 amendment):** the *ability-level* mill
+    /// mechanics asserted below remain correct, but Millikin's ability is no
+    /// longer reachable *as a mana ability* — its `Mill` cost moves a card from a
+    /// library, so `is_mana_ability` now returns `false` for it. This test still
+    /// passes because it drives the cost payer directly and never consults the
+    /// classifier; see `mill_cost_is_not_a_mana_ability` for the classification.
     #[test]
     fn millikin_mills_a_card_and_adds_colorless() {
         let mut state = GameState::new_two_player(42);

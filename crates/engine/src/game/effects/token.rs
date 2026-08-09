@@ -1162,12 +1162,12 @@ pub fn apply_resolved_token_creation(
     // directly above, which runs before this snapshot exactly as the live paths
     // do. Storing the live record on the command would not close (i) or (ii)
     // either, for the same ordering reason, so it was not done.
-    let entry_record = state
+    let mut entry_record = state
         .objects
         .get(&object_id)
         .expect("the token was materialized above")
         .snapshot_for_zone_change(object_id, None, Zone::Battlefield);
-    crate::game::restrictions::record_zone_change(state, entry_record);
+    crate::game::restrictions::record_zone_change(state, &mut entry_record);
     // CR 111.1: replay must not hand the same id out again to a later allocation.
     state.next_object_id = state.next_object_id.max(command.resulting_next_object_id);
     // CR 613.7d: the birth drew an entry timestamp alongside the object id, and

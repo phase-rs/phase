@@ -1,12 +1,14 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "framer-motion";
 
 import { useCardImage } from "../../hooks/useCardImage";
+import { useLongPress } from "../../hooks/useLongPress";
 import { useDraftStore } from "../../stores/draftStore";
 import { menuButtonClass } from "../menu/buttonStyles";
 import type { DraftCardInstance, DraftPlayerView } from "../../adapter/draft-adapter";
-import { CardPreview, type CardHoverInfo } from "../card/CardPreview";
+import type { CardHoverInfo } from "../card/CardPreview";
+import { HoverCardPreview } from "../card/HoverCardPreview";
 import { ManaCurve } from "./ManaCurve";
 
 // Shared enter/exit for cards moving between the pool and the deck.
@@ -52,17 +54,26 @@ function CardTile({ card, count, dimmed, onClick, onHover }: CardTileProps) {
     size: "normal",
     sourcePrinting: { setCode: card.set_code, collectorNumber: card.collector_number },
   });
+  const hoverInfo = {
+    name: card.name,
+    sourcePrinting: { setCode: card.set_code, collectorNumber: card.collector_number },
+  };
+  const { handlers, firedRef } = useLongPress(() => onHover(hoverInfo));
+
+  const handleClick = () => {
+    if (firedRef.current) {
+      firedRef.current = false;
+      return;
+    }
+    onClick();
+  };
 
   return (
     <button
-      onClick={onClick}
-      onMouseEnter={() =>
-        onHover({
-          name: card.name,
-          sourcePrinting: { setCode: card.set_code, collectorNumber: card.collector_number },
-        })
-      }
+      onClick={handleClick}
+      onMouseEnter={() => onHover(hoverInfo)}
       onMouseLeave={() => onHover(null)}
+      {...handlers}
       className={`relative cursor-pointer overflow-hidden rounded-[14px] ring-1 ring-white/10 transition-all duration-150 hover:scale-[1.02] hover:ring-white/20
         ${dimmed ? "opacity-70 hover:opacity-90" : ""}`}
     >
@@ -186,6 +197,7 @@ interface LimitedDeckBuilderProps {
   onRemoveFromDeck?: (cardName: string) => void;
   onSetLandCount?: (landName: string, count: number) => void;
   onSubmitDeck?: () => Promise<void> | void;
+  submissionError?: string | null;
   showSuggestions?: boolean;
 }
 
@@ -197,6 +209,7 @@ export function LimitedDeckBuilder({
   onRemoveFromDeck,
   onSetLandCount,
   onSubmitDeck,
+  submissionError = null,
   showSuggestions = true,
 }: LimitedDeckBuilderProps = {}) {
   const { t } = useTranslation("draft");
@@ -219,6 +232,8 @@ export function LimitedDeckBuilder({
   const submitDeck = onSubmitDeck ?? quickSubmitDeck;
 
   const [hoveredCard, setHoveredCard] = useState<CardHoverInfo | null>(null);
+  const [addableQuery, setAddableQuery] = useState("");
+  const [localSubmissionError, setLocalSubmissionError] = useState<string | null>(null);
 
   const pool = useMemo(() => view?.pool ?? [], [view?.pool]);
 
@@ -239,18 +254,36 @@ export function LimitedDeckBuilder({
 
   const totalCards = mainDeck.length + totalLands;
   const minDeckSize = view?.min_deck_size ?? 40;
-  const addableCards = view?.addable_cards?.length
-    ? view.addable_cards
-    : BASIC_LANDS.map((land) => land.name);
+  const addableCards = view?.addable_cards ?? BASIC_LANDS.map((land) => land.name);
+  const filteredAddableCards = useMemo(() => {
+    const query = addableQuery.trim().toLowerCase();
+    return query
+      ? addableCards.filter((name) => name.toLowerCase().includes(query))
+      : addableCards;
+  }, [addableCards, addableQuery]);
   const deckValid = totalCards >= minDeckSize;
+  const displayedSubmissionError = submissionError ?? localSubmissionError;
+
+  useEffect(() => {
+    setLocalSubmissionError(null);
+  }, [mainDeck, landCounts]);
+
+  const handleSubmit = async () => {
+    setLocalSubmissionError(null);
+    try {
+      await submitDeck();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setLocalSubmissionError(message || t("limitedDeck.submitFailed"));
+    }
+  };
 
   if (!view) return null;
 
   return (
     <div className="flex h-full flex-col gap-4">
-      <CardPreview
-        cardName={hoveredCard?.name ?? null}
-        sourcePrinting={hoveredCard?.sourcePrinting}
+      <HoverCardPreview
+        card={hoveredCard}
         mobileLayout="compact"
         onDismiss={() => setHoveredCard(null)}
       />
@@ -328,8 +361,16 @@ export function LimitedDeckBuilder({
                 </button>
               )}
             </div>
+            <input
+              type="search"
+              value={addableQuery}
+              onChange={(event) => setAddableQuery(event.target.value)}
+              placeholder={t("limitedDeck.searchAddableCards")}
+              aria-label={t("limitedDeck.searchAddableCards")}
+              className="mb-3 w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white outline-none placeholder:text-white/25 focus:border-emerald-400/50"
+            />
             <div className="flex flex-col gap-2">
-              {addableCards.map((name) => (
+              {filteredAddableCards.map((name) => (
                 <LandRow
                   key={name}
                   name={name}
@@ -361,7 +402,7 @@ export function LimitedDeckBuilder({
 
             <button
               type="button"
-              onClick={submitDeck}
+              onClick={() => void handleSubmit()}
               disabled={!deckValid}
               className={menuButtonClass({
                 tone: "emerald",
@@ -372,6 +413,15 @@ export function LimitedDeckBuilder({
             >
               {t("limitedDeck.submitDeck")}
             </button>
+            {displayedSubmissionError && (
+              <p
+                role="alert"
+                className="rounded-lg border border-red-400/40 bg-red-500/10 px-3 py-2 text-sm text-red-100"
+              >
+                <span className="font-medium">{t("limitedDeck.validationTitle")}: </span>
+                {displayedSubmissionError}
+              </p>
+            )}
           </section>
         </div>
       </div>

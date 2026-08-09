@@ -153,6 +153,10 @@ pub fn resolve(
         });
     } else {
         // CR 701.20e: "Look at" privately shows the hand to the ability controller.
+        state.remember_card_identities(
+            crate::game::turn_control::decision_audience_for_player(state, ability.controller),
+            &hand,
+        );
         state.private_look_ids = hand.clone();
         state.private_look_player = Some(ability.controller);
     }

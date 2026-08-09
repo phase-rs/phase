@@ -1,4 +1,5 @@
 pub mod ability;
+pub mod ability_visit;
 pub mod action_stable_order;
 pub mod actions;
 pub mod attribution;
@@ -62,7 +63,10 @@ pub use interaction::{
 };
 pub use keywords::{Keyword, PartnerType, ProtectionTarget};
 pub use layers::{ActiveContinuousEffect, Layer};
-pub use log::{GameLogEntry, LogCategory, LogSegment};
+pub use log::{
+    GameLogEntry, LogBoundary, LogCategory, LogImportance, LogPresentation, LogSegment, LogTone,
+    LogVisibility,
+};
 pub use mana::{
     ManaColor, ManaCost, ManaCostShard, ManaPool, ManaRestriction, ManaSourceOutput,
     ManaSourcePenalty, ManaSourceSelection, ManaType, ManaUnit, SpellMeta, TapsForManaSelection,

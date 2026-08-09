@@ -3,8 +3,12 @@
 //!
 //! Parser AST verification — VERIFIED (no parser remediation required; every
 //! axis classifies from the existing typed AST, never by card name):
-//! - Reanimation payoff: `Effect::ChangeZone { origin: Some(Zone::Graveyard),
-//!   destination: Zone::Battlefield, target, .. }` at `ability.rs:7147` —
+//! - Reanimation payoff: `Effect::ChangeZone` (in `engine::types::ability`) with
+//!   `destination: Zone::Battlefield` and the graveyard **positively asserted** —
+//!   either by `origin: Some(Zone::Graveyard)` or, when the parser leaves
+//!   `origin` unset, by the target filter's `FilterProp::InZone { Graveyard }`
+//!   ("from an opponent's graveyard"). [`change_zone_leaves_graveyard`] is the
+//!   single authority for that question —
 //!   CR 404.1 (graveyard is the discard pile) + CR 110.1 (the card becomes a
 //!   permanent as it enters the battlefield). The reanimated body is a creature
 //!   (`TypeFilter::Creature`) or a Vehicle (`TypeFilter::Subtype("Vehicle")`,
@@ -222,19 +226,54 @@ pub(crate) fn ability_is_discard_outlet(ability: &AbilityDefinition) -> bool {
     ability.cost_categories().contains(&CostCategory::Discards)
 }
 
+/// Single authority — CR 404.1: does this zone change take its object **out of a
+/// graveyard**, whichever AST home carries the constraint?
+///
+/// The "this comes from a graveyard" fact has two homes in the AST, chosen by
+/// Oracle phrasing, and they are the same fact:
+///
+/// - `"from a graveyard"` (Reanimate, Rise from the Grave) sets
+///   `ChangeZone.origin = Some(Zone::Graveyard)`.
+/// - `"from an opponent's graveyard"` (Ashen Powder), `"from graveyards"`
+///   (Ancient Brass Dragon), `"in your graveyard"` (Moira, Urborg Haunt) and
+///   the player-relative possessive `"from the graveyard of the player who
+///   controlled that creature"` (Glyph of Reincarnation) all leave `origin`
+///   unset and carry the constraint on the **target filter** as
+///   `FilterProp::InZone { Graveyard }`. CR 115.2: a graveyard card is only a
+///   legal target because the filter says so, which is why target enumeration
+///   and resolution-time re-legality read the filter and not `origin`.
+///
+/// `TargetFilter::extract_in_zone` is the engine's own authority for "which zone
+/// does this filter select from" — the parser gates its `assimilate` production
+/// on this very call, and `game::layers`, `game::triggers`, `game::quantity` and
+/// `game::effects::change_zone` all consult it. Re-deriving the zone here would
+/// create a second source of truth.
+///
+/// An unset `origin` alone never qualifies: both disjuncts positively assert
+/// `Zone::Graveyard`.
+pub(crate) fn change_zone_leaves_graveyard(origin: &Option<Zone>, target: &TargetFilter) -> bool {
+    *origin == Some(Zone::Graveyard) || target.extract_in_zone() == Some(Zone::Graveyard)
+}
+
 /// CR 404.1 + CR 110.1: a reanimation effect moves a creature/Vehicle card from
-/// a graveyard onto the battlefield. Origin must be the graveyard; destination
-/// the battlefield. An unset origin (`None`) is "from anywhere" and does not
-/// qualify as a *reanimation* signature on its own.
+/// a graveyard onto the battlefield. The destination must be the battlefield and
+/// the graveyard must be **positively asserted** — by `origin`, or by the target
+/// filter's zone (see [`change_zone_leaves_graveyard`]).
+///
+/// An unset `origin` *alone* is "from anywhere" and must never qualify:
+/// Treacherous Urge and Zara, Renegade Recruiter put a creature onto the
+/// battlefield from an opponent's **hand** with exactly `origin: None` and a
+/// zone-less filter. Those stay rejected.
 fn effect_is_reanimation(effect: &Effect) -> bool {
     matches!(
         effect,
         Effect::ChangeZone {
-            origin: Some(Zone::Graveyard),
+            origin,
             destination: Zone::Battlefield,
             target,
             ..
-        } if target_filter_is_reanimatable_body(target)
+        } if change_zone_leaves_graveyard(origin, target)
+            && target_filter_is_reanimatable_body(target)
     )
 }
 

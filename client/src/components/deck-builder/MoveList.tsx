@@ -5,6 +5,7 @@ import type { UnsupportedCard } from "../../services/deckCompatibility";
 import type { GroupAccent } from "./deckGrouping";
 
 import { CardEntryRow } from "./CardEntryRow";
+import type { CardHoverHandler } from "./hoverPreview";
 
 function totalCards(entries: DeckEntry[]): number {
   return entries.reduce((sum, e) => sum + e.count, 0);
@@ -22,7 +23,7 @@ export interface MoveListProps {
   onIncrement?: (name: string, section: "main" | "sideboard") => void;
   /** Forwarded to each row. See `CardEntryRowProps.canIncrement`. */
   canIncrement?: (name: string) => boolean;
-  onCardHover?: (name: string | null) => void;
+  onCardHover?: CardHoverHandler;
   unsupportedMap?: Map<string, UnsupportedCard>;
   /** Render the section even when it has zero entries, showing `emptyHint`.
    *  Used for the always-visible sideboard target in the deck editor. */

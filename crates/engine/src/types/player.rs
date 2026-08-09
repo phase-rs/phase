@@ -145,7 +145,8 @@ pub struct Player {
     /// CR 702.179d: The inherent speed trigger can increase speed only once each turn.
     #[serde(default)]
     pub speed_trigger_used_this_turn: bool,
-    /// CR 710.2: Number of crimes committed this turn.
+    /// CR 700.13: Whether this player has committed a crime this turn (stored
+    /// as 0 or 1 for `QuantityRef` condition evaluation).
     #[serde(default)]
     pub crimes_committed_this_turn: u32,
     /// CR 704.5b: Set when this player attempted to draw from an empty library.
