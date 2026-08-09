@@ -6543,7 +6543,7 @@ pub(super) fn handle_resolution_choice(
                 })
             }
         }
-        // CR 310.10 + CR 704.5w + CR 704.5x: controller assigns the battle's new
+        // CR 310.11 + CR 704.5w + CR 704.5x: controller assigns the battle's new
         // protector. Re-running the SBA fixpoint (via the Priority resumption) will
         // find any remaining battles still needing reassignment.
         (

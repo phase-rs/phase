@@ -501,7 +501,7 @@ pub(crate) fn live_mandatory_loop_winner(
 /// `OrderTriggers` exemption already retains the ring across a non-sampling beat (dump D
 /// measured 35 such beats in one drive), and `WaitingFor::is_forced_cascade_window`
 /// extends that to every forced pre-priority window (CR 603.3d / CR 603.5 + CR 608.2 /
-/// CR 903.9a / CR 704.5j / CR 310.10 / CR 703.1 + CR 117.3a). The invariant this guard
+/// CR 903.9a / CR 704.5j / CR 310.11 / CR 703.1 + CR 117.3a). The invariant this guard
 /// actually needs is weaker and true:
 /// **every point at which CR 704.5a could fire is either sampled or clears the ring.**
 /// CR 704.3 fixes those points: SBAs are checked whenever a player would get priority,
@@ -510,7 +510,7 @@ pub(crate) fn live_mandatory_loop_winner(
 /// exempt for three DIFFERENT reasons, and the weaker invariant is what covers all
 /// three:
 /// the between-resolutions members (CR 603.3b / CR 603.3d / CR 903.9a / CR 704.5j /
-/// CR 310.10) sit inside the CR 704.3 fixpoint itself, where no life total moves; the
+/// CR 310.11) sit inside the CR 704.3 fixpoint itself, where no life total moves; the
 /// MID-resolution member (`OptionalEffectChoice`, CR 603.5 + CR 608.2) is a pause in the
 /// middle of a resolution, where life absolutely can move — but CR 608.2 performs no SBA
 /// check mid-resolution, so a life change there is not a CR 704.5a point being skipped,
