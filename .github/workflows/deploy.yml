@@ -340,6 +340,60 @@ jobs:
           ./scripts/gen-scryfall-sets.sh
           ./scripts/gen-scryfall-printings.sh
 
+      - name: Derive MTGJSON cache key
+        # Re-derived in this job rather than plumbed out of `preview-inputs`:
+        # `steps.` references cannot cross a job boundary, and a dangling one
+        # does not fail — it expands to the empty string, which would freeze the
+        # locale-map key at a constant and serve the same maps forever.
+        #
+        # Re-running is safe and stays single-authority: the action probes
+        # MTGJSON's published version, so both jobs derive the same suffix from
+        # the same source rather than forking the formula.
+        id: mtgjson-key
+        uses: ./.github/actions/mtgjson-cache-key
+
+      - name: Restore locale card-art maps
+        # Caches the OUTPUT (five small JSON maps), not the ~169 MB AllSetFiles
+        # input the generator downloads to build them. Folding that input into
+        # the `data/mtgjson` entry is not an option: that cache is saved far
+        # earlier (it is complete before this step runs) and GitHub caches are
+        # immutable, so a later hit could never contain it — and the extracted
+        # set files would add ~1 GB to an entry shared with release.yml.
+        #
+        # Same `mtgjson-` prefix as the draft-pools pair (so /clear-caches
+        # mtgjson sweeps it) and the same published-data suffix. The generator's
+        # script hash joins the key because LOCALE_MAP lives in the script: a
+        # locale added there must rebuild, and the data-version suffix alone
+        # cannot see a source change.
+        #
+        # NO restore-keys: every input to the output is in the key, so an
+        # inexact hit is by construction a stale map.
+        id: locale-images-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: client/public/scryfall-images.*.json
+          key: mtgjson-locale-images-${{ steps.mtgjson-key.outputs.suffix }}-${{ hashFiles('scripts/gen-scryfall-locale-images.sh') }}
+
+      # Separate from the Scryfall step: this reads MTGJSON set files, not the
+      # Scryfall bulk exports, so it is not covered by the data/scryfall cache.
+      #
+      # The generator no-ops when all five maps are already present, so a cache
+      # hit skips the AllSetFiles download entirely. It gates on the files
+      # themselves rather than `cache-hit` (same reasoning as "Generate draft
+      # pools"): a poisoned or partial entry reports a hit with nothing on disk,
+      # and regenerating on an absent file lets the cache self-heal.
+      - name: Generate locale card-art maps
+        run: ./scripts/gen-scryfall-locale-images.sh
+
+      - name: Save locale card-art maps
+        # Banked the moment the maps exist, so the AllSetFiles download is never
+        # paid twice for the same inputs even if a later step fails.
+        if: ${{ steps.locale-images-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: client/public/scryfall-images.*.json
+          key: mtgjson-locale-images-${{ steps.mtgjson-key.outputs.suffix }}-${{ hashFiles('scripts/gen-scryfall-locale-images.sh') }}
+
       - name: Save Scryfall bulk data
         # data/scryfall is complete once the four generators have run. Banking
         # it here keeps a later failure from re-hitting the Scryfall API on the

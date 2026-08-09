@@ -1,4 +1,10 @@
-import type { GameAction, GameObject, ObjectId } from "../adapter/types.ts";
+import type {
+  GameAction,
+  GameObject,
+  ObjectAction,
+  ObjectId,
+  WaitingFor,
+} from "../adapter/types.ts";
 
 /**
  * Look up the legal actions whose `source_object()` is `objectId`.
@@ -10,9 +16,9 @@ import type { GameAction, GameObject, ObjectId } from "../adapter/types.ts";
  * — never a client-side discriminated-union introspection.
  */
 export function collectObjectActions(
-  legalActionsByObject: Record<string, GameAction[]> | undefined,
+  legalActionsByObject: Record<string, ObjectAction[]> | undefined,
   objectId: ObjectId,
-): GameAction[] {
+): ObjectAction[] {
   if (!legalActionsByObject) return [];
   return legalActionsByObject[String(objectId)] ?? [];
 }
@@ -89,9 +95,9 @@ export function resolveSingleActionDispatch(
  * permission inspection.
  */
 export function playOrCastActionsForObject(
-  legalActionsByObject: Record<string, GameAction[]> | undefined,
+  legalActionsByObject: Record<string, ObjectAction[]> | undefined,
   objectId: ObjectId,
-): GameAction[] {
+): ObjectAction[] {
   return collectObjectActions(legalActionsByObject, objectId).filter((a) =>
     a.type === "CastSpell"
     || a.type === "CastSpellForFree"
@@ -114,7 +120,7 @@ export function playOrCastActionsForObject(
  * gold with a promise that releasing will cast immediately.
  */
 export function resolveDirectPlayOrCastAction(
-  legalActionsByObject: Record<string, GameAction[]> | undefined,
+  legalActionsByObject: Record<string, ObjectAction[]> | undefined,
   object: GameObject | undefined,
 ): GameAction | null {
   if (!object) return null;
@@ -126,4 +132,131 @@ export function resolveDirectPlayOrCastAction(
   return playOrCastActionsForObject(legalActionsByObject, object.id).includes(directAction)
     ? directAction
     : null;
+}
+
+export interface ActivationAffordances {
+  /** Objects with >=1 NON-mana action, offered only where the engine accepts an
+   *  activation: CR 113.3b — "A player may activate such an ability whenever they
+   *  have priority". Membership-queried by id; NOT zone-scoped (a hand card with a
+   *  CastSpell is a member) — never enumerate this set to build a zone listing. */
+  activatableObjectIds: Set<number>;
+  /** Objects with >=1 mana action (CR 605.1a), additionally offered during the
+   *  cost-payment states whose `apply` arms accept a mana activation. */
+  manaTappableObjectIds: Set<number>;
+}
+
+/**
+ * THE single authority for "which objects may be activated right now, and through
+ * which ring". Every deciding activation surface consumes this — none re-derives it.
+ *
+ * Lifted verbatim from `GameBoard`'s `boardInteractionState` memo, with the three
+ * `gameState.objects[objectId]` reads rewritten to `objects[objectId]` because the
+ * parameter is the objects map, not the game state.
+ */
+export function deriveActivationAffordances(
+  waitingFor: WaitingFor | null,
+  canActForWaitingState: boolean,
+  legalActionsByObject: Record<string, GameAction[]>,
+  objects: Record<string, GameObject> | undefined,
+): ActivationAffordances {
+  const activatableObjectIds = new Set<number>();
+  const manaTappableObjectIds = new Set<number>();
+  if (!objects) return { activatableObjectIds, manaTappableObjectIds };
+
+  const playerCanAct =
+    waitingFor != null
+    && (
+      (waitingFor.type === "Priority" && canActForWaitingState)
+      || (waitingFor.type === "ManaPayment" && canActForWaitingState)
+      || (waitingFor.type === "UnlessPayment" && canActForWaitingState)
+      // CR 118.12a: Disjunctive unless-cost — same input enablement as
+      // UnlessPayment (player chooses among sub-costs).
+      || (waitingFor.type === "UnlessPaymentChooseCost" && canActForWaitingState)
+    );
+
+  if (waitingFor?.type === "Priority" && canActForWaitingState) {
+    // The engine owns the "which permanent does this action act on" mapping
+    // via GameAction::source_object(), exposed as `legalActionsByObject`.
+    // The cyan activatable ring surfaces permanents with at least one non-mana
+    // action; mana abilities are handled by the separate mana ring below. This
+    // iteration is variant-agnostic — a future keyword activation needs zero
+    // frontend changes.
+    for (const [idStr, actions] of Object.entries(legalActionsByObject)) {
+      const objectId = Number(idStr);
+      const object = objects[objectId];
+      if (!object) continue;
+      if (actions.some((action) => !isManaObjectAction(action, object))) {
+        activatableObjectIds.add(objectId);
+      }
+    }
+  }
+
+  if (playerCanAct) {
+    for (const [idStr, actions] of Object.entries(legalActionsByObject)) {
+      const objectId = Number(idStr);
+      const object = objects[objectId];
+      if (!object) continue;
+      if (actions.some((action) => isManaObjectAction(action, object))) {
+        manaTappableObjectIds.add(objectId);
+      }
+    }
+  }
+
+  return { activatableObjectIds, manaTappableObjectIds };
+}
+
+export type ObjectActivation =
+  | { kind: "dispatch"; action: GameAction }
+  | { kind: "choose"; actions: GameAction[] }
+  | { kind: "none" };
+
+/**
+ * THE single authority for "given one object's engine bucket, what does a click do".
+ *
+ * Owns the CR 605.1a mana/non-mana partition; EVERY dispatch decision — mana and
+ * non-mana alike — goes through resolveSingleActionDispatch (#506). CR 113.3b
+ * keyword activations (Crew/Station/Equip/Saddle) are surfaced alongside activated
+ * abilities. The merged order is [abilities, keywords, mana].
+ *
+ * Takes the WHOLE `ActivationAffordances` pair rather than a loose boolean per
+ * ring: each ring is dropped by the same authority that painted it, so a caller
+ * cannot hand this function half of its own gate. An earlier signature took only
+ * the mana bit, which merged the non-mana partition unconditionally and let a
+ * cost-payment prompt offer an activation the board itself refuses.
+ */
+export function resolveObjectActivation(
+  actions: GameAction[],
+  object: GameObject | undefined,
+  affordances: ActivationAffordances,
+  objectId: ObjectId,
+): ObjectActivation {
+  const abilityActions: GameAction[] = [];
+  const manaActions: GameAction[] = [];
+  const keywordActions: GameAction[] = [];
+  for (const action of actions) {
+    if (isManaObjectAction(action, object)) {
+      manaActions.push(action);
+    } else if (action.type === "ActivateAbility") {
+      abilityActions.push(action);
+    } else {
+      keywordActions.push(action);
+    }
+  }
+
+  const merged: GameAction[] = [];
+  // CR 113.3b: an activated ability that isn't a mana ability may be activated
+  // only when its controller has priority. `activatableObjectIds` is populated
+  // for exactly that state, so a cost-payment prompt (ManaPayment /
+  // UnlessPayment / UnlessPaymentChooseCost) drops the non-mana partition
+  // instead of offering an activation the engine would refuse.
+  if (affordances.activatableObjectIds.has(objectId)) {
+    merged.push(...abilityActions, ...keywordActions);
+  }
+  // CR 605.1a: mana abilities are additionally offered during those payment
+  // states, whose `apply` arms accept a mana activation.
+  if (affordances.manaTappableObjectIds.has(objectId)) merged.push(...manaActions);
+  if (merged.length === 0) return { kind: "none" };
+
+  const auto = resolveSingleActionDispatch(merged, object);
+  return auto ? { kind: "dispatch", action: auto } : { kind: "choose", actions: merged };
 }

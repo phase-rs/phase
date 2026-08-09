@@ -22,26 +22,32 @@
 //! # MEASURED SCOPE OF THIS MODULE — read this before adding a row
 //!
 //! The bounded offer FIRES on this dump (that is 5d's headline and [`r1_the_bounded_offer_fires_
-//! on_the_real_f4_dump`] is the row). It publishes exactly **one** decision point — Sue's
-//! `MayChoice`. Torch's `Targets` point and Reed's `MayChoice` point are **NOT** published, and
-//! the mechanism is measured and pinned by
-//! [`r1b_the_published_point_set_is_exactly_what_the_retained_window_announces`]: the CR 732.2a
-//! ring sampler fires only at `Priority { player == active_player }` after a non-shrinking
-//! resolution, so on this board the retained frames alternate strictly between the `404` and
-//! `402` stack entries. `certified_period_touch`'s `announced` set is "entries in a frame's
-//! stack that were absent from the previous frame's", so the `403` and `401` entries are
-//! structurally invisible to conjunct (6) and to `bounded_cycle_pin_slots_for_window`.
+//! on_the_real_f4_dump`] is the row). It publishes **all three** per-iteration choices this
+//! cycle opens — Sue's `MayChoice`, Reed's `MayChoice` and Torch's `Targets` slot — and the
+//! mechanism is measured and pinned by
+//! [`r1b_the_published_point_set_is_exactly_what_the_retained_window_announces`].
+//!
+//! ⚠ **THE PREVIOUS PARAGRAPH SAID THE OPPOSITE, AND IT WAS A MEASUREMENT OF A BLIND SPOT, NOT
+//! OF THE BOARD.** The CR 732.2a ring sampler used to fire only at `Priority { player ==
+//! active_player }` after a non-shrinking resolution, so on this board the retained frames
+//! alternated strictly between the `404` and `402` stack entries; `certified_period_touch`'s
+//! `announced` set is "entries in a frame's stack that were absent from the previous frame's",
+//! which made the `403` and `401` entries structurally invisible to conjunct (6) and to
+//! `bounded_cycle_pin_slots_for_window`. Torch and Reed resolve ACROSS a forced pre-priority
+//! window, and that window is exactly what the old site could not see. The second sampling site
+//! records a frame at the beat such a window is **ANSWERED**, so those two entries are now
+//! announced like the other two — a widening of what the offer can publish, not a change to
+//! what the board does.
 //!
 //! CONSEQUENCE, also measured and pinned
-//! ([`r2_an_accepted_declaration_commits_zero_cycles_because_reeds_may_is_unannounced`]): an
-//! accepted `Fixed(n)` declaration carrying the FULL published pin set drives cycle 0, answers
-//! Sue's "may" from the pin (U4's arm, on the real dump), and then **aborts** on Reed's
-//! unpinned "may" ⇒ whole-cycle rollback, zero commit, manual handback. That is fail-CLOSED and
-//! rules-safe, but it is not a grant — so the plan's R2a/R2b/R3/R5 (pass ⇒ grant, respond ⇒
-//! no-grant, Sue-Decline rollback, `victim_slot` keyed by Torch) have no non-vacuous form on
-//! this tree and are NOT written here. They are handed back with the mechanism above.
+//! ([`r2a_an_accepted_declaration_commits_exactly_n_cycles_because_reeds_may_is_announced`]): an
+//! accepted `Fixed(n)` declaration carrying the full published pin set now **commits exactly
+//! `n` repetitions** — P1 loses `n` life, P0's library loses `n` cards — and `n = 1` and `n = 3`
+//! are DISTINGUISHABLE. The former zero-commit was the fail-closed abort on Reed's unpinned
+//! "may"; with Reed published there is nothing left to abort on.
 
 use engine::analysis::decision_template::{DecisionKind, DecisionPointKind, IterationCount};
+use engine::analysis::resource::ResourceVector;
 use engine::game::engine::apply;
 use engine::types::ability::{ReplacementMode, TargetRef};
 use engine::types::actions::GameAction;
@@ -84,10 +90,8 @@ fn gunzip(gz: &[u8]) -> String {
 /// The dump was captured with the detector OFF; every row here is about the CR 732.2a
 /// interactive offer, so the mode is set to `Interactive` at load — the same thing the user's
 /// own toggle does.
-fn load_f4() -> GameState {
-    let json = gunzip(include_bytes!(
-        "../fixtures/fantastic_four_bounded_loop_4p.json.gz"
-    ));
+fn load_dump(gz: &[u8]) -> GameState {
+    let json = gunzip(gz);
     let envelope: serde_json::Value =
         serde_json::from_str(&json).expect("dump envelope parses as JSON");
     let mut state = serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
@@ -95,6 +99,88 @@ fn load_f4() -> GameState {
         .into_game_state();
     state.loop_detection = engine::types::game_state::LoopDetectionMode::Interactive;
     state
+}
+
+fn load_f4() -> GameState {
+    load_dump(include_bytes!(
+        "../fixtures/fantastic_four_bounded_loop_4p.json.gz"
+    ))
+}
+
+/// **MODE1** — the user's own 2026-08-03 capture of the board that raised NO offer at all
+/// (`fastastic-four-no-offer-phase5.zip`, `game-state-turn-5-…19-09-15-030Z.json`), derived by
+/// `jq -c '{gameState}' … | gzip -9 -n` (860,451 B; the raw envelope is 20.5 MB, of which
+/// `turnCheckpoints` alone is 16.4 MB and no loader reads it).
+///
+/// Its distinguishing field is `may_trigger_auto_choices`: it carries the user's stored
+/// "always take" for Sue's CR 603.5 `may`, so guard (b) withholds that pin slot and gate (6)
+/// can only be discharged by the CR 603.5 auto-answer relief.
+fn load_mode1() -> GameState {
+    load_dump(include_bytes!(
+        "../fixtures/f4_user_mode1_no_offer_4p.json.gz"
+    ))
+}
+
+/// **MODE2** — the user's own 2026-08-03 capture of the board where the offer DID fire, the
+/// declaration WAS accepted, and the drive then committed **nothing** and re-offered
+/// (`f4-offer-fires-no-ff.zip`, `game-state-turn-5-…19-56-54-597Z.json`), derived by the same
+/// `jq -c '{gameState}' … | gzip -9 -n` (971,617 B).
+///
+/// Its distinguishing field is the COMPLEMENT of MODE1's: `may_trigger_auto_choices` is EMPTY
+/// (the user cleared the "always take" as a workaround), so this board reaches the offer
+/// through the ordinary CR 603.5 publication path — and the accepted grant aborted on a `may`
+/// the offer had not published. The two dumps are therefore one field apart on the axis this
+/// change is about, which is why both are tracked.
+fn load_mode2() -> GameState {
+    load_dump(include_bytes!(
+        "../fixtures/f4_user_mode2_accept_commits_nothing_4p.json.gz"
+    ))
+}
+
+/// The four axes ONE committed cycle of this loop moves: every seat's life, every seat's
+/// library size, The Thing's counters, and the token population.
+///
+/// All four, not one: a commit that moved only life could be a stray drain, while a commit
+/// that moves all four is the CYCLE. `u32::MAX` for a missing Thing is deliberate — an absent
+/// permanent must fail an equality loudly rather than read as "zero counters".
+fn commit_axes(state: &GameState) -> (Vec<i32>, Vec<usize>, u32, usize) {
+    let thing = state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .find(|o| o.name == THING)
+        .map(|o| o.counters.values().copied().sum::<u32>())
+        .unwrap_or(u32::MAX);
+    let tokens = state
+        .battlefield
+        .iter()
+        .filter(|id| state.objects.get(id).is_some_and(|o| o.is_token))
+        .count();
+    (
+        state.players.iter().map(|p| p.life).collect(),
+        state.players.iter().map(|p| p.library.len()).collect(),
+        thing,
+        tokens,
+    )
+}
+
+/// Every living opponent Accepts the CR 732.2c window, returning how many did. A zero return
+/// means the window never opened, which every caller turns into a loud failure.
+fn accept_all_opponents(state: &mut GameState) -> usize {
+    use engine::analysis::loop_check::ShortcutResponse;
+    let mut responders = 0;
+    while let WaitingFor::RespondToShortcut { player, .. } = state.waiting_for.clone() {
+        apply(
+            state,
+            player,
+            GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept,
+            },
+        )
+        .expect("each living opponent accepts (CR 732.2c)");
+        responders += 1;
+    }
+    responders
 }
 
 /// R18 / §3 D6 TARGET A — resolve a fixture object by CARD NAME, never by literal `ObjectId`.
@@ -359,24 +445,39 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
 /// `apply()`, and its `max_iterations` equals the bound re-derived by this row from the
 /// offer-beat board.
 ///
-/// **STATUS: PARTIAL — pending the (A)/(B) ruling.** §6 R1 as planned also expected the offer to
-/// publish three decision points and to be TAKEABLE (commit ≥ 1 cycle). Measured on this tree it
-/// publishes ONE point and commits ZERO cycles (see `r1b` and `r2` for the pinned measurements,
-/// and the module header for the mechanism). This row therefore ships the half of R1 that the
-/// measurement supports — the offer fires, and its bound arithmetic is correct — and pins the
-/// other half AS MEASURED rather than asserting the falsified prediction. R2a/R2b/R3/R4/R5 and
-/// the interruptibility pair stay unwritten until the ruling lands.
+/// **STATUS: §6 R1's other half is now MEASURED TRUE, in two sibling rows.** R1 as planned also
+/// expected the offer to publish three decision points and to be TAKEABLE (commit ≥ 1 cycle).
+/// ⚠ THE NOTE THAT STOOD HERE — *"measured on this tree it publishes ONE point and commits ZERO
+/// cycles (see `r1b` and `r2`)"* — IS FALSIFIED by this branch's own rows, and is replaced
+/// rather than softened:
+///
+/// * [`r1b_the_published_point_set_is_exactly_what_the_retained_window_announces`] pins
+///   **THREE** points — `[Sue MayChoice, Reed MayChoice, Torch Targets]` — not one;
+/// * [`r2a_an_accepted_declaration_commits_exactly_n_cycles_because_reeds_may_is_announced`]
+///   commits **exactly `n`**, run at `n = 1` and `n = 3` so the two outcomes are
+///   distinguishable — not zero;
+/// * the row that measured zero was `r2_an_accepted_declaration_commits_zero_cycles_…`, and it
+///   NO LONGER EXISTS. This branch RENAMED it to `r2a_…` once the answer-beat sampler announced
+///   the frame Reed's entry sits on, which removed the unannounced `may` the zero-commit was
+///   fail-closing on. Any surviving cross-reference to `r2` resolves to nothing.
+///
+/// This row keeps the half it always owned — the offer fires, and its bound arithmetic is
+/// correct. `r2b`/`r3`/`r4`/`r5` and the interruptibility pair are still unwritten: no `fn r2b_`,
+/// `fn r3_`, `fn r4_` or `fn r5_` row exists in this file.
 ///
 /// # What the assertion is bound to, and why it is not `f(x) == f(x)`
 ///
 /// The expectation is computed HERE from (i) each living seat's life and library on the
 /// offer-beat board and (ii) the per-period delta the ENGINE published on the certificate — it
-/// never calls `elimination_bounds`, which is the function under test. Per §6 R1's ROUND-38
-/// (F3) ruling the row is anchored to the **in-tree MAX form** (`resource.rs`
-/// `observed_life_loss.max(declared_life_magnitude)` under the `declarable_victims` guard);
-/// the additive per-victim form is a tracked follow-up (R1-fu), not a prerequisite. Measured on
-/// this board `victim_slot` is EMPTY (see `r5`'s handback in the module header), so the two
-/// forms coincide here and the row states which one it assumes.
+/// never calls `elimination_bounds`, which is the function under test. ⚠ THE ANCHOR THAT STOOD
+/// HERE — *"anchored to the in-tree MAX form … the additive per-victim form is a tracked
+/// follow-up (R1-fu), not a prerequisite … measured on this board `victim_slot` is EMPTY, so the
+/// two forms coincide"* — IS FALSIFIED ON BOTH CLAUSES. The in-tree form IS the additive one
+/// (`resource.rs` `observed_life_loss.max(0) + declared_life_magnitude` under the
+/// `declarable_victims` guard), and `victim_slot` is NON-EMPTY on this board, so the two forms
+/// do NOT coincide here — which is why this row's own assertion message states the additive form
+/// it assumes, and names what actually remains tracked as F1: the additive form OVER-CHARGES
+/// wherever a published slot IS the observed drain.
 ///
 /// # Reach-guards (each excludes a way this could pass degenerately)
 ///
@@ -430,9 +531,38 @@ fn r1_the_bounded_offer_fires_on_the_real_f4_dump() {
     // CR 704.5a headroom is `life - 1`: a seat at exactly 0 has LOST, so a legal shortcut must
     // stop one point above it. CR 104.3c: an empty library is only lethal on the next draw, so
     // the library axis divides the whole remaining library.
+    // CR 704.5a: a published re-aimable `Targets` slot may be pointed at ANY of its legal
+    // player targets in EVERY remaining repetition, so each of them is charged that slot's
+    // magnitude ON TOP of its own observed drain. Both terms come off the offer's OWN
+    // published data — `certificate.per_cycle.victim_slot` and `schema.points` — never from
+    // `elimination_bounds`, so this stays an independent re-derivation.
+    let declared_life_magnitude: i64 = per_cycle
+        .victim_slot
+        .iter()
+        .map(|(_, m)| *m)
+        .filter(|m| *m > 0)
+        .sum();
+    let declarable_victims: std::collections::BTreeSet<PlayerId> = schema
+        .points
+        .iter()
+        .filter_map(|p| match &p.kind {
+            DecisionPointKind::Targets { legal_targets, .. } => Some(legal_targets),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|t| match t {
+            TargetRef::Player(p) => Some(*p),
+            _ => None,
+        })
+        .collect();
     let mut bounds: Vec<i64> = vec![];
     for player in state.players.iter().filter(|p| !p.is_eliminated) {
-        let loss = -per_cycle.delta.life.get(&player.id).copied().unwrap_or(0);
+        let observed = -per_cycle.delta.life.get(&player.id).copied().unwrap_or(0);
+        let loss = if declarable_victims.contains(&player.id) {
+            observed.max(0) + declared_life_magnitude
+        } else {
+            observed
+        };
         if loss > 0 {
             bounds.push((player.life as i64 - 1) / loss);
         }
@@ -458,8 +588,13 @@ fn r1_the_bounded_offer_fires_on_the_real_f4_dump() {
         expected,
         "CR 732.2a + CR 704.5a: `max_iterations` is the MIN over every living seat's \
          elimination headroom, divided by the per-period consumption the certificate itself \
-         published. Re-derived here as {bounds:?} -> {expected}; the offer published {}. \
-         (This row assumes the IN-TREE max form; see R1-fu.)",
+         published, PLUS the published `victim_slot` magnitude charged to every declarable \
+         victim. Re-derived here as {bounds:?} -> {expected} with declared={declared_life_magnitude} \
+         over victims {declarable_victims:?}; the offer published {}. (The additive per-victim \
+         form is now BOTH the in-tree form and this re-derivation, because `victim_slot` is \
+         non-empty on this board for the first time. It is NOT the follow-up discharged: the \
+         same additive form OVER-CHARGES wherever a published slot IS the observed drain — \
+         MEASURED one life point wide by the B5f pair — and that remains tracked as F1.)",
         schema.max_iterations
     );
     assert!(
@@ -469,26 +604,30 @@ fn r1_the_bounded_offer_fires_on_the_real_f4_dump() {
     );
 }
 
-/// §6 R1, SECOND HALF — **a MEASURED CORRECTION to the plan, pinned so it cannot drift
-/// silently. STATUS: PARTIAL — this row pins the CURRENT truth of the published point set, not
-/// the planned one, pending the (A)/(B) ruling.**
+/// §6 R1, SECOND HALF — the published point set, pinned so it cannot drift silently.
 ///
 /// R1 as written expects `points ≡ {Targets(403 Torch), MayChoice(401 Reed),
-/// MayChoice(402 Sue)}`. That expectation is a HEAD-era SNAPSHOT-mint reading (§2: *"returns 1
-/// point when 403 is up"*), and it does not survive U3's WINDOW mint. Measured on this tree:
+/// MayChoice(402 Sue)}`. ⚠ THE MEASUREMENT THAT STOOD HERE — *"the `403` / `401` entries only
+/// ever sit on the stack across a `TriggerTargetSelection` / `OptionalEffectChoice` window …
+/// so `403` and `401` are never announced … therefore `bounded_cycle_pin_slots_for_window`
+/// publishes exactly ONE point — Sue's `MayChoice`"* — IS FALSIFIED BY THIS ROW'S OWN BODY, and
+/// is replaced rather than softened. Measured on this tree now:
 ///
-/// * the retained ring frames on this board alternate strictly between the `404` and `402`
-///   stack entries — the CR 732.2a sampler fires only at `Priority { player == active_player }`
-///   after a non-shrinking resolution, and the `403` / `401` entries only ever sit on the stack
-///   across a `TriggerTargetSelection` / `OptionalEffectChoice` window;
-/// * `certified_period_touch`'s `announced` set is exactly "entries in a frame's stack absent
-///   from the previous frame's", so `403` and `401` are never announced;
-/// * therefore `bounded_cycle_pin_slots_for_window` publishes exactly ONE point — Sue's
-///   `MayChoice`.
+/// * ALL FOUR cycle sources are retained on some sample's stack — the `framed_sources` census
+///   below asserts `{Thing, Sue, Torch, Reed}` exactly, and states `Torch`/`Reed` as its own
+///   conjunct because they are the load-bearing half;
+/// * `403` and `401` do still resolve ACROSS a forced pre-priority window, but the answer-beat
+///   sampling site in `apply_action` records a frame at the beat that window is ANSWERED — so
+///   `certified_period_touch`'s `announced` set, still exactly "entries in a frame's stack
+///   absent from the previous frame's", now contains them;
+/// * therefore `bounded_cycle_pin_slots_for_window` publishes all THREE points, and R1's
+///   planned expectation is MET rather than corrected.
 ///
 /// The row asserts the MEASUREMENT, with the sources named, and the frame census as its own
-/// reach-guard. **If a future change widens the announced set this row FAILS LOUDLY and must be
-/// re-keyed — which is the point: R2a/R2b/R3/R5 become writable at exactly that moment.**
+/// reach-guard. **If a future change NARROWS the announced set again this row FAILS LOUDLY** —
+/// which is what it is for: that shrink is exactly the regression
+/// [`r2a_an_accepted_declaration_commits_exactly_n_cycles_because_reeds_may_is_announced`],
+/// written on the strength of Reed being published, would otherwise silently lose.
 #[test]
 fn r1b_the_published_point_set_is_exactly_what_the_retained_window_announces() {
     let mut state = load_f4();
@@ -515,17 +654,17 @@ fn r1b_the_published_point_set_is_exactly_what_the_retained_window_announces() {
         .collect();
     assert_eq!(
         framed_sources,
-        [thing, sue].into_iter().collect(),
-        "MEASURED: every retained sample's stack holds a {THING:?} ({thing:?}) or {SUE:?} \
-         ({sue:?}) entry and NEVER a {TORCH:?} ({torch:?}) or {REED:?} ({reed:?}) one, because \
-         those two resolve across a prompt window and the sampler only fires at an \
-         active-player `Priority` settle. This is the reach-guard for the point-set assertion \
-         below"
+        [thing, sue, torch, reed].into_iter().collect(),
+        "MEASURED: every one of the four cycle sources is retained on some sample's stack. \
+         {TORCH:?} ({torch:?}) and {REED:?} ({reed:?}) resolve ACROSS a forced pre-priority \
+         window, and the second sampling site in `apply_action` records a frame at the beat \
+         that window is ANSWERED — so they are announced exactly like {THING:?} ({thing:?}) \
+         and {SUE:?} ({sue:?}). This is the reach-guard for the point-set assertion below"
     );
     assert!(
-        !framed_sources.contains(&torch) && !framed_sources.contains(&reed),
+        framed_sources.contains(&torch) && framed_sources.contains(&reed),
         "stated as its own conjunct because it is the load-bearing half: the two sources whose \
-         choices go unpublished are exactly the two the sampler never retains"
+         choices used to go unpublished are exactly the two the answer-beat sampler adds"
     );
 
     let published: Vec<(ObjectId, &'static str)> = schema
@@ -546,35 +685,40 @@ fn r1b_the_published_point_set_is_exactly_what_the_retained_window_announces() {
         .collect();
     assert_eq!(
         published,
-        vec![(sue, "MayChoice")],
-        "MEASURED PLAN CORRECTION (§6 R1): the window mint publishes ONE point — Sue's \
-         CR 603.5 `may`. Torch's CR 608.2b `Targets` point and Reed's CR 603.5 `may` are NOT \
-         published because their stack entries are never ANNOUNCED (see the frame census \
-         above). If this assertion fails because the set GREW, the announced-set derivation \
-         changed and R2a/R2b/R3/R5 must be written in the same change"
+        vec![(sue, "MayChoice"), (reed, "MayChoice"), (torch, "Targets")],
+        "MEASURED: the window mint publishes all THREE per-iteration choices this cycle \
+         opens — Sue's and Reed's CR 603.5 `may` gates and Torch's CR 608.2b `Targets` slot. \
+         The set is exactly the announced set from the census above; if it SHRINKS again the \
+         answer-beat sampling site regressed"
     );
 }
 
-/// §6 R2, **as measured** — the consequence of the unannounced choices, driven end to end.
+/// §6 R2a, **as measured** — the accepted declaration COMMITS, driven end to end.
 ///
 /// A `Fixed(n)` declaration carrying the FULL published pin set is ACCEPTED at declare
 /// (`predictability_gate` + `validate_pins` both pass — the published set is covered), every
-/// living opponent Accepts (CR 732.2c), and then the drive **commits nothing**: cycle 0 answers
-/// Sue's `OptionalEffectChoice` from the pin (U4's `inject_pinned_answer` arm, on the real
-/// dump), reaches Reed's `OptionalEffectChoice`, finds no pin for it, and returns
-/// `CycleOutcome::Abort` ⇒ whole-cycle rollback ⇒ CR 800.4a priority handback.
+/// living opponent Accepts (CR 732.2c), and the drive then commits **exactly `n`** repetitions
+/// of the published per-cycle delta: cycle 0 answers Sue's `OptionalEffectChoice` from the pin
+/// (U4's `inject_pinned_answer` arm, on the real dump), then Reed's from ITS pin, and the cycle
+/// closes at the published period boundary.
 ///
-/// This is FAIL-CLOSED and rules-safe; it is also NOT a grant, so §6 R2a's *"exactly N cycles
-/// commit"* has no non-vacuous form here and is handed back rather than weakened. The row pins
-/// the zero-commit **together with its cause**, so it cannot be read as "the drive works":
+/// ⚠ **THIS ROW USED TO ASSERT THE OPPOSITE** (`r2_..._commits_zero_cycles_because_reeds_may_
+/// is_unannounced`) and the rename is the point: the zero-commit was the fail-closed abort on
+/// Reed's UNPINNED `may`, which existed only because the sampler could not see the frame
+/// Reed's entry announced on. With Reed published there is nothing left to abort on, so §6
+/// R2a's *"exactly N cycles commit"* finally has a non-vacuous form on the real dump.
 ///
-/// * the same `n` is run at 1 and at 3 and BOTH commit zero (a partial commit would separate
-///   them, which is the discriminator `bounded_fixed_count_commits_exactly_n_periods` uses);
+/// The row pins the commit **together with its cause**, so it cannot be read as "some delta
+/// appeared":
+///
+/// * the same declaration is run at `n = 1` and `n = 3` and the two outcomes must be
+///   DISTINGUISHABLE — the discriminator `bounded_fixed_count_commits_exactly_n_periods` uses,
+///   and the guard against an instrument that would satisfy the per-`n` equalities vacuously;
 /// * the declaration is asserted to have been ACCEPTED (`RespondToShortcut` raised), so the
-///   zero is the DRIVE's and not a declare-time refusal — that distinction is the whole row;
-/// * Reed's "may" is asserted UNPUBLISHED on the same offer, naming the cause.
+///   commit is the DRIVE's and not a declare-time artefact;
+/// * Reed's `may` is asserted PUBLISHED on the same offer, naming the cause.
 #[test]
-fn r2_an_accepted_declaration_commits_zero_cycles_because_reeds_may_is_unannounced() {
+fn r2a_an_accepted_declaration_commits_exactly_n_cycles_because_reeds_may_is_announced() {
     use engine::analysis::loop_check::ShortcutResponse;
 
     let mut committed_per_n = vec![];
@@ -582,21 +726,33 @@ fn r2_an_accepted_declaration_commits_zero_cycles_because_reeds_may_is_unannounc
         let mut state = load_f4();
         let reed = resolve_by_name(&state, REED);
         drive_f4_to_offer(&mut state, 400).expect("the bounded offer fires (see R1)");
-        let (proposer, _certificate, schema) = offer_parts(&state);
+        let (proposer, certificate, schema) = offer_parts(&state);
+        // The row's failure message CLAIMS the published per-cycle delta, so the assertion
+        // has to READ it. This binding used to be `_certificate` and the expectation two
+        // literal `1`s — a re-dump that changed the rate reddened the row for a reason that
+        // has nothing to do with the property under test.
+        let per_cycle = certificate
+            .per_cycle
+            .clone()
+            .expect("a bounded offer publishes its per-period signature");
         let schema = schema.clone();
 
         assert!(
-            !schema.points.iter().any(|p| matches!(&p.slot.source,
+            schema.points.iter().any(|p| matches!(&p.slot.source,
                     engine::types::game_state::YieldTarget::ThisObject { source_id, .. }
                         if *source_id == reed)),
-            "the CAUSE this row is about: Reed's CR 603.5 `may` is NOT among the published \
-             points, so no legal declaration can pin it"
+            "the CAUSE this row is about: Reed's CR 603.5 `may` IS among the published \
+             points, so a legal declaration can pin it and the drive has nothing left to \
+             abort on"
         );
 
         let template = f4_pin_template(&schema, proposer, n);
 
         let life_before: Vec<i64> = state.players.iter().map(|p| p.life as i64).collect();
         let libs_before: Vec<usize> = state.players.iter().map(|p| p.library.len()).collect();
+        // Seat ids read POSITIONALLY, from the same order the two vectors above index, so the
+        // published rate looked up below belongs to the seat whose movement is measured.
+        let seats: Vec<PlayerId> = state.players.iter().map(|p| p.id).collect();
 
         apply(
             &mut state,
@@ -629,26 +785,53 @@ fn r2_an_accepted_declaration_commits_zero_cycles_because_reeds_may_is_unannounc
 
         let life_after: Vec<i64> = state.players.iter().map(|p| p.life as i64).collect();
         let libs_after: Vec<usize> = state.players.iter().map(|p| p.library.len()).collect();
+        // Both axes are measured as LOSSES (`before - after`), so the published signed rates
+        // are negated to match. `libs_*` are `usize`: cast EACH side before subtracting, or a
+        // library that fails to shrink — the exact zero-commit regression this row guards —
+        // aborts on an arithmetic overflow instead of printing the diagnostic below.
+        let life_rate = -per_cycle.delta.life.get(&seats[1]).copied().unwrap_or(0);
+        let lib_rate = -per_cycle
+            .delta
+            .library_delta
+            .get(&seats[0])
+            .copied()
+            .unwrap_or(0);
+        assert!(
+            life_rate > 0 && lib_rate > 0,
+            "n={n}: ANTI-VACUITY — both published per-cycle rates must be strictly positive, \
+             else the equality below degenerates to `0 == 0 * {n}` and asserts nothing. \
+             published life={:?} library={:?}",
+            per_cycle.delta.life,
+            per_cycle.delta.library_delta
+        );
         assert_eq!(
-            (&life_after, &libs_after),
-            (&life_before, &libs_before),
-            "n={n}: MEASURED — the accepted shortcut commits NOTHING. Cycle 0 answers Sue's \
-             `may` from the pin and then aborts on Reed's UNPINNED `may`, and the whole cycle \
-             is rolled back (CR 732.2a: an unpinned per-iteration choice is not a describable \
-             predictable sequence). If this ever fails because a delta APPEARED, the announced \
-             set widened and §6 R2a/R2b/R3/R5 must be written in the same change"
+            (
+                life_before[1] - life_after[1],
+                libs_before[0] as i64 - libs_after[0] as i64
+            ),
+            (life_rate * i64::from(n), lib_rate * i64::from(n)),
+            "n={n}: CR 732.2a — the accepted shortcut commits EXACTLY n repetitions of the \
+             published per-cycle delta ({:?} loses {life_rate} life and {:?}'s library loses \
+             {lib_rate} card(s) per repetition). life {life_before:?} -> {life_after:?}, libs \
+             {libs_before:?} -> {libs_after:?}",
+            seats[1],
+            seats[0]
         );
         assert!(
             matches!(state.waiting_for, WaitingFor::Priority { .. }),
-            "n={n}: CR 800.4a — the aborted drive hands back to ordinary priority, got {:?}",
+            "n={n}: CR 732.2a — the taken shortcut's ending point is a place where a player \
+             has priority, got {:?}",
             state.waiting_for
         );
         committed_per_n.push((life_after, libs_after));
     }
-    assert_eq!(
+    assert_ne!(
         committed_per_n[0], committed_per_n[1],
-        "n=1 and n=3 must be INDISTINGUISHABLE: a partial commit would separate them, and a \
-         partial commit is the one outcome CR 732.2a forbids outright"
+        "n=1 and n=3 must be DISTINGUISHABLE: the declared count is the whole content of a \
+         CR 732.2a `Fixed(n)` grant, so an instrument that cannot separate them would satisfy \
+         the per-n assertions above vacuously. This is the discriminator \
+         `bounded_fixed_count_commits_exactly_n_periods` uses, adopted here now that this \
+         board actually grants"
     );
 }
 
@@ -727,7 +910,14 @@ fn r23_5_reach_no_may_beat_of_the_f4_drive_carries_a_construction_cursor() {
 ///
 /// # What the row asserts
 ///
-/// On the offer-beat board, ONE CR 614.1a replacement definition that the resolver's OWN
+/// CR ANCHORS, CORRECTED: this row cited **CR 614.1a** for the choice. `614.1a` is
+/// "effects that use the word *instead*" — a sub-rule, and not the one that makes an
+/// optional replacement a choice. **CR 614.1** is the DEFINITION (replacement effects watch
+/// for an event and replace it) and **CR 732.2a** is the LOAD-BEARING half: a shortcut
+/// "can't include conditional actions, where the outcome of a game event determines the next
+/// action a player takes". CR 616.1 stays where it belongs — the two-or-more ORDERING branch.
+///
+/// On the offer-beat board, ONE CR 614.1 replacement definition that the resolver's OWN
 /// derivation draws turns the OFFER into `UnspecifiedChoiceWindow`; six definitions the
 /// resolver's derivation does NOT draw leave the offer standing. That contrast IS the claim:
 /// the obligation is **event-derived**, read off what the resolution proposes through
@@ -754,8 +944,9 @@ fn r23_5_reach_no_may_beat_of_the_f4_drive_carries_a_construction_cursor() {
 ///
 /// * **(pos)** the UNMODIFIED offer-beat board OFFERS through the metered seam — asserted
 ///   FIRST, so every refusal below is attributable to the definition and not to the replay.
-/// * **(a)** one OPTIONAL `AddCounter` definition ⇒ `UnspecifiedChoiceWindow` (CR 614.1a: an
-///   optional replacement is a genuine resolution-time choice ⇒ the period is not choice-free).
+/// * **(a)** one OPTIONAL `AddCounter` definition ⇒ `UnspecifiedChoiceWindow` (CR 732.2a +
+///   CR 614.1: an optional replacement is a genuine resolution-time choice, and a described
+///   sequence may not contain one ⇒ the period is not choice-free).
 /// * **(a′)** the SAME definition, MANDATORY ⇒ still OFFERS. CR 616.1: a lone quantity
 ///   modification commutes with nothing, so there is no ordering choice to make. This is what
 ///   keeps (a) keyed to OPTIONALITY rather than to "a definition exists".
@@ -786,7 +977,7 @@ fn r23_5_reach_no_may_beat_of_the_f4_drive_carries_a_construction_cursor() {
 /// optional replacement — and a MANDATORY entry publishes no `may`, so
 /// `pinned_may_choice_relief` returns `None` and conjunct (6) refuses there. Disable that
 /// detection and the entry classifies `FreeUnlessReplacements([AddCounter])`, whereupon the
-/// CR 614.1a discharge conjunct refuses instead. Defence in depth is the property; a row that
+/// CR 732.2a + CR 614.1 discharge conjunct refuses instead. Defence in depth is the property; a row that
 /// flipped on either single edit would have been asserting over only one of the two.
 ///
 /// ⚠ §6 R9's stated probe (*"swap `proposed_event_prompt_cause` back to a def-scan over
@@ -818,7 +1009,10 @@ fn r9_the_offer_refuses_on_a_derived_replacement_obligation_not_on_a_definition_
 
     // One definition, installed on an EXISTING P0-controlled permanent (never a new object),
     // so board membership — and therefore every certification premise — is untouched.
-    // CR 614.1a scopes a definition to its controller's events, and The Thing is P0's.
+    // CR ANCHOR CORRECTED with the two above it: this said "CR 614.1a scopes a definition to
+    // its controller's events". It does not — `614.1a` is the "effects that use the word
+    // *instead*" sub-rule and says nothing about controllers. CR 614.1 is the definition a
+    // replacement definition answers to: it watches for the event its own text names.
     let with_def = |event: ReplacementEvent, optional: bool| -> GameState {
         let mut hostile = healthy.clone();
         let mut def = ReplacementDefinition::new(event.clone());
@@ -873,7 +1067,7 @@ fn r9_the_offer_refuses_on_a_derived_replacement_obligation_not_on_a_definition_
             a_out,
             Err(engine::game::engine::BoundedOfferRefusal::UnspecifiedChoiceWindow)
         ),
-        "(a) CR 614.1a + CR 732.2a: an OPTIONAL replacement candidate applicable to an \
+        "(a) CR 732.2a + CR 614.1: an OPTIONAL replacement candidate applicable to an \
          ANNOUNCED entry's DERIVED event is a real resolution-time choice, so the period is \
          not choice-free and the offer must be refused. got {a_out:?}, meter {a_meter:?}"
     );
@@ -887,24 +1081,40 @@ fn r9_the_offer_refuses_on_a_derived_replacement_obligation_not_on_a_definition_
          to `a definition exists` rather than to OPTIONALITY. got {a2_out:?}, meter {a2_meter:?}"
     );
 
-    // ── (b) the def-NAME discriminator: six optional definitions the resolver never draws ──
+    // ── (b) the def-NAME discriminator, RE-DERIVED: the one optional definition whose event
+    //    this board's announced resolutions still never propose ──
+    let b_event = ReplacementEvent::RemoveCounter;
+    let (b_out, b_meter) = outcome(&with_def(b_event.clone(), true));
+    assert!(
+        b_out.is_ok(),
+        "(b) {b_event:?}: this board's announced resolutions never PROPOSE this event, so an \
+         event-derived obligation must ignore the definition entirely and the offer must \
+         stand. A scan over `def.event` NAMES would refuse here exactly as it refuses in (a), \
+         which is what makes this arm the discriminator. got {b_out:?}, meter {b_meter:?}"
+    );
+
+    // ── (b′) the five events the WIDENED announced set really does propose ──
+    // Once Torch's damage and Reed's draw are announced, `ChangeZone`/`Moved`/`CreateToken`/
+    // `Draw`/`DamageDone` are genuinely derivable from this period's resolutions, so an
+    // OPTIONAL definition on any of them is a real CR 616.1 choice and must refuse. This arm
+    // is the paired positive control for (b): without it, (b) shrinking to one event could be
+    // read as the obligation going blind rather than as the proposal set widening.
     for event in [
         ReplacementEvent::ChangeZone,
         ReplacementEvent::Moved,
         ReplacementEvent::CreateToken,
         ReplacementEvent::Draw,
         ReplacementEvent::DamageDone,
-        ReplacementEvent::RemoveCounter,
     ] {
-        let (b_out, b_meter) = outcome(&with_def(event.clone(), true));
+        let (c_out, c_meter) = outcome(&with_def(event.clone(), true));
         assert!(
-            b_out.is_ok(),
-            "(b) {event:?}: this board's announced resolutions never PROPOSE this event, so \
-             an event-derived obligation must ignore the definition entirely and the offer \
-             must stand. A scan over `def.event` NAMES — round 2's design — would refuse here \
-             exactly as it refuses in (a), which is what makes this arm the discriminator. \
-             (`ChangeZone`/`CreateToken` are §6 R9's own stated keying; see this row's doc for \
-             why `Effect::Token` derives no token-entry event.) got {b_out:?}, meter {b_meter:?}"
+            matches!(
+                c_out,
+                Err(engine::game::engine::BoundedOfferRefusal::UnspecifiedChoiceWindow)
+            ),
+            "(b′) {event:?}: the widened announced set PROPOSES this event, so an OPTIONAL \
+             replacement applicable to it is a genuine resolution-time choice and the offer \
+             must refuse. got {c_out:?}, meter {c_meter:?}"
         );
     }
 }
@@ -1129,11 +1339,14 @@ fn optional_entries(state: &GameState) -> usize {
 // `handle_declare_shortcut` does with each member of it.
 //
 // ⚠ MEASURED SCOPE. §5 U6 as planned expects a declare candidate "whose template pins all
-// three F4 slots (or declines)". F4 publishes ONE point, not three (see `r1b`), and the
-// measured answer to the underlying question is the second branch: the AI DECLINES, because
-// the only declaration it can emit is one the engine refuses outright. These rows pin that,
-// name the two independent reasons, and pin the accepted shape the generator never emits —
-// they do not assert the planned prediction.
+// three F4 slots (or declines)". F4 does publish all THREE slots — `r1b` pins
+// `[Sue MayChoice, Reed MayChoice, Torch Targets]` — and the measured answer is still the
+// SECOND branch: the AI DECLINES, because the only declaration it can emit is one the engine
+// refuses outright. The generator builds no pinning template at ALL (its only `Fixed` candidate
+// carries `template: None`), so a published set of three is exactly as unreachable for it as a
+// set of one would have been — the count is not what excludes it, its emptiness gate is. These
+// rows pin that, name the two independent reasons, and pin the accepted shape the generator
+// never emits — they do not assert the planned prediction.
 // ─────────────────────────────────────────────────────────────────────────────────────────
 
 /// §5 U6 (i) — MEASURED: at the real F4 bounded offer the engine's AI candidate generator
@@ -1147,7 +1360,8 @@ fn optional_entries(state: &GameState) -> usize {
 ///   `handle_declare_shortcut` refuses it — measured in
 ///   [`u6_no_declaration_the_generator_can_emit_opens_the_window_while_the_accepted_shape_is_one_it_never_builds`].
 /// * `Fixed(max_iterations)` is gated on `schema.points.is_empty()` — it carries
-///   `template: None`, and a published pin set fail-closes on that. F4 publishes one point.
+///   `template: None`, and a published pin set fail-closes on that. F4 publishes THREE points
+///   (`r1b`), so the gate is closed with room to spare; ONE would already have closed it.
 ///
 /// So the AI declines because it has nothing else it can legally say, not because it emitted a
 /// declaration the engine then accepted-and-discarded.
@@ -1260,10 +1474,10 @@ fn u6_the_ai_candidate_set_at_the_f4_offer_is_decline_only() {
 /// be satisfied by a board that refuses every declaration for some unrelated reason. With it,
 /// the three refusals are proved to be refusals of *those* declarations.
 ///
-/// ⚠ This row deliberately does NOT assert that the accepted declaration accomplishes
-/// anything — measured, it commits zero cycles ([`r2_an_accepted_declaration_commits_zero_cycles_because_reeds_may_is_unannounced`]).
-/// Closing the generator gap would therefore ride the grant mechanism, which is why U6 reports
-/// the gap rather than building the candidate.
+/// ⚠ This row deliberately does NOT assert what the accepted declaration then accomplishes —
+/// that is [`r2a_an_accepted_declaration_commits_exactly_n_cycles_because_reeds_may_is_announced`]'s
+/// job, and it now measures an exact `n`-repetition commit (it measured a zero commit while
+/// Reed's `may` was unpublished). Splitting the two keeps this row a DECLARE-time matrix.
 ///
 /// The `UntilLethal` rows are what justifies the generator's `!schema.is_bounded()` gate
 /// ([`u6_the_ai_candidate_set_at_the_f4_offer_is_decline_only`]): the engine refuses that count
@@ -1348,7 +1562,8 @@ fn u6_no_declaration_the_generator_can_emit_opens_the_window_while_the_accepted_
         outcome(IterationCount::Fixed(max), None),
         "Priority",
         "and 'just emit `Fixed`' is not a template-free remedy: a `template: None` declaration \
-         against a non-empty schema fail-closes when `last_loop_action_sequence` is empty"
+         against a non-empty schema fail-closes unless the recorded driving period belongs to \
+         the offer's proposer, and here there is no period at all"
     );
     // ── ANTI-VACUITY CONTROL: this board DOES accept a declaration ──
     assert_eq!(
@@ -1423,5 +1638,666 @@ fn u6_the_declare_owner_firewall_holds_on_the_real_f4_offer() {
          APNAP window; the byte-identical declaration owned by {hostile:?} is refused into the \
          CR 800.4a manual handback. `handle_declare_shortcut` pushes no events on either path, \
          so the event counts are exact rather than wildcards"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────
+// B5f — the DECLARED term is load-bearing on a real board, in both directions
+// ─────────────────────────────────────────────────────────────────────────────────────────
+
+/// §4 B5f — **`elimination_bounds`'s `declared_life_magnitude` can suppress an offer that is
+/// otherwise legal, and the suppression is measured ONE LIFE POINT WIDE on the user's own
+/// board.**
+///
+/// CR 704.5a (a seat at 0 or less life has lost) + CR 732.2a (a shortcut describes a
+/// PREDICTABLE sequence, so a repetition that could eliminate a seat mid-proposal is not
+/// describable). Once the answer-beat sampling site announces Torch's CR 608.2b `Targets`
+/// entry, `victim_slot` is non-empty and every declarable victim is charged
+/// `observed.max(0) + S` rather than `observed` alone. On MODE1 that is `1 + 1 = 2`, so P1's
+/// headroom must be at least 2 for a single legal repetition to exist.
+///
+/// ARM (α), the matched positive: P1 seeded at **7** and at **6** — headroom 3 and 2 at the
+/// offer beat — both OFFER, with `max_iterations == 1`.
+/// ARM (β), the typed refusal: P1 seeded at **5** and at **4** — headroom 1 and 0 — the drive
+/// reaches the SAME beat and raises NO window, and the typed verdict on that very board is
+/// `NoNarrowedLegalCount`. Asserted BY REASON, never as a bare absence: a row that only
+/// observes "no offer" stops testing its own conjunct the moment an earlier one refuses first.
+///
+/// The two arms are **one life point apart** (6 offers, 5 refuses), which is what makes the
+/// row about the divisor and not about the board.
+///
+/// REVERT-PROBE (DROP): delete `declared_life_magnitude` from `elimination_bounds`'s additive
+/// form ⇒ the divisor falls 2 → 1 ⇒ headroom 1 at P1=5 yields `1 / 1 == 1` ⇒ (β) OFFERS ⇒
+/// FLIPS. REVERT-PROBE (TRIVIALIZE): make the term unconditional (charge it to every seat, not
+/// only to declarable victims) ⇒ P0/P2/P3 are charged 0 + 1 with 39 headroom, which does not
+/// narrow below 1, so (α) survives — and the arm that flips is the reach-guard below, which
+/// asserts P1 is the ONLY declarable victim on this board.
+#[test]
+fn b5f_the_declared_term_can_suppress_an_otherwise_legal_offer() {
+    use engine::game::engine::{
+        try_offer_bounded_cycle_shortcut_metered, BoundedOfferRefusal, ProbeCap,
+    };
+
+    /// The MODE1 board with P1's life REPLACED. Every other field — including the stored
+    /// auto-choice guard (b) reads — is the user's own capture, so the only axis that moves
+    /// between the arms below is the headroom `elimination_bounds` divides.
+    fn seeded(life: i32) -> GameState {
+        let mut state = load_mode1();
+        let p1 = state
+            .players
+            .iter_mut()
+            .find(|p| p.id == P1)
+            .expect("MODE1 is a 4-player board");
+        p1.life = life;
+        state
+    }
+
+    // ── ARM (α) — the matched positive, asserted FIRST ──────────────────────────────────
+    let mut alpha = seeded(7);
+    let alpha_beat = drive_f4_to_offer(&mut alpha, 400).expect(
+        "REACH-GUARD (α): MODE1 with P1 at 7 must raise the bounded offer, else every \
+         refusal below is asserted over a board that was refusing anyway",
+    );
+    let (proposer, certificate, schema) = offer_parts(&alpha);
+    let per_cycle = certificate
+        .per_cycle
+        .clone()
+        .expect("a bounded offer publishes its per-period signature");
+
+    // ── REACH-GUARD: the DECLARED term is what this row is about, so it must be non-zero,
+    //    and P1 must be the only seat it is charged to. ──
+    let declared: i64 = per_cycle
+        .victim_slot
+        .iter()
+        .map(|(_, m)| *m)
+        .filter(|m| *m > 0)
+        .sum();
+    assert!(
+        declared > 0,
+        "REACH-GUARD: `victim_slot` must publish a strictly positive magnitude, else the \
+         additive term is 0 and (β) below would be about the observed drain alone; \
+         victim_slot = {:?}",
+        per_cycle.victim_slot
+    );
+    let declarable: std::collections::BTreeSet<PlayerId> = schema
+        .points
+        .iter()
+        .filter_map(|p| match &p.kind {
+            DecisionPointKind::Targets { legal_targets, .. } => Some(legal_targets),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|t| match t {
+            TargetRef::Player(p) => Some(*p),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        declarable.contains(&P1),
+        "REACH-GUARD: P1 — the seat this row starves — must be a DECLARABLE victim of the \
+         published `Targets` slot, or the extra term is never charged to it; declarable = \
+         {declarable:?}"
+    );
+    let observed_p1 = -per_cycle.delta.life.get(&P1).copied().unwrap_or(0);
+    let life_at_offer = alpha
+        .players
+        .iter()
+        .find(|p| p.id == P1)
+        .expect("P1 is seated")
+        .life as i64;
+    assert_eq!(
+        i64::from(schema.max_iterations),
+        (life_at_offer - 1) / (observed_p1.max(0) + declared),
+        "(α) CR 704.5a: the published bound is P1's headroom divided by the ADDITIVE \
+         magnitude — observed {observed_p1} plus declared {declared} — at P1 life \
+         {life_at_offer}. Under the `max` form this divisor would be \
+         {} and the bound would be {}",
+        observed_p1.max(declared),
+        (life_at_offer - 1) / observed_p1.max(declared).max(1)
+    );
+    assert_eq!(
+        schema.max_iterations, 1,
+        "(α) the seeded headroom admits exactly ONE legal repetition; a larger bound would \
+         mean (β) is one point further away than this row claims"
+    );
+
+    let mut alpha6 = seeded(6);
+    assert_eq!(
+        drive_f4_to_offer(&mut alpha6, 400),
+        Some(alpha_beat),
+        "(α) the SECOND positive, one point down: P1 at 6 still offers, at the same beat. \
+         This is the arm (β) is one life point away from"
+    );
+
+    // ── ARM (β) — the TYPED refusal, on the same beat the positive offered at ───────────
+    for life in [5, 4] {
+        let mut beta = seeded(life);
+        assert_eq!(
+            drive_f4_to_offer(&mut beta, alpha_beat + 1),
+            None,
+            "(β) P1 at {life}: no window may be raised through beat {alpha_beat} — the beat \
+             the (α) arms both offered at"
+        );
+        let at_priority = replay_at_priority(&beta, proposer);
+        let (outcome, meter) =
+            try_offer_bounded_cycle_shortcut_metered(&at_priority, false, ProbeCap::Shipped);
+        assert!(
+            matches!(outcome, Err(BoundedOfferRefusal::NoNarrowedLegalCount)),
+            "(β) P1 at {life}: the refusal must be TYPED at the elimination bound — \
+             `observed {observed_p1} + declared {declared}` exceeds P1's remaining headroom, \
+             so no legal repetition count exists (CR 704.5a + CR 732.2a). A different variant \
+             here means an EARLIER conjunct refused and this row stopped testing its own. \
+             got {outcome:?}, meter {meter:?}"
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────
+// M1 / A1 — THE USER'S OWN TWO CAPTURES, DRIVEN TO AN ACCEPTED GRANT THAT COMMITS
+// ─────────────────────────────────────────────────────────────────────────────────────────
+
+/// The published point set as `(source card name, kind)` — the offer's OWN data, read off
+/// `state.waiting_for` rather than re-derived, so a row asserting a cause asserts the thing
+/// the engine published.
+fn published_point_names(state: &GameState) -> Vec<(String, &'static str)> {
+    let (_, _, schema) = offer_parts(state);
+    schema
+        .points
+        .iter()
+        .map(|p| {
+            let source = match &p.slot.source {
+                engine::types::game_state::YieldTarget::ThisObject { source_id, .. } => state
+                    .objects
+                    .get(source_id)
+                    .map(|o| o.name.clone())
+                    // NOT a synthetic `obj<id>`: every caller compares this string against the
+                    // SUE / REED / TORCH constants, so an unresolvable source would read as
+                    // "not that card" and silently SATISFY the by-name ABSENCE assertions this
+                    // helper feeds (m1's owner-firewall row). Same class of failure as the
+                    // `other =>` arm below, so the same treatment.
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "a published point names {source_id:?}, absent from `objects` — an \
+                             unresolvable name would silently satisfy the by-name ABSENCE \
+                             assertions this helper feeds"
+                        )
+                    }),
+                other => panic!("unexpected decision source {other:?}"),
+            };
+            let kind = match &p.kind {
+                DecisionPointKind::MayChoice => "MayChoice",
+                DecisionPointKind::Targets { .. } => "Targets",
+                other => panic!("unexpected point kind {other:?}"),
+            };
+            (source, kind)
+        })
+        .collect()
+}
+
+/// THE GUARD ABOVE MUST BE ABLE TO FIRE. A guard that cannot is worse than none: it reads as
+/// protection while the hole it names stays open, which is the exact defect the synthetic
+/// `obj<id>` fallback was. Drive the real capture to its offer, then delete the first
+/// published point's source object — the one state the fallback used to paper over — and
+/// require the typed panic. `expected` is a substring match, so a panic from any OTHER cause
+/// (an empty point set, a non-`ThisObject` source) fails this row instead of passing it.
+#[test]
+#[should_panic(expected = "absent from `objects`")]
+fn published_point_names_panics_when_a_points_source_is_absent() {
+    let mut state = load_f4();
+    drive_f4_to_offer(&mut state, 400).expect("the bounded offer fires (see R1)");
+    let (_, _, schema) = offer_parts(&state);
+    let source_id = match &schema
+        .points
+        .first()
+        .expect("the offer publishes at least one point")
+        .slot
+        .source
+    {
+        engine::types::game_state::YieldTarget::ThisObject { source_id, .. } => *source_id,
+        other => panic!("unexpected decision source {other:?}"),
+    };
+    state.objects.remove(&source_id);
+    published_point_names(&state);
+}
+
+/// Drive one user capture to its offer, declare a CONFORMANT `Fixed(n)`, have every living
+/// opponent Accept, and measure what the grant actually committed.
+///
+/// The life, library and COUNTER axes are asserted EXACTLY and every expectation is DERIVED
+/// FROM THE OFFER'S OWN published `per_cycle.delta` — `n` repetitions of the signature the
+/// certificate itself carries — so no repetition rate is hard-coded and a re-dump flows
+/// through unedited. Each of the three carries an ANTI-VACUITY guard on the published rate,
+/// because `x == rate * n` is satisfied by any `x` when `rate` is zero.
+///
+/// ⚠ THE COUNTER AXIS WAS WEAKENED FOR A REASON THAT WAS FALSE. The note here used to say the
+/// counter axis is event-fed and left at zero by `ResourceVector::snapshot`. MEASURED, the
+/// published vector carries `counters: {(Plus1Plus1, Creature): 2}` — non-zero, and
+/// state-readable (`snapshot` walks the battlefield for it). The real obstacle was the
+/// ACCESSOR: [`commit_axes`] reads ONE named object's counters (The Thing) while the published
+/// key `(CounterClass, ObjectClass)` is an AGGREGATE over every battlefield object of that
+/// class, so the two are not comparable quantities. Asserted here against the aggregate
+/// accessor the certificate is minted from, and still returned for the caller's per-object
+/// `n`-scaling arm. MEASURED on both captures: aggregate `(Plus1Plus1, Creature)` moves `2`
+/// at `n = 1` and `6` at `n = 3`, i.e. exactly `2n`, which is the assertion this note's false
+/// predecessor had waved off as underivable.
+///
+/// The TOKEN axis genuinely cannot be asserted against the certificate: `tokens_created` IS
+/// event-fed, and the published vector carries `tokens_created: 0` on both captures, so an
+/// exact expectation derived from it would be the vacuous `0 == 0 * n`. It keeps the
+/// `n`-scaling arm alone.
+///
+/// Returns `(offer beat, published points, Thing-counter delta, token delta)`.
+fn accept_a_fixed_grant(
+    mut state: GameState,
+    n: u32,
+    label: &str,
+) -> (u32, Vec<(String, &'static str)>, i64, i64) {
+    let beat = drive_f4_to_offer(&mut state, 400).unwrap_or_else(|| {
+        panic!("[{label} n={n}] REACH-GUARD: the CR 732.2a bounded offer must FIRE on this capture")
+    });
+    let (proposer, certificate, schema) = offer_parts(&state);
+    let per_cycle = certificate
+        .per_cycle
+        .clone()
+        .expect("a bounded offer publishes its per-period signature");
+    let schema = schema.clone();
+    assert!(
+        schema.max_iterations >= n,
+        "[{label} n={n}] REACH-GUARD: the published bound {} must admit this count, else the \
+         declaration is refused for a reason that has nothing to do with the drive",
+        schema.max_iterations
+    );
+    let points = published_point_names(&state);
+    let before = commit_axes(&state);
+    let before_rv = ResourceVector::snapshot(&state);
+
+    let template = f4_pin_template(&schema, proposer, n);
+    apply(
+        &mut state,
+        proposer,
+        GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(n),
+            template: Some(template),
+        },
+    )
+    .expect("the conformant declaration is dispatched");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::RespondToShortcut { .. }),
+        "[{label} n={n}] the declaration must be ACCEPTED and open the CR 732.2b APNAP window; \
+         a `Priority` here is a DECLARE-time refusal, a different defect entirely. got {:?}",
+        state.waiting_for
+    );
+    let responders = accept_all_opponents(&mut state);
+    assert!(
+        responders > 0,
+        "[{label} n={n}] REACH-GUARD: at least one living opponent must have answered the \
+         CR 732.2c window, else the grant was never put to the table"
+    );
+
+    let after = commit_axes(&state);
+    let measured = ResourceVector::delta(&before_rv, &ResourceVector::snapshot(&state));
+    // ── ANTI-VACUITY on the published RATES (F3) ─────────────────────────────────────────
+    // Every equality below has the shape `moved == rate * n`, which an all-zero certificate
+    // satisfies with a board that never moved. The counters/tokens half already guards this
+    // in `assert_axis_scales`; these are the life and library halves' matching guards.
+    assert!(
+        per_cycle.delta.life.values().any(|&rate| rate != 0),
+        "[{label} n={n}] ANTI-VACUITY: the published per-cycle LIFE delta must move some \
+         seat, else every life equality below is `0 == 0 * {n}` and asserts nothing. \
+         published life = {:?}",
+        per_cycle.delta.life
+    );
+    assert!(
+        per_cycle
+            .delta
+            .library_delta
+            .values()
+            .any(|&rate| rate != 0),
+        "[{label} n={n}] ANTI-VACUITY: the published per-cycle LIBRARY delta must move some \
+         seat, else every library equality below is `0 == 0 * {n}` and asserts nothing. \
+         published library = {:?}",
+        per_cycle.delta.library_delta
+    );
+
+    for (i, player) in state.players.iter().enumerate() {
+        let life_rate = per_cycle.delta.life.get(&player.id).copied().unwrap_or(0);
+        assert_eq!(
+            i64::from(after.0[i]) - i64::from(before.0[i]),
+            life_rate * i64::from(n),
+            "[{label} n={n}] CR 732.2a: seat {:?}'s life must move by EXACTLY {n} repetitions \
+             of the offer's own published per-cycle life delta ({life_rate}). \
+             before={:?} after={:?}",
+            player.id,
+            before.0,
+            after.0
+        );
+        let lib_rate = per_cycle
+            .delta
+            .library_delta
+            .get(&player.id)
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(
+            after.1[i] as i64 - before.1[i] as i64,
+            lib_rate * i64::from(n),
+            "[{label} n={n}] CR 732.2a: seat {:?}'s library must move by EXACTLY {n} \
+             repetitions of the published per-cycle library delta ({lib_rate}). \
+             before={:?} after={:?}",
+            player.id,
+            before.1,
+            after.1
+        );
+    }
+    // ── THE COUNTER AXIS, EXACTLY (F4) ───────────────────────────────────────────────────
+    // CR 122.1 + CR 732.2a. Against the AGGREGATE accessor the certificate is minted from,
+    // not against `commit_axes`'s single named object — that mismatch, not "the axis is
+    // event-fed", is why this assertion was previously only a scaling arm.
+    assert!(
+        per_cycle.delta.counters.values().any(|&rate| rate != 0),
+        "[{label} n={n}] ANTI-VACUITY: the published per-cycle COUNTER delta must be \
+         non-zero, else the equality below is `0 == 0 * {n}`. published = {:?}",
+        per_cycle.delta.counters
+    );
+    for (key, rate) in &per_cycle.delta.counters {
+        assert_eq!(
+            measured.counters.get(key).copied().unwrap_or(0),
+            rate * i64::from(n),
+            "[{label} n={n}] CR 732.2a: the {key:?} counter axis must move by EXACTLY {n} \
+             repetitions of the offer's own published per-cycle rate ({rate}). \
+             measured = {:?}",
+            measured.counters
+        );
+    }
+    // Nothing may move on a counter axis the certificate never published: a commit that
+    // pumped an unpublished counter class would satisfy every equality above and still be a
+    // cycle the offer did not describe.
+    for (key, moved) in &measured.counters {
+        if *moved != 0 {
+            assert!(
+                per_cycle.delta.counters.contains_key(key),
+                "[{label} n={n}] CR 732.2a: {key:?} moved by {moved} but is absent from the \
+                 published per-cycle signature {:?}",
+                per_cycle.delta.counters
+            );
+        }
+    }
+
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "[{label} n={n}] CR 732.2a: a taken shortcut's ending point is a place where a player \
+         has priority, got {:?}",
+        state.waiting_for
+    );
+    (
+        beat,
+        points,
+        i64::from(after.2) - i64::from(before.2),
+        after.3 as i64 - before.3 as i64,
+    )
+}
+
+/// The `n`-scaling arm shared by both captures: every axis a cycle moves must move `n` times
+/// as far at `n = 3` as at `n = 1`, and must move AT ALL at `n = 1`.
+///
+/// The non-zero guard is the anti-vacuity half and is not decoration: `3 * 0 == 0`, so without
+/// it an axis that never moved would satisfy the scaling equality silently. Together the two
+/// halves are the discriminator `bounded_fixed_count_commits_exactly_n_periods` uses — a
+/// partial commit, a saturating commit and a zero commit each break one of them.
+fn assert_axis_scales(label: &str, axis: &str, at_1: i64, at_3: i64) {
+    assert_ne!(
+        at_1, 0,
+        "[{label}] ANTI-VACUITY: the {axis} axis must MOVE on a single committed repetition, \
+         else the scaling equality below is `3 * 0 == 0` and asserts nothing"
+    );
+    assert_eq!(
+        at_3,
+        at_1 * 3,
+        "[{label}] CR 732.2a: three repetitions must move the {axis} axis exactly three times \
+         as far as one ({at_1}); a partial or saturating commit separates them"
+    );
+}
+
+/// **M1 — the user's own capture that raised NO offer at all now offers, and the accepted
+/// grant COMMITS on every axis one cycle moves.**
+///
+/// CR 732.2a + CR 603.5. MODE1's distinguishing field is a stored `may_trigger_auto_choices`
+/// entry — the user's "always take" for Sue's `may`. Guard (b) of `entry_publishes_pin_slots`
+/// WITHHOLDS a pin slot the CR 603.5 gate can never spend, so Sue's `MayChoice` is deliberately
+/// absent from the published set; the gate is discharged instead by the auto-answer relief.
+/// That is the whole reason this board raised nothing before: the relief did not exist, so a
+/// stored answer looked like an unanswerable choice.
+///
+/// The row asserts the CAUSE alongside the effect, so a green cannot be read as "some offer
+/// appeared":
+///
+/// * the capture's identity is reach-guarded (`may_trigger_auto_choices` NON-EMPTY) — on a
+///   board without one, the relief path is not the mechanism under test;
+/// * Sue is asserted ABSENT from the published points while Reed and Torch are PRESENT, which
+///   is guard (b) discriminating between a stored answer and an open choice on ONE board;
+/// * every axis is asserted exactly, against the offer's own published per-cycle signature.
+///
+/// REVERT-PROBE: ablate the CR 603.5 auto-answer relief in `auto_may_choice_relief` ⇒ gate (6)
+/// can no longer be discharged for Sue's withheld slot ⇒ no offer fires ⇒ the reach-guard in
+/// `accept_a_fixed_grant` FLIPS. Positive control: the same drive on MODE2, whose
+/// `may_trigger_auto_choices` is EMPTY, reaches its offer through the ordinary publication
+/// path (the row below) — so "the drive reaches an offer" is not a property of the harness.
+#[test]
+fn m1_the_users_stored_auto_choice_board_offers_and_the_grant_commits_on_every_axis() {
+    let identity = load_mode1();
+    assert!(
+        !identity.may_trigger_auto_choices.is_empty(),
+        "REACH-GUARD: MODE1 is the capture whose CR 603.5 answer is STORED; without one, guard \
+         (b) withholds nothing and this row measures the ordinary publication path instead"
+    );
+
+    let (beat1, points, counters_1, tokens_1) = accept_a_fixed_grant(load_mode1(), 1, "MODE1");
+    assert!(
+        points
+            .iter()
+            .any(|(src, kind)| src == REED && *kind == "MayChoice")
+            && points
+                .iter()
+                .any(|(src, kind)| src == TORCH && *kind == "Targets"),
+        "MODE1: the two choices with NO stored answer must be PUBLISHED — that is the paired \
+         positive that makes Sue's absence below an attribution rather than an empty set. \
+         published = {points:?}"
+    );
+    assert!(
+        !points.iter().any(|(src, _)| src == SUE),
+        "MODE1 THE CAUSE: Sue's `may` is answered by the user's stored auto-choice, so guard \
+         (b) withholds a pin slot the CR 603.5 gate could never spend and the relief discharges \
+         gate (6) instead. published = {points:?}"
+    );
+
+    let (beat3, _, counters_3, tokens_3) = accept_a_fixed_grant(load_mode1(), 3, "MODE1");
+    assert_eq!(
+        beat1, beat3,
+        "the two arms must offer at the SAME beat — they are one declared count apart and \
+         nothing else"
+    );
+    assert_axis_scales("MODE1", "The Thing's counters", counters_1, counters_3);
+    assert_axis_scales("MODE1", "token", tokens_1, tokens_3);
+}
+
+/// **A1 — the user's own capture where the accepted grant committed NOTHING now commits on
+/// every axis, and the declared count scales it.**
+///
+/// CR 732.2a. This is the capture the user took after clearing the stored auto-choice as a
+/// workaround: the offer fired, the declaration was accepted, and the drive then rolled the
+/// whole cycle back and re-offered — because Reed's `may` resolves across a forced
+/// pre-priority window that the ring sampler could not see, so the offer published a pin set
+/// that did not cover every per-iteration choice and cycle 0 aborted on the first uncovered
+/// one.
+///
+/// With the answer-beat sampling site the announced set contains all three choices, so the
+/// published set covers the cycle and the grant commits. The row is the fix bar for this
+/// change: it asserts a commit on ALL FOUR axes and `n = 1` vs `n = 3` DISTINGUISHABLE.
+///
+/// * the capture's identity is reach-guarded (`may_trigger_auto_choices` EMPTY), which is
+///   MODE1's field inverted — the two captures are one axis apart;
+/// * all three sources are asserted PUBLISHED, naming the cause of the commit;
+/// * every axis is asserted exactly, against the offer's own published per-cycle signature.
+///
+/// REVERT-PROBE: ablate the answer-beat sampling site ⇒ Reed's and Torch's entries are never
+/// announced ⇒ the published set shrinks ⇒ cycle 0 aborts on the uncovered `may` ⇒ every axis
+/// delta collapses to 0 ⇒ both the exact-axis assertions and the scaling arm FLIP.
+#[test]
+fn a1_the_users_accept_committed_nothing_board_now_commits_on_every_axis() {
+    let identity = load_mode2();
+    assert!(
+        identity.may_trigger_auto_choices.is_empty(),
+        "REACH-GUARD: MODE2 is the POST-workaround capture — the user cleared the stored \
+         answer, so this board reaches its offer through the ordinary CR 603.5 publication \
+         path and not through the relief MODE1 exercises"
+    );
+
+    let (beat1, points, counters_1, tokens_1) = accept_a_fixed_grant(load_mode2(), 1, "MODE2");
+    for expected in [(SUE, "MayChoice"), (REED, "MayChoice"), (TORCH, "Targets")] {
+        assert!(
+            points
+                .iter()
+                .any(|(src, kind)| src == expected.0 && *kind == expected.1),
+            "MODE2 THE CAUSE: every per-iteration choice this cycle opens must be PUBLISHED, \
+             or the drive aborts on the first uncovered one and commits nothing — which is \
+             exactly what the user captured. missing {expected:?}; published = {points:?}"
+        );
+    }
+
+    let (beat3, _, counters_3, tokens_3) = accept_a_fixed_grant(load_mode2(), 3, "MODE2");
+    assert_eq!(
+        beat1, beat3,
+        "the two arms must offer at the SAME beat — they are one declared count apart and \
+         nothing else"
+    );
+    assert_axis_scales("MODE2", "The Thing's counters", counters_1, counters_3);
+    assert_axis_scales("MODE2", "token", tokens_1, tokens_3);
+}
+
+/// ITEM 2 (CR 732.2a) — the DECLARE seam: a `template: None` declaration is admitted only when
+/// the recorded period belongs to the offer's own proposer.
+///
+/// **WHY THIS FIXTURE AND NOT `loop_shortcut.rs`.** Site F sits under
+/// `if !offer.schema.points.is_empty()`. The dina bounded offer publishes an EMPTY point set
+/// (asserted green by that module's acceptance row), so this row would be structurally VACUOUS
+/// there. The F4 offer publishes all three of this cycle's per-iteration choices, so the arm is
+/// live here and only here. That fixture choice is load-bearing, not incidental.
+///
+/// **WHY IT IS A DIFFERENT ROW FROM THE MINT ARMS.** The mint-seam instrument
+/// (`try_offer_bounded_cycle_shortcut`) cannot observe `handle_declare_shortcut` at all —
+/// different seam, different instrument. Any future change to this routing discriminant needs
+/// BOTH a mint-seam row and a declare-seam row; neither covers the other.
+///
+/// **THE HAZARD, and it is the one direction in which relaxing step (1b) makes the engine LESS
+/// safe than before.** A `template: None` declaration against a non-empty schema skips pin
+/// validation entirely — legitimate for exactly one drive shape, the object-growth route, which
+/// re-derives its template from `last_loop_action_sequence`. Once (1b) went seat-relative, a
+/// bounded offer can be minted with a FOREIGN period in state; under a merely-non-empty test that
+/// foreign period would take the unvalidated sibling arm and open the CR 732.2b APNAP window on a
+/// client-supplied declaration. The arm therefore asks whose period it is.
+///
+/// | arm | sequence | expected `waiting_for` |
+/// |---|---|---|
+/// | EMPTY-seq | empty | `Priority` (fail-closed) — must-not-flip |
+/// | OWN-seq | proposer's | `RespondToShortcut` (the legitimate object-growth route) — must-not-flip |
+/// | FOREIGN-seq | an opponent's | `Priority` — **the remedy** |
+///
+/// **TWO-SIDED CONTROL, PER ASSERTION** — no constant implementation passes:
+/// * **DROP** the proposer test (restore `state.last_loop_action_sequence.is_empty()`) ⇒
+///   FOREIGN-seq returns `RespondToShortcut` ⇒ THAT assertion fails, while EMPTY/OWN still pass.
+/// * **TRIVIALIZE** to always-reject ⇒ OWN-seq returns `Priority` ⇒ **that** assertion fails
+///   instead (the shipped object-growth declarations break — the tree's own doc above this arm
+///   says keying on `template.is_none()` alone does exactly this). TRIVIALIZE to never-reject ⇒
+///   EMPTY-seq returns `RespondToShortcut` ⇒ that assertion fails.
+///
+/// ⚠ **WHAT THIS ROW DELIBERATELY DOES NOT ASSERT — a realized negative, recorded rather than
+/// re-keyed.** Continuing each ACCEPTED arm through `accept_all_opponents` was measured, and both
+/// the legitimate OWN-seq route and the illegitimate FOREIGN-seq one commit `dlife = 0`: a
+/// `template: None` declaration carries no pins, so the drive fail-closes on the first uncovered
+/// per-iteration choice either way. (The conformant `template: Some(..)` declarations DO commit —
+/// that is `r2a`'s subject — but they never reach this arm.) The board's own zero therefore
+/// DOMINATES any life-axis discriminator here, so the downstream harm is structurally
+/// unobservable on this fixture and is NOT claimed. This row asserts the GATE VERDICT, which is
+/// the property that actually fails closed.
+#[test]
+fn a_template_free_declaration_is_admitted_only_by_the_proposers_own_period() {
+    use engine::types::game_state::{BuybackUsage, LoopAction, LoopActionContext};
+
+    let mut state = load_f4();
+    let beat = drive_f4_to_offer(&mut state, 400)
+        .expect("REACH-GUARD: every arm below is vacuous without the engine's own bounded offer");
+    let (proposer, _, schema) = offer_parts(&state);
+    assert!(
+        !schema.points.is_empty(),
+        "REACH-GUARD: site F sits under `!offer.schema.points.is_empty()`, so an empty point \
+         set makes this whole row unreachable — which is exactly why it is not on the dina \
+         fixture (beat {beat})"
+    );
+    let max = schema.max_iterations;
+    assert!(
+        max >= 1,
+        "REACH-GUARD: the published bound must admit `Fixed(1)`, else the arms are refused for \
+         a reason that has nothing to do with the period"
+    );
+
+    let opp = state
+        .players
+        .iter()
+        .map(|p| p.id)
+        .find(|p| *p != proposer)
+        .expect("REACH-GUARD: the FOREIGN arm needs a second seat to attribute a period to");
+    let card_id = state
+        .objects
+        .values()
+        .next()
+        .map(|o| o.card_id)
+        .expect("the dump has objects");
+
+    // One offer state, one field reassigned per arm, one action applied — nothing else differs.
+    let declare_with = |seq: Vec<LoopActionContext>| {
+        let mut probe = state.clone();
+        probe.last_loop_action_sequence = seq;
+        apply(
+            &mut probe,
+            proposer,
+            GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(1),
+                template: None,
+            },
+        )
+        .expect("dispatched — a refusal is a HANDBACK, not an error");
+        probe.waiting_for.variant_name()
+    };
+    let step = |controller: PlayerId| LoopActionContext {
+        card_id,
+        controller,
+        action: LoopAction::Recast {
+            from_zone: engine::types::zones::Zone::Hand,
+            uses_buyback: BuybackUsage::NotUsed,
+        },
+        convoke: None,
+        pins: Vec::new(),
+    };
+
+    assert_eq!(
+        declare_with(Vec::new()),
+        "Priority",
+        "EMPTY-seq must-not-flip — CR 732.2a: with no period at all there is nothing to \
+         re-derive a template from, so a pin-consuming drive would run with no pins. Fail closed \
+         into the manual-play handback"
+    );
+    assert_eq!(
+        declare_with(vec![step(proposer)]),
+        "RespondToShortcut",
+        "OWN-seq must-not-flip: the proposer's own recorded period IS the object-growth route's \
+         re-derivation source, so this is the shipped legitimate acceptance. An always-reject \
+         remedy breaks it"
+    );
+    assert_eq!(
+        declare_with(vec![step(opp)]),
+        "Priority",
+        "FOREIGN-seq — THE REMEDY. CR 732.2a: an opponent's independent activation is not a \
+         template this proposer's drive can re-derive from, so admitting it would open the \
+         CR 732.2b window on a client-supplied declaration that received ZERO pin validation \
+         against a schema with published points"
     );
 }

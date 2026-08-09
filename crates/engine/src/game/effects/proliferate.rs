@@ -375,14 +375,16 @@ fn apply_counter_addition_plan_item(
             player_id,
             counter_kind,
             count,
-        } => super::player_counter::add_player_counter_with_replacement(
-            state,
-            actor,
-            player_id,
-            counter_kind,
-            count,
-            events,
-        ),
+        } => {
+            super::player_counter::add_player_counter_with_replacement(
+                state,
+                actor,
+                player_id,
+                counter_kind,
+                count,
+                events,
+            ) != super::player_counter::PlayerCounterAdditionOutcome::NeedsChoice
+        }
         PendingCounterAddition::Energy {
             actor,
             player_id,

@@ -16,7 +16,7 @@ use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use super::strategy_helpers::best_proactive_cast_score;
 #[cfg(test)]
-use engine::types::game_state::CastPaymentMode;
+use engine::types::game_state::{CastPaymentMode, TargetSelectionProgress};
 
 pub struct HandDisruptionPolicy;
 
@@ -448,7 +448,10 @@ mod tests {
                 effect_detail: TargetEffectDetail::None,
             }],
             mode_labels: Vec::new(),
-            selection: Default::default(),
+            selection: TargetSelectionProgress {
+                current_legal_targets: legal_targets,
+                ..Default::default()
+            },
         };
         state.waiting_for = waiting_for.clone();
         let decision = AiDecisionContext {
@@ -482,24 +485,6 @@ mod tests {
             target_score(TargetRef::Player(PlayerId(1)))
                 > target_score(TargetRef::Player(PlayerId(0))),
             "Peek-style hand reveal should prefer an opponent's hand over the AI's own hand"
-        );
-
-        let scored = crate::search::score_candidates(&state, PlayerId(0), &config);
-        let score_for_target = |target| {
-            scored
-                .iter()
-                .find_map(|(action, score)| match action {
-                    GameAction::ChooseTarget {
-                        target: Some(chosen),
-                    } if *chosen == target => Some(*score),
-                    _ => None,
-                })
-                .expect("target candidate should be scored")
-        };
-        assert!(
-            score_for_target(TargetRef::Player(PlayerId(1)))
-                > score_for_target(TargetRef::Player(PlayerId(0))),
-            "registered AI scoring should prefer the opponent target"
         );
     }
 

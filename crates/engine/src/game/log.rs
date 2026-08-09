@@ -2,23 +2,378 @@ use crate::types::ability::{AbilityTag, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
-use crate::types::log::{GameLogEntry, LogCategory, LogSegment};
+use crate::types::log::{
+    GameLogEntry, LogBoundary, LogCategory, LogImportance, LogPresentation, LogSegment, LogTone,
+    LogVisibility,
+};
+use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 
 /// Resolve a batch of events into structured log entries.
-/// Events that would leak hidden information (e.g., cards drawn from library) are filtered out.
-pub fn resolve_log_entries(events: &[GameEvent], state: &GameState) -> Vec<GameLogEntry> {
+/// Events that could leak hidden information are tagged for an explicit diagnostic opt-in.
+pub fn resolve_log_entries(
+    events: &[GameEvent],
+    before: &GameState,
+    after: &GameState,
+) -> Vec<GameLogEntry> {
+    let has_game_start = events
+        .iter()
+        .any(|event| matches!(event, GameEvent::GameStarted));
+    let mut cursor = if has_game_start {
+        LogCursor::pregame()
+    } else {
+        LogCursor {
+            turn: before.turn_number,
+            phase: before.phase,
+        }
+    };
+
     events
         .iter()
-        .filter(|event| !should_exclude_event(event, state))
-        .map(|event| GameLogEntry {
-            seq: 0, // Assigned by frontend
-            turn: state.turn_number,
-            phase: state.phase,
-            category: categorize(event),
-            segments: format_segments(event, state),
+        .filter_map(|event| {
+            cursor.apply(event);
+            (!should_exclude_event(event, after)).then(|| {
+                let segments = format_segments(event, after);
+                (!segments.is_empty()).then(|| GameLogEntry {
+                    seq: 0, // Assigned by frontend
+                    turn: cursor.turn,
+                    phase: cursor.phase,
+                    category: categorize(event),
+                    segments,
+                    presentation: presentation(event),
+                })
+            })?
         })
         .collect()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LogCursor {
+    turn: u32,
+    phase: Phase,
+}
+
+impl LogCursor {
+    fn pregame() -> Self {
+        Self {
+            turn: 0,
+            phase: Phase::Untap,
+        }
+    }
+
+    fn apply(&mut self, event: &GameEvent) {
+        match event {
+            GameEvent::GameStarted => *self = Self::pregame(),
+            GameEvent::TurnStarted { turn_number, .. } => {
+                self.turn = *turn_number;
+                self.phase = Phase::Untap;
+            }
+            GameEvent::PhaseChanged { phase } => self.phase = *phase,
+            _ => {}
+        }
+    }
+}
+
+fn presentation(event: &GameEvent) -> LogPresentation {
+    LogPresentation {
+        importance: importance(event),
+        tone: tone(event),
+        boundary: boundary(event),
+        visibility: visibility(event),
+    }
+}
+
+fn importance(event: &GameEvent) -> LogImportance {
+    match event {
+        GameEvent::CardPredicateGuessMade { .. }
+        | GameEvent::DebugActionUsed { .. }
+        | GameEvent::DebugPermissionGranted { .. }
+        | GameEvent::DebugPermissionRevoked { .. } => LogImportance::Diagnostic,
+        GameEvent::GameStarted
+        | GameEvent::GameOver { .. }
+        | GameEvent::PlayerLost { .. }
+        | GameEvent::PlayerEliminated { .. }
+        | GameEvent::TurnStarted { .. }
+        | GameEvent::SpellCast { .. }
+        | GameEvent::SpellCopied { .. }
+        | GameEvent::LandPlayed { .. }
+        | GameEvent::AttackersDeclared { .. }
+        | GameEvent::BlockersDeclared { .. }
+        | GameEvent::DamageDealt { .. }
+        | GameEvent::CombatDamageDealtToPlayer { .. }
+        | GameEvent::LifeChanged { .. }
+        | GameEvent::CreatureDestroyed { .. }
+        | GameEvent::PermanentSacrificed { .. }
+        | GameEvent::TokenCreated { .. }
+        | GameEvent::ObjectConjured { .. } => LogImportance::Essential,
+        GameEvent::PhaseChanged { .. }
+        | GameEvent::AbilityActivated { .. }
+        | GameEvent::NinjutsuActivated { .. }
+        | GameEvent::KeywordAbilityActivated { .. }
+        | GameEvent::CounterAdded { .. }
+        | GameEvent::CounterRemoved { .. }
+        | GameEvent::ControllerChanged { .. }
+        | GameEvent::Transformed { .. }
+        | GameEvent::Flipped { .. }
+        | GameEvent::TurnedFaceUp { .. }
+        | GameEvent::TurnedFaceDown { .. }
+        | GameEvent::Discarded { .. }
+        | GameEvent::Cycled { .. }
+        | GameEvent::CardsRevealed { .. }
+        | GameEvent::BecomesTarget { .. }
+        | GameEvent::ReplacementApplied { .. }
+        | GameEvent::SpeedChanged { .. }
+        | GameEvent::ArmyAmassed { .. } => LogImportance::Context,
+        // The remaining variants are deliberately listed rather than covered by a
+        // wildcard. Adding a GameEvent must require an explicit presentation policy.
+        GameEvent::HiddenSearchViewed { .. }
+        | GameEvent::PriorityPassed { .. }
+        | GameEvent::Mutated { .. }
+        | GameEvent::Augmented { .. }
+        | GameEvent::XValueChosen { .. }
+        | GameEvent::ZoneChanged { .. }
+        | GameEvent::ManaAdded { .. }
+        | GameEvent::TappedForMana { .. }
+        | GameEvent::ManaPoolEmptied { .. }
+        | GameEvent::ManaRecolored { .. }
+        | GameEvent::PermanentTapped { .. }
+        | GameEvent::CreatureExerted { .. }
+        | GameEvent::CreatureEnlisted { .. }
+        | GameEvent::Foretold { .. }
+        | GameEvent::BecameForetold { .. }
+        | GameEvent::MulliganStarted
+        | GameEvent::CardsDrawn { .. }
+        | GameEvent::CardDrawn { .. }
+        | GameEvent::PermanentUntapped { .. }
+        | GameEvent::PermanentPhasedOut { .. }
+        | GameEvent::PermanentPhasedIn { .. }
+        | GameEvent::PlayerPhasedOut { .. }
+        | GameEvent::PlayerPhasedIn { .. }
+        | GameEvent::BecomesPlotted { .. }
+        | GameEvent::StackPushed { .. }
+        | GameEvent::StackResolved { .. }
+        | GameEvent::DamageCleared { .. }
+        | GameEvent::ResolutionHalted { .. }
+        | GameEvent::DamagePrevented { .. }
+        | GameEvent::SpellCountered { .. }
+        | GameEvent::ObjectIntensified { .. }
+        | GameEvent::Evolved { .. }
+        | GameEvent::Unattached { .. }
+        | GameEvent::ContinuousEffectEnded { .. }
+        | GameEvent::AttackerBecameBlockedByEffect { .. }
+        | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
+        | GameEvent::CombatTaxPaid { .. }
+        | GameEvent::CombatTaxDeclined { .. }
+        | GameEvent::VehicleCrewed { .. }
+        | GameEvent::Stationed { .. }
+        | GameEvent::Saddled { .. }
+        | GameEvent::Regenerated { .. }
+        | GameEvent::CreatureSuspected { .. }
+        | GameEvent::CreatureNoLongerSuspected { .. }
+        | GameEvent::Detained { .. }
+        | GameEvent::BecamePrepared { .. }
+        | GameEvent::BecameUnprepared { .. }
+        | GameEvent::CaseSolved { .. }
+        | GameEvent::ClassLevelGained { .. }
+        | GameEvent::DayNightChanged { .. }
+        | GameEvent::PowerToughnessChanged { .. }
+        | GameEvent::EffectResolved { .. }
+        | GameEvent::CrimeCommitted { .. }
+        | GameEvent::CascadeMissed { .. }
+        | GameEvent::MonarchChanged { .. }
+        | GameEvent::CityBlessingGained { .. }
+        | GameEvent::EnduringStoryGained { .. }
+        | GameEvent::DieRolled { .. }
+        | GameEvent::StartingPlayerContest { .. }
+        | GameEvent::CoinFlipped { .. }
+        | GameEvent::RingTemptsYou { .. }
+        | GameEvent::CreatureExploited { .. }
+        | GameEvent::RoomEntered { .. }
+        | GameEvent::RoomDoorUnlocked { .. }
+        | GameEvent::DungeonCompleted { .. }
+        | GameEvent::Planeswalked { .. }
+        | GameEvent::ChaosEnsued { .. }
+        | GameEvent::PlanarDieRolled { .. }
+        | GameEvent::SchemeSetInMotion { .. }
+        | GameEvent::SchemeAbandoned { .. }
+        | GameEvent::InitiativeTaken { .. }
+        | GameEvent::AttractionOpened { .. }
+        | GameEvent::ContraptionAssembled { .. }
+        | GameEvent::StickerPlaced { .. }
+        | GameEvent::AttractionsRolledToVisit { .. }
+        | GameEvent::AttractionVisited { .. }
+        | GameEvent::ContraptionCranked { .. }
+        | GameEvent::Firebend { .. }
+        | GameEvent::Airbend { .. }
+        | GameEvent::Earthbend { .. }
+        | GameEvent::Waterbend { .. }
+        | GameEvent::CompanionRevealed { .. }
+        | GameEvent::CompanionMovedToHand { .. }
+        | GameEvent::EnergyChanged { .. }
+        | GameEvent::PlayerCounterChanged { .. }
+        | GameEvent::ManaExpended { .. }
+        | GameEvent::PlayerPerformedAction { .. }
+        | GameEvent::Specialized { .. }
+        | GameEvent::Clash { .. }
+        | GameEvent::VoteCast { .. }
+        | GameEvent::VoteResolved { .. } => LogImportance::Detail,
+    }
+}
+
+fn tone(event: &GameEvent) -> LogTone {
+    match event {
+        GameEvent::CardPredicateGuessMade { .. }
+        | GameEvent::DebugActionUsed { .. }
+        | GameEvent::DebugPermissionGranted { .. }
+        | GameEvent::DebugPermissionRevoked { .. } => LogTone::Diagnostic,
+        GameEvent::LifeChanged { amount, .. } if *amount > 0 => LogTone::Positive,
+        GameEvent::TokenCreated { .. }
+        | GameEvent::ObjectConjured { .. }
+        | GameEvent::CityBlessingGained { .. }
+        | GameEvent::EnduringStoryGained { .. }
+        | GameEvent::MonarchChanged { .. }
+        | GameEvent::InitiativeTaken { .. } => LogTone::Positive,
+        GameEvent::DamageDealt { .. }
+        | GameEvent::DamagePrevented { .. }
+        | GameEvent::CreatureDestroyed { .. }
+        | GameEvent::PermanentSacrificed { .. }
+        | GameEvent::SpellCountered { .. }
+        | GameEvent::PlayerLost { .. }
+        | GameEvent::PlayerEliminated { .. } => LogTone::Negative,
+        GameEvent::LifeChanged { amount, .. } if *amount < 0 => LogTone::Negative,
+        GameEvent::SpellCast { .. }
+        | GameEvent::SpellCopied { .. }
+        | GameEvent::AbilityActivated { .. }
+        | GameEvent::NinjutsuActivated { .. }
+        | GameEvent::KeywordAbilityActivated { .. }
+        | GameEvent::AttackersDeclared { .. }
+        | GameEvent::BlockersDeclared { .. }
+        | GameEvent::AttackerBecameBlockedByEffect { .. }
+        | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
+        | GameEvent::CombatTaxPaid { .. }
+        | GameEvent::CombatTaxDeclined { .. }
+        | GameEvent::CreatureExerted { .. }
+        | GameEvent::CreatureEnlisted { .. }
+        | GameEvent::SpeedChanged { .. }
+        | GameEvent::ArmyAmassed { .. }
+        | GameEvent::DieRolled { .. }
+        | GameEvent::CoinFlipped { .. }
+        | GameEvent::RingTemptsYou { .. }
+        | GameEvent::Firebend { .. }
+        | GameEvent::Airbend { .. }
+        | GameEvent::Earthbend { .. }
+        | GameEvent::Waterbend { .. }
+        | GameEvent::Clash { .. }
+        | GameEvent::VoteCast { .. }
+        | GameEvent::VoteResolved { .. } => LogTone::Informational,
+        GameEvent::LifeChanged { .. }
+        | GameEvent::GameStarted
+        | GameEvent::HiddenSearchViewed { .. }
+        | GameEvent::CreatureExploited { .. }
+        | GameEvent::TurnStarted { .. }
+        | GameEvent::PhaseChanged { .. }
+        | GameEvent::PriorityPassed { .. }
+        | GameEvent::Mutated { .. }
+        | GameEvent::Augmented { .. }
+        | GameEvent::XValueChosen { .. }
+        | GameEvent::ZoneChanged { .. }
+        | GameEvent::ManaAdded { .. }
+        | GameEvent::TappedForMana { .. }
+        | GameEvent::ManaPoolEmptied { .. }
+        | GameEvent::ManaRecolored { .. }
+        | GameEvent::PermanentTapped { .. }
+        | GameEvent::Foretold { .. }
+        | GameEvent::BecameForetold { .. }
+        | GameEvent::MulliganStarted
+        | GameEvent::CardsDrawn { .. }
+        | GameEvent::CardDrawn { .. }
+        | GameEvent::PermanentUntapped { .. }
+        | GameEvent::PermanentPhasedOut { .. }
+        | GameEvent::PermanentPhasedIn { .. }
+        | GameEvent::PlayerPhasedOut { .. }
+        | GameEvent::PlayerPhasedIn { .. }
+        | GameEvent::BecomesPlotted { .. }
+        | GameEvent::LandPlayed { .. }
+        | GameEvent::StackPushed { .. }
+        | GameEvent::StackResolved { .. }
+        | GameEvent::Discarded { .. }
+        | GameEvent::Cycled { .. }
+        | GameEvent::DamageCleared { .. }
+        | GameEvent::GameOver { .. }
+        | GameEvent::ResolutionHalted { .. }
+        | GameEvent::CounterAdded { .. }
+        | GameEvent::ObjectIntensified { .. }
+        | GameEvent::Evolved { .. }
+        | GameEvent::CounterRemoved { .. }
+        | GameEvent::ControllerChanged { .. }
+        | GameEvent::EffectResolved { .. }
+        | GameEvent::Unattached { .. }
+        | GameEvent::ContinuousEffectEnded { .. }
+        | GameEvent::BecomesTarget { .. }
+        | GameEvent::VehicleCrewed { .. }
+        | GameEvent::Stationed { .. }
+        | GameEvent::Saddled { .. }
+        | GameEvent::ReplacementApplied { .. }
+        | GameEvent::Transformed { .. }
+        | GameEvent::Flipped { .. }
+        | GameEvent::Specialized { .. }
+        | GameEvent::DayNightChanged { .. }
+        | GameEvent::TurnedFaceUp { .. }
+        | GameEvent::TurnedFaceDown { .. }
+        | GameEvent::CardsRevealed { .. }
+        | GameEvent::CombatDamageDealtToPlayer { .. }
+        | GameEvent::CrimeCommitted { .. }
+        | GameEvent::Regenerated { .. }
+        | GameEvent::CreatureSuspected { .. }
+        | GameEvent::CreatureNoLongerSuspected { .. }
+        | GameEvent::Detained { .. }
+        | GameEvent::BecamePrepared { .. }
+        | GameEvent::BecameUnprepared { .. }
+        | GameEvent::CaseSolved { .. }
+        | GameEvent::ClassLevelGained { .. }
+        | GameEvent::PowerToughnessChanged { .. }
+        | GameEvent::CascadeMissed { .. }
+        | GameEvent::StartingPlayerContest { .. }
+        | GameEvent::RoomEntered { .. }
+        | GameEvent::RoomDoorUnlocked { .. }
+        | GameEvent::DungeonCompleted { .. }
+        | GameEvent::Planeswalked { .. }
+        | GameEvent::ChaosEnsued { .. }
+        | GameEvent::PlanarDieRolled { .. }
+        | GameEvent::SchemeSetInMotion { .. }
+        | GameEvent::SchemeAbandoned { .. }
+        | GameEvent::AttractionOpened { .. }
+        | GameEvent::ContraptionAssembled { .. }
+        | GameEvent::StickerPlaced { .. }
+        | GameEvent::AttractionsRolledToVisit { .. }
+        | GameEvent::AttractionVisited { .. }
+        | GameEvent::ContraptionCranked { .. }
+        | GameEvent::CompanionRevealed { .. }
+        | GameEvent::CompanionMovedToHand { .. }
+        | GameEvent::EnergyChanged { .. }
+        | GameEvent::PlayerCounterChanged { .. }
+        | GameEvent::ManaExpended { .. }
+        | GameEvent::PlayerPerformedAction { .. } => LogTone::Neutral,
+    }
+}
+
+fn boundary(event: &GameEvent) -> LogBoundary {
+    match event {
+        GameEvent::TurnStarted { .. } => LogBoundary::Turn,
+        GameEvent::PhaseChanged { .. } => LogBoundary::Phase,
+        _ => LogBoundary::None,
+    }
+}
+
+fn visibility(event: &GameEvent) -> LogVisibility {
+    match event {
+        // Draws are intentionally retained for diagnostics, but normal logs
+        // must not disclose an opponent or AI's private card flow.
+        GameEvent::CardDrawn { .. } | GameEvent::CardsDrawn { .. } => {
+            LogVisibility::HiddenInformation
+        }
+        _ => LogVisibility::Public,
+    }
 }
 
 /// Returns true for events that should be excluded from log output.
@@ -49,8 +404,6 @@ fn should_exclude_event(event: &GameEvent, state: &GameState) -> bool {
         {
             true
         }
-        // CardDrawn also reveals which specific card was drawn
-        GameEvent::CardDrawn { .. } => true,
         // StackPushed/StackResolved are low-signal bookkeeping —
         // the meaningful info is in SpellCast/AbilityActivated and EffectResolved
         GameEvent::StackPushed { .. } | GameEvent::StackResolved { .. } => true,
@@ -228,6 +581,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
 
         GameEvent::MonarchChanged { .. }
         | GameEvent::CityBlessingGained { .. }
+        | GameEvent::EnduringStoryGained { .. }
         | GameEvent::DieRolled { .. }
         | GameEvent::CoinFlipped { .. }
         | GameEvent::RingTemptsYou { .. }
@@ -906,7 +1260,9 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(&format!("{kind:?}")),
         ],
 
-        GameEvent::BecomesTarget { target, source_id } => {
+        GameEvent::BecomesTarget {
+            target, source_id, ..
+        } => {
             let mut segments = Vec::new();
             match target {
                 TargetRef::Object(object_id) => segments.push(card_seg(state, *object_id)),
@@ -970,6 +1326,13 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             vec![
                 player_seg(state, *player_id),
                 text(" gets the city's blessing"),
+            ]
+        }
+
+        GameEvent::EnduringStoryGained { player_id } => {
+            vec![
+                player_seg(state, *player_id),
+                text(" gains an enduring story"),
             ]
         }
 
@@ -1323,6 +1686,9 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::game::engine::{
+        start_game, start_game_skip_mulligan, start_game_with_starting_player,
+    };
     use crate::game::zones::create_object;
     use crate::types::identifiers::CardId;
 
@@ -1341,7 +1707,7 @@ mod tests {
             controller: PlayerId(0),
             object_id: id,
         };
-        let entries = resolve_log_entries(&[event], &state);
+        let entries = resolve_log_entries(&[event], &state, &state);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].category, LogCategory::Stack);
         // Verify card name is resolved
@@ -1396,7 +1762,7 @@ mod tests {
             },
         ];
 
-        let entries = resolve_log_entries(&events, &state);
+        let entries = resolve_log_entries(&events, &state, &state);
         assert_eq!(entries.len(), 1);
         assert!(entries[0].segments.iter().any(
             |segment| matches!(segment, LogSegment::CardName { name, .. } if name == "Public Discard")
@@ -1438,6 +1804,7 @@ mod tests {
                     object_id: foretold,
                 },
             ],
+            &state,
             &state,
         );
 
@@ -1488,7 +1855,7 @@ mod tests {
             source_id: Some(source_id),
             choice: "Nonland".to_string(),
         };
-        let entries = resolve_log_entries(&[event], &state);
+        let entries = resolve_log_entries(&[event], &state, &state);
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].category, LogCategory::Debug);
@@ -1658,13 +2025,208 @@ mod tests {
                 toughness_delta: 2,
             },
         ];
-        let entries = resolve_log_entries(&events, &state);
+        let entries = resolve_log_entries(&events, &state, &state);
         assert_eq!(entries.len(), events.len());
         for entry in &entries {
             assert!(
                 !entry.segments.is_empty(),
                 "Every event should produce at least one segment"
             );
+        }
+    }
+
+    #[test]
+    fn cursor_uses_pregame_context_then_turn_and_phase_boundaries() {
+        let mut before = GameState::new_two_player(42);
+        before.turn_number = 9;
+        before.phase = Phase::End;
+        let mut after = before.clone();
+        after.turn_number = 1;
+        after.phase = Phase::Upkeep;
+        let entries = resolve_log_entries(
+            &[
+                GameEvent::StartingPlayerContest {
+                    rounds: vec![],
+                    winner: PlayerId(0),
+                },
+                GameEvent::GameStarted,
+                GameEvent::TurnStarted {
+                    player_id: PlayerId(0),
+                    turn_number: 1,
+                },
+                GameEvent::PhaseChanged {
+                    phase: Phase::Upkeep,
+                },
+                GameEvent::CardDrawn {
+                    player_id: PlayerId(0),
+                    object_id: ObjectId(77),
+                    nth_in_turn: 1,
+                    nth_in_step: 1,
+                },
+            ],
+            &before,
+            &after,
+        );
+
+        assert_eq!(entries[0].turn, 0);
+        assert_eq!(entries[1].turn, 0);
+        assert_eq!(entries[2].turn, 1);
+        assert_eq!(entries[2].phase, Phase::Untap);
+        assert_eq!(entries[3].phase, Phase::Upkeep);
+        assert_eq!(entries[4].turn, 1);
+        assert_eq!(
+            entries[4].presentation.visibility,
+            LogVisibility::HiddenInformation
+        );
+        assert!(
+            matches!(entries[4].segments.as_slice(), [LogSegment::PlayerName { .. }, LogSegment::Text(text)] if text == " draws a card")
+        );
+    }
+
+    #[test]
+    fn factory_attaches_policy_metadata_and_omits_empty_entries() {
+        let state = GameState::new_two_player(42);
+        let entries = resolve_log_entries(
+            &[
+                GameEvent::LifeChanged {
+                    player_id: PlayerId(0),
+                    amount: 3,
+                },
+                GameEvent::LifeChanged {
+                    player_id: PlayerId(1),
+                    amount: -3,
+                },
+                GameEvent::TappedForMana {
+                    source_id: ObjectId(1),
+                    player_id: PlayerId(0),
+                    produced: vec![],
+                    tap_state: Default::default(),
+                },
+            ],
+            &state,
+            &state,
+        );
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].presentation.importance, LogImportance::Essential);
+        assert_eq!(entries[0].presentation.tone, LogTone::Positive);
+        assert_eq!(entries[1].presentation.tone, LogTone::Negative);
+    }
+
+    #[test]
+    fn presentation_policy_table_covers_importance_and_polarity() {
+        let cases = [
+            (
+                GameEvent::GameStarted,
+                LogImportance::Essential,
+                LogTone::Neutral,
+            ),
+            (
+                GameEvent::PhaseChanged {
+                    phase: Phase::Upkeep,
+                },
+                LogImportance::Context,
+                LogTone::Neutral,
+            ),
+            (
+                GameEvent::LifeChanged {
+                    player_id: PlayerId(0),
+                    amount: 1,
+                },
+                LogImportance::Essential,
+                LogTone::Positive,
+            ),
+            (
+                GameEvent::DamageDealt {
+                    source_id: ObjectId(1),
+                    target: TargetRef::Player(PlayerId(1)),
+                    amount: 2,
+                    is_combat: false,
+                    excess: 0,
+                },
+                LogImportance::Essential,
+                LogTone::Negative,
+            ),
+            (
+                GameEvent::DebugActionUsed {
+                    player_id: PlayerId(0),
+                    description: "set life".to_string(),
+                },
+                LogImportance::Diagnostic,
+                LogTone::Diagnostic,
+            ),
+            (
+                GameEvent::TappedForMana {
+                    source_id: ObjectId(1),
+                    player_id: PlayerId(0),
+                    produced: vec![],
+                    tap_state: Default::default(),
+                },
+                LogImportance::Detail,
+                LogTone::Neutral,
+            ),
+        ];
+
+        for (event, expected_importance, expected_tone) in cases {
+            assert_eq!(importance(&event), expected_importance, "{event:?}");
+            assert_eq!(tone(&event), expected_tone, "{event:?}");
+        }
+    }
+
+    #[test]
+    fn start_game_log_entries_reset_hostile_context_before_turn_one() {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 99;
+        state.phase = Phase::End;
+
+        let result = start_game(&mut state);
+
+        assert!(matches!(
+            result.events.as_slice(),
+            [
+                GameEvent::StartingPlayerContest { .. },
+                GameEvent::GameStarted,
+                GameEvent::TurnStarted { turn_number: 1, .. },
+                ..
+            ]
+        ));
+        assert_eq!(result.log_entries[0].turn, 0);
+        assert_eq!(result.log_entries[0].phase, Phase::Untap);
+        assert_eq!(result.log_entries[1].turn, 0);
+        assert_eq!(result.log_entries[1].phase, Phase::Untap);
+        assert_eq!(result.log_entries[2].turn, 1);
+        assert_eq!(result.log_entries[2].phase, Phase::Untap);
+    }
+
+    #[test]
+    fn explicit_and_skip_mulligan_starts_reset_context_without_a_contest() {
+        let mut explicit_state = GameState::new_two_player(42);
+        explicit_state.turn_number = 99;
+        explicit_state.phase = Phase::End;
+        let explicit = start_game_with_starting_player(&mut explicit_state, PlayerId(1));
+
+        let mut skip_state = GameState::new_two_player(42);
+        skip_state.turn_number = 99;
+        skip_state.phase = Phase::End;
+        let skipped = start_game_skip_mulligan(&mut skip_state);
+
+        for result in [&explicit, &skipped] {
+            assert!(!result
+                .events
+                .iter()
+                .any(|event| matches!(event, GameEvent::StartingPlayerContest { .. })));
+            assert!(matches!(
+                result.events.as_slice(),
+                [
+                    GameEvent::GameStarted,
+                    GameEvent::TurnStarted { turn_number: 1, .. },
+                    ..
+                ]
+            ));
+            assert_eq!(result.log_entries[0].turn, 0);
+            assert_eq!(result.log_entries[0].phase, Phase::Untap);
+            assert_eq!(result.log_entries[1].turn, 1);
+            assert_eq!(result.log_entries[1].phase, Phase::Untap);
         }
     }
 
@@ -1682,9 +2244,19 @@ mod tests {
                     object_id: ObjectId(5),
                 },
             ],
+            presentation: Default::default(),
         };
         let json = serde_json::to_string(&entry).unwrap();
         let deserialized: GameLogEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(entry, deserialized);
+    }
+
+    #[test]
+    fn legacy_log_json_defaults_presentation() {
+        let json = r#"{"seq":1,"turn":1,"phase":"Untap","category":"Game","segments":[{"type":"Text","value":"Game started"}]}"#;
+        let entry: GameLogEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.presentation, LogPresentation::default());
+        let serialized = serde_json::to_value(&entry).unwrap();
+        assert_eq!(serialized["presentation"]["importance"], "Detail");
     }
 }

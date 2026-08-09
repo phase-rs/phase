@@ -904,6 +904,7 @@ fn issue_3660_finalize_copy_retarget_stashes_offers_on_deferred_pause() {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         })
     }
 

@@ -1,9 +1,8 @@
 import { useCallback, useMemo, useState, type CSSProperties } from "react";
 
-import type { DebugAction, GameObject } from "../../adapter/types";
+import type { DebugAction, DebugLibraryCardView } from "../../adapter/types";
 import { CardImage } from "../card/CardImage";
 import { ModalPanelShell } from "../ui/ModalPanelShell";
-import { useInspectHoverProps } from "../../hooks/useInspectHoverProps";
 import { useGameDispatch } from "../../hooks/useGameDispatch";
 import { useGameStore } from "../../stores/gameStore";
 import { useUiStore } from "../../stores/uiStore";
@@ -14,10 +13,10 @@ import { useUiStore } from "../../stores/uiStore";
  * scrubbing through a dropdown.
  *
  * The cards are shown in a STABLE RANDOMIZED order rather than their true
- * library order. The engine deliberately leaves the on-wire `library` Vec order
- * untouched (debug exposes card *names* but must not leak *draw order*, per
- * `visibility.rs`), so this view shuffles the display once per open. Moving a
- * card out simply removes it from its slot — the rest keep their positions.
+ * library order. The engine supplies a separate, authorized debug projection
+ * rather than revealing normal library objects, and this view shuffles it once
+ * per open. Moving a card out simply removes it from its slot — the rest keep
+ * their positions.
  */
 export function DebugLibraryViewer() {
   const viewer = useUiStore((s) => s.debugLibraryViewer);
@@ -35,8 +34,7 @@ function DebugLibraryViewerInner({
   playerId: number;
   onClose: () => void;
 }) {
-  const objects = useGameStore((s) => s.gameState?.objects);
-  const libraryIds = useGameStore((s) => s.gameState?.players[playerId]?.library);
+  const libraryCards = useGameStore((s) => s.gameState?.derived?.debug_library_cards);
   const openDebugContextMenu = useUiStore((s) => s.openDebugContextMenu);
   const dispatch = useGameDispatch();
 
@@ -45,17 +43,14 @@ function DebugLibraryViewerInner({
   const [seed] = useState(() => Math.floor(Math.random() * 2 ** 31));
 
   const cards = useMemo(() => {
-    if (!objects || !libraryIds) return [];
+    if (!libraryCards) return [];
     const rank = (id: number) => {
       // Deterministic per (seed, id) pseudo-random key — a stable shuffle.
       const x = Math.sin((id + 1) * (seed + 1)) * 43758.5453;
       return x - Math.floor(x);
     };
-    return libraryIds
-      .map((id) => objects[id])
-      .filter((obj): obj is GameObject => Boolean(obj))
-      .sort((a, b) => rank(a.id) - rank(b.id));
-  }, [objects, libraryIds, seed]);
+    return [...libraryCards].sort((a, b) => rank(a.object_id) - rank(b.object_id));
+  }, [libraryCards, seed]);
 
   const move = useCallback(
     (objectId: number, toZone: "Battlefield" | "Hand") => {
@@ -91,12 +86,12 @@ function DebugLibraryViewerInner({
               } as CSSProperties
             }
           >
-            {cards.map((obj) => (
+            {cards.map((card) => (
               <LibraryCard
-                key={obj.id}
-                obj={obj}
-                onOpenMenu={(x, y) => openDebugContextMenu({ objectId: obj.id, x, y })}
-                onMove={(zone) => move(obj.id, zone)}
+                key={card.object_id}
+                card={card}
+                onOpenMenu={(x, y) => openDebugContextMenu({ objectId: card.object_id, x, y })}
+                onMove={(zone) => move(card.object_id, zone)}
               />
             ))}
           </div>
@@ -107,26 +102,23 @@ function DebugLibraryViewerInner({
 }
 
 function LibraryCard({
-  obj,
+  card,
   onOpenMenu,
   onMove,
 }: {
-  obj: GameObject;
+  card: DebugLibraryCardView;
   onOpenMenu: (x: number, y: number) => void;
   onMove: (zone: "Battlefield" | "Hand") => void;
 }) {
-  const hoverProps = useInspectHoverProps();
-
   return (
     <div
       className="group relative shrink-0 cursor-pointer rounded-lg transition-transform hover:scale-[1.03] hover:ring-1 hover:ring-white/20"
-      {...hoverProps(obj.id)}
       onClick={(e) => {
         e.stopPropagation();
         onOpenMenu(e.clientX, e.clientY);
       }}
     >
-      <CardImage cardName={obj.name} size="normal" />
+      <CardImage cardName={card.name} size="normal" />
       {/* Quick-move buttons for the two most common debug destinations; the
           full zone list is one click away via the card's debug context menu. */}
       <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center gap-1 rounded-b-lg bg-black/60 p-1 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100">

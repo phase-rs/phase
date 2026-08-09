@@ -23,8 +23,6 @@
 //!   - CR 303.4b: the player an Aura is attached to is the enchanted player;
 //!     resolved at runtime via `TargetFilter::AttachedTo`.
 //!   - CR 508.1a: the active player chooses which creatures attack.
-//!   - CR 608.2k: "that player" refers back to the enchanted player named by the
-//!     trigger condition.
 
 use engine::game::effects::attach::attach_to_player;
 use engine::game::layers::evaluate_layers;

@@ -94,6 +94,29 @@ pub fn resolve_phase_in(
         phase_in_player(state, *pid, events);
     }
 
+    // CR 400.7 + CR 603.7c + CR 603.7b: the trigger fired and resolved; it
+    // affected nothing. ALTITUDE IS LOAD-BEARING — this guard cannot live in
+    // `collect_phase_in_targets`, which returns a bare `Vec<ObjectId>` with no
+    // `events` in scope and, worse, converts an emptied target list into a
+    // CR 702.26b battlefield-wide sweep for phased-out permanents matching the
+    // filter. That is a POOL-SCAN FALLBACK binding different objects, so the
+    // guard is hoisted here, above the call that would perform it.
+    //
+    // Placed AFTER the player-phasing branch deliberately:
+    // `pinned_object_targets_all_stale` is scoped to object refs, and
+    // `live_object_targets` passes `TargetRef::Player` through by construction.
+    // Guarding above the player branch would suppress a legitimate player
+    // phase-in on an ability that carries both a player ref and a stale object
+    // ref.
+    if ability.pinned_object_targets_all_stale(state) {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::PhaseIn,
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
+
     // CR 702.26b: Filter choke point normally excludes phased-out objects, so
     // we can't rely on the standard target expansion for phase-in. Instead,
     // enumerate state.battlefield directly and match the filter manually,
@@ -168,8 +191,19 @@ fn collect_phase_in_targets(
     ability: &ResolvedAbility,
     target: &TargetFilter,
 ) -> Vec<ObjectId> {
+    // CR 400.7 + CR 603.7c: drop pinned referents that became new objects. This
+    // is a RAW read — `resolve_phase_in` never calls `resolved_targets`, so the
+    // targeting chokepoint cannot see this pin.
+    //
+    // Substitution here handles the PARTIALLY-stale case (some referents live,
+    // some not). It deliberately does NOT handle the all-stale case, because
+    // emptying `from_targets` falls through to the CR 702.26b battlefield sweep
+    // below, which would phase in a DIFFERENT set of permanents. That case is
+    // caught by the `pinned_object_targets_all_stale` early return hoisted into
+    // `resolve_phase_in` — see the comment there for why the guard cannot live
+    // in this function.
     let from_targets: Vec<ObjectId> = ability
-        .targets
+        .live_object_targets(state)
         .iter()
         .filter_map(|t| match t {
             TargetRef::Object(id) => Some(*id),

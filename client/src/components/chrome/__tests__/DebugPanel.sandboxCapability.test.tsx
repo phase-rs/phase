@@ -24,6 +24,7 @@ const storeState = {
   // be satisfied by a duck-typed object.
   adapter: null as unknown,
 };
+const debugDispatch = vi.fn();
 
 vi.mock("../../../stores/gameStore", () => ({
   useGameStore: Object.assign(
@@ -55,12 +56,12 @@ vi.mock("../../../hooks/usePlayerId", () => ({
   usePlayerId: () => 0,
   usePerspectivePlayerId: () => 0,
 }));
-vi.mock("../../../hooks/useGameDispatch", () => ({ useGameDispatch: () => vi.fn() }));
+vi.mock("../../../hooks/useGameDispatch", () => ({ useGameDispatch: () => debugDispatch }));
 vi.mock("../../../game/dispatch", () => ({ restoreGameState: vi.fn() }));
 vi.mock("../../../audio/AudioManager", () => ({
   audioManager: { play: vi.fn(), diagnostics: () => "" },
 }));
-vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (k: string) => k }) }));
+vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 // `CardNameAutocomplete` fetches the full name list on mount via a build-time
 // define that vitest does not provide. Only the ungated branch mounts it, and
 // the suggestion list is not what these tests measure — the input's presence
@@ -201,8 +202,38 @@ describe("DebugPanel — desktop solo capability", () => {
     openCreateCardAccordion();
 
     expect(screen.getByPlaceholderText("Lightning Bolt")).toBeInTheDocument();
+    expect(screen.getByLabelText("Make nonlegendary")).toBeInTheDocument();
     expect(
       screen.queryByText(/Spawning a card by name needs the in-browser engine/),
     ).toBeNull();
+  });
+
+  it("dispatches the nonlegendary override for a created card", () => {
+    uiState.debugPanelTab = "actions";
+    storeState.adapter = null;
+
+    render(<DebugPanel />);
+    openCreateCardAccordion();
+
+    fireEvent.change(screen.getByPlaceholderText("Lightning Bolt"), {
+      target: { value: "Isamaru, Hound of Konda" },
+    });
+    fireEvent.click(screen.getByLabelText("Make nonlegendary"));
+    fireEvent.click(screen.getByRole("button", { name: "Create Card" }));
+
+    expect(debugDispatch).toHaveBeenCalledWith({
+      type: "Debug",
+      data: {
+        type: "CreateCard",
+        data: {
+          card_name: "Isamaru, Hound of Konda",
+          owner: 0,
+          zone: "Hand",
+          attach_to: undefined,
+          run_etb: true,
+          nonlegendary: true,
+        },
+      },
+    });
   });
 });

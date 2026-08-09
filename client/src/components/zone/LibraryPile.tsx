@@ -10,7 +10,10 @@ import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { CASTABLE_AFFORDANCE_IDLE } from "../../viewmodel/castableAffordance.ts";
-import { playOrCastActionsForObject } from "../../viewmodel/cardActionChoice.ts";
+import {
+  playOrCastActionsForObject,
+  resolveSingleActionDispatch,
+} from "../../viewmodel/cardActionChoice.ts";
 import { isLibraryCardRevealedToViewer } from "../../viewmodel/gameStateView.ts";
 
 interface LibraryPileProps {
@@ -66,16 +69,10 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
   });
   const topCardName = useGameStore((s) => {
     if (topObjectId == null) return null;
-    const peek =
-      playerId === myId &&
-      (s.gameState?.players[playerId]?.can_look_at_top_of_library ?? false);
-    // Gate visibility on the engine's reveal sets (mirrors OpponentHand), never
-    // on name redaction: single-player renders the raw, unredacted state, so the
-    // top card name is present even for an opponent's hidden top. CR 701.20b
-    // (public reveal) and CR 701.20e (private look, e.g. Mishra's Bauble) are
-    // the only windows that expose an opponent's top.
+    // Rust has already resolved public reveals, private looks, and continuous
+    // top-card permissions into the per-object display projection.
     const revealedToMe = isLibraryCardRevealedToViewer(s.gameState ?? null, topObjectId, myId);
-    if (!peek && !revealedToMe) return null;
+    if (!revealedToMe) return null;
     return s.gameState?.objects[topObjectId]?.name ?? null;
   });
 
@@ -108,13 +105,14 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
 
   const handlePlay = useCallback(() => {
     if (playActions.length === 0 || topObjectId == null) return;
-    if (playActions.length === 1) {
-      void dispatchAction(playActions[0]);
-    } else {
-      // Multiple options (e.g., cast normal + alt-cost) — defer to the shared
-      // ability-choice modal so the player can pick.
-      setPendingAbilityChoice({ objectId: topObjectId as ObjectId, actions: playActions });
-    }
+    // #506: one authority for the lone-action decision. Multiple options (e.g.
+    // cast normal + alt-cost) defer to the shared ability-choice modal.
+    const auto = resolveSingleActionDispatch(
+      playActions,
+      useGameStore.getState().gameState?.objects[topObjectId],
+    );
+    if (auto) void dispatchAction(auto);
+    else setPendingAbilityChoice({ objectId: topObjectId as ObjectId, actions: playActions });
   }, [playActions, topObjectId, dispatchAction, setPendingAbilityChoice]);
 
   if (count === 0) return null;
