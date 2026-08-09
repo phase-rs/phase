@@ -292,7 +292,7 @@ export class DraftPodHostAdapter {
         this.emit({ type: "lobbyFull" });
         break;
       case "draftStarted":
-        this.setStatus("drafting");
+        this.setStatus(hostStatusForView(event.view));
         this.emit({ type: "draftStarted", view: event.view });
         break;
       case "pickReceived":

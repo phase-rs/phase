@@ -1086,10 +1086,12 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
       break;
     case "lobbyFull":
       break;
-    case "draftStarted":
-      set({ view: event.view, phase: "drafting" });
-      saveDraftPodProgress("drafting", event.view);
+    case "draftStarted": {
+      const activePhase = activePhaseForDraftViewStatus(event.view.status);
+      set({ view: event.view, phase: phaseForDraftViewStatus(event.view.status) });
+      if (activePhase) saveDraftPodProgress(activePhase, event.view);
       break;
+    }
     case "draftComplete":
       set({ phase: "deckbuilding" });
       saveDraftPodProgress("deckbuilding");

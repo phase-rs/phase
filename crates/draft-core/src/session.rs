@@ -48,13 +48,13 @@ impl DraftSession {
     /// sessions establish these properties at start and legacy `SeatFlags`
     /// snapshots remain compatible because their bitmap lengths are unrelated.
     pub fn validate_sealed_snapshot(&self) -> Result<(), DraftError> {
-        if self.kind != DraftKind::Sealed {
-            return Ok(());
-        }
-        if self.config.kind != DraftKind::Sealed {
+        if self.kind != self.config.kind {
             return Err(DraftError::InvalidSealedSnapshot {
                 reason: "session kind does not match configuration".to_string(),
             });
+        }
+        if self.kind != DraftKind::Sealed {
+            return Ok(());
         }
         let DraftSource::Set { code } = &self.config.source else {
             return Err(DraftError::SealedRequiresSetSource);
@@ -77,6 +77,20 @@ impl DraftSession {
         {
             return Err(DraftError::InvalidSealedSnapshot {
                 reason: "per-seat vectors do not match the core seats".to_string(),
+            });
+        }
+        let expected_pool_size =
+            usize::from(self.config.pack_count) * usize::from(self.config.cards_per_pack);
+        if self.status != DraftStatus::Lobby
+            && self
+                .pools
+                .iter()
+                .any(|pool| pool.len() != expected_pool_size)
+        {
+            return Err(DraftError::InvalidSealedSnapshot {
+                reason:
+                    "started sealed pools must contain exactly one card from each configured pack"
+                        .to_string(),
             });
         }
         if self.status != DraftStatus::Lobby
@@ -919,6 +933,33 @@ mod tests {
         assert!(session.validate_sealed_snapshot().is_ok());
 
         session.packs_by_seat[0].push(DraftPack(Vec::new()));
+        assert!(matches!(
+            session.validate_sealed_snapshot(),
+            Err(DraftError::InvalidSealedSnapshot { .. })
+        ));
+    }
+
+    #[test]
+    fn sealed_snapshot_rejects_started_pool_with_wrong_card_count() {
+        let (mut session, source) = test_session(2);
+        session.kind = DraftKind::Sealed;
+        session.config.kind = DraftKind::Sealed;
+        session.config.pack_count = 6;
+        apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
+
+        session.pools[0].pop();
+
+        assert!(matches!(
+            session.validate_sealed_snapshot(),
+            Err(DraftError::InvalidSealedSnapshot { .. })
+        ));
+    }
+
+    #[test]
+    fn sealed_snapshot_rejects_session_and_configuration_kind_mismatch() {
+        let (mut session, _) = test_session(2);
+        session.kind = DraftKind::Sealed;
+
         assert!(matches!(
             session.validate_sealed_snapshot(),
             Err(DraftError::InvalidSealedSnapshot { .. })
