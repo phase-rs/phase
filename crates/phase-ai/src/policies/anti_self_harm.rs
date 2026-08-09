@@ -5498,8 +5498,8 @@ mod tests {
     // creature-only DealDamage whose amount is dynamic (ObjectCount-based, not
     // a literal constant). `lethal_to_creature` returns `None` for a non-Fixed
     // amount, so `is_useful_removal_target` fails open as "useful" and the
-    // sibling :396 branch (no targetable opponent creature) never fires. The
-    // new `removal_lethality::can_kill_any_legal_target` gate must penalise
+    // sibling no-targetable-opponent-creature branch never fires. The
+    // `removal_lethality::can_kill_any_legal_target` gate must penalise
     // committing this when 1 damage is non-lethal to every legal opponent
     // creature.
     #[test]

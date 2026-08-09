@@ -378,10 +378,10 @@ pub(crate) fn lethality_bonus(
 /// damage have ANY legal target it can actually kill?
 ///
 /// The cast-commit dual of [`lethality_bonus`] (which ranks targets during
-/// selection). The AI layer bug this closes: a burn spell whose damage
-/// is provably non-lethal against every legal target gets cast and pointed
-/// at the biggest body, wasting the card. This gate tells the cast-commit
-/// whiff check ([`super::anti_self_harm::score_pre_cast`]) whether committing
+/// selection). Prevents cases where a burn spell whose damage is provably
+/// non-lethal against every legal target gets cast and pointed at the biggest
+/// body, wasting the card. This gate tells the cast-commit whiff check
+/// ([`super::anti_self_harm::score_pre_cast`]) whether committing
 /// is ever worthwhile against the board.
 ///
 /// **Conservative no-veto contract** — returns `true` (do not veto) whenever it
@@ -750,7 +750,7 @@ mod tests {
     }
 
     /// Self-controlled targets are not "useful" removal targets. The
-    /// empty/self-only target set is covered by the sibling `:396` branch in
+    /// empty/self-only target set is covered by the sibling branch in
     /// `anti_self_harm::score_pre_cast` (no targetable opponent creature),
     /// which fires before this gate is consulted — so this gate's contract
     /// fails open on it (never veto from a vacuous "all survived").
@@ -901,7 +901,7 @@ mod tests {
     /// is classified `EffectPolarity::Contextual`, so the fail-open guard must
     /// cover Contextual non-`DealDamage` effects — not just `Harmful` ones.
     /// Without that extension this spell is wrongly vetoed as a total *damage*
-    /// whiff. Guards round-2 review MED #1 (lost fix).
+    /// whiff.
     #[test]
     fn can_kill_fails_open_on_mixed_damage_and_gain_control_creature() {
         let mut state = make_state();
@@ -972,7 +972,7 @@ mod tests {
     /// enchantments, CR 613.1b) instead of only creatures. The fail-open must
     /// not require a creature filter: `permanent()` here targets the
     /// opponent's artifact, a legal and useful control line invisible to
-    /// creature-only filters. Guards round-2 review LOW (lost fix).
+    /// creature-only filters.
     #[test]
     fn can_kill_fails_open_on_mixed_damage_and_gain_control_of_permanent() {
         let mut state = make_state();
@@ -1111,11 +1111,10 @@ mod tests {
     /// opponent's artifact is a legal control target (CR 613.1b, Layer 2). The
     /// pre-commit `AnyOf` arm only matched a single level of plain
     /// permanent-type inners, so this nested disjunction fell through to the
-    /// old `_ => false` catch-all and vetoed the mixed spell; the recursive
-    /// helper added in the fix must descend into nested `AnyOf`. A sibling
+    /// catch-all and vetoed the mixed spell; the recursive
+    /// helper must descend into nested `AnyOf`. A sibling
     /// `AnyOf(Non(Land), Non(Creature))` case pins the same recursion over
-    /// negated inners, which the pre-commit arm likewise rejected. Guards
-    /// round-3 review LOW #2 (filter-shape coverage).
+    /// negated inners.
     #[test]
     fn can_kill_fails_open_on_anyof_gain_control_target() {
         let mut state = make_state();
@@ -1169,9 +1168,8 @@ mod tests {
     /// The control half targets "nonland" via `TypeFilter::Non` — the opponent's
     /// artifact matches ("nonland, noncreature permanent" filters are the
     /// canonical Non shape), a legal control target (CR 613.1b, Layer 2). The
-    /// guard must treat `Non(Land)` as able to match a permanent; the old
-    /// catch-all vetoed every Non shape, including "noncreature permanent"
-    /// control lines. Guards round-3 review LOW #2 (filter-shape coverage).
+    /// guard must treat `Non(Land)` as able to match a permanent; the catch-all
+    /// vetoed every Non shape, including "noncreature permanent" control lines.
     #[test]
     fn can_kill_fails_open_on_non_land_gain_control_target() {
         let mut state = make_state();
@@ -1198,9 +1196,8 @@ mod tests {
     /// The control half targets "a permanent, or a player" via a TargetFilter
     /// level `Or` — the opponent's artifact satisfies the permanent alternative
     /// (CR 613.1b, Layer 2). The guard must walk `TargetFilter::Or` branches;
-    /// the old `let Some(TargetFilter::Typed(..))` destructure returned `false`
-    /// for any non-Typed shape and vetoed the mixed spell. Guards round-3 review
-    /// LOW #2 (filter-shape coverage).
+    /// the `let Some(TargetFilter::Typed(..))` destructure returned `false`
+    /// for any non-Typed shape and vetoed the mixed spell.
     #[test]
     fn can_kill_fails_open_on_or_filter_gain_control_target() {
         let mut state = make_state();

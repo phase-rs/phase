@@ -212,8 +212,7 @@ fn prefers_removing_larger_creature() {
     );
 }
 
-/// Reproduction for a reported Slash of Light misplay (2026-07-30): with a
-/// single 2/1 creature and no Equipment on board, Slash of Light deals 1
+/// With a single 2/1 creature and no Equipment on board, Slash of Light deals 1
 /// damage — non-lethal on a 3/3 — so casting it at a 3/3 wastes the removal
 /// spell. The AI should NOT commit the cast in this situation.
 ///
@@ -276,12 +275,9 @@ fn does_not_cast_slash_of_light_for_nonlethal_damage() {
     // passing.
     //
     // Medium is deliberately NOT asserted here: at difficulty Medium the cast
-    // decision goes through the search path which (pre-existing, unrelated to
-    // this fix) projects casting Slash of Light as a ~WIN_SCORE (10000) line
-    // whether or not the whiff penalty is applied — a search/terminal-eval
-    // artifact orthogonal to the cast-commit whiff guard. Out of scope for this
-    // change due to a pre-existing search/terminal-evaluation artifact at Medium
-    // difficulty.
+    // decision goes through the search path which projects casting Slash of Light
+    // as a ~WIN_SCORE (10000) line whether or not the whiff penalty is applied —
+    // a search/terminal-eval artifact orthogonal to the cast-commit whiff guard.
     for diff in [
         AiDifficulty::Easy,
         AiDifficulty::Hard,
