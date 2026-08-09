@@ -16412,6 +16412,7 @@ impl Effect {
             | Effect::TurnFaceUp { .. }
             | Effect::UnattachAll { .. }
             | Effect::Unsuspect { .. }
+            | Effect::ReproduceEventCounters { .. }
             | Effect::WinTheGame { .. } => false,
         }
     }
