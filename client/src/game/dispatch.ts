@@ -837,6 +837,9 @@ async function processRemoteUpdateInner(
     useUiStore.getState().flashTurnBanner(bannerText, turnNumber);
   }
 
+  flashInGameRolls(events);
+  flashCompletedScry(events);
+
   // 3. Normalize events into animation steps
   const pacingMultipliers = usePreferencesStore.getState().pacingMultipliers;
   const steps = normalizeEvents(events, { pacingMultipliers });
