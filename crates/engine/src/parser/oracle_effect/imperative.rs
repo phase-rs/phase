@@ -8955,8 +8955,8 @@ pub(super) fn parse_exile_ast(
 }
 
 pub(super) fn that_player_library_filter(ctx: &ParseContext) -> TargetFilter {
-    // CR 303.4b + CR 608.2k: "attack enchanted player" trigger scope resolves
-    // "that player's"/"their library" to the enchanted (attached) player — the
+    // "Attack enchanted player" trigger scope resolves "that player's"/"their
+    // library" to the defender captured at attack declaration — the
     // shared single-authority binding (`enchanted_player_anaphor_filter`) so this
     // resolver stays complete for the whole curse class, not just the subject
     // verb forms handled in subject.rs.

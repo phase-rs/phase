@@ -8112,8 +8112,8 @@ fn resolve_player_anaphor_damage_recipient(
     if !is_player_anaphor {
         return None;
     }
-    // CR 303.4b + CR 608.2k: "attack enchanted player" trigger scope resolves a
-    // bare "them"/"they" damage recipient to the enchanted (attached) player — the
+    // "Attack enchanted player" trigger scope resolves a bare "them"/"they" damage
+    // recipient to the defender captured at attack declaration — the
     // shared single-authority binding (`enchanted_player_anaphor_filter`) so this
     // resolver stays complete for the whole curse class (e.g. "~ deals 2 damage to
     // them"), not just the subject verb forms handled in subject.rs.

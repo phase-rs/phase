@@ -10,8 +10,8 @@
 //! The fix routes the clause through the shared "attacks enchanted player"
 //! grammar (`Attacks` mode, `valid_source = Controller`,
 //! `valid_target = AttachedTo`, `attack_target_filter = Player`) and binds the
-//! "that player" anaphor to the enchanted (attached) player via
-//! `TargetFilter::AttachedTo`.
+//! "that player" anaphor to the defender captured at attack declaration via
+//! `TargetFilter::DefendingPlayer`.
 //!
 //! These tests drive the real combat pipeline (declare attackers → attack
 //! trigger onto the stack → resolve). Combat damage is isolated out by clearing
@@ -19,11 +19,6 @@
 //! `attack_qualifier_stack_conditions.rs`), so the asserted life deltas come
 //! solely from the resolved trigger.
 //!
-//! CR references:
-//!   - CR 303.4b: the player an Aura is attached to is the enchanted player;
-//!     resolved at runtime via `TargetFilter::AttachedTo`.
-//!   - CR 508.1a: the active player chooses which creatures attack.
-
 use engine::game::effects::attach::attach_to_player;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -77,8 +72,8 @@ fn resolve_trigger_only(runner: &mut GameRunner) {
 }
 
 /// Build a 3-player game where P0 controls Archnemesis enchanting P1. Returns
-/// the runner and the attacking creature's object id.
-fn setup(attacker_controller: PlayerId) -> (GameRunner, ObjectId) {
+/// the runner, attacking creature, and Aura object ids.
+fn setup(attacker_controller: PlayerId) -> (GameRunner, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
 
@@ -102,7 +97,7 @@ fn setup(attacker_controller: PlayerId) -> (GameRunner, ObjectId) {
     attach_to_player(runner.state_mut(), curse_id, P1);
     evaluate_layers(runner.state_mut());
     reindex_object_triggers(runner.state_mut(), curse_id);
-    (runner, attacker)
+    (runner, attacker, curse_id)
 }
 
 /// NAMED FIX: P0 (controller) attacks P1 (the enchanted player). The enchanted
@@ -111,7 +106,7 @@ fn setup(attacker_controller: PlayerId) -> (GameRunner, ObjectId) {
 /// player was untouched — so both life assertions flip on revert.
 #[test]
 fn archnemesis_drains_enchanted_player_when_controller_attacks_it() {
-    let (mut runner, attacker) = setup(P0);
+    let (mut runner, attacker, _) = setup(P0);
 
     let p0_life = life(&runner, P0);
     let p1_life = life(&runner, P1);
@@ -140,6 +135,35 @@ fn archnemesis_drains_enchanted_player_when_controller_attacks_it() {
     );
 }
 
+/// The player named by "that player" is fixed when attackers are declared.
+/// Moving the Aura before its trigger resolves must not retarget the life loss.
+#[test]
+fn archnemesis_keeps_the_declared_defender_when_the_aura_moves() {
+    let (mut runner, attacker, curse) = setup(P0);
+
+    let p1_life = life(&runner, P1);
+    let p2_life = life(&runner, P2);
+
+    hand_turn_to(&mut runner, P0);
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+        .expect("declaring an attack on the enchanted player should succeed");
+
+    attach_to_player(runner.state_mut(), curse, P2);
+    resolve_trigger_only(&mut runner);
+
+    assert_eq!(
+        life(&runner, P1),
+        p1_life - 2,
+        "the defender captured at attack declaration loses life"
+    );
+    assert_eq!(
+        life(&runner, P2),
+        p2_life,
+        "moving the Aura before resolution must not retarget the trigger"
+    );
+}
+
 /// DEFENDER SCOPE: P0 attacks P2, a player who is NOT enchanted. The trigger
 /// must not fire — no draw, no life change. Before the fix (bare `YouAttack`,
 /// no defender scope) the trigger fired on any attack by P0, so the controller
@@ -147,7 +171,7 @@ fn archnemesis_drains_enchanted_player_when_controller_attacks_it() {
 /// proves the trigger *can* fire, so this negative is non-vacuous.
 #[test]
 fn archnemesis_no_effect_when_controller_attacks_non_enchanted_player() {
-    let (mut runner, attacker) = setup(P0);
+    let (mut runner, attacker, _) = setup(P0);
 
     let p0_life = life(&runner, P0);
     let p1_life = life(&runner, P1);
@@ -180,7 +204,7 @@ fn archnemesis_no_effect_when_controller_attacks_non_enchanted_player() {
 /// positive test above is the paired reach-guard.
 #[test]
 fn archnemesis_does_not_fire_when_non_controller_attacks_enchanted_player() {
-    let (mut runner, attacker) = setup(P2);
+    let (mut runner, attacker, _) = setup(P2);
 
     let p0_life = life(&runner, P0);
     let p1_life = life(&runner, P1);

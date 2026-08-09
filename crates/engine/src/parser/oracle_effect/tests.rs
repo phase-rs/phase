@@ -49966,25 +49966,25 @@ fn glen_elendras_answer_counter_all_conjunction_parses_single_or() {
     );
 }
 
-/// CR 303.4b + CR 608.2k: the `EnchantedPlayer` relative-player scope produced by
-/// an "attack enchanted player" trigger must bind a bare player anaphor to the
-/// enchanted (attached) player uniformly across every "that player"/"them"
+/// The `EnchantedPlayer` relative-player scope produced by an "attack enchanted
+/// player" trigger must bind a bare player anaphor to the defender captured at
+/// attack declaration uniformly across every "that player"/"them"
 /// resolver. `enchanted_player_anaphor_filter` is the single authority; this
-/// pins that it maps `EnchantedPlayer → AttachedTo` and nothing else, and that
+/// pins that it maps `EnchantedPlayer → DefendingPlayer` and nothing else, and that
 /// the library-owner sibling resolver (`that_player_library_filter`, the sibling
 /// of the subject.rs and damage-recipient resolvers) consults it — so "that
-/// player's library" in this trigger class owns the enchanted player's library,
-/// not the attacker's. Building-block guard for a latent class (no shipping card
-/// uses the library body yet).
+/// player's library" in this trigger class belongs to that attacked player, not
+/// the attacker. Building-block guard for a latent class (no shipping card uses
+/// the library body yet).
 #[test]
 fn enchanted_player_anaphor_binding_is_shared_across_resolvers() {
     use crate::parser::oracle_ir::context::ParseContext;
     use crate::types::ability::{ControllerRef, TargetFilter};
 
-    // Shared authority: EnchantedPlayer → AttachedTo; every other scope → None.
+    // Shared authority: EnchantedPlayer → DefendingPlayer; every other scope → None.
     assert_eq!(
         super::subject::enchanted_player_anaphor_filter(Some(&ControllerRef::EnchantedPlayer)),
-        Some(TargetFilter::AttachedTo)
+        Some(TargetFilter::DefendingPlayer)
     );
     assert_eq!(
         super::subject::enchanted_player_anaphor_filter(Some(&ControllerRef::TriggeringPlayer)),
@@ -49999,8 +49999,8 @@ fn enchanted_player_anaphor_binding_is_shared_across_resolvers() {
     };
     assert_eq!(
         super::imperative::that_player_library_filter(&ctx),
-        TargetFilter::AttachedTo,
-        "'that player's library' under an attack-enchanted-player scope must own the enchanted player's library"
+        TargetFilter::DefendingPlayer,
+        "'that player's library' under an attack-enchanted-player scope must use the captured defender"
     );
 }
 

@@ -994,10 +994,10 @@ fn condition_introduces_defending_player(cond_lower: &str) -> bool {
 /// CR 303.4b + CR 508.1a: "[actor] attack[s] enchanted player" names
 /// the Aura's attached player as the trigger's referenced defender, so a later
 /// bare "that player"/"the player" anaphor in the effect body binds to the
-/// enchanted player. Sibling of `condition_introduces_defending_player`; the
-/// distinction is the specific "enchanted player" referent (`AttachedTo`), which
-/// must resolve to the specific attached host rather than the generic combat
-/// defending player. The actor prefix is optional (matched via
+/// defender captured at attack declaration. Sibling of
+/// `condition_introduces_defending_player`; `AttachedTo` remains the trigger-time
+/// match constraint while the body uses the generic combat defender. The actor
+/// prefix is optional (matched via
 /// `parse_trigger_actor` with an `unwrap_or` fallback) so "a creature attacks
 /// enchanted player" is covered by the bare-verb form, exactly as the second
 /// branch of `condition_introduces_defending_player`.
@@ -1244,10 +1244,10 @@ pub(crate) fn relative_player_scope_for_condition(cond_lower: &str) -> Option<Co
     } else if condition_introduces_damage_source_controller_player(cond_lower) {
         Some(ControllerRef::ParentTargetController)
     } else if condition_introduces_enchanted_player(cond_lower) {
-        // CR 303.4b: "that player" after "attack enchanted player" is
-        // the enchanted (attached) player, resolved via `TargetFilter::AttachedTo`
-        // (subject.rs). Placed before the generic defending-player arm so the
-        // specific attached-host referent is never widened to `DefendingPlayer`.
+        // "That player" after "attack enchanted player" is the defender captured
+        // by the attack event, resolved via `TargetFilter::DefendingPlayer`
+        // (subject.rs). This remains distinct from `AttachedTo`, which is used
+        // only to decide whether the Aura's trigger fires.
         Some(ControllerRef::EnchantedPlayer)
     } else if condition_introduces_defending_player(cond_lower) {
         // CR 608.2c: Attack triggers use DefendingPlayer (the attacked player

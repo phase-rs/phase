@@ -2192,8 +2192,7 @@ fn parse_block_grant_duration(input: &str) -> OracleResult<'_, Option<Duration>>
 /// by an "attack[s] enchanted player" trigger condition
 /// (`relative_player_scope_for_condition`, oracle_trigger.rs) — resolves a bare
 /// player anaphor ("that player" / "them" / "they") in the effect body to the
-/// enchanted (attached) player, the Aura's host, via `TargetFilter::AttachedTo`
-/// (mirroring the literal-"enchanted player" subject mapping).
+/// defender captured by that attack event via `TargetFilter::DefendingPlayer`.
 ///
 /// Single authority for the scope→filter binding, consulted by all three parallel
 /// "that player"/"them" anaphor resolvers — `parse_subject_application` (this
@@ -2206,7 +2205,7 @@ fn parse_block_grant_duration(input: &str) -> OracleResult<'_, Option<Duration>>
 pub(super) fn enchanted_player_anaphor_filter(
     scope: Option<&ControllerRef>,
 ) -> Option<TargetFilter> {
-    matches!(scope, Some(ControllerRef::EnchantedPlayer)).then_some(TargetFilter::AttachedTo)
+    matches!(scope, Some(ControllerRef::EnchantedPlayer)).then_some(TargetFilter::DefendingPlayer)
 }
 
 /// Which player-subject anaphor a standalone "that/the player" clause names.
@@ -2214,8 +2213,8 @@ pub(super) fn enchanted_player_anaphor_filter(
 /// Both forms resolve to an event-context `TargetFilter` via
 /// `parse_event_context_ref`, and they diverge in exactly one place: on a
 /// player-attached Aura/Curse (`relative_player_scope == EnchantedPlayer`), a
-/// bare `Player` anaphor rebinds to the enchanted player (CR 303.4b — the Aura's
-/// host), while an `AttackingPlayer` anaphor always names the attacker
+/// bare `Player` anaphor rebinds to the attack event's defender, while an
+/// `AttackingPlayer` anaphor always names the attacker
 /// (CR 506.2 / CR 603.7c) and must keep its event-context filter. Carrying the
 /// distinction as a typed discriminant lets the enchanted-player guard branch on
 /// the parsed kind instead of re-matching the subject's text label.
@@ -2725,10 +2724,10 @@ pub(super) fn parse_subject_application(
                 enchanted_player_anaphor_filter(ctx.relative_player_scope.as_ref())
                     .filter(|_| matches!(subject_anaphor, PlayerSubjectAnaphor::Player))
             {
-                // CR 303.4b: a bare "that player"/"the player" anaphor
-                // in an effect body whose trigger condition names "attack enchanted
-                // player" refers to the enchanted (attached) player — the Aura's
-                // host — resolved via `AttachedTo` (the shared
+                // A bare "that player"/"the player" anaphor in an effect body whose
+                // trigger condition names "attack enchanted player" refers to the
+                // defender captured at attack declaration, resolved via
+                // `DefendingPlayer` (the shared
                 // `enchanted_player_anaphor_filter` binding). The explicit "that/the
                 // attacking player" phrases name the attacker instead, so the
                 // `PlayerSubjectAnaphor::AttackingPlayer` discriminant excludes them

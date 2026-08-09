@@ -26924,8 +26924,8 @@ fn archnemesis_you_attack_enchanted_player_drains_enchanted_player() {
     );
     assert_eq!(
         target.as_ref(),
-        Some(&TargetFilter::AttachedTo),
-        "'that player' must drain the enchanted player (AttachedTo), not the attacker"
+        Some(&TargetFilter::DefendingPlayer),
+        "'that player' must drain the captured defender, not the attacker"
     );
 
     // The "You draw a card and gain 2 life" tail stays on the controller.
@@ -26956,10 +26956,10 @@ fn archnemesis_you_attack_enchanted_player_drains_enchanted_player() {
 }
 
 #[test]
-fn attack_enchanted_player_binds_damage_to_them_to_enchanted_player() {
-    // CR 303.4b + CR 508.1a: the "attack enchanted player" trigger
+fn attack_enchanted_player_binds_damage_to_them_to_declared_defender() {
+    // The "attack enchanted player" trigger
     // class must bind a bare "them"/"they" damage recipient in the effect body to
-    // the enchanted (attached) player, not the attacker — the same enchanted-player
+    // the defender captured at attack declaration, not the attacker — the same
     // anaphor binding used for the "that player loses N life" subject form
     // (Archnemesis, above). This exercises the damage-recipient sibling resolver
     // (`resolve_player_anaphor_damage_recipient`, oracle_effect/lower.rs): before
@@ -26981,8 +26981,8 @@ fn attack_enchanted_player_binds_damage_to_them_to_enchanted_player() {
     };
     assert_eq!(
         *target,
-        TargetFilter::AttachedTo,
-        "'them' must bind to the enchanted player (AttachedTo), not the attacker"
+        TargetFilter::DefendingPlayer,
+        "'them' must bind to the captured defender, not the attacker"
     );
 }
 
