@@ -318,7 +318,6 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
     );
     for field in [
         "attacked_defenders_this_turn",
-        "attacked_defenders_last_turn",
         "creature_attacked_defenders_this_turn",
     ] {
         add_spec(
@@ -331,6 +330,15 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
             Classification::Canonical(HASH_MAP_OF_HASH_SET),
         );
     }
+    add_spec(
+        &mut specs,
+        game_state,
+        "GameState",
+        None,
+        "attacked_defenders_last_turn",
+        "Box<HashMap<HashSet>>",
+        Classification::Canonical(HASH_MAP_OF_HASH_SET),
+    );
     for field in ["objects", "attribution", "lki_cache"] {
         add_spec(
             &mut specs,
@@ -1736,7 +1744,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
     ];
     assert_eq!(
         direct_fields.len(),
-        39,
+        40,
         "private stack_trigger_firings is covered by its unit test"
     );
     for field in direct_fields {
