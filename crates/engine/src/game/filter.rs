@@ -5015,7 +5015,7 @@ fn matches_filter_prop(
         // (recorded in the source's `convoked_creatures`). Source-relative,
         // mirroring `SaddledSource`.
         FilterProp::ConvokedSource => source.convoked_creatures.contains(&object_id),
-        // CR 310.8a: "each battle they protect" — protector is an opponent of
+        // CR 310.9 + CR 310.9e: "each battle they protect" — protector is an opponent of
         // the source controller (Joyful Stormsculptor class).
         FilterProp::ProtectorMatches { controller } => {
             if !obj.card_types.core_types.contains(&CoreType::Battle) {
