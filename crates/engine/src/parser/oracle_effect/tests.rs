@@ -40985,10 +40985,20 @@ fn bare_shared_noun_counter_choice_keeps_final_comma_or_separator() {
         "Put a flying, lifelink, or +1/+1 counter on it.",
         AbilityKind::Spell,
     );
-    let Effect::ChooseOneOf { branches, .. } = &*ability.effect else {
+    assert!(matches!(
+        &*ability.effect,
+        Effect::TargetOnly {
+            target: TargetFilter::SelfRef,
+        }
+    ));
+    let choice = ability
+        .sub_ability
+        .as_deref()
+        .expect("the shared self target must lead to the counter choice");
+    let Effect::ChooseOneOf { branches, .. } = &*choice.effect else {
         panic!(
             "expected a three-way counter choice, got {:?}",
-            ability.effect
+            choice.effect
         );
     };
     assert_eq!(branches.len(), 3);
@@ -40997,7 +41007,7 @@ fn bare_shared_noun_counter_choice_keeps_final_comma_or_separator() {
         Effect::PutCounter {
             counter_type: CounterType::Keyword(KeywordKind::Lifelink),
             count: QuantityExpr::Fixed { value: 1 },
-            target: TargetFilter::SelfRef,
+            target: TargetFilter::ParentTarget,
         }
     ));
 }
