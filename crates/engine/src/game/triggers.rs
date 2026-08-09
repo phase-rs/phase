@@ -9930,14 +9930,17 @@ fn evaluate_trigger_condition_with_source(
                 GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
                 _ => None,
             });
-            match (source_id, dying_creature) {
+            match (source_context, dying_creature) {
                 // CR 400.7: match the source by ObjectId AND incarnation — a
                 // re-entered source is a new object that dealt no prior damage.
-                (Some(src), Some(subj)) => state.damage_dealt_this_turn.iter().any(|r| {
-                    r.source_id == src
-                        && damage_record_source_incarnation_matches(state, r, src)
-                        && damage_record_matches_dying_object(state, r, subj, trigger_event)
-                }),
+                (Some(source), Some(subj)) => {
+                    let source_id = source.identity.reference.object_id;
+                    state.damage_dealt_this_turn.iter().any(|r| {
+                        r.source_id == source_id
+                            && damage_record_source_incarnation_matches(r, source)
+                            && damage_record_matches_dying_object(state, r, subj, trigger_event)
+                    })
+                }
                 _ => false,
             }
         }
@@ -10749,29 +10752,20 @@ pub(crate) fn check_trigger_condition(
 /// not a later object reusing the same storage id. Death bumps the live
 /// incarnation, and the card can move again before an intervening-if recheck,
 /// so subtract the death move and every subsequent move of that object.
-/// CR 400.7: True when `record`'s source is the SAME incarnation of `source_id`
-/// that is asking now. A permanent that dealt damage, left, and re-entered keeps
-/// its `ObjectId` but bumps its incarnation, so the current object is a NEW
-/// object (CR 400.7) that did not deal the recorded damage; exact-source
-/// look-backs must reject it. `None` recorded incarnation is lenient (legacy
-/// records / fixtures). A recorded incarnation with no live source object is
-/// rejected: the asking incarnation cannot be confirmed identical. Unlike the
-/// dying-object helper this needs no later-move arithmetic — the source of a
-/// dies-trigger intervening-if (e.g. Hawkeye) is a bystander still on the
-/// battlefield, not the object mid-zone-change.
+/// CR 400.7: True when `record`'s source matches the trigger source's observed
+/// incarnation. The observation, rather than a later live object lookup, is
+/// authoritative: a source may die alongside the damaged creature (Rot Wolf),
+/// while a re-entered source is a distinct object. `None` recorded incarnation
+/// is lenient for legacy records and fixtures.
 fn damage_record_source_incarnation_matches(
-    state: &GameState,
     record: &DamageRecord,
-    source_id: ObjectId,
+    source_context: &TriggerSourceContext,
 ) -> bool {
-    let Some(recorded_incarnation) = record.source_incarnation else {
-        return true;
-    };
-    state
-        .objects
-        .get(&source_id)
-        .map(|object| object.incarnation)
-        == Some(recorded_incarnation)
+    record
+        .source_incarnation
+        .is_none_or(|recorded_incarnation| {
+            source_context.identity.reference.incarnation == recorded_incarnation
+        })
 }
 
 pub(crate) fn damage_record_matches_dying_object(
@@ -21445,9 +21439,24 @@ pub mod tests {
             Some(&event),
         ));
 
+        let prior_source_context = trigger_source_context_for_latch(
+            &state,
+            state.objects.get(&source).expect("source exists"),
+        );
+
         // CR 400.7: the source leaves and re-enters (same ObjectId, bumped
         // incarnation). The stale record must no longer credit the new object.
         state.objects.get_mut(&source).unwrap().bump_incarnation();
+        assert!(
+            check_trigger_condition_with_source(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(&prior_source_context),
+                Some(&event),
+            ),
+            "the prior source context must still receive its own damage trigger"
+        );
         assert!(
             !check_trigger_condition(&state, &condition, PlayerId(0), Some(source), Some(&event),),
             "a re-entered source (bumped incarnation) must not match a prior \
