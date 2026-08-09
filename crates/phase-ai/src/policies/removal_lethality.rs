@@ -912,7 +912,10 @@ mod tests {
     /// `DestroyAll` half (CR 701.8) is an independent, useful mass-removal
     /// line. `extract_target_filter` surfaces `DestroyAll`'s population filter
     /// and the cast-commit gate resolves it against the real opposing
-    /// population (the 3/3) via `find_legal_targets`.
+    /// population (the 3/3) through the resolver-mirroring mass path
+    /// (`mass_effect_has_opposing_population` — battlefield population matched
+    /// with `matches_target_filter`, CR 115.10a; DestroyAll is non-targeted),
+    /// not via `find_legal_targets`, which gates target legality.
     #[test]
     fn can_kill_fails_open_on_mixed_damage_and_destroy_all() {
         let mut state = make_state();
@@ -974,9 +977,10 @@ mod tests {
         assert!(
             can_kill_any_legal_target(&ctx),
             "mixed deal-1 + destroy-all must fail open: `DestroyAll` (CR 701.8) \
-             resolves a real opposing population (the 3/3) through \
-             `find_legal_targets`, so the spell is not a total whiff even though \
-             1 damage alone cannot kill the 3/3"
+             resolves a real opposing population (the 3/3) through the \
+             resolver-mirroring mass population path \
+             (`mass_effect_has_opposing_population`, CR 115.10a), so the spell \
+             is not a total whiff even though 1 damage alone cannot kill the 3/3"
         );
     }
 
