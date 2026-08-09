@@ -119,6 +119,11 @@ describe("useCardImage", () => {
       findPrintingById: vi.fn(),
       getCardPrintings: vi.fn().mockResolvedValue([]),
       isCardImageRotatedSync: vi.fn().mockReturnValue(false),
+      // Report the art locale as already resolved so the hook's background
+      // loader short-circuits — this test is about token fallback, not
+      // localization.
+      isLocaleArtReady: vi.fn().mockReturnValue(true),
+      loadLocaleArt: vi.fn().mockResolvedValue(new Map()),
       resolveFaceIndexSync: vi.fn().mockReturnValue(null),
       resolveOracleIdSync: vi.fn().mockReturnValue(null),
       resolvePrintingImageUrl: vi.fn(),
@@ -166,6 +171,10 @@ describe("useCardImage", () => {
       getCardPrintings: vi.fn().mockResolvedValue([]),
       isCardImageFlipLayoutSync: vi.fn().mockReturnValue(false),
       isCardImageRotatedSync: vi.fn().mockReturnValue(false),
+      // See the note on the token-fallback mock above: the art locale is
+      // reported ready so the background loader never runs here.
+      isLocaleArtReady: vi.fn().mockReturnValue(true),
+      loadLocaleArt: vi.fn().mockResolvedValue(new Map()),
       pickOldestPrinting: vi.fn(),
       resolveFaceIndexSync: vi.fn().mockReturnValue(null),
       resolveOracleIdSync: vi.fn().mockReturnValue(null),

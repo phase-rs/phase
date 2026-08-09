@@ -848,25 +848,22 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         // for just this token. `flush_layers` escalates to a full pass when
         // the copied object sources a continuous effect, carries a CDA, etc.
         crate::game::layers::mark_layers_entered(state, token_id);
-        crate::game::restrictions::record_battlefield_entry(state, token_id);
         crate::game::restrictions::record_token_created(state, token_id);
 
-        let zone_change_record = state
-            .objects
-            .get(&token_id)
-            .expect("token just created")
-            .snapshot_for_zone_change(token_id, None, Zone::Battlefield);
-        events.push(GameEvent::ZoneChanged {
-            object_id: token_id,
-            from: None,
-            to: Zone::Battlefield,
-            record: Box::new(zone_change_record),
-        });
-        events.push(GameEvent::TokenCreated {
-            object_id: token_id,
-            name: name.clone(),
+        // CR 400.7 + CR 608.2i + CR 603.2c: route the record and the entry pair through the single
+        // `from: None → Battlefield` authority so the emitted `ZoneChanged` carries this turn's
+        // real zone-change index instead of the `0` placeholder. The authority performs the
+        // CR 608.2i battlefield-entry bookkeeping itself, so the co-located
+        // `record_battlefield_entry` call is deleted — keeping it would double-count
+        // `battlefield_entries_this_turn`.
+        super::token::push_committed_token_entry_events(
+            state,
+            token_id,
+            name.clone(),
             source_id,
-        });
+            events,
+        )
+        .expect("token just created");
         created_ids.push(token_id);
     }
 
@@ -966,26 +963,28 @@ pub(crate) fn apply_remaining_token_modifications_after_counter_pause(
     }
     super::token::inject_predefined_token_abilities(state, token_id);
     crate::game::layers::mark_layers_entered(state, token_id);
-    crate::game::restrictions::record_battlefield_entry(state, token_id);
     crate::game::restrictions::record_token_created(state, token_id);
-    if let Some(token) = state.objects.get(&token_id) {
-        let zone_change_record = token.snapshot_for_zone_change(token_id, None, Zone::Battlefield);
-        events.push(GameEvent::ZoneChanged {
-            object_id: token_id,
-            from: None,
-            to: Zone::Battlefield,
-            record: Box::new(zone_change_record),
-        });
-    }
-    events.push(GameEvent::TokenCreated {
-        object_id: token_id,
-        name,
-        source_id,
-    });
-    state.last_created_token_ids.push(token_id);
-    if let Some(pending) = state.active_copy_token_mut() {
-        pending.created_ids.push(token_id);
-    }
+    // CR 400.7 + CR 608.2i + CR 603.2c: route the record and the entry pair through the single
+    // `from: None → Battlefield` authority so the emitted `ZoneChanged` carries this turn's real
+    // zone-change index instead of the `0` placeholder. The authority performs the CR 608.2i
+    // battlefield-entry bookkeeping itself, so the co-located `record_battlefield_entry` call is
+    // deleted — keeping it would double-count `battlefield_entries_this_turn`.
+    //
+    // OBJECT-GONE: one of four counter-pause / deferred resume routes with this shape, all covered
+    // by the same predicate inside `push_committed_token_entry_events` — it gates `TokenCreated` on
+    // the authority's `None` verdict, so a vanished token cannot put a live creation event on the
+    // wire with no `created_tokens_this_turn` row behind it. MEASURED with the predicate deleted,
+    // token removed: `(TokenCreated=1, created_tokens_this_turn=0, last_created_token_ids=1)` —
+    // exactly the disagreement
+    // `a_vanished_counter_paused_token_reports_neither_creation_event_nor_ledger_row` forbids. The
+    // anaphora slot below carries the SAME predicate through
+    // `record_last_created_copy_batch_token`, which is the third ledger of the triple; without it
+    // the gone path reads `(0, 0, 1)`. That call owns BOTH of the slot's destinations — ledger 3
+    // and this batch's `created_ids`, which `drain_pending_copy_token_resolution` assigns wholesale
+    // back onto ledger 3 — because a separate buffer push republished the withheld id and clobbered
+    // the guarded list on top of it.
+    super::token::push_committed_token_entry_events(state, token_id, name, source_id, events);
+    super::token::record_last_created_copy_batch_token(state, token_id);
     true
 }
 
@@ -1857,7 +1856,7 @@ mod tests {
         assert!(events.iter().any(
             |e| matches!(e, GameEvent::TokenCreated { name, .. } if name == "Mist-Syndicate Naga")
         ));
-        // Verify record_battlefield_entry and record_token_created were called
+        // Verify record_token_created was called
         assert!(
             state
                 .players_who_created_token_this_turn

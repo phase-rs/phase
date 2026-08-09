@@ -66,6 +66,23 @@ fn with_draft_mut<R>(
     })
 }
 
+/// Preserve Limited-deck validation details across the WASM boundary so the
+/// deck builder can tell the player what needs correction.
+fn deck_submission_message(error: DraftError) -> String {
+    match error {
+        DraftError::ValidationFailed { errors } => errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; "),
+        error => error.to_string(),
+    }
+}
+
+fn deck_submission_error(error: DraftError) -> JsValue {
+    JsValue::from_str(&deck_submission_message(error))
+}
+
 /// Map a u8 difficulty value to AiDifficulty.
 /// Per T-55-02: clamp to 0..=4, default to Medium for out-of-range.
 fn map_difficulty(val: u8) -> AiDifficulty {
@@ -436,7 +453,7 @@ pub fn submit_deck(main_deck_json: &str) -> Result<JsValue, JsValue> {
             DraftAction::SubmitDeck { seat: 0, main_deck },
             None,
         )
-        .map_err(|e| JsValue::from_str(&format!("Deck submission failed: {}", e)))?;
+        .map_err(deck_submission_error)?;
 
         Ok(to_js(&filter_for_player(session, 0)))
     })
@@ -613,9 +630,8 @@ pub fn submit_deck_for_seat(seat: u8, main_deck_json: &str) -> Result<JsValue, J
         .map_err(|e| JsValue::from_str(&format!("Failed to parse deck: {e}")))?;
 
     with_draft_mut(|session| {
-        session::apply(session, DraftAction::SubmitDeck { seat, main_deck }, None).map_err(
-            |e| JsValue::from_str(&format!("Deck submission failed for seat {seat}: {e}")),
-        )?;
+        session::apply(session, DraftAction::SubmitDeck { seat, main_deck }, None)
+            .map_err(deck_submission_error)?;
 
         Ok(to_js(&filter_for_player(session, seat)))
     })
@@ -989,6 +1005,18 @@ pub fn get_draft_status() -> Result<JsValue, JsValue> {
 #[cfg(test)]
 mod pool_input_tests {
     use super::*;
+    use draft_core::validation::LimitedDeckError;
+
+    #[test]
+    fn deck_submission_message_includes_validation_details() {
+        let message = deck_submission_message(DraftError::ValidationFailed {
+            errors: vec![LimitedDeckError::NotInPool {
+                name: "Watery Grave".to_string(),
+            }],
+        });
+
+        assert_eq!(message, "card 'Watery Grave' is not in the drafted pool");
+    }
 
     #[test]
     fn pool_input_set_round_trip() {

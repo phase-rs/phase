@@ -221,42 +221,18 @@ fn tchaka_monarch_activation_gated_on_owning_commander() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// `ControlsCommander { ownership: Any }` — the any-owner sibling of T'Chaka's
-// owner-scoped `Own` gate. T'Chaka only exercises `Own`; this drives the `Any`
-// evaluator (`game::commander::controls_any_commander`) through the real cast
-// pipeline via Deadly Rollick's commander free-cast.
-// ---------------------------------------------------------------------------
-
-/// Deadly Rollick, verbatim Oracle text. "If you control a commander" is
-/// any-owner (CR 903.3d), so its free-cast permission lowers to
-/// `ParsedCondition::ControlsCommander { ownership: Any }` — distinct from
-/// T'Chaka's owner-scoped "your commander".
 const DEADLY_ROLLICK_ORACLE: &str =
     "If you control a commander, you may cast this spell without paying its mana cost.\nExile target creature.";
 
 const DEADLY_ROLLICK_NAME: &str = "Deadly Rollick";
 
-/// Where the caster's commander sits for the `Any` free-cast tests.
 #[derive(Clone, Copy)]
 enum AnyCommanderSetup {
-    /// Own commander on the battlefield — `controls_any_commander` true. The
-    /// positive reach-guard proving the free-cast path is live.
     OwnOnBattlefield,
-    /// A STOLEN opponent's commander on the battlefield: owned by P1, controlled by
-    /// P0. `controls_any_commander` is true (any-owner) even though
-    /// `controls_own_commander` is false — the discriminator that Deadly Rollick's
-    /// gate delegates to the any-owner evaluator, NOT the owner-scoped one.
     StolenOnBattlefield,
-    /// No commander anywhere — `controls_any_commander` false.
     NoCommander,
 }
 
-/// Deadly Rollick (`{3}{B}`) in P0's hand with an EMPTY mana pool, so it is
-/// castable ONLY via the commander free-cast. A vanilla creature (`Bystander`,
-/// controlled by P1) is always on the battlefield as the legal "Exile target
-/// creature" target, so castability turns on the commander gate alone — never on
-/// target availability. Returns `(runner, deadly_rollick_id, bystander_id)`.
 fn deadly_rollick_scenario(setup: AnyCommanderSetup) -> (GameRunner, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -268,11 +244,8 @@ fn deadly_rollick_scenario(setup: AnyCommanderSetup) -> (GameRunner, ObjectId, O
             generic: 3,
         })
         .id();
-
-    // Always-present legal target so "Exile target creature" never gates casting.
     let bystander = scenario.add_creature(P1, "Bystander", 1, 1).id();
 
-    // No `with_mana_pool`: the printed {3}{B} is unpayable, isolating the free cast.
     let battlefield_commander = match setup {
         AnyCommanderSetup::OwnOnBattlefield | AnyCommanderSetup::StolenOnBattlefield => {
             Some(scenario.add_creature(P0, "Regal Vanguard", 3, 3).id())
@@ -281,104 +254,60 @@ fn deadly_rollick_scenario(setup: AnyCommanderSetup) -> (GameRunner, ObjectId, O
     };
 
     let mut runner = scenario.build();
-
-    if let Some(cmd) = battlefield_commander {
-        let obj = runner
+    if let Some(commander) = battlefield_commander {
+        let commander = runner
             .state_mut()
             .objects
-            .get_mut(&cmd)
+            .get_mut(&commander)
             .expect("commander object exists");
-        obj.is_commander = true;
+        commander.is_commander = true;
         if matches!(setup, AnyCommanderSetup::StolenOnBattlefield) {
-            // Controlled by P0 (from add_creature) but owned by P1: it is P1's
-            // commander that P0 controls — satisfies "a commander", not "your
-            // commander".
-            obj.owner = P1;
+            commander.owner = P1;
         }
     }
 
     (runner, rollick, bystander)
 }
 
-/// Whether the candidate generator offers casting `spell` right now — via the
-/// ordinary `CastSpell` surface (reached through the free alternative cost with an
-/// empty pool) or the dedicated `CastSpellForFree`.
-fn cast_offered(runner: &GameRunner, spell: ObjectId) -> bool {
-    legal_actions(runner.state()).iter().any(|a| {
+fn ordinary_cast_offered(runner: &GameRunner, spell: ObjectId) -> bool {
+    legal_actions(runner.state()).iter().any(|action| {
         matches!(
-            a,
-            GameAction::CastSpell { object_id, .. }
-                | GameAction::CastSpellForFree { object_id, .. }
-            if *object_id == spell
+            action,
+            GameAction::CastSpell { object_id, .. } if *object_id == spell
         )
     })
 }
 
-/// CR 903.3d: "If you control a commander" (Deadly Rollick) is any-owner — the
-/// `ControlsCommander { ownership: Any }` gate. With an empty pool the spell is
-/// castable ONLY when that free-cast condition holds, so the offered/withheld cast
-/// candidate is a direct production probe of the `Any` evaluator. This guards the
-/// offer surface at both ends; the full free-cast → target → resolve pipeline for
-/// the discriminating stolen case is exercised by
-/// `deadly_rollick_stolen_commander_free_cast_resolves_and_exiles_target`.
 #[test]
-fn deadly_rollick_free_cast_offer_gated_on_controlling_any_commander() {
-    // (a) POSITIVE reach-guard: own commander on the battlefield → offered. Proves
-    // the free-cast path is live so the negative case below is not vacuous.
-    let (runner, rollick, _bystander) =
-        deadly_rollick_scenario(AnyCommanderSetup::OwnOnBattlefield);
+fn deadly_rollick_ordinary_cast_offer_requires_controlling_any_commander() {
+    let (runner, rollick, _) = deadly_rollick_scenario(AnyCommanderSetup::OwnOnBattlefield);
     assert!(
-        cast_offered(&runner, rollick),
-        "own commander on the battlefield: the commander free cast must be offered \
-         (empty pool, so the printed {{3}}{{B}} is unpayable)"
+        ordinary_cast_offered(&runner, rollick),
+        "an owned commander must enable the ordinary CastSpell offer with an empty mana pool"
     );
 
-    // (b) NEGATIVE: no commander controlled. With an empty pool the printed cost is
-    // unpayable and the free cast is gated off, so no cast candidate is offered.
-    let (runner, rollick, _bystander) = deadly_rollick_scenario(AnyCommanderSetup::NoCommander);
+    let (runner, rollick, _) = deadly_rollick_scenario(AnyCommanderSetup::NoCommander);
     assert!(
-        !cast_offered(&runner, rollick),
-        "no commander controlled: with an empty pool the spell must not be castable"
+        !ordinary_cast_offered(&runner, rollick),
+        "without a commander, Deadly Rollick's unpayable printed cost must not be offered"
     );
 }
 
-/// CR 903.3d + CR 118.9: the DISCRIMINATOR, driven all the way through resolution.
-/// P0 controls ONLY a stolen opponent's commander (owned by P1). `Any` is
-/// any-owner, so Deadly Rollick's "cast without paying its mana cost" is legal;
-/// this is the any-owner counterpart to
-/// `tchaka_monarch_activation_gated_on_owning_commander`, where the same stolen
-/// commander is REJECTED by the owner-scoped gate.
-///
-/// The pool is EMPTY, so the spell can reach the stack ONLY via the free cast —
-/// resolving it and exiling the Bystander proves the whole alternative-cost →
-/// target → resolve path actually runs, not merely that a cast action was listed.
-/// A regression that broke the `Any` evaluator, the free-cast application, target
-/// binding, or resolution would leave the Bystander on the battlefield here.
 #[test]
-fn deadly_rollick_stolen_commander_free_cast_resolves_and_exiles_target() {
+fn deadly_rollick_stolen_commander_enables_ordinary_free_cast_and_resolution() {
     let (mut runner, rollick, bystander) =
         deadly_rollick_scenario(AnyCommanderSetup::StolenOnBattlefield);
-
-    // Reach-guard: the free cast is the ONLY way this is castable (empty pool).
     assert!(
-        cast_offered(&runner, rollick),
-        "stolen commander: the any-owner free cast must be offered before resolving"
+        ordinary_cast_offered(&runner, rollick),
+        "a controlled opponent-owned commander must enable the ordinary CastSpell offer"
     );
 
-    // CR 118.9 + CR 601.2b: the "cast without paying its mana cost" permission is
-    // offered as the alternative-cost choice (accept = free cast, decline = pay the
-    // printed {3}{B}). `.accept_optional()` takes the free cast; `.target_object`
-    // binds the "Exile target creature" target before the spell hits the stack.
     let outcome = runner
         .cast(rollick)
         .accept_optional()
         .target_object(bystander)
         .resolve();
 
-    // CR 608.2d: "Exile target creature" resolves — the Bystander leaves the
-    // battlefield for exile, proving the free cast was taken, the target bound, and
-    // the spell resolved. (Owner-scoped `controls_own_commander` would have made the
-    // spell uncastable for free with an empty pool, so it could never reach here.)
     outcome.assert_zone(&[bystander], Zone::Exile);
 }
 

@@ -738,8 +738,10 @@ pub(crate) fn move_object_with_terminal(
             .get(&req.object_id)
             .expect("object exists (zone read above)");
         // CR 111.8: A token that has left the battlefield can't change zones; it
-        // remains in place and ceases to exist at the next SBA (CR 111.7).
-        if zones::token_is_outside_battlefield_and_stack(obj) {
+        // remains in place and ceases to exist at the next SBA (CR 111.7). An
+        // exact CR 601.2a pending spell plus its announcement placeholder makes
+        // the retained-origin representation stack-resident until this delivery.
+        if zones::token_is_outside_battlefield_and_stack(state, obj) {
             return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
         }
         // CR 603.2g + CR 603.6a: A Battlefield -> Battlefield move does not put a
@@ -776,18 +778,19 @@ pub(crate) fn move_object_with_terminal(
     // requested index and the tail's auto-shuffle is suppressed (CR 701.24a: a
     // placement is not a shuffle).
     //
-    // Phase E tranche 2: 11 raw library-position callers still bypass this consult
-    // by calling `zones::move_to_library_position` / `move_to_library_at_index`
-    // directly instead of routing through `move_object`'s placement arm. They are:
-    //   - engine_resolution_choices.rs (×5)
-    //   - reveal_until.rs:~400 (`shuffle_to_bottom`)
-    //   - drawn_this_turn_choice.rs:~114
-    //   - discover.rs:~103 (put-back of unhit cards)
-    //   - put_on_top.rs:~153 / ~158
-    //   - cascade.rs:~154 (bottom-in-random-order)
-    // Migrating each onto this arm is a guaranteed no-op today (zero pool
-    // `Moved` defs target the library) but pins the redirect consult for the
-    // future. Re-verify the census before lifting:
+    // Phase E tranche 2: six production raw library-position callers still bypass
+    // this consult by calling `zones::move_to_library_position` /
+    // `move_to_library_at_index` directly instead of routing through
+    // `move_object`'s placement arm. They are:
+    //   - engine_resolution_choices.rs: clash return (~2989)
+    //   - engine_resolution_choices.rs: EffectZoneChoice bottom placement (~7260)
+    //   - engine_resolution_choices.rs: EffectZoneChoice top/Nth placement (~7272)
+    //   - engine_resolution_choices.rs: EffectZoneChoice mixed-source reorder (~7333)
+    //   - zone_pipeline.rs: exempt library-placement delivery (~821)
+    //   - zone_pipeline.rs: replacement delivery placement (~2353)
+    // Migrating each onto this arm is a production no-op today (the only
+    // `Moved` definition targeting the library is test-only) but pins the
+    // redirect consult for the future. Re-verify the census before lifting:
     //   rg -o 'destination_zone\(Zone::\w+\)' crates/engine/src | sort | uniq -c
     if let Some(position) = req.placement.clone() {
         if req.to == Zone::Library {
@@ -2155,6 +2158,7 @@ pub(crate) fn deliver_replaced_zone_change(
         controller_override: ctrl_override,
         face_down_profile,
         enter_as_copy,
+        discard_frame,
         applied,
         ..
     } = event
@@ -2167,6 +2171,19 @@ pub(crate) fn deliver_replaced_zone_change(
         } else {
             ZoneDeliveryExileTracking::None
         };
+        // CR 701.9a + CR 400.7: Capture the card while it is still in hand.
+        // The discard frame, not a current-zone lookup, owns the eventual
+        // contingent condition's facts through redirects and replacement pauses.
+        let discard_lki = discard_frame.and_then(|_| {
+            (from == Zone::Hand)
+                .then(|| {
+                    state
+                        .objects
+                        .get(&object_id)
+                        .map(|object| object.snapshot_for_mana_spent())
+                })
+                .flatten()
+        });
 
         let merged_permanent_leave = from == Zone::Battlefield
             && state
@@ -2378,6 +2395,48 @@ pub(crate) fn deliver_replaced_zone_change(
                 .objects
                 .get(&object_id)
                 .is_some_and(|obj| obj.zone == Zone::Battlefield);
+        // CR 701.9a + CR 614.1: The inner move has now completed with its
+        // final replacement-selected destination. Append one operation-owned
+        // result exactly once; a prevented move never reaches this delivery.
+        if let (Some(frame_id), Some(lki), Some(final_zone)) = (
+            discard_frame,
+            discard_lki,
+            state.objects.get(&object_id).map(|object| object.zone),
+        ) {
+            if final_zone != Zone::Hand {
+                let (recorded, source_id) = {
+                    let frame = state
+                        .resolution_stack
+                        .active_discard_parent_of_active_ability_continuation_mut(frame_id)
+                        .expect(
+                            "discard provenance must name the active continuation's discard parent",
+                        );
+                    let recorded = frame.results.is_empty();
+                    let source_id = frame.source_id;
+                    if recorded {
+                        frame
+                            .results
+                            .push(crate::types::ability::DiscardedCardResult {
+                                object_id,
+                                lki: lki.clone(),
+                                final_zone,
+                            });
+                    }
+                    (recorded, source_id)
+                };
+                if recorded {
+                    crate::game::restrictions::record_discard(state, lki.owner);
+                    if final_zone == Zone::Graveyard {
+                        crate::game::restrictions::record_card_discarded(state, object_id);
+                    }
+                    events.push(GameEvent::Discarded {
+                        player_id: lki.owner,
+                        object_id,
+                        source_id,
+                    });
+                }
+            }
+        }
         // Roll back the face-down preflight flag when the entry was rejected, so a
         // blocked manifest/morph leaves the card unchanged in its origin zone
         // rather than stranded face down (corrupting hidden state for a move that
@@ -3078,6 +3137,62 @@ fn execute_zone_move_with_applied_terminal(
             replacement::park_waiting_for(state, player);
             ZoneMoveTerminalResult::NeedsChoice(player)
         }
+    }
+}
+
+#[cfg(test)]
+mod announced_spell_residency_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{Effect, ResolvedAbility};
+    use crate::types::game_state::{StackEntry, StackEntryKind};
+    use crate::types::identifiers::CardId;
+
+    #[test]
+    fn casting_to_stack_rejects_same_id_activated_ability_entry() {
+        let mut state = GameState::new_two_player(42);
+        let object_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Activated Source".to_string(),
+            Zone::Exile,
+        );
+        state.objects.get_mut(&object_id).unwrap().is_token = true;
+        state.stack.push_back(StackEntry {
+            id: object_id,
+            source_id: object_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: object_id,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    vec![],
+                    object_id,
+                    PlayerId(0),
+                )),
+            },
+        });
+        assert_eq!(state.objects[&object_id].zone, Zone::Exile);
+        assert!(state.stack.iter().any(|entry| {
+            entry.id == object_id && matches!(entry.kind, StackEntryKind::ActivatedAbility { .. })
+        }));
+
+        // CR 109.1 / CR 602.2a: A same-id activated ability is a distinct
+        // noncard stack object, so it cannot satisfy the spell-residency gate.
+        let mut events = Vec::new();
+        let result = move_object_with_terminal(
+            &mut state,
+            ZoneMoveRequest::casting_to_stack(object_id, object_id),
+            &mut events,
+        );
+
+        assert!(matches!(
+            result,
+            ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained)
+        ));
+        assert_eq!(state.objects[&object_id].zone, Zone::Exile);
+        assert!(events.is_empty());
     }
 }
 

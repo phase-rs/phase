@@ -21,13 +21,16 @@
 //!
 //! CR 611.2c: one continuous effect naming several subjects determines the set
 //! each part applies to independently — i.e. the UNION of the named subjects.
-//! CR 301.5f: an Equipment attaches to a creature.
+//! CR 301.5a: an Equipment is attached to a creature, which is then the
+//! "equipped creature". CR 301.5f: an ability referring to the "equipped
+//! creature" means whatever creature the permanent is attached to.
 //! CR 702.2b: deathtouch. CR 702.11b: hexproof.
 
 use engine::game::combat::AttackTarget;
 use engine::game::game_object::AttachTarget;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::ability::Effect;
 use engine::types::card_type::CoreType;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
@@ -76,8 +79,9 @@ fn wand_of_orcus_unbindable_subject_grants_nothing_board_wide() {
 
     let mut runner = scenario.build();
 
-    // CR 301.5f: make the Wand a real Equipment attached to `host`, so its
-    // "equipped creature attacks" trigger has a subject to fire on.
+    // CR 301.5a: attach the Wand to `host` so it is a real Equipment with an
+    // equipped creature. CR 301.5f: that is what its "equipped creature
+    // attacks" trigger resolves against, so the trigger has a subject to fire on.
     {
         let obj = runner.state_mut().objects.get_mut(&wand).unwrap();
         obj.card_types.core_types = vec![CoreType::Artifact];
@@ -103,6 +107,38 @@ fn wand_of_orcus_unbindable_subject_grants_nothing_board_wide() {
         vec!["Wand of Orcus".to_string()],
         "the attack trigger must be on the stack, or nothing below is exercised"
     );
+
+    // ...and the trigger must carry the SPECIFIC gap this test is about. Stack
+    // presence alone proves only that a trigger was created: a regression that
+    // dropped the execute effect entirely would also grant no deathtouch and
+    // leave every assertion below green. Pin the reason, not just the silence.
+    {
+        let wand_obj = runner.state().objects.get(&wand).unwrap();
+        let gap = wand_obj
+            .trigger_definitions
+            .iter_unchecked()
+            .filter_map(|entry| entry.definition.execute.as_ref())
+            .find_map(|exec| match exec.effect.as_ref() {
+                Effect::Unimplemented { name, description } => Some((name, description)),
+                _ => None,
+            })
+            .expect(
+                "the attack trigger's execute chain must be an Unimplemented gap — if it \
+                 parsed, or vanished, the deathtouch assertions below prove nothing",
+            );
+        assert_eq!(
+            gap.0, "unbound_subject",
+            "the gap must name the SUBJECT as the unbound part; another name means the \
+             clause failed elsewhere and this test stopped covering the fail-closed path"
+        );
+        assert!(
+            gap.1
+                .as_deref()
+                .is_some_and(|text| text.contains("Zombies you control")),
+            "reach-guard: the gap must quote the unbindable conjunct, got {:?}",
+            gap.1
+        );
+    }
 
     runner.advance_until_stack_empty();
     runner.state_mut().layers_dirty.mark_full();

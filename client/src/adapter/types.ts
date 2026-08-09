@@ -987,6 +987,9 @@ export interface GameObject {
   owner: PlayerId;
   controller: PlayerId;
   zone: Zone;
+  /** Engine-projected identity visibility for the current viewer. Omitted/false
+   *  means the display layer must not show this card's face or name. */
+  display_visible_to_viewer?: boolean;
   tapped: boolean;
   face_down: boolean;
   flipped: boolean;
@@ -1417,8 +1420,12 @@ export type KeywordAction =
 export type StackEntryKind =
   | { type: "Spell"; data: { card_id: CardId; ability?: ResolvedAbility; actual_mana_spent?: number } }
   | { type: "ActivatedAbility"; data: { source_id: ObjectId; ability: ResolvedAbility } }
-  | { type: "TriggeredAbility"; data: { source_id: ObjectId; ability: ResolvedAbility; description?: string; source_name?: string } }
+  | { type: "TriggeredAbility"; data: { source_id: ObjectId; ability: ResolvedAbility; description?: string; source_name?: string; provenance?: SyntheticTriggerProvenance } }
   | { type: "KeywordAction"; data: { action: KeywordAction } };
+
+/** Engine-authored identity for a synthesized triggered ability. */
+export type SyntheticTriggerProvenance =
+  | { type: "Storm"; data: { copy_count: number } };
 
 export interface StackEntry {
   id: ObjectId;
@@ -1470,6 +1477,7 @@ export interface StackEntryDisplay {
   targets?: StackTargetDisplay[];
   paid?: StackPaidFactView[];
   trigger_context?: TriggerContextDisplay[];
+  provenance?: SyntheticTriggerProvenance;
 }
 
 // ── Pending Cast (for target selection) ──────────────────────────────────
@@ -2044,6 +2052,18 @@ export const LOG_CATEGORIES = [
 
 export type LogCategory = (typeof LOG_CATEGORIES)[number];
 
+export type LogImportance = "Essential" | "Context" | "Detail" | "Diagnostic";
+export type LogTone = "Neutral" | "Positive" | "Negative" | "Informational" | "Diagnostic";
+export type LogBoundary = "None" | "Turn" | "Phase";
+export type LogVisibility = "Public" | "HiddenInformation";
+
+export interface LogPresentation {
+  importance: LogImportance;
+  tone: LogTone;
+  boundary: LogBoundary;
+  visibility: LogVisibility;
+}
+
 export type LogSegment =
   | { type: "Text"; value: string }
   | { type: "CardName"; value: { name: string; object_id: ObjectId } }
@@ -2059,6 +2079,8 @@ export interface GameLogEntry {
   phase: Phase;
   category: LogCategory;
   segments: LogSegment[];
+  /** Optional only while clients may restore payloads saved before log presentation metadata. */
+  presentation?: LogPresentation;
 }
 
 // ── Action Result ────────────────────────────────────────────────────────
@@ -2109,6 +2131,7 @@ export type DebugAction =
         zone: Zone;
         attach_to?: AttachTarget;
         run_etb: boolean;
+        nonlegendary: boolean;
       };
     }
   | { type: "RemoveObject"; data: { object_id: ObjectId } }
@@ -2143,7 +2166,10 @@ export type DebugAction =
         run_etb: boolean;
       };
     }
-  | { type: "CreateTokenCopy"; data: { source_id: ObjectId; owner: PlayerId } };
+  | {
+      type: "CreateTokenCopy";
+      data: { source_id: ObjectId; owner: PlayerId; nonlegendary: boolean };
+    };
 
 // CR 117.3d: priority-yield preference types, mirroring the engine's
 // `YieldScope` / `YieldTarget` / `PriorityYieldOp` / `PriorityYield`. The
@@ -2417,6 +2443,7 @@ export type GameEvent =
   | { type: "StackPushed"; data: { object_id: ObjectId } }
   | { type: "StackResolved"; data: { object_id: ObjectId } }
   | { type: "Discarded"; data: { player_id: PlayerId; object_id: ObjectId } }
+  | { type: "EnduringStoryGained"; data: { player_id: PlayerId } }
   | { type: "DamageCleared"; data: { object_id: ObjectId } }
   | { type: "GameOver"; data: { winner: PlayerId | null } }
   | { type: "DamageDealt"; data: { source_id: ObjectId; target: TargetRef; amount: number; is_combat: boolean; excess?: number } }
@@ -2570,8 +2597,17 @@ export type TriggerKind = "Proliferate" | "Magecraft" | "Constellation" | "Landf
  * One unbounded-resource axis a CR 732.2a net-progress loop pumps. Mirrors
  * `engine::analysis::resource::ResourceAxis` (serde externally-tagged: unit
  * variants serialize as bare strings, data variants as a single-key object,
- * tuple variants as an array). The frontend only formats each axis to a display
- * family — it never derives which axes are unbounded or decides attribution.
+ * tuple variants as an array). The engine owns the display family each axis
+ * groups into as well (`unbounded_families`, per seat), and no STATE surface
+ * derives family, unboundedness, or attribution — each one reads that channel.
+ *
+ * ONE BOUNDED EXCEPTION, named because the unqualified sentence was false:
+ * `LoopShortcutModal` renders the PRE-accept offer, whose prompt carries a bare
+ * axis list and no family channel yet — the engine has nothing to publish until
+ * a loop is actually marked unbounded. It maps those axes through the client's
+ * `familyOf` mirror, which `unbounded-family-tags.json` pins tag-by-tag against
+ * the engine's `derived_views::family_of`, so the mirror cannot drift from the
+ * authority.
  */
 export type ResourceAxis =
   | { Mana: ManaType }
@@ -2617,11 +2653,117 @@ export type ResourceAxisTag =
 /**
  * One `∞` HUD row. Mirrors `engine::game::derived_views::UnboundedResourceView`.
  * `player` is the engine-decided HUD attribution (NOT necessarily the loop
- * controller); `axis` is the engine-provided identity the FE maps to a family.
+ * controller); `axis` is the engine-provided identity, and its display family
+ * and collapse state arrive separately on `unbounded_families`.
  */
 export interface UnboundedResourceView {
   player: PlayerId;
   axis: ResourceAxis;
+}
+
+/** The display family an unbounded axis groups into. Mirrors
+ *  `engine::game::derived_views::UnboundedFamily` (`rename_all = "lowercase"`), so these
+ *  literals ARE the wire strings. Pinned tag-by-tag against the engine by
+ *  `unbounded-family-tags.json`. */
+export type UnboundedFamily =
+  | "mana"
+  | "life"
+  | "damage"
+  | "mill"
+  | "counters"
+  | "tokens"
+  | "cards"
+  | "casts"
+  | "combats"
+  | "turns"
+  | "triggers";
+
+/** Whether the boundary can still fail to apply a scheduled collapse. Mirrors
+ *  `engine::game::derived_views::CollapseCertainty`. `Conditional` means the collapse may be
+ *  declined or may park, and the axis then stays unbounded. */
+export type CollapseCertainty = "Committed" | "Conditional";
+
+/**
+ * One display family's collapse coverage. Mirrors
+ * `engine::game::derived_views::FamilyCollapseState` (serde `tag`/`content`).
+ * `Mixed` means the family holds both a scheduled and an unscheduled axis; a single glyph
+ * cannot say two things, so it says the weaker one.
+ */
+export type FamilyCollapseState =
+  | { type: "Unscheduled" }
+  | { type: "Mixed" }
+  | {
+      type: "Scheduled";
+      data: {
+        certainty: CollapseCertainty;
+        /**
+         * The seat the engine will ask to name the collapse count (CR 732.2a's "specified number
+         * of times") — the loop's CONTROLLER. It is emitted because it is NOT recoverable from
+         * `UnboundedFamilyView.player`, which is the ATTRIBUTION seat: for `Life`/`DamageDealt`/
+         * `LibraryDelta`/`Poison` axes that is the VICTIM, who is never asked.
+         *
+         * `undefined` means the family's scheduled axes name TWO OR MORE distinct seats — never
+         * "nobody". One glyph cannot address two players, so the badge falls back to the
+         * seat-neutral voice instead of picking a winner.
+         */
+        prompted?: PlayerId;
+      };
+    };
+
+/**
+ * One `∞` badge's engine-owned state, keyed per seat and per display family. Mirrors
+ * `engine::game::derived_views::UnboundedFamilyView`.
+ *
+ * THE FE NEVER RE-DERIVES THIS, and could not: the engine resolves it on the loop's PRODUCING
+ * CONTROLLER key, before attribution rewrites `player`. The row channel keys by the ATTRIBUTION
+ * player, which for `Life`/`DamageDealt`/`LibraryDelta`/`Poison` axes is the *victim*, not the loop
+ * that produced the growth — so two controllers draining one victim collide under the same key and
+ * any join marks the wrong controller. The controller identity does not survive onto the wire, so
+ * only the engine can answer.
+ *
+ * `state` is NOT a guarantee that the growth lands, and that is typed rather than disclosed:
+ * `Scheduled(Conditional)` is exactly the case where a `Counters`/`Life` axis can be declined (a
+ * counter/life observer appeared between accept and boundary) or a `Tokens` mint can park, leaving
+ * the axis unbounded with nothing applied. Only `Scheduled(Committed)` promises a bound.
+ */
+export interface UnboundedFamilyView {
+  player: PlayerId;
+  family: UnboundedFamily;
+  state: FamilyCollapseState;
+}
+
+/** Mirrors `engine::game::derived_views::CounterMagnitude`. Absent on the wire ⇒ `"Finite"`. */
+export type CounterMagnitude = "Finite" | "Unbounded";
+
+/**
+ * One renderable counter row on one object. Mirrors
+ * `engine::game::derived_views::CounterRowView`.
+ *
+ * `counter` matches the object's `counters` map key (`CounterType`'s serde spelling — e.g.
+ * `"charge"`, `"P1P1"`). `count` is the object's LIVE count and is engine-supplied because a row
+ * may legitimately have no entry in that map at all: a pair the loop pumps from `0 -> 1` is
+ * registered while the object still carries none, so the count is `0` and there is nothing to join
+ * back to. Re-deriving it here would also be the FE inferring game state. That `count: 0` case is
+ * `"Unbounded"`-only — the finite pass drops zero entries, the unbounded pass does not.
+ */
+export interface CounterRowView {
+  counter: CounterType;
+  count: number;
+  magnitude?: CounterMagnitude;
+}
+
+/**
+ * Every counter row one object renders, PRE-PARTITIONED by the engine. Mirrors
+ * `engine::game::derived_views::ObjectCounterDisplay`.
+ *
+ * CR 306.5c: `loyalty` is the loyalty TOTAL row for an object that has a loyalty characteristic
+ * (loyalty IS its loyalty-counter count); everything else is a `pills` row, including a loyalty
+ * counter on an object with no loyalty. Loyalty ABILITY COST badges are never unbounded (CR 606.4
+ * — a cost is a number of loyalty counters to pay, not a total).
+ */
+export interface ObjectCounterDisplay {
+  pills?: CounterRowView[];
+  loyalty?: CounterRowView;
 }
 
 /** Mirrors `engine::analysis::loop_check::WinKind` (unit variants → bare strings). */
@@ -2746,6 +2888,12 @@ export interface TurnOrderSlotView {
 /** CR 509.1g: engine-authored public `(blocker, attacker)` combat display pair. */
 export type BlockerAssignmentPair = [ObjectId, ObjectId];
 
+/** Debug-only card identity authorized for the viewing player's library browser. */
+export interface DebugLibraryCardView {
+  object_id: ObjectId;
+  name: string;
+}
+
 /**
  * Engine-authored projections computed at each state snapshot. Rides
  * alongside GameState through every adapter path. Frontend components
@@ -2755,6 +2903,12 @@ export type BlockerAssignmentPair = [ObjectId, ObjectId];
  */
 export interface DerivedViews {
   unique_authorized_submitter?: PlayerId;
+  /**
+   * Explicit debug-only identities for the viewing player's library. Normal
+   * library objects remain hidden in `GameState.objects`; only the debug
+   * browser consumes this separately authorized projection.
+   */
+  debug_library_cards?: DebugLibraryCardView[];
   /**
    * Engine-classified live keyword badges for battlefield permanents. The
    * strip renders this map directly rather than deciding which keyword timing
@@ -2768,6 +2922,9 @@ export interface DerivedViews {
    * shows the badge without naming an unavailable source.
   */
   temporary_cant_be_blocked?: Record<string, ObjectId | null>;
+
+  /** Engine-classified recipients of an applicable bare CantBeBlocked static. */
+  cant_be_blocked?: ObjectId[];
 
   /**
    * CR 509.1g: sorted public blocker-to-attacker pairs. BlockAssignmentLines
@@ -2798,6 +2955,11 @@ export interface DerivedViews {
    * infer game logic from raw abilities.
    */
   stack_entry_details?: Record<string, StackEntryDisplay>;
+  /**
+   * CR 702.40a: prospective Storm copy counts for the viewing player's own
+   * hand, keyed by hand object id. The engine owns qualification and counting.
+   */
+  prospective_storm_counts?: Record<string, number>;
   /**
    * Engine-authored "Auras attached to player X" projection. Players have no
    * `attachments` back-link on the GameObject side because they aren't
@@ -2844,10 +3006,34 @@ export interface DerivedViews {
   /**
    * CR 732.2a: `∞` HUD rows — one per (engine-attributed player, pumped axis)
    * of every unbounded-resource loop. Empty/omitted when no loop is active. The
-   * FE maps each axis to a display family and never re-derives attribution.
+   * engine also owns the display family and its collapse state, published as
+   * `unbounded_families` below; the FE re-derives neither.
    * Mirrors `engine::game::derived_views::DerivedViews::unbounded_resources`.
+   *
+   * This channel and its two siblings below stay POPULATED after all players accept a
+   * shortcut, until the engine applies the growth at the next CR 500.5 boundary. That window is
+   * CR 732.2c's advance to the proposal's ending point (a priority window per CR 732.2a), not a
+   * deviation from it. What matters to the FE is only that the mark is still live there, so `∞` is current engine
+   * state, not a stale mark. Render it.
+   *
+   * ONE EXCEPTION, ON TWO CONJUNCTS THAT MUST BOTH HOLD: an object-backed row (a TOKEN axis, or a
+   * COUNTER axis with registered targets) is dropped when (1) no accepted collapse names that axis
+   * AND (2) its entire registered board backing has left the battlefield — the engine will not
+   * render an `∞` beside an already-empty pile. Once the table has ACCEPTED, conjunct (1) fails and
+   * the row survives its backing dying, because CR 732.2c takes the shortcut at the last accept and
+   * the growth still lands. Either way the accepted collapse itself is never cancelled: the row may
+   * vanish and the boundary still cashes the axis out. Do not infer a cancellation from a
+   * disappearing row — a row's disappearance says nothing about the collapse. What the FE IS told
+   * about the collapse arrives on `unbounded_families` below, and only there.
    */
   unbounded_resources?: UnboundedResourceView[];
+  /**
+   * The engine-owned per-seat, per-display-family collapse state behind each `∞` badge — one row
+   * per `(attributed player, family)` actually rendered. Empty/omitted whenever
+   * `unbounded_resources` is. Mirrors
+   * `engine::game::derived_views::DerivedViews::unbounded_families`.
+   */
+  unbounded_families?: UnboundedFamilyView[];
   /**
    * CR 732.2a / CR 110.1: battlefield object IDs forming an accepted object-growth
    * loop's "∞ pile" (the winning controller's tapped fodder-class members). Engine-
@@ -2857,16 +3043,29 @@ export interface DerivedViews {
    */
   unbounded_pile?: ObjectId[];
   /**
-   * CR 732.2a / CR 701.34a: per-object `∞` counter channel — for each battlefield
-   * object (keyed by ObjectId-as-string), the counter-type keys whose preserved
-   * `Generic` counters an accepted counter-growth loop (proliferate charge, burden)
-   * pumps unboundedly. Each value string matches the object's `counters` map key
-   * (e.g. `"charge"`). The FE renders `∞` (not `×N`) on any counter pill whose type
-   * is in this set, and never re-derives which counters are unbounded. Empty/omitted
-   * when no counter-growth loop is active. Mirrors
-   * `engine::game::derived_views::DerivedViews::unbounded_counters`.
+   * CR 122.1 + CR 732.2a: the COMPLETE per-object counter-display projection, keyed by
+   * ObjectId-as-string — every counter row every display surface renders, for every
+   * object that has one, in ANY zone (a Skullbriar-class permanent keeps its counters in
+   * the graveyard per CR 113.6b; a suspended card carries time counters in exile per
+   * CR 702.62b).
+   *
+   * CONTRACT FOR CONSUMERS: render `pills` in the order given; never sort, never filter,
+   * never read `obj.counters`; `magnitude` absent means `"Finite"`. The engine already
+   * partitioned loyalty (CR 306.5c), deduplicated across seats, and ordered the rows (`∞`
+   * first, then `CounterType` order).
+   *
+   * ZERO COUNTS ARE DROPPED IN THE FINITE PASS ONLY. `counter_display_views`' FINITE pass
+   * admits through `positive_counter_entries` (CR 122.1 — a zero map entry is not a marker),
+   * so no `"Finite"` row ever carries `count: 0`. The UNBOUNDED pass has NO zero filter: it
+   * reads the live count for a REGISTERED pair, so an `"Unbounded"` row legitimately carries
+   * `count: 0` for a pair the loop pumps `0 -> 1`. A consumer that filters on `count > 0`
+   * therefore deletes real `∞` rows — which is why consumers filter nothing.
+   *
+   * An object with no renderable row is absent from this map; the whole field is omitted
+   * when no object has one. Mirrors
+   * `engine::game::derived_views::DerivedViews::counter_display`.
    */
-  unbounded_counters?: Record<string, string[]>;
+  counter_display?: Record<string, ObjectCounterDisplay>;
 }
 
 /** Mirrors `engine::types::game_state::NextSpellModifier` (serde tag="type"). */
@@ -3013,6 +3212,7 @@ export interface GameState {
   initiative?: PlayerId | null;
   monarch?: PlayerId | null;
   city_blessing?: PlayerId[];
+  enduring_story?: PlayerId[];
   ring_level?: Record<string, number>;
   ring_bearer?: Record<string, ObjectId | null>;
   commander_damage?: CommanderDamageEntry[];
@@ -3520,6 +3720,42 @@ export interface AiActionProposal {
   action: GameAction;
 }
 
+/** Local-only explanation bound to an opaque AI proposal token. */
+export interface AiDecisionDiagnosticReceipt {
+  semanticOwner: PlayerId;
+  authorizedActor: PlayerId;
+  selectedAction: GameAction;
+  status: "ranked" | "direct";
+  selectionExplanation: string;
+  samplingTemperature: number | null;
+  candidates: AiDecisionDiagnosticCandidate[];
+}
+
+export interface AiDecisionDiagnosticCandidate {
+  action: GameAction;
+  objectName: string | null;
+  details: { label: string; value: string }[];
+  rank: number | null;
+  isTopRanked: boolean;
+  isSelected: boolean;
+  score: number | null;
+  weight: number | null;
+  probability: number | null;
+}
+
+export interface AiDecisionDiagnosticsCapability {
+  setAiDecisionDiagnosticsEnabled(enabled: boolean): void;
+  subscribeAiDecisionDiagnostics(listener: (receipt: AiDecisionDiagnosticReceipt) => void): () => void;
+}
+
+export function supportsAiDecisionDiagnostics(
+  adapter: EngineAdapter | null,
+): adapter is EngineAdapter & AiDecisionDiagnosticsCapability {
+  return adapter != null
+    && "setAiDecisionDiagnosticsEnabled" in adapter
+    && "subscribeAiDecisionDiagnostics" in adapter;
+}
+
 /** Result of the engine-owned game-scoped AI worker card-data build. */
 export type AiCardSubsetResult =
   | { kind: "full" }
@@ -3609,4 +3845,44 @@ export function supportsMatchConcede(
   return adapter !== null
     && (adapter as Partial<MatchConcedeCapability>).supportsMatchConcede === true
     && typeof (adapter as Partial<MatchConcedeCapability>).sendMatchConcede === "function";
+}
+
+/**
+ * One turn boundary the server offers as a rollback target. Snake_case because
+ * this is the wire shape verbatim (`server-core`'s `RewindOption`); the client
+ * renders it and never derives it.
+ */
+export interface RewindOption {
+  readonly turn_number: number;
+  readonly active_player: PlayerId;
+}
+
+/**
+ * How far back a rollback request reaches. Mirrors `server-core`'s
+ * `RewindTarget` — an internally tagged union, not a boolean pair, because the
+ * two granularities carry different payloads.
+ */
+export type RewindTarget =
+  | { readonly kind: "last_action" }
+  | { readonly kind: "turn_start"; readonly turn_number: number };
+
+/**
+ * Optional transport capability for a *server-authoritative* rollback. Shaped
+ * exactly like `MatchConcedeCapability` above, and for the same reason: only
+ * the adapter that can actually bind the request to an authenticated wire
+ * session declares it, so no other adapter is forced to answer a question it
+ * has no meaningful answer to. A local-authority adapter rewinds its own state
+ * instead and must NOT claim this.
+ */
+export interface ServerRewindCapability {
+  readonly supportsServerRewind: true;
+  sendRequestTakeback(target?: RewindTarget): void;
+}
+
+export function supportsServerRewind(
+  adapter: EngineAdapter | null,
+): adapter is EngineAdapter & ServerRewindCapability {
+  return adapter !== null
+    && (adapter as Partial<ServerRewindCapability>).supportsServerRewind === true
+    && typeof (adapter as Partial<ServerRewindCapability>).sendRequestTakeback === "function";
 }

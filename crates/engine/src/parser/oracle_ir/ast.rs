@@ -193,11 +193,15 @@ pub(crate) struct SubjectPhraseAst {
     /// BOARD-WIDE effect — the grant landed on every permanent, lands and
     /// artifacts included, while coverage still reported the card as supported.
     /// Encoding the unbound state in the type makes that fail-open
-    /// unrepresentable: every consumer must say what it does with `None`, and
-    /// the one consumer that actually reads this field
-    /// (`lower_subject_predicate_ast`'s `ImperativeFallback` arm, the only
-    /// predicate kind that applies the subject filter) fails closed to
-    /// `Effect::unimplemented`. Same shape, same reason, as
+    /// unrepresentable: every consumer must say what it does with `None`.
+    /// `lower_subject_predicate_ast`'s `ImperativeFallback` arm — the only
+    /// predicate kind that applies the subject filter — is the only consumer
+    /// that treats `None` as a coverage GAP, failing closed to
+    /// `Effect::unimplemented`. The other readers
+    /// (`sync_subject_into_nested_shuffle_sub`, `inject_subject_target`) reach
+    /// it through `target.or(affected)` and treat `None` as "nothing to
+    /// rebind", returning early. `None` is therefore reachable in all three —
+    /// do not assume otherwise when editing them. Same shape, same reason, as
     /// [`EntersUnderSpec::UnboundAnaphor`].
     pub(crate) affected: Option<TargetFilter>,
     pub(crate) target: Option<TargetFilter>,
@@ -605,6 +609,53 @@ pub(crate) enum ImperativeFamilyAst {
     Explore,
     /// CR 702.162a: Connive.
     Connive,
+    /// CR 701.70a + CR 608.2c: Recruit — draw, discard, then create the
+    /// contingent Soldier token when the card discarded by this instruction was
+    /// nonland. This remains a parser IR node because lowering must build the
+    /// three-step, direct-child chain rather than introduce a card-specific
+    /// runtime effect.
+    Recruit,
+    /// CR 205.1a + CR 205.1b + CR 613.1d + CR 110.2a + CR 122.1: `assimilate
+    /// <target phrase>` (Borg Queen, Perfection Manifest — Star Trek Commander).
+    ///
+    /// The keyword action's definition is supplied ONLY by reminder text, which
+    /// is stripped before the parser runs, so it is encoded here rather than
+    /// parsed: "Put it onto the battlefield under your control with a +1/+1
+    /// counter. It's a Borg artifact creature and loses all other creature
+    /// types."
+    ///
+    /// Like `Recruit`, this remains a parser IR node because lowering must build
+    /// a two-step, direct-child chain (`ChangeZone` + a `Duration::Permanent`
+    /// `GenericEffect` bound to the parent target) rather than introduce a
+    /// card-specific runtime effect. The chain it lowers to is the SAME shape
+    /// the reanimate-then-retype class already produces from spelled-out Oracle
+    /// text (Ashen Powder's move + Rise from the Grave's type rider).
+    ///
+    /// CR 205.1b: "becomes a '[creature type or types] artifact creature'"
+    /// RETAINS all prior card types, supertypes, and non-creature subtypes and
+    /// REPLACES only the creature types — so the lowering emits additive
+    /// `AddType`s plus a creature-set-scoped subtype replacement, never
+    /// `SetCardTypes`.
+    ///
+    /// CR 611.2e: because the definition uses the "is [characteristic]" form
+    /// ("It's a Borg artifact creature"), the rule requires the type change to
+    /// apply SIMULTANEOUSLY with the permanent entering the battlefield. The
+    /// engine installs it after entry via the shared `ChangeZone` +
+    /// `GenericEffect` continuation, so an ETB trigger keying on the new
+    /// characteristics does not see them. This is a PRE-EXISTING, CLASS-WIDE
+    /// deviation shared with Rise from the Grave and Grave Betrayal (both also
+    /// the "is" form); Puppeteer Clique's "It gains haste" is the "gains" form
+    /// and is correct. Not introduced here, and out of scope to fix.
+    ///
+    /// `assimilate` has NO CR 701.x keyword-action number: the set is
+    /// unreleased and `docs/MagicCompRules.txt` has zero matches for it. Do not
+    /// invent one, and do not reuse Recruit's `CR 701.70a` — that number is
+    /// Recruit's, not assimilate's.
+    Assimilate {
+        /// The card the keyword action moves — "target creature card from an
+        /// opponent's graveyard" (CR 115.2: a non-battlefield-zone target).
+        target: TargetFilter,
+    },
     /// CR 509.1c: Block this turn/combat if able.
     ForceBlock {
         attacker: Option<ForceBlockAttackerRef>,
@@ -662,6 +713,13 @@ pub(crate) enum ImperativeFamilyAst {
     Behold(TargetFilter),
     /// CR 701.48a: Learn.
     Learn,
+    /// CR 106.1b + CR 602.2b: "note the type of mana spent to pay this
+    /// activation cost" (Jeweled Amulet). Field-less: there is nothing to
+    /// select — the payment already happened, so the effect is a pure
+    /// readback recorded at resolution. Scoped to the singular-type wording;
+    /// Ice Cauldron's "note the type AND AMOUNT..." sibling is intentionally
+    /// left unmatched (see `parse_imperative_family_ast`).
+    NoteManaSpent,
     /// CR 701.40a: Manifest the top card(s) of library.
     Manifest {
         target: TargetFilter,

@@ -4243,66 +4243,35 @@ mod tests {
         }
     }
 
+    /// Every counter-removed for-each phrase lowers to the same
+    /// `PreviousEffectAmount { Total }` — the counter-type word and the "this way"
+    /// suffix are both informational; the runtime amount is whatever the parent
+    /// effect removed.
     #[test]
-    fn for_each_charge_counter_removed_this_way_is_previous_effect_amount() {
-        let qty = parse_for_each_clause("charge counter removed this way").unwrap();
-        assert_eq!(
-            qty,
-            QuantityRef::PreviousEffectAmount {
-                channel: crate::types::ability::DamageChannel::Total,
-            }
-        );
-    }
-
-    #[test]
-    fn for_each_charge_counters_removed_this_way_is_previous_effect_amount() {
-        // Plural variant — same dispatch.
-        let qty = parse_for_each_clause("charge counters removed this way").unwrap();
-        assert_eq!(
-            qty,
-            QuantityRef::PreviousEffectAmount {
-                channel: crate::types::ability::DamageChannel::Total,
-            }
-        );
-    }
-
-    #[test]
-    fn for_each_counter_removed_this_way_is_previous_effect_amount() {
-        // Untyped (no leading counter-type word). The runtime amount is whatever
-        // the parent removed; the omitted English type word is informational.
-        let qty = parse_for_each_clause("counter removed this way").unwrap();
-        assert_eq!(
-            qty,
-            QuantityRef::PreviousEffectAmount {
-                channel: crate::types::ability::DamageChannel::Total,
-            }
-        );
-    }
-
-    #[test]
-    fn for_each_storage_counter_removed_this_way_is_previous_effect_amount() {
-        // Storage Counter cycle (Saprazzan Cove etc.) — same shape, different
-        // counter type. Must produce the same dispatch.
-        let qty = parse_for_each_clause("storage counter removed this way").unwrap();
-        assert_eq!(
-            qty,
-            QuantityRef::PreviousEffectAmount {
-                channel: crate::types::ability::DamageChannel::Total,
-            }
-        );
-    }
-
-    #[test]
-    fn for_each_bare_counter_removed_is_previous_effect_amount() {
-        // Blademane Baku: "For each counter removed, this creature gets +2/+0
-        // until end of turn" — no "this way" suffix on the activated tail.
-        let qty = parse_for_each_clause("counter removed").unwrap();
-        assert_eq!(
-            qty,
-            QuantityRef::PreviousEffectAmount {
-                channel: crate::types::ability::DamageChannel::Total,
-            }
-        );
+    fn for_each_counter_removed_phrases_are_previous_effect_amount() {
+        for (phrase, note) in [
+            ("charge counter removed this way", "typed singular"),
+            ("charge counters removed this way", "typed plural"),
+            ("counter removed this way", "untyped — no leading type word"),
+            (
+                "storage counter removed this way",
+                "Storage Counter cycle (Saprazzan Cove)",
+            ),
+            (
+                "counter removed",
+                "Blademane Baku — no \"this way\" suffix on the activated tail",
+            ),
+        ] {
+            let qty = parse_for_each_clause(phrase)
+                .unwrap_or_else(|| panic!("{phrase:?} ({note}) must parse"));
+            assert_eq!(
+                qty,
+                QuantityRef::PreviousEffectAmount {
+                    channel: crate::types::ability::DamageChannel::Total,
+                },
+                "{phrase:?} ({note})"
+            );
+        }
     }
 
     #[test]

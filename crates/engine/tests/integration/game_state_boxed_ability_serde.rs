@@ -105,6 +105,7 @@ fn populated_state() -> GameState {
             source_name: String::new(),
             subject_match_count: None,
             die_result: None,
+            provenance: None,
         },
     });
     state.pending_trigger = Some(Box::new(PendingTrigger::ordinary(

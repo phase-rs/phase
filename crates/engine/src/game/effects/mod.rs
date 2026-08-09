@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::game::conditions::{
-    eval_has_city_blessing, eval_is_initiative, eval_is_monarch,
+    eval_has_city_blessing, eval_has_enduring_story, eval_is_initiative, eval_is_monarch,
     eval_source_attached_to_controlled_creature, eval_source_entered_this_turn,
     eval_source_is_tapped,
 };
@@ -157,6 +157,7 @@ pub mod manifest_dread;
 pub mod mill;
 pub mod monstrosity;
 pub mod myriad;
+pub mod note_mana_spent;
 pub mod opponent_guess;
 pub mod overload;
 pub mod pair_with;
@@ -772,10 +773,30 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     if !waits_for_resolution_choice(&state.waiting_for)
         && state.active_ability_continuation().is_some()
     {
-        let frame = state
+        let discard_frame = state
+            .resolution_stack
+            .active_ability_continuation_discard_parent_id();
+        let mut frame = state
             .take_active_ability_continuation()
             .expect("checked active continuation must be consumable")
             .expect("checked active continuation must exist");
+        if let Some(discard_id) = discard_frame {
+            let discard = state
+                .resolution_stack
+                .take_active_discard()
+                .expect("direct Recruit parent must be active after its child is popped")
+                .expect("direct Recruit parent must exist");
+            assert_eq!(
+                discard.id, discard_id,
+                "direct Recruit parent id must remain adjacent"
+            );
+            if let Some(result) = discard.results.into_iter().next() {
+                frame
+                    .pending
+                    .chain
+                    .set_direct_discard_result_for_immediate_node(result);
+            }
+        }
         let cont = frame.pending;
         let PendingContinuation {
             chain,
@@ -878,6 +899,7 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
         ResolutionFrame::AbilityContinuation(_) | ResolutionFrame::ChangeZone(_) => {
             drain_pending_continuation(state, events)
         }
+        ResolutionFrame::Discard(_) => {}
         ResolutionFrame::RepeatFor(_) => drain_active_repeat_for(state, events),
         ResolutionFrame::RepeatUntil(_) => drain_active_repeat_until(state),
         ResolutionFrame::RepeatedOptionalPayment(_) => {
@@ -2252,6 +2274,7 @@ fn try_begin_reflexive_target_selection_inner(
             // into the later fresh-`apply()` target-assign.
             subject_match_count: freeze_reflexive_event_count(state, controller, source_id),
             die_result: state.die_result_this_resolution,
+            provenance: None,
         };
         let trigger_events =
             crate::game::triggers::take_pending_trigger_event_batch(state, &pending);
@@ -2345,6 +2368,7 @@ fn try_begin_reflexive_target_selection_inner(
         // creating ability so the reflexive entry can re-stamp it when it
         // resolves as its own stack object.
         die_result: state.die_result_this_resolution,
+        provenance: None,
     };
     let trigger_events = crate::game::triggers::take_pending_trigger_event_batch(state, &pending);
     let pending_for_state = pending.clone();
@@ -2438,6 +2462,15 @@ fn apply_parent_chain_context(
     state: &mut GameState,
 ) {
     child.context = parent.context.clone();
+    // CR 701.9a + CR 608.2c: A discard result is visible only to the direct
+    // contingent child. Every ordinary hand-off clears it, preventing a later
+    // grandchild (or an unrelated chain branch) from reading stale provenance.
+    if !matches!(
+        parent.effect,
+        Effect::Discard { .. } | Effect::DiscardCard { .. }
+    ) {
+        child.context.direct_discard_result = None;
+    }
     // CR 401.5 + CR 608.2c (issue #1365) + CR 609.3 + issue #4950
     // (Thoughtseize): `state.last_parent_target_missing_reason` is `Some` for
     // the narrow window between a Dig/ChooseFromZone/RevealHand reveal-choice
@@ -2881,7 +2914,8 @@ fn quantity_ref_depends_on_zone_change_this_way(qty: &QuantityRef) -> bool {
 
 fn condition_depends_on_zone_change_this_way(condition: &AbilityCondition) -> bool {
     match condition {
-        AbilityCondition::ZoneChangedThisWay { .. } => true,
+        AbilityCondition::ZoneChangedThisWay { .. }
+        | AbilityCondition::DiscardedCardMatchesFilter { .. } => true,
         AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
             quantity_expr_depends_on_zone_change_this_way(lhs)
                 || quantity_expr_depends_on_zone_change_this_way(rhs)
@@ -2940,13 +2974,13 @@ fn sub_ability_target_belongs_to_reflexive_context(sub: &ResolvedAbility) -> boo
     }
 }
 
-fn condition_contains_city_blessing(condition: &AbilityCondition) -> bool {
+fn condition_contains_designation(condition: &AbilityCondition) -> bool {
     match condition {
-        AbilityCondition::HasCityBlessing => true,
-        AbilityCondition::Not { condition } => condition_contains_city_blessing(condition),
-        AbilityCondition::ConditionInstead { inner } => condition_contains_city_blessing(inner),
+        AbilityCondition::HasCityBlessing | AbilityCondition::HasEnduringStory => true,
+        AbilityCondition::Not { condition } => condition_contains_designation(condition),
+        AbilityCondition::ConditionInstead { inner } => condition_contains_designation(inner),
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
-            conditions.iter().any(condition_contains_city_blessing)
+            conditions.iter().any(condition_contains_designation)
         }
         _ => false,
     }
@@ -3237,6 +3271,8 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::CompletedDungeon { .. }
             | AbilityCondition::IsInitiative
             | AbilityCondition::HasCityBlessing
+            | AbilityCondition::HasEnduringStory
+            | AbilityCondition::DiscardedCardMatchesFilter { .. }
             | AbilityCondition::IsRingBearer
             | AbilityCondition::TargetHasKeywordInstead { .. }
             | AbilityCondition::TargetMatchesFilter { .. }
@@ -4391,6 +4427,7 @@ pub fn resolve_effect(
         Effect::GrantCastingPermission { .. } => grant_permission::resolve(state, ability, events),
         Effect::ChooseFromZone { .. } => choose_from_zone::resolve(state, ability, events),
         Effect::RememberCard { .. } => remember_card::resolve(state, ability, events),
+        Effect::NoteManaSpent => note_mana_spent::resolve(state, ability, events),
         Effect::ForEachCategory { .. } => {
             choose_from_zone::resolve_for_each_category(state, ability, events)
         }
@@ -5008,7 +5045,7 @@ fn affected_objects_with_causes(
 /// stamped onto the tracked-set members it publishes. Derived purely from the
 /// effect kind (and its declared destination), so it is independent of any
 /// replacement that later redirects the members' landing zone.
-fn this_way_cause_for_effect(effect: &Effect) -> Option<ThisWayCause> {
+pub(crate) fn this_way_cause_for_effect(effect: &Effect) -> Option<ThisWayCause> {
     use crate::types::zones::Zone;
     // CR 400.7: a generic zone change names a "this way" verb only for the
     // destinations a consumer references — Exile (exiled), Battlefield
@@ -5971,6 +6008,116 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
     }
 }
 
+/// CR 608.2d: how a caller supplies the feasibility fact [`upfront_optional_gate`]'s LAST
+/// conjunct needs.
+///
+/// `resolve_chain_body` has ALREADY run the probe by the time it reaches the gate — it needs
+/// the value for the `CastFromZone` decline early-return that precedes both the CR 101.4
+/// fan-out and the gate — so it passes [`OptionalFeasibility::Known`] and production never
+/// probes twice. That matters: [`optional_effect_is_infeasible`]'s `CastFromZone` arm clones
+/// the whole `GameState` per bound object and runs a full `cast_from_zone::resolve` dry-run.
+/// Every other caller passes [`OptionalFeasibility::Probe`], which runs only after the cheap
+/// conjuncts have all passed.
+///
+/// A TWO-VARIANT DOMAIN ENUM RATHER THAN `Option<bool>`, and the reason is naming, not
+/// CLAUDE.md's `bool` prohibition (`Option<T>` is on its approved list): `Known(bool)` says
+/// *"the caller already ran the probe and this is its answer"* while `Probe` says *"run it
+/// here, after the cheap conjuncts"*. With `Option<bool>`, `None` would mean "probe here" only
+/// by convention — undocumented at every call site and indistinguishable from "no opinion".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OptionalFeasibility {
+    /// The caller ran [`optional_effect_is_infeasible`] and hands its answer over.
+    Known(bool),
+    /// Run the probe here, LAST — after every cheap conjunct has passed.
+    Probe,
+}
+
+/// CR 603.5 + CR 608.2c + CR 608.2d + CR 603.12a — THE single authority for *"does this
+/// ability open ONE up-front optional gate, and to whom, under which key?"*
+///
+/// `None` ⇒ no up-front gate opens at all. Four disjoint reasons, in the order they are
+/// evaluated:
+///
+/// 1. not `optional`;
+/// 2. `optional_for` is set — the CR 608.2d + CR 101.4 fan-out prompts eligible players in
+///    APNAP order instead, which is a CASCADE of up to one window per living player and not
+///    one gate (`resolve_chain_body` returns at that fan-out before ever reaching the gate;
+///    see the coupling note there);
+/// 3. one of the three `repeat_for` shapes that re-fire optionality PER ITERATION
+///    (CR 608.2c + CR 608.2d + CR 603.12a);
+/// 4. an infeasible optional (CR 608.2d: "a player can't choose an impossible option").
+///
+/// **THE FEASIBILITY PROBE IS THE LAST CONJUNCT, AND THAT ORDERING IS A GUARANTEE, NOT AN
+/// IMPLEMENTATION ACCIDENT.** `engine::entry_publishes_pin_slots` calls this once per announced
+/// entry, per candidate window, per beat, where production pays it once per resolution. LAST
+/// ordering restricts the clone-bearing arm to `optional ∧ ¬optional_for ∧ ¬repeat ∧
+/// Effect::CastFromZone` entries — a strict subset of the population production already pays
+/// for. It is deliberately NOT charged against `PROBE_BUDGET`: that counter bounds CR 732.2a
+/// certification ASKS at the verdict door, and putting wall-clock cost on the same counter
+/// would re-base every metered row's pinned spend and make neither number readable.
+pub(crate) struct UpfrontOptionalGate {
+    /// CR 608.2d: [`optional_prompt_player`] names who ANNOUNCES it — not always the controller.
+    pub prompt_player: PlayerId,
+    /// `None` ⇒ the ability carries no `may_trigger_origin`, so no stored preference can key
+    /// on it. That is not the same as "no preference stored": it is "no key exists".
+    pub key: Option<MayTriggerAutoChoiceKey>,
+}
+
+pub(crate) fn upfront_optional_gate(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    feasibility: OptionalFeasibility,
+) -> Option<UpfrontOptionalGate> {
+    if !ability.optional || ability.optional_for.is_some() {
+        return None;
+    }
+    // CR 608.2c + CR 608.2d + CR 603.12a: the three shapes that SUPPRESS the single up-front
+    // gate and fire optionality per iteration instead.
+    if has_kind_driven_repeat(ability)
+        || has_member_driven_repeat_after_hydration(state, ability)
+        || is_repeated_optional_payment(ability)
+    {
+        return None;
+    }
+    let infeasible = match feasibility {
+        OptionalFeasibility::Known(known) => known,
+        OptionalFeasibility::Probe => optional_effect_is_infeasible(state, ability),
+    };
+    if infeasible {
+        return None;
+    }
+    let prompt_player = optional_prompt_player(state, ability);
+    Some(UpfrontOptionalGate {
+        prompt_player,
+        key: ability
+            .may_trigger_origin
+            .clone()
+            .map(|origin| MayTriggerAutoChoiceKey {
+                player: prompt_player,
+                source_id: ability.source_id,
+                origin,
+            }),
+    })
+}
+
+/// CR 603.5: is that gate ALREADY ANSWERED by a stored "don't ask again" preference?
+///
+/// The CONSUMER half of [`upfront_optional_gate`], so the mint's suppression, the analysis's
+/// relief and production's own early return can no longer disagree about which mays are
+/// answered. `None` ⇒ the gate will PROMPT, or there is no gate, or the ability carries no
+/// `may_trigger_origin` for a preference to key on — all three are unspecified windows, which
+/// is the fail-closed direction for every consumer.
+///
+/// Passes [`OptionalFeasibility::Probe`]: a caller asking "is this already answered?" has by
+/// definition not run the feasibility probe itself.
+pub(crate) fn stored_may_answer(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<AutoMayChoice> {
+    let gate = upfront_optional_gate(state, ability, OptionalFeasibility::Probe)?;
+    state.may_trigger_auto_choice(gate.key.as_ref()?)
+}
+
 /// CR 603.12a + CR 608.2c: True when this ability is a "you may pay {cost} up to
 /// N times. When you do, [reflexive]" process (Hawkeye, Master Marksman — "Trick
 /// Arrows"). Unlike a generic `repeat_for` loop (one up-front "you may" then N
@@ -6549,8 +6696,8 @@ pub(crate) fn resolve_player_for_context_ref(
     ability.controller
 }
 
-/// CR 117.3a: Determine which player receives the "may" prompt for an optional
-/// effect. Most optional effects go to the caster (CR 608.2d). Subject-anchored
+/// CR 608.2d: Determine which player ANNOUNCES the choice — receives the "may"
+/// prompt — for an optional effect. Most go to the caster. Subject-anchored
 /// optional effects — "its controller may search their library" (Assassin's
 /// Trophy, Path to Exile, Ghost Quarter, Oblation, …) — route the prompt to the
 /// acting subject (the target permanent's controller). This mirrors the
@@ -7415,31 +7562,15 @@ fn effect_consumes_event_context_amount(effect: &Effect) -> bool {
     consumes
 }
 
-/// Walks every `QuantityRef` reachable through `quantity`'s composition forms
-/// and reports whether any satisfies `pred`. Single traversal authority for the
-/// resolution-local back-reference predicates, so a new `QuantityExpr`
-/// composition form is threaded in exactly one place instead of once per
-/// predicate.
+/// Delegates to `QuantityExpr::any_ref` (`types/ability.rs`) — the single
+/// traversal authority, relocated there so the parser layer can consult it
+/// too without reaching into game internals. Kept as a thin free-function
+/// wrapper here since this module's call sites (below) predate the move.
 fn quantity_expr_any_ref(
     quantity: &QuantityExpr,
     pred: &mut dyn FnMut(&QuantityRef) -> bool,
 ) -> bool {
-    match quantity {
-        QuantityExpr::Ref { qty } => pred(qty),
-        QuantityExpr::Offset { inner, .. }
-        | QuantityExpr::ClampMin { inner, .. }
-        | QuantityExpr::Multiply { inner, .. }
-        | QuantityExpr::DivideRounded { inner, .. } => quantity_expr_any_ref(inner, pred),
-        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
-            exprs.iter().any(|expr| quantity_expr_any_ref(expr, pred))
-        }
-        QuantityExpr::UpTo { max } => quantity_expr_any_ref(max, pred),
-        QuantityExpr::Power { exponent, .. } => quantity_expr_any_ref(exponent, pred),
-        QuantityExpr::Difference { left, right } => {
-            quantity_expr_any_ref(left, pred) || quantity_expr_any_ref(right, pred)
-        }
-        QuantityExpr::Fixed { .. } => false,
-    }
+    quantity.any_ref(pred)
 }
 
 fn quantity_expr_references_event_context_amount(quantity: &QuantityExpr) -> bool {
@@ -9221,6 +9352,13 @@ fn resolve_chain_body(
     // affected player of the resolving replaced event (Zur's Weirding).
     if ability.optional {
         if let Some(scope) = ability.optional_for {
+            // COUPLING, recorded: `upfront_optional_gate` encodes this same fan-out
+            // pre-emption as `optional_for.is_some() ⇒ None`. The two agree because
+            // THIS returns first, not because either derives from the other. Moving
+            // or weakening this early return silently changes what the authority
+            // means at the gate below (CR 608.2d + CR 101.4). The `debug_assert!` at
+            // the gate is the executable half of this note.
+            //
             // Exhaustive match: there is no compiler exhaustiveness guard at the
             // other OpponentMayScope consumers, so this serves as the manual
             // guard. Adding a variant forces a decision here.
@@ -9294,23 +9432,38 @@ fn resolve_chain_body(
     // may" PER iteration via `drive_repeated_optional_payment`, not once up
     // front — suppress the single gate here exactly as the kind/member-driven
     // loops do.
-    if ability.optional
-        && !has_kind_driven_repeat(ability)
-        && !has_member_driven_repeat_after_hydration(state, ability)
-        && !is_repeated_optional_payment(ability)
-        && !optional_is_infeasible
-    {
+    //
+    // ADOPTION A: this branch IS `upfront_optional_gate`. The conjunct set is not restated
+    // here — that is what makes the function an authority rather than a fourth copy. The
+    // feasibility fact is handed over as `Known`, because `optional_is_infeasible` was
+    // already computed above for the `CastFromZone` decline early-return, and a re-probe
+    // would run the clone-bearing arm twice on production's hot resolve path.
+    if let Some(gate) = upfront_optional_gate(
+        state,
+        ability,
+        OptionalFeasibility::Known(optional_is_infeasible),
+    ) {
+        // The executable half of the `optional_for` coupling note above: this branch is
+        // reachable only because the CR 101.4 fan-out already returned, so the authority's
+        // `optional_for.is_some() ⇒ None` conjunct can never be the thing that admits an
+        // ability here. MEASURED across the whole `--lib` suite with an `unreachable!` in
+        // this position: zero firings.
+        debug_assert!(
+            ability.optional_for.is_none(),
+            "CR 608.2d + CR 101.4: the fan-out early return must have taken every \
+             `optional_for` ability before the up-front gate"
+        );
         let description = ability.description.clone();
-        let prompt_player = optional_prompt_player(state, ability);
-        let may_trigger_key =
-            ability
-                .may_trigger_origin
-                .clone()
-                .map(|origin| MayTriggerAutoChoiceKey {
-                    player: prompt_player,
-                    source_id: ability.source_id,
-                    origin,
-                });
+        let UpfrontOptionalGate {
+            prompt_player,
+            key: may_trigger_key,
+        } = gate;
+        // Deliberately the DIRECT store read rather than `stored_may_answer`, and this is
+        // not a duplicated authority: the KEY is what has to be built in one place, and it
+        // was — by `upfront_optional_gate`, above. `stored_may_answer` would re-enter the
+        // authority with `Probe` and run the feasibility clone a second time, which is the
+        // exact defect `OptionalFeasibility` exists to prevent. Same key, same store, same
+        // answer, one probe.
         if let Some(ref key) = may_trigger_key {
             if let Some(choice) = state.may_trigger_auto_choice(key) {
                 resolve_optional_effect_decision(
@@ -10017,6 +10170,56 @@ fn resolve_chain_body(
             _ => None,
         })
         .collect();
+    // CR 701.9a + CR 608.2c + CR 400.7: Capture the result from the active,
+    // operation-owned discard frame. Unlike an event-slice or global ledger,
+    // the frame remains exact through replacement redirection and cannot be
+    // satisfied by a sibling discard from the same source.
+    let mut discard_context;
+    let ability = if matches!(
+        ability.effect,
+        Effect::Discard { .. } | Effect::DiscardCard { .. }
+    ) {
+        let result = state.resolution_stack.active_discard().and_then(|frame| {
+            frame
+                .results
+                .first()
+                .map(|result| (frame.id, result.clone()))
+        });
+        if let Some((frame_id, result)) = result {
+            discard_context = ability.clone();
+            discard_context.context.direct_discard_result = Some(result);
+            let retired = state.resolution_stack.take_active_discard().expect(
+                "completed Recruit discard frame must remain live until direct-child hand-off",
+            );
+            assert_eq!(
+                retired.expect("active Recruit frame must exist").id,
+                frame_id
+            );
+            &discard_context
+        } else {
+            // A prevented/no-op Recruit discard cannot satisfy its contingent
+            // instruction. Once no prompt remains, retire the operation frame
+            // instead of letting it leak into a later discard resolution.
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                if let Some(frame_id) = state
+                    .resolution_stack
+                    .active_discard()
+                    .map(|frame| frame.id)
+                {
+                    let retired = state.resolution_stack.take_active_discard().expect(
+                        "settled Recruit discard frame must remain live until its gate is checked",
+                    );
+                    assert_eq!(
+                        retired.expect("active Recruit frame must exist").id,
+                        frame_id
+                    );
+                }
+            }
+            ability
+        }
+    } else {
+        ability
+    };
     // CR 608.2c + CR 109.5: Accumulate player actions across the chain for
     // `PlayerFilter::PerformedActionThisWay`. This is distinct from
     // `last_zone_changed_ids`: "searched this way" keys off the player action
@@ -10212,9 +10415,10 @@ fn resolve_chain_body(
     if ability.sub_ability.as_ref().is_some_and(|sub| {
         sub.condition
             .as_ref()
-            .is_some_and(condition_contains_city_blessing)
+            .is_some_and(condition_contains_designation)
     }) {
         crate::game::sba::apply_city_blessing_if_triggered(state, events);
+        crate::game::sba::apply_enduring_story_if_triggered(state, events);
     }
 
     // Follow typed sub_ability chain, propagating parent targets when sub has none.
@@ -11739,6 +11943,23 @@ pub(crate) fn evaluate_condition(
         // CR 702.131c: The city's blessing is a player designation that effects
         // can identify.
         AbilityCondition::HasCityBlessing => eval_has_city_blessing(state, ability.controller),
+        AbilityCondition::HasEnduringStory => eval_has_enduring_story(state, ability.controller),
+        // CR 701.9a + CR 608.2c + CR 400.7: Recruit reads the captured
+        // hand-time characteristics of the card discarded by its direct parent;
+        // a redirect and any destination-zone incarnation are irrelevant.
+        AbilityCondition::DiscardedCardMatchesFilter { filter } => ability
+            .context
+            .direct_discard_result
+            .as_ref()
+            .is_some_and(|result| {
+                crate::game::filter::matches_target_filter_on_lki_snapshot(
+                    state,
+                    result.object_id,
+                    &result.lki,
+                    filter,
+                    &crate::game::filter::FilterContext::from_ability(ability),
+                )
+            }),
         // CR 701.54a: Ring-bearer designation on the ability source.
         AbilityCondition::IsRingBearer => crate::game::effects::ring::is_current_ring_bearer(
             state,
@@ -22970,6 +23191,7 @@ mod tests {
     fn evaluate_condition_city_blessing_checks_ability_controller() {
         let mut state = GameState::new_two_player(42);
         state.city_blessing.insert(PlayerId(0));
+        state.enduring_story.insert(PlayerId(0));
         let ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
@@ -22985,6 +23207,11 @@ mod tests {
             &state,
             &ability,
         ));
+        assert!(evaluate_condition(
+            &AbilityCondition::HasEnduringStory,
+            &state,
+            &ability,
+        ));
 
         let opponent_ability = ResolvedAbility::new(
             Effect::Draw {
@@ -22997,6 +23224,11 @@ mod tests {
         );
         assert!(!evaluate_condition(
             &AbilityCondition::HasCityBlessing,
+            &state,
+            &opponent_ability,
+        ));
+        assert!(!evaluate_condition(
+            &AbilityCondition::HasEnduringStory,
             &state,
             &opponent_ability,
         ));
@@ -26569,15 +26801,15 @@ mod tests {
     }
 
     #[test]
-    fn condition_contains_city_blessing_recurses_through_condition_instead() {
+    fn condition_contains_designation_recurses_through_condition_instead() {
         let condition = AbilityCondition::ConditionInstead {
             inner: Box::new(AbilityCondition::HasCityBlessing),
         };
 
         assert!(
-            condition_contains_city_blessing(&condition),
-            "city's-blessing gated continuations wrapped in ConditionInstead must run the \
-             mid-chain blessing check before the condition is evaluated"
+            condition_contains_designation(&condition),
+            "designation-gated continuations wrapped in ConditionInstead must run the \
+             mid-chain designation check before the condition is evaluated"
         );
     }
 

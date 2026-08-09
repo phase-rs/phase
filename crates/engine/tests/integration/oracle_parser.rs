@@ -935,3 +935,177 @@ fn brood_birthing_grant_static_unchanged_by_masking() {
         result.statics[0]
     );
 }
+
+/// Issue #6504: Jeweled Amulet's "note the type of mana spent to pay this
+/// activation cost" / "add one mana of this artifact's last noted type" pair
+/// must parse to the typed `Effect::NoteManaSpent` / `ManaProduction::NotedType`
+/// building block, not fall through to `Effect::Unimplemented`.
+#[test]
+fn jeweled_amulet_notes_and_reads_back_mana_type() {
+    use engine::types::ability::{ManaProduction, QuantityExpr};
+
+    let result = parse(
+        "{1}, {T}: Put a charge counter on this artifact. Note the type of mana \
+         spent to pay this activation cost. Activate only if there are no charge \
+         counters on this artifact.\n{T}, Remove a charge counter from this \
+         artifact: Add one mana of this artifact's last noted type.",
+        "Jeweled Amulet",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+
+    assert_eq!(
+        result.abilities.len(),
+        2,
+        "Jeweled Amulet has two top-level activated abilities: {:#?}",
+        result.abilities
+    );
+
+    let note_ability = result
+        .abilities
+        .iter()
+        .find(|a| matches!(&*a.effect, Effect::PutCounter { .. }))
+        .unwrap_or_else(|| panic!("no PutCounter ability parsed: {:#?}", result.abilities));
+    let note_sub = note_ability
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("PutCounter has no note sub-ability: {note_ability:#?}"));
+    assert!(
+        matches!(&*note_sub.effect, Effect::NoteManaSpent),
+        "expected Effect::NoteManaSpent, got {:#?}",
+        note_sub.effect
+    );
+
+    let add_ability = result
+        .abilities
+        .iter()
+        .find(|a| matches!(&*a.effect, Effect::Mana { .. }))
+        .unwrap_or_else(|| panic!("no Mana ability parsed: {:#?}", result.abilities));
+    match &*add_ability.effect {
+        Effect::Mana { produced, .. } => match produced {
+            ManaProduction::NotedType { count } => {
+                assert_eq!(
+                    count,
+                    &QuantityExpr::Fixed { value: 1 },
+                    "expected 'one mana' to parse as count=1"
+                );
+            }
+            other => panic!("expected ManaProduction::NotedType, got {other:#?}"),
+        },
+        other => unreachable!("filtered to Effect::Mana above, got {other:#?}"),
+    }
+}
+
+/// Issue #6504: the note clause is a composed grammar (article + cost-referent
+/// axes independently optional/variable), not a Jeweled-Amulet-shaped sentence
+/// tag — a hypothetical sibling printing the articleless "note type" and the
+/// shorter "this cost" (rather than "this activation cost") must reach
+/// `Effect::NoteManaSpent` with no new parser arm. `Amber Amulet` here is not
+/// a real printed card; it exercises the grammar's structural variants that
+/// `parse_note_mana_spent_clause`'s unit tests cover in isolation, end to end
+/// through the full Oracle-text pipeline.
+#[test]
+fn note_mana_spent_grammar_accepts_a_hypothetical_sibling_wording() {
+    let result = parse(
+        "{1}, {T}: Put a charge counter on this artifact. Note type of mana \
+         spent to pay this cost. Activate only if there are no charge \
+         counters on this artifact.",
+        "Amber Amulet",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+
+    let note_ability = result
+        .abilities
+        .iter()
+        .find(|a| matches!(&*a.effect, Effect::PutCounter { .. }))
+        .unwrap_or_else(|| panic!("no PutCounter ability parsed: {:#?}", result.abilities));
+    let note_sub = note_ability
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("PutCounter has no note sub-ability: {note_ability:#?}"));
+    assert!(
+        matches!(&*note_sub.effect, Effect::NoteManaSpent),
+        "expected Effect::NoteManaSpent for the articleless/shorter-cost \
+         sibling wording, got {:#?}",
+        note_sub.effect
+    );
+}
+
+/// Issue #6504 (coverage-honesty guard): Ice Cauldron prints Jeweled Amulet's
+/// sibling "note the type AND AMOUNT of mana spent..." / "add ... last noted
+/// type and amount of mana" pair, which `parse_note_mana_spent_clause` and
+/// `ManaProduction::NotedType` deliberately do not model (see the doc comment
+/// on `parse_note_mana_spent_clause`). A production-parser assertion — not
+/// just the isolated `parse_note_mana_spent_clause` unit tests — is required
+/// here: it proves the parser actually REACHES both noted-mana clauses
+/// (rather than failing earlier in the sentence for an unrelated reason) and
+/// that each still falls through to `Effect::Unimplemented`, so an upstream
+/// routing/fallback change can't silently start reporting Ice Cauldron as
+/// supported or partially supported. Paired with
+/// `jeweled_amulet_notes_and_reads_back_mana_type`'s positive full-Oracle
+/// assertion that the same grammar area reaches `Effect::NoteManaSpent` for
+/// Jeweled Amulet's singular-type wording.
+#[test]
+fn ice_cauldron_note_type_and_amount_stays_unimplemented() {
+    let result = parse(
+        "{X}, {T}: You may exile a nonland card from your hand. You may cast that \
+         card for as long as it remains exiled. Put a charge counter on this \
+         artifact and note the type and amount of mana spent to pay this \
+         activation cost. Activate only if there are no charge counters on this \
+         artifact.\n{T}, Remove a charge counter from this artifact: Add this \
+         artifact's last noted type and amount of mana. Spend this mana only to \
+         cast the last card exiled with this artifact.",
+        "Ice Cauldron",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+
+    // First ability: exile -> cast -> put counter -> note (type and amount).
+    // The note clause is reached only by walking through three chained
+    // sub-abilities, proving the parser gets all the way to the noted-mana
+    // subject rather than failing earlier for an unrelated reason.
+    let exile_ability = result
+        .abilities
+        .iter()
+        .find(|a| matches!(&*a.effect, Effect::ChangeZone { .. }))
+        .unwrap_or_else(|| panic!("no exile ability parsed: {:#?}", result.abilities));
+    let cast_sub = exile_ability
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("exile has no cast sub-ability: {exile_ability:#?}"));
+    let counter_sub = cast_sub
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("cast has no counter sub-ability: {cast_sub:#?}"));
+    let note_sub = counter_sub
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("counter has no note sub-ability: {counter_sub:#?}"));
+    assert!(
+        matches!(&*note_sub.effect, Effect::Unimplemented { name, .. } if name == "note"),
+        "Ice Cauldron's 'type AND amount' noted-mana subject must stay \
+         Unimplemented, not be swallowed by parse_note_mana_spent_clause's \
+         singular-type grammar; got {:#?}",
+        note_sub.effect
+    );
+
+    // Second ability: the mana-producing "add ... last noted type and amount
+    // of mana" must not be matched by `ManaProduction::NotedType`'s
+    // singular-type pattern.
+    let mana_ability = result
+        .abilities
+        .iter()
+        .find(|a| matches!(&*a.effect, Effect::Unimplemented { name, .. } if name == "add"))
+        .unwrap_or_else(|| panic!("no 'add' mana ability parsed: {:#?}", result.abilities));
+    assert!(
+        matches!(&*mana_ability.effect, Effect::Unimplemented { .. }),
+        "Ice Cauldron's 'last noted type and amount of mana' must stay \
+         Unimplemented, not be matched by ManaProduction::NotedType's \
+         singular-type pattern; got {:#?}",
+        mana_ability.effect
+    );
+}

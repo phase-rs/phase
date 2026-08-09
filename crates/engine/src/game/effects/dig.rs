@@ -170,6 +170,10 @@ pub fn resolve(
             // looker — and only the looker — through any subsequent "you may reveal
             // that card" optional decision, instead of leaving the looking player to
             // choose blind.
+            state.remember_card_identities(
+                crate::game::turn_control::decision_audience_for_player(state, ability.controller),
+                &cards,
+            );
             state.private_look_ids = cards.clone();
             state.private_look_player = Some(ability.controller);
         }
@@ -197,6 +201,12 @@ pub fn resolve(
             card_ids: cards.clone(),
             card_names,
         });
+    }
+    if !is_reveal {
+        state.remember_card_identities(
+            crate::game::turn_control::decision_audience_for_player(state, ability.controller),
+            &cards,
+        );
     }
 
     // Pre-compute selectable cards by evaluating the filter against each card.

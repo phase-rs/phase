@@ -202,13 +202,42 @@ pub fn resolve(
     };
     let count = resolve_quantity_with_targets(state, count_expr, ability).max(0) as usize;
 
+    // CR 400.7 + CR 603.7c: a delayed sacrifice whose pinned referent became a
+    // new object affects nothing. Return before the empty-pool fallback below,
+    // which resolves a player scope and would make the controller sacrifice a
+    // DIFFERENT permanent (`resolve_sacrifice_scope`, CR 701.21a: "To sacrifice
+    // a permanent, its controller moves it from the battlefield directly to its
+    // owner's graveyard"). Note this file elsewhere cites CR 701.17a for
+    // sacrifice; 701.17a is mill (CR 701.21 is Sacrifice). That pre-existing
+    // cluster is left alone here so the correction lands as one auditable pass.
+    //
+    // Emits EffectResolved first, matching the shipped CR 400.7 SelfRef guard
+    // above, which this guard is the direct extension of.
+    if ability.pinned_object_targets_all_stale(state) {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
+
+    let live_targets = ability.live_object_targets(state);
     let targeted_objects = if matches!(
         sacrifice_controller_scope(filter),
         Some(ControllerRef::ParentTargetController)
     ) {
         Vec::new()
     } else {
-        crate::game::effects::effect_object_targets(filter, &ability.targets)
+        // CR 400.7 + CR 603.7c: `effect_object_targets` indexes ParentTargetSlot
+        // by DECLARED position, so a pin-filtered slice would renumber every
+        // later slot. Pass the raw list for that filter shape.
+        let pool: &[TargetRef] = if matches!(filter, TargetFilter::ParentTargetSlot { .. }) {
+            &ability.targets
+        } else {
+            &live_targets
+        };
+        crate::game::effects::effect_object_targets(filter, pool)
     };
 
     if targeted_objects.is_empty() {

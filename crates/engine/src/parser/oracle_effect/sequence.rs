@@ -6346,6 +6346,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::Bolster { .. }
         | Effect::Adapt { .. }
         | Effect::Learn
+        | Effect::NoteManaSpent
         | Effect::Forage
         | Effect::Harness
         | Effect::CollectEvidence { .. }
@@ -11754,33 +11755,29 @@ mod tests {
 
     // --- Token enters with counters continuation ---
 
+    /// The parser accepts both the "the token enters with " and "it enters with "
+    /// prefixes in one `alt`; both must produce the same continuation. The `let …
+    /// else` is load-bearing: a bare `if let` would let any other `ContinuationAst`
+    /// variant pass without ever asserting the variant under test.
     #[test]
     fn token_enters_with_x_counters_where_x_is() {
-        let result = try_parse_token_enters_with_counters(
+        for text in [
             "the token enters with x +1/+1 counters on it, where x is the number of other creatures you control",
-        );
-        assert!(result.is_some());
-        if let Some(ContinuationAst::TokenEntersWithCounters {
-            counter_type,
-            count,
-        }) = result
-        {
-            assert_eq!(counter_type, CounterType::Plus1Plus1);
-            // Should be an ObjectCount ref for "the number of other creatures you control"
-            assert!(matches!(count, QuantityExpr::Ref { .. }));
-        } else {
-            panic!("expected TokenEntersWithCounters");
-        }
-    }
-
-    #[test]
-    fn token_enters_with_it_prefix() {
-        let result = try_parse_token_enters_with_counters(
             "it enters with x +1/+1 counters on it, where x is the number of creatures you control",
-        );
-        assert!(result.is_some());
-        if let Some(ContinuationAst::TokenEntersWithCounters { counter_type, .. }) = result {
-            assert_eq!(counter_type, CounterType::Plus1Plus1);
+        ] {
+            let Some(ContinuationAst::TokenEntersWithCounters {
+                counter_type,
+                count,
+            }) = try_parse_token_enters_with_counters(text)
+            else {
+                panic!("expected TokenEntersWithCounters for {text:?}");
+            };
+            assert_eq!(counter_type, CounterType::Plus1Plus1, "{text:?}");
+            // An ObjectCount ref for the "where x is the number of …" tail.
+            assert!(
+                matches!(count, QuantityExpr::Ref { .. }),
+                "{text:?} count should be a ref, got {count:?}"
+            );
         }
     }
 
