@@ -68,7 +68,7 @@ use crate::game::bracket_estimate::CommanderBracketTier;
 use crate::game::combat::{AttackTarget, CombatState};
 use crate::game::deck_loading::DeckEntry;
 
-use crate::game::game_object::{AttachTarget, CaseState, GameObject, PhaseStatus};
+use crate::game::game_object::{AttachTarget, BackFaceData, CaseState, GameObject, PhaseStatus};
 
 fn default_rng() -> ChaCha20Rng {
     ChaCha20Rng::seed_from_u64(0)
@@ -3646,6 +3646,31 @@ pub struct PendingCopyTokenResolution {
     pub remaining: VecDeque<PendingCopyTokenBatch>,
     pub effect_kind: EffectKind,
     pub source_id: ObjectId,
+}
+
+/// Private, face-complete source for a debug-created card that has not yet
+/// materialized as a game object. This lives only inside a resolution frame so
+/// a paused batch neither allocates an object identity nor exposes a future
+/// card in a public zone before its own entry begins.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DebugCardEntrySource {
+    pub face: CardFace,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub back_face: Option<BackFaceData>,
+}
+
+/// CR 400.7 + CR 614.1: Remaining real battlefield entries for one debug
+/// Create Card request. Each item is materialized immediately before its own
+/// entry attempt, so replacement and as-enters choices can suspend without
+/// staging later cards in a visible zone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingDebugCardEntries {
+    pub source: DebugCardEntrySource,
+    pub owner: PlayerId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_to: Option<AttachTarget>,
+    pub nonlegendary: bool,
+    pub remaining: u32,
 }
 
 /// CR 616.1: Which pausing primitive of an `EachPlayerCopyChosen` per-player
@@ -17387,6 +17412,36 @@ impl GameState {
     ) -> Result<(), ResolutionStackError> {
         self.resolution_stack
             .insert_copy_token_parent_at_child_boundary(pending, child_stack_start)
+    }
+
+    /// Returns the debug-card batch owner only when its typed frame owns the
+    /// stack top.
+    pub fn active_debug_card_entries(&self) -> Option<&PendingDebugCardEntries> {
+        self.resolution_stack.active_debug_card_entries()
+    }
+
+    /// Consume exactly the active debug-card batch after its current entry
+    /// finishes. A buried batch is a parent dependency, not a fallback.
+    pub fn take_active_debug_card_entries(
+        &mut self,
+    ) -> Result<Option<PendingDebugCardEntries>, ResolutionStackError> {
+        self.resolution_stack.take_active_debug_card_entries()
+    }
+
+    /// Park a debug-card batch as the active inner frame.
+    pub fn push_debug_card_entries(&mut self, pending: PendingDebugCardEntries) {
+        self.resolution_stack.push_debug_card_entries(pending);
+    }
+
+    /// Insert a debug-card batch below the complete child stack its current
+    /// entry attempt created after recording the pre-entry boundary.
+    pub fn insert_debug_card_entries_parent_at_child_boundary(
+        &mut self,
+        pending: PendingDebugCardEntries,
+        child_stack_start: usize,
+    ) -> Result<(), ResolutionStackError> {
+        self.resolution_stack
+            .insert_debug_card_entries_parent_at_child_boundary(pending, child_stack_start)
     }
 
     /// Returns the EachPlayerCopyChosen owner only when its typed frame owns

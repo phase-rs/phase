@@ -2137,6 +2137,7 @@ export type DebugAction =
         attach_to?: AttachTarget;
         run_etb: boolean;
         nonlegendary: boolean;
+        count: number;
       };
     }
   | { type: "RemoveObject"; data: { object_id: ObjectId } }
@@ -2169,11 +2170,12 @@ export type DebugAction =
       data: {
         request: DebugTokenRequest;
         run_etb: boolean;
+        count: number;
       };
     }
   | {
       type: "CreateTokenCopy";
-      data: { source_id: ObjectId; owner: PlayerId; nonlegendary: boolean };
+      data: { source_id: ObjectId; owner: PlayerId; nonlegendary: boolean; count: number };
     };
 
 // CR 117.3d: priority-yield preference types, mirroring the engine's
@@ -2462,6 +2464,18 @@ export type GameEvent =
   | { type: "PermanentSacrificed"; data: { object_id: ObjectId; player_id: PlayerId } }
   | { type: "ArmyAmassed"; data: { object_id: ObjectId; source_id: ObjectId; controller: PlayerId } }
   | { type: "EffectResolved"; data: { kind: string; source_id: ObjectId } }
+  // CR 701.22a: the engine records only public scry placement counts, never
+  // card identities, so presentation can show the completed outcome safely.
+  | {
+      type: "PlayerPerformedAction";
+      data: {
+        player_id: PlayerId;
+        action: string;
+        look_count?: number;
+        scry_bottom_count?: number;
+        scry_top_count?: number;
+      };
+    }
   | { type: "AttackersDeclared"; data: { attacker_ids: ObjectId[]; defending_player: PlayerId; attacks?: [ObjectId, AttackTarget][] } }
   | { type: "BlockersDeclared"; data: { assignments: [ObjectId, ObjectId][] } }
   | { type: "BecomesTarget"; data: { target: TargetRef; source_id: ObjectId } }

@@ -28,7 +28,6 @@ use engine::game::{
     validate_name_deck_for_format_full, BracketEstimate, DeckCompatibilityRequest, DeckList,
     PlayerDeckList, ReplayPlayer,
 };
-use engine::types::card_type::Supertype;
 use engine::types::format::{DeckCopyLimit, FormatConfig, GameFormat};
 use engine::types::game_state::{PersistedGameState, TrustedGameStateEnvelope, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -1323,12 +1322,22 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
         ref card_name,
         owner,
         zone,
+        count,
         attach_to,
         run_etb,
         nonlegendary,
     }) = action
     {
-        return handle_debug_create_card(card_name, owner, zone, attach_to, run_etb, nonlegendary);
+        return handle_debug_create_card(DebugCreateCardRequest {
+            actor,
+            card_name,
+            owner,
+            zone,
+            count,
+            attach_to,
+            run_etb,
+            nonlegendary,
+        });
     }
 
     // Cloned before `apply` consumes `action` — recorded into REPLAY_LOG only
@@ -1336,10 +1345,20 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
     // reaches here.
     let action_for_replay = action.clone();
     let is_debug_action = matches!(action, GameAction::Debug(_));
+    let is_zero_count_debug_create = matches!(
+        &action,
+        GameAction::Debug(debug_action) if debug_action.is_zero_count_create()
+    );
     match with_state_mut(|state| match apply(state, actor, action) {
         Ok(result) => {
-            record_replay_action(is_debug_action, actor, action_for_replay);
-            invalidate_ai_proposals();
+            record_replay_action(
+                is_debug_action && !is_zero_count_debug_create,
+                actor,
+                action_for_replay,
+            );
+            if !is_zero_count_debug_create {
+                invalidate_ai_proposals();
+            }
             to_js(&result)
         }
         Err(e) => {
@@ -1409,15 +1428,19 @@ fn record_replay_action(is_debug_action: bool, actor: PlayerId, action_for_repla
     });
 }
 
-fn handle_debug_create_card(
-    card_name: &str,
+struct DebugCreateCardRequest<'a> {
+    actor: PlayerId,
+    card_name: &'a str,
     owner: PlayerId,
     zone: engine::types::zones::Zone,
+    count: u32,
     attach_to: Option<engine::game::game_object::AttachTarget>,
     run_etb: bool,
     nonlegendary: bool,
-) -> JsValue {
-    match handle_debug_create_card_inner(card_name, owner, zone, attach_to, run_etb, nonlegendary) {
+}
+
+fn handle_debug_create_card(request: DebugCreateCardRequest<'_>) -> JsValue {
+    match handle_debug_create_card_inner(request) {
         Ok(result) => to_js(&result),
         Err(msg) => JsValue::from_str(msg),
     }
@@ -1429,26 +1452,56 @@ fn handle_debug_create_card(
 /// plain `cargo test`. See `bracket_estimate_tests::estimate_bracket_inner`
 /// for the same split.
 fn handle_debug_create_card_inner(
-    card_name: &str,
-    owner: PlayerId,
-    zone: engine::types::zones::Zone,
-    attach_to: Option<engine::game::game_object::AttachTarget>,
-    run_etb: bool,
-    nonlegendary: bool,
+    request: DebugCreateCardRequest<'_>,
 ) -> Result<engine::types::game_state::ActionResult, &'static str> {
-    let face = CARD_DB.with(|cell| {
+    let DebugCreateCardRequest {
+        actor,
+        card_name,
+        owner,
+        zone,
+        count,
+        attach_to,
+        run_etb,
+        nonlegendary,
+    } = request;
+    if count > engine::types::actions::MAX_DEBUG_CREATE_COUNT {
+        return Err("Engine error: debug create count exceeds the maximum");
+    }
+    if count == 0 {
+        return with_state(|state| {
+            if !state.debug_mode {
+                return Err("Engine error: Debug actions require debug_mode to be enabled");
+            }
+            if !state.debug_permitted.is_empty() && !state.debug_permitted.contains(&actor) {
+                return Err("Engine error: Debug actions require debug permission");
+            }
+            if !state.players.iter().any(|player| player.id == owner) {
+                return Err("Engine error: Debug: invalid owner player id");
+            }
+            Ok(engine::types::game_state::ActionResult {
+                events: vec![],
+                waiting_for: state.waiting_for.clone(),
+                log_entries: vec![],
+            })
+        })
+        .unwrap_or(Err(NOT_INITIALIZED_ERR));
+    }
+    let source = CARD_DB.with(|cell| {
         let db = cell.borrow();
         let Some(db) = db.as_ref() else {
             return Err("Engine error: card database not loaded");
         };
         match db.get_face_by_name(card_name) {
-            Some(face) => Ok(face.clone()),
+            Some(face) => Ok(engine::game::debug_card_entry_source(db, face)),
             None => Err("Engine error: card not found in database"),
         }
     })?;
     with_state_mut(|state| {
         if !state.debug_mode {
             return Err("Engine error: Debug actions require debug_mode to be enabled");
+        }
+        if !state.debug_permitted.is_empty() && !state.debug_permitted.contains(&actor) {
+            return Err("Engine error: Debug actions require debug permission");
         }
         if !state.players.iter().any(|p| p.id == owner) {
             return Err("Engine error: Debug: invalid owner player id");
@@ -1461,93 +1514,18 @@ fn handle_debug_create_card_inner(
         // so `export_replay_log` can't produce a log that silently omits a
         // debug spawn.
         REPLAY_LOG.with(|cell| cell.set(None));
-        // CR 400.7: For battlefield destination, stage the object in Hand
-        // first, then route through the real ETB pipeline so replacements,
-        // triggers, and SBAs all fire. Direct creation in Battlefield (the
-        // old path) bypassed all of these and left Auras stranded with
-        // `attached_to: None` plus a `entered_battlefield_turn` stamp that
-        // survived later zone moves.
-        let staging_zone = if zone == engine::types::zones::Zone::Battlefield {
-            engine::types::zones::Zone::Hand
-        } else {
-            zone
-        };
-        let card_id = engine::types::identifiers::CardId(state.next_object_id);
-        let obj_id =
-            engine::game::create_object(state, card_id, owner, face.name.clone(), staging_zone);
-        let obj = state.objects.get_mut(&obj_id).expect("just created");
-        engine::game::printed_cards::apply_card_face_to_object(obj, &face);
-        // CR 205.4a-b: Legendary is an independent supertype. The sandbox
-        // override removes only that supertype from both the base (copiable)
-        // and current characteristics, preserving every other type detail.
-        if nonlegendary {
-            obj.base_card_types
-                .supertypes
-                .retain(|supertype| *supertype != Supertype::Legendary);
-            obj.card_types
-                .supertypes
-                .retain(|supertype| *supertype != Supertype::Legendary);
-        }
-        state.layers_dirty.mark_full();
-
-        // Hydrate `back_face` for dual-faced spawns (MDFC, Transform, Adventure,
-        // Omen, Meld, Prepare). `apply_card_face_to_object` only writes the named
-        // face; without this, a debug-spawned Esika, God of the Tree has no
-        // Prismatic Bridge back face, so Ctrl-to-flip preview and MDFC face-choice
-        // casting silently no-op until a page refresh re-runs deck hydration. This
-        // is the same canonical primitive `load_and_hydrate_decks` uses, so the
-        // debug-spawn path can't drift from the normal load path. The new object
-        // already carries `printed_ref` (set by `apply_card_face_to_object`), which
-        // rehydrate uses to resolve the card and its other face.
-        CARD_DB.with(|cell| {
-            if let Some(db) = cell.borrow().as_ref() {
-                engine::game::printed_cards::rehydrate_game_from_card_db(state, db);
-            }
-        });
-
-        // CR 303.4f + CR 704.5n: When the user picks an attachment target,
-        // wire the host through the engine's attach resolvers BEFORE routing
-        // through the ETB pipeline. The resolvers (`attach_to`,
-        // `attach_to_player`) own all legality checks (CR 301.5 / 303.4i,
-        // `CantBeAttached` / `CantBeEnchanted` / `CantBeEquipped` statics) and
-        // back-link bookkeeping (host's `attachments` list, `layers_dirty`),
-        // so the WASM bridge stays a thin transport layer with zero attachment
-        // logic. Doing this pre-ETB means the post-ETB SBA pass sees the
-        // attachment with a legal host instead of an orphan (CR 704.5n) and
-        // any "becomes attached" trigger fires from the same resolved state
-        // a real cast would produce. Only honored for Battlefield spawns —
-        // Auras in Hand/Library/Exile/Graveyard have no battlefield host.
-        if zone == engine::types::zones::Zone::Battlefield {
-            if let Some(target) = attach_to {
-                use engine::game::game_object::AttachTarget;
-                match target {
-                    AttachTarget::Object(target_id) => {
-                        if state.objects.contains_key(&target_id) {
-                            engine::game::effects::attach::attach_to(state, obj_id, target_id);
-                        }
-                    }
-                    AttachTarget::Player(target_player) => {
-                        if state.players.iter().any(|p| p.id == target_player) {
-                            engine::game::effects::attach::attach_to_player(
-                                state,
-                                obj_id,
-                                target_player,
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        let result = if zone == engine::types::zones::Zone::Battlefield {
-            engine::game::route_debug_create_to_battlefield(state, obj_id, run_etb)
-        } else {
-            engine::types::game_state::ActionResult {
-                events: vec![],
-                waiting_for: state.waiting_for.clone(),
-                log_entries: vec![],
-            }
-        };
+        let result = engine::game::create_debug_cards(
+            state,
+            engine::game::DebugCardCreateRequest {
+                source,
+                owner,
+                zone,
+                count,
+                attach_to,
+                run_etb,
+                nonlegendary,
+            },
+        );
 
         engine::game::public_state::bump_state_revision(state);
         engine::game::public_state::mark_public_state_all_dirty(state);
@@ -4589,19 +4567,30 @@ mod replay_bridge_tests {
         GAME_STATE.with(|cell| cell.set(Some(state)));
         assert!(has_replay_recording());
 
-        let result = handle_debug_create_card_inner(
-            "Test Card",
-            PlayerId(0),
-            engine::types::zones::Zone::Hand,
-            None,
-            true,
-            true,
-        );
+        let result = handle_debug_create_card_inner(DebugCreateCardRequest {
+            actor: PlayerId(0),
+            card_name: "Test Card",
+            owner: PlayerId(0),
+            zone: engine::types::zones::Zone::Hand,
+            count: 2,
+            attach_to: None,
+            run_etb: true,
+            nonlegendary: true,
+        });
         assert!(
             result.is_ok(),
             "debug create-card should succeed in this fixture: {result:?}"
         );
         with_state(|state| {
+            assert_eq!(
+                state
+                    .objects
+                    .values()
+                    .filter(|object| object.name == "Test Card")
+                    .count(),
+                2,
+                "a non-battlefield debug CreateCard batch materializes each card"
+            );
             let card = state
                 .objects
                 .values()
@@ -4628,6 +4617,106 @@ mod replay_bridge_tests {
 
         clear_game_state();
         CARD_DB.with(|c| *c.borrow_mut() = None);
+    }
+
+    #[test]
+    fn debug_create_card_battlefield_batch_uses_the_engine_entry_pipeline() {
+        use engine::database::CardDatabase;
+
+        clear_game_state();
+        let db = CardDatabase::from_json_str(
+            r#"{
+                "test card": {
+                    "name": "Test Card",
+                    "mana_cost": { "type": "NoCost" },
+                    "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+                    "power": "1",
+                    "toughness": "1",
+                    "loyalty": null,
+                    "defense": null,
+                    "oracle_text": null,
+                    "abilities": [],
+                    "triggers": [],
+                    "static_abilities": [],
+                    "replacements": [],
+                    "keywords": []
+                }
+            }"#,
+        )
+        .unwrap();
+        CARD_DB.with(|cell| *cell.borrow_mut() = Some(db));
+
+        let mut state = GameState::new_two_player(19);
+        state.debug_mode = true;
+        GAME_STATE.with(|cell| cell.set(Some(state)));
+
+        let result = handle_debug_create_card_inner(DebugCreateCardRequest {
+            actor: PlayerId(0),
+            card_name: "Test Card",
+            owner: PlayerId(0),
+            zone: engine::types::zones::Zone::Battlefield,
+            count: 2,
+            attach_to: None,
+            run_etb: true,
+            nonlegendary: false,
+        })
+        .expect("a real battlefield debug batch should succeed");
+
+        assert!(matches!(
+            result.waiting_for,
+            engine::types::game_state::WaitingFor::Priority { .. }
+        ));
+        with_state(|state| {
+            assert_eq!(
+                state
+                    .objects
+                    .values()
+                    .filter(|object| {
+                        object.name == "Test Card"
+                            && object.zone == engine::types::zones::Zone::Battlefield
+                    })
+                    .count(),
+                2
+            );
+            assert!(state.resolution_stack.is_empty());
+        })
+        .expect("game state should remain initialized");
+
+        clear_game_state();
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+    }
+
+    #[test]
+    fn debug_create_card_zero_preserves_replay_recording_without_card_database() {
+        clear_game_state();
+        let mut state = GameState::new_two_player(17);
+        state.debug_mode = true;
+        REPLAY_LOG.with(|cell| {
+            cell.set(Some(ReplayLog::new(ReplayHeader {
+                format_config: state.format_config.clone(),
+                match_config: state.match_config,
+                player_count: state.players.len() as u8,
+                first_player: Some(0),
+                seed: state.rng_seed,
+                deck_data: None,
+            })))
+        });
+        GAME_STATE.with(|cell| cell.set(Some(state)));
+
+        let result = handle_debug_create_card_inner(DebugCreateCardRequest {
+            actor: PlayerId(0),
+            card_name: "not loaded",
+            owner: PlayerId(0),
+            zone: engine::types::zones::Zone::Hand,
+            count: 0,
+            attach_to: None,
+            run_etb: true,
+            nonlegendary: false,
+        });
+        assert!(result.is_ok());
+        assert!(has_replay_recording());
+
+        clear_game_state();
     }
 
     /// A non-`CreateCard` debug action (e.g. `DrawCards`) reaches

@@ -7,12 +7,18 @@ use engine::database::legality::{validate_cedh_bracket, CedhBracketError};
 use engine::database::CardDatabase;
 use engine::game::deck_loading::{DeckPayload, PlayerDeckPayload};
 use engine::game::engine::{apply, start_game};
-use engine::game::finalize_public_state;
 use engine::game::interaction::{bind_interaction_authority, submit_interaction};
+use engine::game::log::resolve_log_entries;
 use engine::game::match_flow::apply_trusted_match_forfeit;
 use engine::game::preview::preview_auto_payment_sources;
-use engine::game::{load_and_hydrate_decks, rehydrate_game_from_card_db};
-use engine::types::actions::GameAction;
+use engine::game::public_state::{
+    bump_state_revision, finalize_public_state, mark_public_state_all_dirty,
+};
+use engine::game::{
+    create_debug_cards, debug_card_entry_source, load_and_hydrate_decks,
+    rehydrate_game_from_card_db, DebugCardCreateRequest,
+};
+use engine::types::actions::{DebugAction, GameAction};
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, PersistedGameState};
@@ -1342,6 +1348,20 @@ impl SessionManager {
         player_token: &str,
         action: GameAction,
     ) -> Result<ActionResult, String> {
+        self.handle_action_with_card_db(game_code, player_token, action, None)
+    }
+
+    /// Handle a game action whose transport can resolve debug card names through
+    /// its live card database. The engine owns materialization and entry; this
+    /// boundary only resolves the player-entered card name into a card face.
+    #[allow(clippy::type_complexity)]
+    pub fn handle_action_with_card_db(
+        &mut self,
+        game_code: &str,
+        player_token: &str,
+        action: GameAction,
+        card_db: Option<&CardDatabase>,
+    ) -> Result<ActionResult, String> {
         let session = self
             .sessions
             .get_mut(game_code)
@@ -1409,6 +1429,10 @@ impl SessionManager {
         // legality gate: several legal action classes are combinatorial.
         let records_takeback = !action.is_actor_scoped_preference();
 
+        if let GameAction::Debug(debug_action) = &action {
+            debug_action.validate_create_count()?;
+        }
+
         let pre_action_state = records_takeback.then(|| session.state.clone());
 
         // Set player names for log resolution.
@@ -1420,10 +1444,72 @@ impl SessionManager {
         // `player == authorized_submitter(state)`, so a spoofed action at the
         // wire is rejected inside the engine as well as here.
         let action_type = action.variant_name();
-        let result = apply(&mut session.state, player, action).map_err(|e| {
-            warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
-            format!("Engine error: {}", e)
-        })?;
+        let result = match action {
+            action @ GameAction::Debug(DebugAction::CreateCard { count: 0, .. }) => {
+                apply(&mut session.state, player, action).map_err(|e| {
+                    warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
+                    format!("Engine error: {}", e)
+                })?
+            }
+            GameAction::Debug(DebugAction::CreateCard {
+                card_name,
+                owner,
+                zone,
+                count,
+                attach_to,
+                run_etb,
+                nonlegendary,
+            }) => {
+                if !session.state.debug_mode {
+                    return Err("Engine error: Debug actions require debug_mode to be enabled".to_string());
+                }
+                if !session.state.players.iter().any(|player| player.id == owner) {
+                    return Err("Engine error: Debug: invalid owner player id".to_string());
+                }
+                let card_db = card_db.ok_or_else(|| {
+                    "Debug::CreateCard requires a card database at the transport boundary".to_string()
+                })?;
+                let face = card_db
+                    .get_face_by_name(&card_name)
+                    .ok_or_else(|| "Engine error: card not found in database".to_string())?;
+                let debug_action = DebugAction::CreateCard {
+                    card_name: card_name.clone(),
+                    owner,
+                    zone,
+                    count,
+                    attach_to,
+                    run_etb,
+                    nonlegendary,
+                };
+                let description = debug_action.describe(&session.state);
+                let before = session.state.clone();
+                let mut result = create_debug_cards(
+                    &mut session.state,
+                    DebugCardCreateRequest {
+                        source: debug_card_entry_source(card_db, face),
+                        owner,
+                        zone,
+                        count,
+                        attach_to,
+                        run_etb,
+                        nonlegendary,
+                    },
+                );
+                result.events.push(GameEvent::DebugActionUsed {
+                    player_id: player,
+                    description,
+                });
+                bump_state_revision(&mut session.state);
+                mark_public_state_all_dirty(&mut session.state);
+                finalize_public_state(&mut session.state);
+                result.log_entries = resolve_log_entries(&result.events, &before, &session.state);
+                result
+            }
+            action => apply(&mut session.state, player, action).map_err(|e| {
+                warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
+                format!("Engine error: {}", e)
+            })?,
+        };
         if let Some(snapshot) = pre_action_state {
             session.push_takeback_state(player, snapshot);
         }
@@ -3938,6 +4024,73 @@ mod tests {
     }
 
     #[test]
+    fn server_card_database_resolves_debug_card_batches() {
+        let mut mgr = SessionManager::new();
+        let (code, token) = create_sandbox_game(&mut mgr);
+        let db = CardDatabase::from_json_str(
+            r#"{
+                "server debug creature": {
+                    "name": "Server Debug Creature",
+                    "mana_cost": { "type": "NoCost" },
+                    "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+                    "power": "1",
+                    "toughness": "1",
+                    "loyalty": null,
+                    "defense": null,
+                    "oracle_text": null,
+                    "abilities": [],
+                    "triggers": [],
+                    "static_abilities": [],
+                    "replacements": [],
+                    "keywords": []
+                }
+            }"#,
+        )
+        .expect("debug-card fixture database parses");
+
+        let result = mgr
+            .handle_action_with_card_db(
+                &code,
+                &token,
+                GameAction::Debug(engine::types::actions::DebugAction::CreateCard {
+                    card_name: "Server Debug Creature".into(),
+                    owner: PlayerId(0),
+                    zone: Zone::Battlefield,
+                    count: 2,
+                    attach_to: None,
+                    run_etb: true,
+                    nonlegendary: false,
+                }),
+                Some(&db),
+            )
+            .expect("server transport resolves a debug CreateCard batch through its card database");
+
+        assert!(
+            result
+                .1
+                .iter()
+                .any(|event| matches!(event, GameEvent::DebugActionUsed { .. })),
+            "source-bound server debug actions retain the engine audit event"
+        );
+        assert!(
+            !result.3.is_empty(),
+            "the audit event resolves to a player-visible game-log entry"
+        );
+
+        assert_eq!(
+            mgr.sessions[&code]
+                .state
+                .objects
+                .values()
+                .filter(|object| {
+                    object.name == "Server Debug Creature" && object.zone == Zone::Battlefield
+                })
+                .count(),
+            2
+        );
+    }
+
+    #[test]
     fn with_sandbox_sets_flag_and_is_idempotent() {
         let base = FormatConfig::standard();
         assert!(!base.allow_debug_actions);
@@ -4493,6 +4646,44 @@ mod tests {
             }),
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn revoked_seat_cannot_create_debug_cards_through_server_card_database() {
+        let mut mgr = SessionManager::new();
+        let (code, host_token) = create_sandbox_game(&mut mgr);
+        let (guest_token, _state) = mgr
+            .join_game_with_name(&code, make_deck(), "Guest".to_string())
+            .expect("guest joins");
+
+        mgr.handle_action(
+            &code,
+            &host_token,
+            GameAction::RevokeDebugPermission {
+                player_id: PlayerId(1),
+            },
+        )
+        .expect("host revokes the guest's debug permission");
+
+        // The server's source-bound CreateCard path must not skip the shared
+        // Debug(_) admission gate before attempting card-database resolution.
+        let err = mgr
+            .handle_action_with_card_db(
+                &code,
+                &guest_token,
+                GameAction::Debug(DebugAction::CreateCard {
+                    card_name: "Any Card".to_string(),
+                    owner: PlayerId(1),
+                    zone: Zone::Battlefield,
+                    count: 1,
+                    attach_to: None,
+                    run_etb: true,
+                    nonlegendary: false,
+                }),
+                None,
+            )
+            .expect_err("revoked guests cannot reach the server CreateCard path");
+        assert_eq!(err, "Debug actions are not permitted for this seat");
     }
 
     #[test]

@@ -15,11 +15,11 @@ use crate::types::game_state::{
     DrainStatus, DrawSequenceStack, GameState, GameStateDecode, GameStateDecodeMode,
     PendingBatchDeliveries, PendingChangeZoneIteration, PendingChooseOneOf, PendingConniveReentry,
     PendingContinuation, PendingCopyTokenResolution, PendingCounterAdditionQueue,
-    PendingCounterMoveQueue, PendingCounterRemovalQueue, PendingEachPlayerCopyChosen,
-    PendingLifeTotalAssignment, PendingMultiDraw, PendingPerCategoryZoneChoice,
-    PendingPerPlayerZoneChoice, PendingRepeatIteration, PendingRepeatUntil, PendingSpellResolution,
-    PendingVoteBallotIteration, PostReplacementDrain, PostReplacementDrainStack,
-    ResidentDrainPolicy, ResolvingTriggerContext, WaitingFor,
+    PendingCounterMoveQueue, PendingCounterRemovalQueue, PendingDebugCardEntries,
+    PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingMultiDraw,
+    PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice, PendingRepeatIteration,
+    PendingRepeatUntil, PendingSpellResolution, PendingVoteBallotIteration, PostReplacementDrain,
+    PostReplacementDrainStack, ResidentDrainPolicy, ResolvingTriggerContext, WaitingFor,
 };
 use crate::types::identifiers::{DiscardFrameId, ObjectId};
 use crate::types::player::PlayerId;
@@ -199,6 +199,7 @@ pub enum ResolutionFrame {
     CounterRemovals(PendingCounterRemovalQueue),
     CounterAdditions(PendingCounterAdditionQueue),
     CopyToken(PendingCopyTokenResolution),
+    DebugCardEntries(Box<PendingDebugCardEntries>),
     EachPlayerCopyChosen(PendingEachPlayerCopyChosen),
     ChooseOneOf(PendingChooseOneOf),
     VoteBallot(PendingVoteBallotIteration),
@@ -230,6 +231,7 @@ pub enum FrameKind {
     CounterRemovals,
     CounterAdditions,
     CopyToken,
+    DebugCardEntries,
     EachPlayerCopyChosen,
     ChooseOneOf,
     VoteBallot,
@@ -260,6 +262,7 @@ impl ResolutionFrame {
             Self::CounterRemovals(_) => FrameKind::CounterRemovals,
             Self::CounterAdditions(_) => FrameKind::CounterAdditions,
             Self::CopyToken(_) => FrameKind::CopyToken,
+            Self::DebugCardEntries(_) => FrameKind::DebugCardEntries,
             Self::EachPlayerCopyChosen(_) => FrameKind::EachPlayerCopyChosen,
             Self::ChooseOneOf(_) => FrameKind::ChooseOneOf,
             Self::VoteBallot(_) => FrameKind::VoteBallot,
@@ -295,6 +298,7 @@ impl ResolutionFrame {
             | Self::CounterRemovals(_)
             | Self::CounterAdditions(_)
             | Self::CopyToken(_)
+            | Self::DebugCardEntries(_)
             | Self::EachPlayerCopyChosen(_)
             | Self::ChooseOneOf(_)
             | Self::VoteBallot(_)
@@ -338,6 +342,7 @@ impl ResolutionFrame {
             | Self::CounterRemovals(_)
             | Self::CounterAdditions(_)
             | Self::CopyToken(_)
+            | Self::DebugCardEntries(_)
             | Self::EachPlayerCopyChosen(_)
             | Self::ChooseOneOf(_)
             | Self::VoteBallot(_)
@@ -1312,6 +1317,53 @@ impl ResolutionStack {
         child_stack_start: usize,
     ) -> Result<(), ResolutionStackError> {
         self.insert_parent_at_child_boundary(ResolutionFrame::CopyToken(pending), child_stack_start)
+    }
+
+    /// Returns the debug-card batch owner only when it owns the stack top.
+    pub fn active_debug_card_entries(&self) -> Option<&PendingDebugCardEntries> {
+        match self.last() {
+            Some(ResolutionFrame::DebugCardEntries(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Consume the exact debug-card batch owner after its child entry settles.
+    pub fn take_active_debug_card_entries(
+        &mut self,
+    ) -> Result<Option<PendingDebugCardEntries>, ResolutionStackError> {
+        match self.last() {
+            None => Ok(None),
+            Some(ResolutionFrame::DebugCardEntries(_)) => {
+                let ResolutionFrame::DebugCardEntries(frame) =
+                    self.pop_expected(FrameKind::DebugCardEntries)?
+                else {
+                    unreachable!("checked debug-card frame kind must match")
+                };
+                Ok(Some(*frame))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::DebugCardEntries,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Park a debug-card batch as the active inner frame.
+    pub fn push_debug_card_entries(&mut self, pending: PendingDebugCardEntries) {
+        self.push_inner(ResolutionFrame::DebugCardEntries(Box::new(pending)));
+    }
+
+    /// Insert the debug-card batch below the exact child stack raised by one
+    /// card's entry attempt.
+    pub fn insert_debug_card_entries_parent_at_child_boundary(
+        &mut self,
+        pending: PendingDebugCardEntries,
+        child_stack_start: usize,
+    ) -> Result<(), ResolutionStackError> {
+        self.insert_parent_at_child_boundary(
+            ResolutionFrame::DebugCardEntries(Box::new(pending)),
+            child_stack_start,
+        )
     }
 
     /// Returns the EachPlayerCopyChosen owner only when its typed frame owns
@@ -3652,6 +3704,11 @@ fn project_frames_into_legacy_state(
             }
             ResolutionFrame::CopyToken(pending) => {
                 projected.resolution_stack.push_copy_token(pending.clone());
+            }
+            ResolutionFrame::DebugCardEntries(pending) => {
+                projected
+                    .resolution_stack
+                    .push_debug_card_entries((**pending).clone());
             }
             ResolutionFrame::EachPlayerCopyChosen(pending) => {
                 projected

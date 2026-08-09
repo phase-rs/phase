@@ -1575,6 +1575,7 @@ pub(super) fn handle_resolution_choice(
                 action: crate::types::events::PlayerActionKind::Scry,
                 look_count: Some(all_cards.len() as u32),
                 scry_bottom_count: Some(bottom_cards.len() as u32),
+                scry_top_count: Some(all_cards.len() as u32 - bottom_cards.len() as u32),
             });
             // CR 401.5 + CR 611.3a: Scry reorders the library top directly (not
             // through the zone-move seam), so a continuous `TopOfLibraryMatches`

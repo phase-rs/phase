@@ -100,6 +100,9 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *   9 — Meld pair and attacking-entry choices after mana-payment preview variants.
  *   8 — Mana-payment preview request/response variants.
  *   7 — PrecastCopyShortcut action and its two WaitingFor variants.
+ *  18 — DebugCardEntries added a serialized, private resolution frame for
+ *       multi-card sandbox battlefield entries that pause for replacement or
+ *       as-enters choices. Old peers cannot deserialize that GameState shape.
  *  17 — Bound draft-match concession request. A Traditional-draft guest
  *       asks its match authority to settle the match; it must not send a
  *       game-level concession through the ordinary P2P path.
@@ -107,7 +110,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 17 as const;
+export const WIRE_PROTOCOL_VERSION = 18 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | { type: "guest_deck"; deckData: unknown; displayName?: string; reservationToken?: string }

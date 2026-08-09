@@ -656,6 +656,22 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         }
 
         GameEvent::PlayerPerformedAction {
+            player_id,
+            action: crate::types::events::PlayerActionKind::Scry,
+            look_count: Some(look_count),
+            scry_bottom_count: Some(scry_bottom_count),
+            ..
+        } => vec![
+            player_seg(state, *player_id),
+            text(" scries "),
+            num(*look_count as i32),
+            text(": "),
+            num(look_count.saturating_sub(*scry_bottom_count) as i32),
+            text(" on top and "),
+            num(*scry_bottom_count as i32),
+            text(" on bottom"),
+        ],
+        GameEvent::PlayerPerformedAction {
             player_id, action, ..
         } => vec![
             player_seg(state, *player_id),
@@ -1736,6 +1752,41 @@ mod tests {
     }
 
     #[test]
+    fn completed_scry_has_a_public_count_only_log_entry() {
+        let state = GameState::new_two_player(42);
+        let entries = resolve_log_entries(
+            &[GameEvent::PlayerPerformedAction {
+                player_id: PlayerId(0),
+                action: crate::types::events::PlayerActionKind::Scry,
+                look_count: Some(3),
+                scry_bottom_count: Some(2),
+                scry_top_count: Some(1),
+            }],
+            &state,
+            &state,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].presentation.visibility, LogVisibility::Public);
+        assert_eq!(
+            entries[0].segments,
+            vec![
+                LogSegment::PlayerName {
+                    name: "Player 1".to_string(),
+                    player_id: PlayerId(0),
+                },
+                LogSegment::Text(" scries ".to_string()),
+                LogSegment::Number(3),
+                LogSegment::Text(": ".to_string()),
+                LogSegment::Number(1),
+                LogSegment::Text(" on top and ".to_string()),
+                LogSegment::Number(2),
+                LogSegment::Text(" on bottom".to_string()),
+            ]
+        );
+    }
+
+    #[test]
     fn public_log_hides_hand_to_library_but_keeps_public_discard() {
         use crate::types::game_state::ZoneChangeRecord;
         use crate::types::zones::Zone;
@@ -1842,6 +1893,7 @@ mod tests {
             action: PlayerActionKind::Draw,
             look_count: None,
             scry_bottom_count: None,
+            scry_top_count: None,
         };
         let draw_entries = resolve_log_entries(&[draw_event], &state, &state);
         assert!(
@@ -1857,6 +1909,7 @@ mod tests {
             action: PlayerActionKind::Scry,
             look_count: Some(1),
             scry_bottom_count: Some(0),
+            scry_top_count: Some(1),
         };
         let scry_entries = resolve_log_entries(&[scry_event], &state, &state);
         assert_eq!(

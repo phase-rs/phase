@@ -5,6 +5,11 @@
     "close": "Chiudi",
     "closeNamed": "Chiudi {{name}}"
   },
+  "scryOutcome": {
+    "title": "Scry completato",
+    "you": "Tu",
+    "result": "{{player}} — {{top}} in cima · {{bottom}} in fondo"
+  },
   "modal": {
     "defaultEyebrow": "Strumento dello spazio di lavoro"
   },
