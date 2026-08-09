@@ -13,6 +13,7 @@
 //! function of the two files it is handed.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::process;
@@ -312,6 +313,247 @@ struct Cluster {
     cards: Vec<String>,
 }
 
+/// The six-string identity of a cluster: category, label, change kind, detail
+/// key, templated before-value, templated after-value.
+type ClusterSig = (String, String, String, String, String, String);
+
+/// Content identity of a snapshot row, total over everything this binary can
+/// observe: the displayed name, the Oracle text that drives the errata
+/// carve-out, and the canonical multiset of its parse items. Two rows equal
+/// under this key are interchangeable in every quantity `compare` emits, so
+/// sorting a group by it makes pairing a function of content rather than of
+/// `.cards` emission order — which is not determined by the data, because
+/// `CardDatabase::face_index` is a `HashMap` and `coverage-report` never sorts
+/// before serializing.
+///
+/// Totality is a checked property, not a hope: of the eight fields on
+/// `CardCoverageResult`, this binary reads only `card_name`, `oracle_text`, and
+/// `parse_details`. If it is ever changed to read another (`printings`,
+/// `supported`, `gap_details`, `gap_count`, `set_code`), that field MUST be
+/// added here in the same change, or pairing stops being content-determined.
+type RowKey<'a> = (&'a str, Option<&'a str>, Vec<String>);
+
+/// Everything `compare` produces, in the order the renderers consume it.
+struct Comparison {
+    clusters: Vec<Cluster>,
+    /// One per changed ROW, not per distinct name. Rows sharing a name are
+    /// distinct cards upstream — `card-data.json` gives them distinct Scryfall
+    /// oracle ids — so both count.
+    changed_cards: usize,
+    oracle_changed: usize,
+    added_cards: Vec<String>,
+    removed_cards: Vec<String>,
+    /// Card names carrying more than one row in EITHER snapshot. Reported on
+    /// stderr so a reader can see the comparator's population exceeds its
+    /// distinct-name count; every row is still compared.
+    duplicate_names: usize,
+}
+
+/// The canonical multiset of a row's parse items. `diff_level` cancels items
+/// whose `canon` matches as a multiset, so two rows with equal `parse_canon`
+/// provably produce no changes. This is `canon` lifted from the item layer to
+/// the row layer; a plain `==` is not available because `ParsedItem` does not
+/// derive `PartialEq`.
+fn parse_canon(details: &[ParsedItem]) -> Vec<String> {
+    let mut canons: Vec<String> = details.iter().map(canon).collect();
+    canons.sort();
+    canons
+}
+
+fn row_key(card: &CardCoverageResult) -> RowKey<'_> {
+    (
+        card.card_name.as_str(),
+        card.oracle_text.as_deref(),
+        parse_canon(&card.parse_details),
+    )
+}
+
+/// Group snapshot rows by lowercased card name. `card_name` is NOT unique in
+/// `coverage-data.json` (30 names carried two rows apiece as measured on
+/// 2026-08-08), so the value is a group, never a single row: collecting into a
+/// map keyed on the name is last-wins and silently drops the other rows.
+fn group_by_name(cards: &[CardCoverageResult]) -> BTreeMap<String, Vec<&CardCoverageResult>> {
+    let mut map: BTreeMap<String, Vec<&CardCoverageResult>> = BTreeMap::new();
+    for card in cards {
+        map.entry(card.card_name.to_ascii_lowercase())
+            .or_default()
+            .push(card);
+    }
+    map
+}
+
+/// The card names of a whole name group, in canonical order.
+///
+/// Used by the two branches that emit a group present on only ONE side, which
+/// never reach the `row_key` sort. Without the sort here, those branches would
+/// emit in `.cards` input order and `added_cards`/`removed_cards` would not be
+/// functions of the input multisets — observable, because both serialize as
+/// ordered JSON arrays in `parse-diff.json`. Only `card_name` is emitted from
+/// these branches, so sorting names (rather than whole rows) is exactly
+/// sufficient.
+fn group_names(group: &[&CardCoverageResult]) -> Vec<String> {
+    let mut names: Vec<String> = group.iter().map(|c| c.card_name.clone()).collect();
+    names.sort();
+    names
+}
+
+/// Compare two snapshots' row populations.
+///
+/// Rows sharing a name are distinct cards, so a group is reconciled the same
+/// way `diff_level` reconciles items one layer down: a canonical ordering, then
+/// an exact-identity pass, then residual reconciliation, then surplus.
+fn compare(base: &[CardCoverageResult], head: &[CardCoverageResult]) -> Comparison {
+    let bmap = group_by_name(base);
+    let hmap = group_by_name(head);
+
+    // Counted over BOTH snapshots: a group that shrinks to one row still means
+    // the comparator's population exceeded its distinct-name count.
+    let mut duplicate_name_set: BTreeSet<&str> = BTreeSet::new();
+    for (name, group) in bmap.iter().chain(hmap.iter()) {
+        if group.len() > 1 {
+            duplicate_name_set.insert(name.as_str());
+        }
+    }
+
+    let mut sig_to_cluster: BTreeMap<ClusterSig, Cluster> = BTreeMap::new();
+    let mut changed_cards = 0usize;
+    let mut oracle_changed = 0usize;
+    let mut added_cards: Vec<String> = Vec::new();
+    let mut removed_cards: Vec<String> = Vec::new();
+
+    for (name, head_group) in &hmap {
+        let Some(base_group) = bmap.get(name) else {
+            // Whole group is new. `head_group` never reaches the sort below, so
+            // canonicalize here or the emitted sequence follows input order.
+            added_cards.extend(group_names(head_group));
+            continue;
+        };
+
+        // Canonical order FIRST: pairing must be a function of row content, not
+        // of `.cards` emission order, which is not determined by the data.
+        let mut base_rows: Vec<(RowKey<'_>, &CardCoverageResult)> =
+            base_group.iter().map(|&b| (row_key(b), b)).collect();
+        let mut head_rows: Vec<(RowKey<'_>, &CardCoverageResult)> =
+            head_group.iter().map(|&h| (row_key(h), h)).collect();
+        base_rows.sort_by(|(a_key, _), (b_key, _)| a_key.cmp(b_key));
+        head_rows.sort_by(|(a_key, _), (b_key, _)| a_key.cmp(b_key));
+
+        // Pass 1 — exact identity: same Oracle text AND the same canonical
+        // parse multiset. `diff_level` emits nothing for such a pair, so they
+        // are consumed silently. Mirrors `diff_level`'s own `canon` pass.
+        let mut weak_head: Vec<(RowKey<'_>, &CardCoverageResult)> = Vec::new();
+        for (h_key, h) in head_rows {
+            match base_rows
+                .iter()
+                .position(|(b_key, _)| b_key.1 == h_key.1 && b_key.2 == h_key.2)
+            {
+                Some(index) => {
+                    base_rows.remove(index);
+                }
+                None => weak_head.push((h_key, h)),
+            }
+        }
+
+        // Pass 2 — residual reconciliation by Oracle text alone, so a row whose
+        // parse changed still pairs with its counterpart. Mirrors `diff_level`'s
+        // `weak_key` pass.
+        let mut unpaired_head: Vec<(RowKey<'_>, &CardCoverageResult)> = Vec::new();
+        for (h_key, h) in weak_head {
+            let Some(index) = base_rows.iter().position(|(b_key, _)| b_key.1 == h_key.1) else {
+                unpaired_head.push((h_key, h));
+                continue;
+            };
+            let (_, b) = base_rows.remove(index);
+            let mut changes = Vec::new();
+            diff_level(&b.parse_details, &h.parse_details, &mut changes);
+            if changes.is_empty() {
+                continue;
+            }
+            changed_cards += 1;
+            // A single row can emit the same signature more than once (repeated
+            // structures). Collapse that HERE, per row, rather than deduping
+            // `cluster.cards` globally: a global dedup would also collapse two
+            // DISTINCT rows that share a name, undercounting the cluster.
+            let mut row_seen: BTreeSet<ClusterSig> = BTreeSet::new();
+            for ch in changes {
+                let before_t = template(&ch.before, &h.card_name);
+                let after_t = template(&ch.after, &h.card_name);
+                let sig: ClusterSig = (
+                    ch.category.to_string(),
+                    ch.label.clone(),
+                    ch.kind.label().to_string(),
+                    ch.key.clone(),
+                    before_t.clone(),
+                    after_t.clone(),
+                );
+                let first_for_this_row = row_seen.insert(sig.clone());
+                let cluster = sig_to_cluster.entry(sig).or_insert_with(|| Cluster {
+                    category: ch.category,
+                    label: ch.label.clone(),
+                    kind: ch.kind,
+                    key: ch.key.clone(),
+                    before: before_t,
+                    after: after_t,
+                    cards: Vec::new(),
+                });
+                if first_for_this_row {
+                    cluster.cards.push(h.card_name.clone());
+                }
+            }
+        }
+
+        // Pass 3 — rows with no Oracle-text counterpart left: the parse
+        // legitimately differs for a non-parser reason (errata/reprint). Carve
+        // out; do not attribute to the PR. Surplus beyond that is a real
+        // population change. Both lists are already in canonical order.
+        let carved = unpaired_head.len().min(base_rows.len());
+        oracle_changed += carved;
+        added_cards.extend(
+            unpaired_head
+                .iter()
+                .skip(carved)
+                .map(|(_, h)| h.card_name.clone()),
+        );
+        removed_cards.extend(
+            base_rows
+                .iter()
+                .skip(carved)
+                .map(|(_, b)| b.card_name.clone()),
+        );
+    }
+
+    for (name, base_group) in &bmap {
+        if !hmap.contains_key(name) {
+            // Whole group is gone. Same reasoning as the `added_cards` branch
+            // above: this group never reaches the sort.
+            removed_cards.extend(group_names(base_group));
+        }
+    }
+
+    let mut clusters: Vec<Cluster> = sig_to_cluster.into_values().collect();
+    // Sort each card list for a stable display order. NO global dedup: repeats
+    // within one row are already collapsed above, and two rows sharing a name
+    // are two cards that must both be counted.
+    for c in &mut clusters {
+        c.cards.sort();
+    }
+    clusters.sort_by(|a, b| {
+        b.cards
+            .len()
+            .cmp(&a.cards.len())
+            .then(a.label.cmp(&b.label))
+    });
+
+    Comparison {
+        clusters,
+        changed_cards,
+        oracle_changed,
+        added_cards,
+        removed_cards,
+        duplicate_names: duplicate_name_set.len(),
+    }
+}
+
 fn load(path: &str) -> CoverageFile {
     let bytes = match fs::read(path) {
         Ok(b) => b,
@@ -411,94 +653,27 @@ fn main() {
     let base = load(&args.base_path);
     let head = load(&args.head_path);
 
-    let bmap: BTreeMap<String, &CardCoverageResult> = base
-        .cards
-        .iter()
-        .map(|c| (c.card_name.to_ascii_lowercase(), c))
-        .collect();
-    let hmap: BTreeMap<String, &CardCoverageResult> = head
-        .cards
-        .iter()
-        .map(|c| (c.card_name.to_ascii_lowercase(), c))
-        .collect();
-
-    let mut sig_to_cluster: BTreeMap<(String, String, String, String, String, String), Cluster> =
-        BTreeMap::new();
-    let mut oracle_changed = 0usize;
-    let mut added_cards: Vec<String> = Vec::new();
-    let mut removed_cards: Vec<String> = Vec::new();
-    let mut changed_card_set: std::collections::BTreeSet<String> =
-        std::collections::BTreeSet::new();
-
-    for (k, h) in &hmap {
-        let Some(b) = bmap.get(k) else {
-            added_cards.push(h.card_name.clone());
-            continue;
-        };
-        // Oracle-text change → parse legitimately differs for a non-parser
-        // reason (errata/reprint). Carve out; do not attribute to the PR.
-        if b.oracle_text != h.oracle_text {
-            oracle_changed += 1;
-            continue;
-        }
-        let mut changes = Vec::new();
-        diff_level(&b.parse_details, &h.parse_details, &mut changes);
-        if changes.is_empty() {
-            continue;
-        }
-        changed_card_set.insert(h.card_name.clone());
-        for ch in changes {
-            let before_t = template(&ch.before, &h.card_name);
-            let after_t = template(&ch.after, &h.card_name);
-            let sig = (
-                ch.category.to_string(),
-                ch.label.clone(),
-                ch.kind.label().to_string(),
-                ch.key.clone(),
-                before_t.clone(),
-                after_t.clone(),
-            );
-            let cluster = sig_to_cluster.entry(sig).or_insert_with(|| Cluster {
-                category: ch.category,
-                label: ch.label.clone(),
-                kind: ch.kind,
-                key: ch.key.clone(),
-                before: before_t,
-                after: after_t,
-                cards: Vec::new(),
-            });
-            cluster.cards.push(h.card_name.clone());
-        }
+    let cmp = compare(&base.cards, &head.cards);
+    if cmp.duplicate_names > 0 {
+        // Not an error: 30 real cards share a name with another card, and every
+        // row is compared. Emitted so a reader — and the receipt pipeline, which
+        // captures stderr with SHA256s — can see that the comparator's
+        // population exceeds its distinct-name count.
+        eprintln!(
+            "coverage-parse-diff: {} card name(s) carry more than one row in one or both snapshots; every row was compared (none dropped).",
+            cmp.duplicate_names
+        );
     }
-    for (k, b) in &bmap {
-        if !hmap.contains_key(k) {
-            removed_cards.push(b.card_name.clone());
-        }
-    }
-
-    let mut clusters: Vec<Cluster> = sig_to_cluster.into_values().collect();
-    // Dedup card lists within a cluster (a card may hit the same signature
-    // more than once via repeated structures) and sort by impact.
-    for c in &mut clusters {
-        c.cards.sort();
-        c.cards.dedup();
-    }
-    clusters.sort_by(|a, b| {
-        b.cards
-            .len()
-            .cmp(&a.cards.len())
-            .then(a.label.cmp(&b.label))
-    });
 
     let md = render_markdown(
         &args.base_sha,
         &args.head_sha,
-        &clusters,
+        &cmp.clusters,
         args.max_clusters,
-        changed_card_set.len(),
-        oracle_changed,
-        &added_cards,
-        &removed_cards,
+        cmp.changed_cards,
+        cmp.oracle_changed,
+        &cmp.added_cards,
+        &cmp.removed_cards,
     );
     match &args.markdown_out {
         Some(p) => {
@@ -514,10 +689,10 @@ fn main() {
         let json = render_json(
             &args.head_sha,
             &args.base_sha,
-            &clusters,
-            &added_cards,
-            &removed_cards,
-            oracle_changed,
+            &cmp.clusters,
+            &cmp.added_cards,
+            &cmp.removed_cards,
+            cmp.oracle_changed,
         );
         if let Err(e) = fs::write(p, json) {
             eprintln!("coverage-parse-diff: cannot write {p}: {e}");
@@ -780,6 +955,22 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
             children: vec![],
+        }
+    }
+
+    /// Build a snapshot row. `set_code` is always empty in real data
+    /// (`coverage.rs` writes `String::new()` at the sole construction site), so
+    /// the fixture matches.
+    fn card(name: &str, oracle: &str, parse_details: &[ParsedItem]) -> CardCoverageResult {
+        CardCoverageResult {
+            card_name: name.to_string(),
+            set_code: String::new(),
+            supported: true,
+            gap_details: Vec::new(),
+            gap_count: 0,
+            oracle_text: Some(oracle.to_string()),
+            parse_details: parse_details.to_vec(),
+            printings: Vec::new(),
         }
     }
 
@@ -1176,5 +1367,394 @@ mod tests {
             v["clusters"][0]["label"], "Mill",
             "the drill-down is unchanged"
         );
+    }
+
+    /// T1. Two rows share a name (the real `fast` shape: distinct cards,
+    /// distinct Oracle text, distinct parse trees). BOTH must be compared —
+    /// keying a map on the name keeps only one and the other's parse change
+    /// vanishes.
+    #[test]
+    fn both_entries_of_a_duplicate_name_are_compared() {
+        let base = vec![
+            card(
+                "Fast",
+                "Target creature gains haste until end of turn.",
+                &[item("DealDamage", &[("amount", "1")], true)],
+            ),
+            card(
+                "Fast",
+                "Discard a card, then draw two cards.",
+                &[item("DrawCard", &[("amount", "2")], true)],
+            ),
+        ];
+        let head = vec![
+            card(
+                "Fast",
+                "Target creature gains haste until end of turn.",
+                &[item("DealDamage", &[("amount", "3")], true)],
+            ),
+            card(
+                "Fast",
+                "Discard a card, then draw two cards.",
+                &[item("DrawCard", &[("amount", "4")], true)],
+            ),
+        ];
+
+        let cmp = compare(&base, &head);
+
+        let labels: Vec<&str> = cmp.clusters.iter().map(|c| c.label.as_str()).collect();
+        assert!(
+            labels.contains(&"DealDamage"),
+            "the first duplicate-name row's parse change is invisible: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"DrawCard"),
+            "the second duplicate-name row's parse change is invisible: {labels:?}"
+        );
+        assert_eq!(cmp.clusters.len(), 2);
+        assert_eq!(cmp.changed_cards, 2, "two rows changed, not one name");
+        assert_eq!(cmp.duplicate_names, 1);
+        // Reach-guard: the rows were diffed, not skipped by the Oracle carve-out.
+        assert_eq!(cmp.oracle_changed, 0);
+        assert!(cmp.added_cards.is_empty());
+        assert!(cmp.removed_cards.is_empty());
+    }
+
+    /// T2. Positive control: real errata must STILL be carved out and counted.
+    /// The fix must stop the carve-out firing on a key collision, not delete it.
+    #[test]
+    fn genuine_oracle_change_is_still_carved_out() {
+        let base = vec![card(
+            "Errata Card",
+            "Old text.",
+            &[item("DealDamage", &[("amount", "1")], true)],
+        )];
+        let head = vec![card(
+            "Errata Card",
+            "New text.",
+            &[item("DealDamage", &[("amount", "9")], true)],
+        )];
+
+        let cmp = compare(&base, &head);
+
+        assert_eq!(cmp.oracle_changed, 1);
+        // Non-vacuous: the parse trees DO differ, so a cluster would appear if
+        // the carve-out had been removed.
+        assert!(cmp.clusters.is_empty());
+        assert_eq!(cmp.changed_cards, 0);
+        assert_eq!(cmp.duplicate_names, 0);
+        assert!(cmp.added_cards.is_empty());
+        assert!(cmp.removed_cards.is_empty());
+    }
+
+    /// T3. A duplicate-name group that loses a row must report exactly one
+    /// removal. Both rows carry identical Oracle text (the real `lightning bolt`
+    /// shape), so pairing cannot lean on the text. Also pins that
+    /// `duplicate_names` counts a group that is duplicated on the BASE side only.
+    #[test]
+    fn duplicate_name_group_shrinking_reports_one_removal() {
+        let twin =
+            |details: &[ParsedItem]| card("Twin", "Twin deals 3 damage to any target.", details);
+        let base = vec![
+            twin(&[item("DealDamage", &[("amount", "3")], true)]),
+            twin(&[item("DealDamage", &[("amount", "3")], true)]),
+        ];
+        let head = vec![twin(&[item("DealDamage", &[("amount", "3")], true)])];
+
+        let cmp = compare(&base, &head);
+
+        assert_eq!(cmp.removed_cards, vec!["Twin".to_string()]);
+        assert!(cmp.added_cards.is_empty());
+        assert!(cmp.clusters.is_empty());
+        assert_eq!(cmp.changed_cards, 0);
+        assert_eq!(cmp.oracle_changed, 0);
+        // The group is duplicated only in `base`; a head-side-only counter reads 0.
+        assert_eq!(cmp.duplicate_names, 1);
+    }
+
+    /// T5. The real `fast`/`replenish` shape: a duplicate-name group in which
+    /// ONE row has genuine errata. The errata'd row must be carved out, the
+    /// other row's parse change must still cluster, and neither may leak into
+    /// added/removed.
+    #[test]
+    fn errata_on_one_row_of_a_duplicate_group_carves_out_without_hiding_the_other() {
+        let base = vec![
+            card("Fast", "Old haste text.", &[item("Haste", &[], true)]),
+            card(
+                "Fast",
+                "Discard a card, then draw two cards.",
+                &[item("DrawCard", &[("amount", "2")], true)],
+            ),
+        ];
+        let head = vec![
+            card("Fast", "New haste text.", &[item("Haste", &[], true)]),
+            card(
+                "Fast",
+                "Discard a card, then draw two cards.",
+                &[item("DrawCard", &[("amount", "4")], true)],
+            ),
+        ];
+
+        let cmp = compare(&base, &head);
+
+        assert_eq!(cmp.oracle_changed, 1);
+        // The non-errata row is still fully visible.
+        let labels: Vec<&str> = cmp.clusters.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, vec!["DrawCard"]);
+        assert_eq!(cmp.changed_cards, 1);
+        // The carve-out must not degrade into a population change.
+        assert!(cmp.added_cards.is_empty());
+        assert!(cmp.removed_cards.is_empty());
+    }
+
+    /// T6. Two rows sharing a name that change in the SAME way are two changed
+    /// cards. Both the headline `changed_cards` and the cluster's card list must
+    /// count them twice — deduping either by name reintroduces exactly the
+    /// record loss this unit removes, and leaves the two numbers contradicting
+    /// each other in the posted comment.
+    #[test]
+    fn two_rows_sharing_a_name_that_change_identically_count_twice() {
+        let bolt = |amount: &str| {
+            card(
+                "Bolt",
+                "Bolt deals 3 damage to any target.",
+                &[item("DealDamage", &[("amount", amount)], true)],
+            )
+        };
+        let base = vec![bolt("3"), bolt("3")];
+        let head = vec![bolt("4"), bolt("4")];
+
+        let cmp = compare(&base, &head);
+
+        assert_eq!(cmp.changed_cards, 2, "both rows changed");
+        assert_eq!(cmp.clusters.len(), 1, "they share one signature");
+        assert_eq!(
+            cmp.clusters[0].cards,
+            vec!["Bolt".to_string(), "Bolt".to_string()],
+            "the cluster must count two cards, not one name"
+        );
+        assert_eq!(cmp.oracle_changed, 0);
+        assert!(cmp.added_cards.is_empty());
+        assert!(cmp.removed_cards.is_empty());
+    }
+
+    /// T7. Pairing inside a duplicate-name group must be decided by row CONTENT,
+    /// never by `.cards` emission order — which is not determined by the data
+    /// (`CardDatabase::face_index` is a `HashMap` and `coverage-report` never
+    /// sorts before serializing). All four input permutations must produce
+    /// identical output.
+    ///
+    /// SCOPE: this fixture pins "at least one of {the canonical sort, the exact
+    /// pass}" — it passes if either survives alone. T8 pins the sort
+    /// individually; T9 pins the exact pass individually. Do not read this test
+    /// as covering either one by itself.
+    #[test]
+    fn pairing_within_a_group_is_content_determined_not_order_determined() {
+        let row = |amount: &str| {
+            card(
+                "Dup",
+                "Same text on both rows.",
+                &[item("DealDamage", &[("amount", amount)], true)],
+            )
+        };
+        let base = vec![row("1"), row("2")];
+        let head = vec![row("1"), row("3")];
+        let base_rev = vec![row("2"), row("1")];
+        let head_rev = vec![row("3"), row("1")];
+
+        let forward = compare(&base, &head);
+
+        // Positive control, so the permutation comparison below cannot pass
+        // vacuously on four identically-wrong results: the exact-identity pass
+        // must match the two `1` rows, leaving exactly one real change (2 → 3).
+        assert_eq!(forward.clusters.len(), 1, "exactly one row really changed");
+        assert_eq!(forward.clusters[0].before, "2");
+        assert_eq!(forward.clusters[0].after, "3");
+        assert_eq!(forward.changed_cards, 1);
+        assert_eq!(forward.oracle_changed, 0);
+        assert!(forward.added_cards.is_empty());
+        assert!(forward.removed_cards.is_empty());
+
+        let canonical = render_json(
+            "head",
+            "base",
+            &forward.clusters,
+            &forward.added_cards,
+            &forward.removed_cards,
+            forward.oracle_changed,
+        );
+
+        for (b, h) in [
+            (&base, &head_rev),
+            (&base_rev, &head),
+            (&base_rev, &head_rev),
+        ] {
+            let permuted = compare(b, h);
+            assert_eq!(
+                render_json(
+                    "head",
+                    "base",
+                    &permuted.clusters,
+                    &permuted.added_cards,
+                    &permuted.removed_cards,
+                    permuted.oracle_changed,
+                ),
+                canonical,
+                "output changed when the input rows were permuted"
+            );
+            assert_eq!(permuted.changed_cards, forward.changed_cards);
+        }
+    }
+
+    /// T8. Pins the CANONICAL SORT specifically. Four rows in one name group,
+    /// all sharing Oracle text, with pairwise-distinct parse trees, so the exact
+    /// pass finds NOTHING and pairing rests entirely on the sort. Without the
+    /// sort, `[2, 1]` pairs 2↔3 and 1↔4 instead of 1↔3 and 2↔4, and the
+    /// permuted projection differs.
+    #[test]
+    fn the_canonical_sort_alone_makes_a_no_exact_match_group_order_independent() {
+        let row = |amount: &str| {
+            card(
+                "Dup",
+                "Same text on both rows.",
+                &[item("DealDamage", &[("amount", amount)], true)],
+            )
+        };
+        let base = vec![row("1"), row("2")];
+        let head = vec![row("3"), row("4")];
+        let base_rev = vec![row("2"), row("1")];
+        let head_rev = vec![row("4"), row("3")];
+
+        let forward = compare(&base, &head);
+
+        // Content control: the sort makes the pairing 1↔3 and 2↔4, in that
+        // order (equal `cards.len()` and equal `label`, so the stable sort
+        // preserves ascending signature order, and "1" sorts before "2").
+        assert_eq!(forward.clusters.len(), 2);
+        assert_eq!(forward.clusters[0].before, "1");
+        assert_eq!(forward.clusters[0].after, "3");
+        assert_eq!(forward.clusters[1].before, "2");
+        assert_eq!(forward.clusters[1].after, "4");
+        assert_eq!(forward.changed_cards, 2);
+        assert_eq!(forward.oracle_changed, 0);
+        assert!(forward.added_cards.is_empty());
+        assert!(forward.removed_cards.is_empty());
+
+        let canonical = render_json(
+            "head",
+            "base",
+            &forward.clusters,
+            &forward.added_cards,
+            &forward.removed_cards,
+            forward.oracle_changed,
+        );
+
+        for (b, h) in [
+            (&base, &head_rev),
+            (&base_rev, &head),
+            (&base_rev, &head_rev),
+        ] {
+            let permuted = compare(b, h);
+            assert_eq!(
+                render_json(
+                    "head",
+                    "base",
+                    &permuted.clusters,
+                    &permuted.added_cards,
+                    &permuted.removed_cards,
+                    permuted.oracle_changed,
+                ),
+                canonical,
+                "dropping the canonical sort lets input order pick the pairing"
+            );
+        }
+    }
+
+    /// T9. Pins the EXACT PASS specifically. Its failure mode is semantic, not a
+    /// permutation difference: with the sort kept and the exact pass removed,
+    /// this fixture is still deterministic but emits TWO spurious clusters
+    /// (2→1 and 3→2) where the truth is one exact match plus one real change.
+    /// Only a content assertion catches that, so this test asserts content.
+    #[test]
+    fn the_exact_pass_prevents_spurious_clusters_when_an_identical_counterpart_exists() {
+        let row = |amount: &str| {
+            card(
+                "Dup",
+                "Same text on both rows.",
+                &[item("DealDamage", &[("amount", amount)], true)],
+            )
+        };
+        let base = vec![row("2"), row("3")];
+        let head = vec![row("1"), row("2")];
+
+        let cmp = compare(&base, &head);
+
+        assert_eq!(
+            cmp.clusters.len(),
+            1,
+            "the two `2` rows are identical and must cancel, leaving one change"
+        );
+        assert_eq!(cmp.clusters[0].before, "3");
+        assert_eq!(cmp.clusters[0].after, "1");
+        assert_eq!(cmp.changed_cards, 1);
+        assert_eq!(cmp.oracle_changed, 0);
+        assert!(cmp.added_cards.is_empty());
+        assert!(cmp.removed_cards.is_empty());
+    }
+
+    /// T10. Pins the two WHOLE-GROUP branches. A name group present on only one
+    /// side never reaches the `row_key` sort, so without `group_names`' sort the
+    /// emitted name sequence follows `.cards` input order — observable, because
+    /// `added_cards`/`removed_cards` serialize as ordered JSON arrays. The two
+    /// rows differ in `card_name` BYTES while sharing one lowercased key, which
+    /// is the only shape that can expose it.
+    #[test]
+    fn whole_group_add_and_remove_emit_names_in_canonical_order() {
+        let mixed = |name: &str| {
+            card(
+                name,
+                "Same text on both rows.",
+                &[item("DealDamage", &[("amount", "1")], true)],
+            )
+        };
+        let empty: Vec<CardCoverageResult> = Vec::new();
+        let fwd_rows = vec![mixed("Fast"), mixed("FAST")];
+        let rev_rows = vec![mixed("FAST"), mixed("Fast")];
+
+        // Head-only group → the `added_cards` branch.
+        let added_fwd = compare(&empty, &fwd_rows);
+        let added_rev = compare(&empty, &rev_rows);
+        assert_eq!(
+            added_fwd.added_cards,
+            vec!["FAST".to_string(), "Fast".to_string()],
+            "whole-group add must emit names in canonical order"
+        );
+        assert_eq!(
+            added_fwd.added_cards, added_rev.added_cards,
+            "whole-group add leaked input order"
+        );
+
+        // Base-only group → the `removed_cards` branch (a different code path).
+        let removed_fwd = compare(&fwd_rows, &empty);
+        let removed_rev = compare(&rev_rows, &empty);
+        assert_eq!(
+            removed_fwd.removed_cards,
+            vec!["FAST".to_string(), "Fast".to_string()],
+            "whole-group remove must emit names in canonical order"
+        );
+        assert_eq!(
+            removed_fwd.removed_cards, removed_rev.removed_cards,
+            "whole-group remove leaked input order"
+        );
+
+        // Reach-guards: both rows really went down the whole-group branches,
+        // rather than being paired, carved out, or dropped.
+        assert_eq!(added_fwd.duplicate_names, 1);
+        assert!(added_fwd.clusters.is_empty());
+        assert_eq!(added_fwd.changed_cards, 0);
+        assert_eq!(added_fwd.oracle_changed, 0);
+        assert!(added_fwd.removed_cards.is_empty());
+        assert!(removed_fwd.added_cards.is_empty());
+        assert_eq!(removed_fwd.duplicate_names, 1);
     }
 }
