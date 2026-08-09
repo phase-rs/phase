@@ -239,6 +239,7 @@
   "page": {
     "cubeDraftTitle": "Cube Draft",
     "quickDraftTitle": "Quick Draft",
+    "sealedTitle": "Scellé",
     "setDraftTab": "Draft d'extension",
     "cubeTab": "Cube"
   },
@@ -264,6 +265,8 @@
     "kindPremierDesc": "Matchs de tournoi en meilleur des un après la construction. Manches plus rapides, pas de réserve entre les parties.",
     "kindTraditional": "Traditionnel",
     "kindTraditionalDesc": "Matchs de tournoi en meilleur des trois après la construction, avec réserve entre les parties.",
+    "kindSealed": "Scellé",
+    "kindSealedDesc": "Ouvrez six boosters directement dans la réserve de chaque joueur, puis construisez un deck de tournoi en meilleur des un.",
     "tournamentFormat": "Format du tournoi",
     "tournamentSwiss": "Suisse",
     "tournamentSwissDesc": "Tout le monde continue de jouer sur trois manches, même après une défaite.",

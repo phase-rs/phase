@@ -239,6 +239,7 @@
   "page": {
     "cubeDraftTitle": "Cube Draft",
     "quickDraftTitle": "Draft Rápido",
+    "sealedTitle": "Sellado",
     "setDraftTab": "Set Draft",
     "cubeTab": "Cube"
   },
@@ -264,6 +265,8 @@
     "kindPremierDesc": "Partidas de torneo al mejor de uno tras la construcción de mazo. Rondas más rápidas, sin banquillo entre juegos.",
     "kindTraditional": "Tradicional",
     "kindTraditionalDesc": "Partidas de torneo al mejor de tres tras la construcción de mazo, con banquillo entre juegos.",
+    "kindSealed": "Sellado",
+    "kindSealedDesc": "Abre seis sobres directamente en el pool de cada jugador y luego construye un mazo de torneo al mejor de uno.",
     "tournamentFormat": "Formato de torneo",
     "tournamentSwiss": "Suizo",
     "tournamentSwissDesc": "Todos siguen jugando durante tres rondas, incluso tras una derrota.",

@@ -239,6 +239,7 @@
   "page": {
     "cubeDraftTitle": "Cube Draft",
     "quickDraftTitle": "Quick Draft",
+    "sealedTitle": "Sealed",
     "setDraftTab": "Set Draft",
     "cubeTab": "Cube"
   },
@@ -264,6 +265,8 @@
     "kindPremierDesc": "Partite di torneo al meglio di una dopo la costruzione del mazzo. Round più rapidi, niente sideboard tra le partite.",
     "kindTraditional": "Tradizionale",
     "kindTraditionalDesc": "Partite di torneo al meglio di tre dopo la costruzione del mazzo, con sideboard tra le partite.",
+    "kindSealed": "Sealed",
+    "kindSealedDesc": "Apri sei buste direttamente nel pool di ogni giocatore, poi costruisci un mazzo da torneo al meglio di una.",
     "tournamentFormat": "Formato torneo",
     "tournamentSwiss": "Svizzero",
     "tournamentSwissDesc": "Tutti continuano a giocare per tre round, anche dopo una sconfitta.",

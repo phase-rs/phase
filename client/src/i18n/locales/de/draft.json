@@ -239,6 +239,7 @@
   "page": {
     "cubeDraftTitle": "Cube Draft",
     "quickDraftTitle": "Quick Draft",
+    "sealedTitle": "Sealed",
     "setDraftTab": "Set Draft",
     "cubeTab": "Cube"
   },
@@ -264,6 +265,8 @@
     "kindPremierDesc": "Best-of-One-Turnierpartien nach dem Deckbau. Schnellere Runden, kein Sideboarding zwischen den Spielen.",
     "kindTraditional": "Traditional",
     "kindTraditionalDesc": "Best-of-Three-Turnierpartien nach dem Deckbau, mit Sideboarding zwischen den Spielen.",
+    "kindSealed": "Sealed",
+    "kindSealedDesc": "Öffne sechs Booster direkt für den Pool jedes Spielers und baue dann ein Best-of-One-Turnierdeck.",
     "tournamentFormat": "Turnierformat",
     "tournamentSwiss": "Schweizer System",
     "tournamentSwissDesc": "Alle spielen drei Runden lang weiter, auch nach einer Niederlage.",

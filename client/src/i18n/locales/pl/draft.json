@@ -239,6 +239,7 @@
   "page": {
     "cubeDraftTitle": "Draft kostki",
     "quickDraftTitle": "Szybki draft",
+    "sealedTitle": "Sealed",
     "setDraftTab": "Draft dodatku",
     "cubeTab": "Kostka"
   },
@@ -264,6 +265,8 @@
     "kindPremierDesc": "Mecze turniejowe do jednej wygranej po budowaniu talii. Szybsze rundy, bez wymiany kart bocznych między grami.",
     "kindTraditional": "Tradycyjny",
     "kindTraditionalDesc": "Mecze turniejowe do dwóch wygranych po budowaniu talii, z wymianą kart bocznych między grami.",
+    "kindSealed": "Sealed",
+    "kindSealedDesc": "Otwórz sześć boosterów bezpośrednio do puli każdego gracza, a następnie zbuduj talię turniejową do jednej wygranej.",
     "tournamentFormat": "Format turnieju",
     "tournamentSwiss": "Szwajcarski",
     "tournamentSwissDesc": "Wszyscy grają przez trzy rundy, nawet po porażce.",

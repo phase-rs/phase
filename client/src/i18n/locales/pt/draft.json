@@ -239,6 +239,7 @@
   "page": {
     "cubeDraftTitle": "Cube Draft",
     "quickDraftTitle": "Quick Draft",
+    "sealedTitle": "Selado",
     "setDraftTab": "Set Draft",
     "cubeTab": "Cube"
   },
@@ -264,6 +265,8 @@
     "kindPremierDesc": "Partidas de torneio melhor de um após a montagem do deck. Rodadas mais rápidas, sem sideboarding entre os jogos.",
     "kindTraditional": "Tradicional",
     "kindTraditionalDesc": "Partidas de torneio melhor de três após a montagem do deck, com sideboarding entre os jogos.",
+    "kindSealed": "Selado",
+    "kindSealedDesc": "Abra seis boosters diretamente no pool de cada jogador e depois monte um deck de torneio melhor de um.",
     "tournamentFormat": "Formato do Torneio",
     "tournamentSwiss": "Suíço",
     "tournamentSwissDesc": "Todos continuam jogando por três rodadas, mesmo após uma derrota.",
