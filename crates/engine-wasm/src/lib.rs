@@ -125,6 +125,7 @@ fn format_diagnostic_value(value: &serde_json::Value) -> String {
     }
 }
 
+#[derive(Debug)]
 struct DecodedRestoredGameState {
     state: GameState,
     debug_permitted_was_serialized: bool,
