@@ -93,6 +93,10 @@ fn setup_attack_curse(oracle: &str, name: &str) -> (GameRunner, ObjectId, Object
         scenario.add_card_to_library_top(P0, "Plains");
         scenario.add_card_to_library_top(P1, "Plains");
     }
+    // P0's nonempty hand makes Curse of Chaos's discard path observable. P1
+    // intentionally has none, so its accidental selection cannot emit a prompt.
+    scenario.add_card_to_hand(P0, "Discard A");
+    scenario.add_card_to_hand(P0, "Discard B");
 
     let mut runner = scenario.build();
 
