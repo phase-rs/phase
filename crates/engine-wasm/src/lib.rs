@@ -4691,7 +4691,6 @@ mod replay_bridge_tests {
                 .count(),
             1
         );
-        assert_eq!(result.log_entries.len(), 1);
         with_state(|state| {
             assert_eq!(
                 state

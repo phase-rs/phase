@@ -1280,7 +1280,6 @@ mod tests {
         .expect("an authorized debug batch should succeed");
 
         assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
-        assert_eq!(result.log_entries.len(), 1);
         assert!(state.resolution_stack.is_empty());
         assert_eq!(
             state

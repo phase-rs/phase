@@ -16350,9 +16350,12 @@ mod stage2_injector_tests {
                 // knowledge) = 11874`, which equals the located coordinate exactly. The conflict markers
                 // sat BELOW the producer, so resolving them could not have shifted it.
                 //
+                // #7128 adds forty lines above this producer while introducing the source-bound debug
+                // card entry boundary. The producer remains byte-identical; only its coordinate moves.
+                //
                 // SET PRESERVATION: unchanged. Upstream adds no line matching the needle to this file and
                 // neither does this branch — total still 37, partition still 5/7/25.
-                "game/engine.rs:11902".to_string(),
+                "game/engine.rs:11942".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \
