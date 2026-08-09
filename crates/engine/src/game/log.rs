@@ -404,14 +404,11 @@ fn should_exclude_event(event: &GameEvent, state: &GameState) -> bool {
         {
             true
         }
-        // CardDrawn also reveals which specific card was drawn
-        GameEvent::CardDrawn { .. } => true,
         // PlayerPerformedAction { Draw } is an internal ledger signal consumed by
         // "for each player who drew a card this way" counting and
-        // the player-action trigger index), not a user-facing event. Excluding it
-        // keeps the visible log silent on draws — matching the deliberate
-        // CardDrawn exclusion above — instead of narrating every draw-step and
-        // cantrip draw as debug-formatted spam.
+        // the player-action trigger index), not a user-facing event. Unlike
+        // CardDrawn, which remains available as a HiddenInformation diagnostic,
+        // excluding it keeps the visible log from narrating internal ledger events.
         GameEvent::PlayerPerformedAction {
             action: crate::types::events::PlayerActionKind::Draw,
             ..
@@ -2119,10 +2116,13 @@ mod tests {
         assert_eq!(entries[2].turn, 1);
         assert_eq!(entries[2].phase, Phase::Untap);
         assert_eq!(entries[3].phase, Phase::Upkeep);
+        assert_eq!(entries[4].turn, 1);
         assert_eq!(
-            entries.len(),
-            4,
-            "CardDrawn is excluded from the visible log"
+            entries[4].presentation.visibility,
+            LogVisibility::HiddenInformation
+        );
+        assert!(
+            matches!(entries[4].segments.as_slice(), [LogSegment::PlayerName { .. }, LogSegment::Text(text)] if text == " draws a card")
         );
     }
 
