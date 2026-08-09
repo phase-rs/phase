@@ -854,9 +854,7 @@ mod tests {
     /// `DestroyAll` half (CR 701.8) is an independent, useful mass-removal
     /// line. `extract_target_filter` surfaces `DestroyAll`'s population filter
     /// and the cast-commit gate resolves it against the real opposing
-    /// population (the 3/3) via `find_legal_targets`. Guards feedback
-    /// finding (2): pre-fix, `DestroyAll` was not surfaced, so this spell read
-    /// as a pure 1-damage whiff and was wrongly vetoed.
+    /// population (the 3/3) via `find_legal_targets`.
     #[test]
     fn can_kill_fails_open_on_mixed_damage_and_destroy_all() {
         let mut state = make_state();
@@ -929,10 +927,7 @@ mod tests {
     /// `Contextual`, but its `TypedFilter.controller` is `ControllerRef::You`
     /// (CR 108.4 / CR 109.5), so `find_legal_targets` names only the caster's
     /// own creatures — there is no legal OPPOSING population for the control
-    /// line. The deleted filter-shape proxy credited this line anyway (its
-    /// `targets_creatures` early-out ignored `TypedFilter.controller`); the
-    /// population check must not. Only the whiff 1-damage half remains, so the
-    /// gate vetoes. Guards feedback finding (1).
+    /// line. Only the whiff 1-damage half remains, so the gate vetoes.
     #[test]
     fn can_kill_vetoes_when_control_line_is_own_controller_constrained() {
         let mut state = make_state();
