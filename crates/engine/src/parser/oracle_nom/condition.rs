@@ -273,6 +273,17 @@ fn parse_remaining_state_presence_conditions(input: &str) -> OracleResult<'_, St
         parse_quantity_quantity_comparison,
         parse_zone_conditions,
         parse_there_are_counters_on_source,
+        parse_remaining_state_presence_conditions_tail,
+    ))
+    .parse(input)
+}
+
+/// Keeps the remaining state-presence grammar below nom's tuple-arity limit
+/// without changing precedence among its tail productions.
+fn parse_remaining_state_presence_conditions_tail(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    alt((
         // Must precede `parse_card_exiled_with_source_condition` — both share
         // the "... exiled with [source]" tail, but this arm's leading "cards
         // with N or more different <quality>" noun phrase is the longer,
