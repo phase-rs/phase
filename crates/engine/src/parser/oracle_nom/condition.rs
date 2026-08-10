@@ -278,6 +278,10 @@ fn parse_remaining_state_presence_conditions(input: &str) -> OracleResult<'_, St
         // with N or more different <quality>" noun phrase is the longer,
         // more specific match.
         parse_cards_distinct_quality_exiled_with_source_condition,
+        // CR 400.1 + CR 401.1 + CR 402.1 + CR 404.1: existential absence over the
+        // controller's hand, library, or graveyard. The bounded "cards in your"
+        // grammar distinguishes it from the following linked-exile arm.
+        parse_no_cards_in_your_zone,
         parse_card_exiled_with_source_condition,
         parse_there_are_conditions,
         parse_there_exists_compound_zone_condition,
@@ -8047,6 +8051,54 @@ fn parse_exiled_with_source_self_ref(input: &str) -> OracleResult<'_, &str> {
     .parse(input)
 }
 
+/// CR 400.1 + CR 401.1 + CR 402.1 + CR 404.1: parse the evidenced existential-absence
+/// family "there are no [typed ]cards in your <zone>". The six current
+/// consumers cover hand, library, and graveyard; broader scope words are not
+/// accepted until an Oracle consumer needs them.
+///
+/// The optional type phrase remains in `ZoneCardCount::filter`, rather than
+/// being reduced to `card_types`: the full filter preserves qualifiers such as
+/// Magmatic Scorchwing's `nonbasic` and Saiba Syphoner's `instant or sorcery`.
+/// `ZoneCardCount` already evaluates that filter against cards in the requested
+/// zone, while `CountScope::Controller` supplies the printed `your` ownership.
+fn parse_no_cards_in_your_zone(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("there are no ").parse(input)?;
+    let (rest, type_text) = alt((
+        value("", tag("cards in ")),
+        terminated(take_until(" cards in "), tag(" cards in ")),
+    ))
+    .parse(rest)?;
+    let filter = if type_text.is_empty() {
+        None
+    } else {
+        let (filter, remainder) = parse_type_phrase(type_text.trim());
+        if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
+            return Err(oracle_err(input));
+        }
+        Some(filter)
+    };
+    let (rest, _) = tag("your ").parse(rest)?;
+    let (rest, zone) = alt((
+        value(ZoneRef::Graveyard, tag("graveyard")),
+        value(ZoneRef::Hand, tag("hand")),
+        value(ZoneRef::Library, tag("library")),
+    ))
+    .parse(rest)?;
+    Ok((
+        rest,
+        make_quantity_comparison(
+            QuantityRef::ZoneCardCount {
+                zone,
+                card_types: Vec::new(),
+                filter,
+                scope: CountScope::Controller,
+            },
+            Comparator::EQ,
+            0,
+        ),
+    ))
+}
+
 /// CR 406.6 + CR 607.2a + CR 603.4: presence/absence gate over the source's
 /// linked-exile pool. Two grammatical surfaces, one axis:
 ///   subject-first  — "a card is exiled with ~" / "one or more cards are exiled with ~"  → count >= 1
@@ -9607,7 +9659,8 @@ pub(crate) fn match_when_you_do(i: &str) -> OracleResult<'_, ()> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        CardTypeSetSource, CountScope, RoundingMode, TypeFilter, TypedFilter, ZoneRef,
+        CardTypeSetSource, CountScope, RoundingMode, TriggerCondition, TypeFilter, TypedFilter,
+        ZoneRef,
     };
     use crate::types::card_type::Supertype;
     use crate::types::mana::{ManaColor, ManaCost};
@@ -12345,20 +12398,163 @@ mod tests {
             } => {}
             other => panic!("expected CardsExiledBySource EQ 0, got {other:?}"),
         }
-        // Negative siblings (reach-guarded by the positive parse above): the
-        // different-zone existential family "there are no cards in your
-        // graveyard/library" (Gorilla Titan, Immortal Coil, Living Conundrum)
-        // shares the "there are no cards " prefix but fails the "exiled with "
-        // anchor, so nom backtracks and the phrase stays coverage-honest
-        // (unparsed) instead of being silently mis-claimed.
-        assert!(
-            parse_inner_condition("there are no cards in your graveyard").is_err(),
-            "graveyard-zone existential must not be claimed by the exiled-with arm"
+    }
+
+    /// The zone-existential family is disjoint from the linked-exile sibling:
+    /// it owns the bounded `cards in your` grammar and retains the complete
+    /// typed filter in `ZoneCardCount::filter`.
+    #[test]
+    fn parse_there_are_no_typed_cards_in_your_zone() {
+        let cases = [
+            ("there are no land cards in your hand", ZoneRef::Hand, true),
+            (
+                "there are no cards in your graveyard",
+                ZoneRef::Graveyard,
+                false,
+            ),
+            (
+                "there are no cards in your library",
+                ZoneRef::Library,
+                false,
+            ),
+            (
+                "there are no nonbasic land cards in your library",
+                ZoneRef::Library,
+                true,
+            ),
+            (
+                "there are no instant or sorcery cards in your hand",
+                ZoneRef::Hand,
+                true,
+            ),
+        ];
+        for (text, zone, has_filter) in cases {
+            let (rest, condition) = parse_inner_condition(text)
+                .unwrap_or_else(|err| panic!("must parse {text:?}: {err:?}"));
+            assert_eq!(rest, "", "remainder for {text:?}");
+            let StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ZoneCardCount {
+                                zone: actual_zone,
+                                card_types,
+                                filter,
+                                scope: CountScope::Controller,
+                            },
+                    },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            } = condition
+            else {
+                panic!("expected controller ZoneCardCount EQ 0 for {text:?}, got {condition:?}");
+            };
+            assert_eq!(actual_zone, zone, "zone for {text:?}");
+            assert!(
+                card_types.is_empty(),
+                "full filter must not be reduced for {text:?}"
+            );
+            assert_eq!(filter.is_some(), has_filter, "filter presence for {text:?}");
+        }
+
+        let (_, nonbasic) =
+            parse_inner_condition("there are no nonbasic land cards in your library")
+                .expect("Magmatic Scorchwing condition");
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ZoneCardCount {
+                            filter: Some(TargetFilter::Typed(filter)),
+                            ..
+                        },
+                },
+            ..
+        } = nonbasic
+        else {
+            panic!("Magmatic Scorchwing must retain a typed zone filter");
+        };
+        assert!(filter.type_filters.contains(&TypeFilter::Land));
+        assert!(filter.properties.contains(&FilterProp::NotSupertype {
+            value: Supertype::Basic,
+        }));
+
+        let (_, instant_or_sorcery) =
+            parse_inner_condition("there are no instant or sorcery cards in your hand")
+                .expect("Saiba Syphoner condition");
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ZoneCardCount {
+                            filter: Some(TargetFilter::Or { filters }),
+                            ..
+                        },
+                },
+            ..
+        } = instant_or_sorcery
+        else {
+            panic!("Saiba Syphoner must retain an instant-or-sorcery filter");
+        };
+        assert!(filters.iter().any(|filter| matches!(
+            filter,
+            TargetFilter::Typed(typed) if typed.type_filters.contains(&TypeFilter::Instant)
+        )));
+        assert!(filters.iter().any(|filter| matches!(
+            filter,
+            TargetFilter::Typed(typed) if typed.type_filters.contains(&TypeFilter::Sorcery)
+        )));
+    }
+
+    #[test]
+    fn parse_no_cards_in_your_zone_rejects_adjacent_grammars() {
+        assert!(parse_no_cards_in_your_zone("there are no cards exiled with ~").is_err());
+        assert!(parse_no_cards_in_your_zone("there are no creatures on the battlefield").is_err());
+        assert!(parse_no_cards_in_your_zone("there are no cards in").is_err());
+        assert!(parse_no_cards_in_your_zone("there are no card in your hand").is_err());
+    }
+
+    /// Production-path regression for Magmatic Scorchwing: the trigger parser
+    /// must retain its CR 603.4 intervening-if, including the nonbasic filter,
+    /// instead of silently lowering the damage trigger as unconditional.
+    #[test]
+    fn magmatic_scorchwing_full_oracle_retains_nonbasic_library_condition() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Flying\nWhen Magmatic Scorchwing enters, if there are no nonbasic land cards in your library, Magmatic Scorchwing deals 3 damage to any target.",
+            "Magmatic Scorchwing",
+            &["Flying".to_string()],
+            &["Creature".to_string()],
+            &["Dragon".to_string()],
         );
-        assert!(
-            parse_inner_condition("there are no cards in your library").is_err(),
-            "library-zone existential must not be claimed by the exiled-with arm"
-        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|trigger| matches!(trigger.mode, crate::types::TriggerMode::ChangesZone))
+            .expect("Magmatic Scorchwing must parse an enters trigger");
+        let Some(TriggerCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ZoneCardCount {
+                            zone: ZoneRef::Library,
+                            card_types,
+                            filter: Some(TargetFilter::Typed(filter)),
+                            scope: CountScope::Controller,
+                        },
+                },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        }) = trigger.condition.as_ref()
+        else {
+            panic!(
+                "Magmatic Scorchwing must retain its nonbasic-library intervening-if: {trigger:?}"
+            );
+        };
+        assert!(card_types.is_empty());
+        assert!(filter.type_filters.contains(&TypeFilter::Land));
+        assert!(filter.properties.contains(&FilterProp::NotSupertype {
+            value: Supertype::Basic,
+        }));
     }
 
     // Adjacent-grammar sibling guard: "there are no <type>s on the

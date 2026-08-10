@@ -12581,6 +12581,84 @@ mod tests {
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 3);
     }
 
+    /// `ZoneCardCount::filter` is evaluated against the card object rather than
+    /// reduced to its type list. This is the runtime half of the parser's
+    /// `there are no nonbasic land cards in your library` condition: a basic
+    /// land must not make the count nonzero, while a nonbasic land must.
+    #[test]
+    fn resolve_zone_card_count_preserves_nonbasic_land_filter() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(800),
+            PlayerId(0),
+            "Magmatic Scorchwing".to_string(),
+            Zone::Battlefield,
+        );
+        let basic = create_object(
+            &mut state,
+            CardId(801),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Library,
+        );
+        let basic_obj = state.objects.get_mut(&basic).unwrap();
+        basic_obj.card_types.core_types.push(CoreType::Land);
+        basic_obj.card_types.supertypes.push(Supertype::Basic);
+
+        let nonbasic_land =
+            TargetFilter::Typed(
+                TypedFilter::land().properties(vec![FilterProp::NotSupertype {
+                    value: Supertype::Basic,
+                }]),
+            );
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Library,
+                card_types: Vec::new(),
+                filter: Some(nonbasic_land),
+                scope: CountScope::Controller,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 0);
+
+        let opponent_nonbasic = create_object(
+            &mut state,
+            CardId(802),
+            PlayerId(1),
+            "Opponent's Karplusan Forest".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&opponent_nonbasic)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), source),
+            0,
+            "your library must not count an opponent's nonbasic land"
+        );
+
+        let nonbasic = create_object(
+            &mut state,
+            CardId(803),
+            PlayerId(0),
+            "Karplusan Forest".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&nonbasic)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 1);
+    }
+
     #[test]
     fn resolve_quantity_counters_on_self() {
         let mut state = GameState::new_two_player(42);

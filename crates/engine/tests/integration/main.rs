@@ -772,6 +772,7 @@ mod lurking_predators_1604_repro;
 mod madame_null_integration;
 mod madrush_cyclops_haste_grant;
 mod magnetic_mountain_choose_and_pay;
+mod magmatic_scorchwing_intervening_if;
 mod magus_of_the_abyss_scoped_chooser;
 mod make_an_example_pile_separation;
 mod mana_autotap_preference;
