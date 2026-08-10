@@ -922,6 +922,7 @@ pub fn apply_resolved_zone_change(
         .get_mut(&command.object.object_id)
         .expect("validated zone command object remains live");
     object.zone = command.to;
+    object.trigger_occurrence_state.retire_all_grants();
     if command.to == Zone::Battlefield {
         object.reset_for_battlefield_entry(
             turn_number,
@@ -1193,6 +1194,7 @@ pub fn move_to_zone(
                 zone_change_record.entered_incarnation = Some(obj_mut.incarnation);
             } else if from != to {
                 // CR 400.7: a move between zones creates a new object.
+                obj_mut.trigger_occurrence_state.retire_all_grants();
                 obj_mut.bump_incarnation();
             }
             (pre_bump_incarnation, obj_mut.incarnation, false)

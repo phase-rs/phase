@@ -89,6 +89,24 @@ mod trigger_occurrence_tests {
     }
 
     #[test]
+    fn zone_change_retirement_forces_a_fresh_grant_generation() {
+        let producer = TriggerGrantProducerKey::Granted {
+            origin: static_origin(),
+            output_index: 0,
+        };
+        let mut state = TriggerOccurrenceState::default();
+        let first = state.grant_instance_for(producer.clone()).unwrap();
+        state.retire_all_grants();
+        let second = state.grant_instance_for(producer).unwrap();
+
+        assert_ne!(
+            first, second,
+            "a new object incarnation must not reuse a grant generation"
+        );
+        assert!(second.0 > first.0, "grant generations remain monotonic");
+    }
+
+    #[test]
     fn identical_grants_from_distinct_producers_remain_distinct_entries() {
         let definition = TriggerDefinition::new(TriggerMode::Attacks);
         let mut state = TriggerOccurrenceState::default();
