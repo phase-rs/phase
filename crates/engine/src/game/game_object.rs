@@ -1625,7 +1625,8 @@ impl GameObject {
             )
         });
         if !has_legacy_entries {
-            return self.validate_trigger_definitions();
+            self.validate_trigger_definitions()?;
+            return self.migrate_legacy_trigger_provenance();
         }
         if self.base_trigger_definitions.is_empty()
             || self.trigger_definitions.len() != self.base_trigger_definitions.len()
@@ -1644,7 +1645,63 @@ impl GameObject {
             return Err("legacy runtime trigger payload has no provable producer or base slot");
         }
         self.materialize_base_trigger_definitions();
-        self.validate_trigger_definitions()
+        self.validate_trigger_definitions()?;
+        self.migrate_legacy_trigger_provenance()
+    }
+
+    /// Restores producer provenance for identity-bearing granted triggers from
+    /// the persisted recipient-local grant table. Older payloads may contain a
+    /// `Granted` occurrence without the producer field; guessing from the
+    /// trigger definition would fragment `MaxTimesPerTurn` accounting again.
+    pub fn migrate_legacy_trigger_provenance(&mut self) -> Result<(), &'static str> {
+        let active_grants: Vec<_> = self
+            .trigger_occurrence_state
+            .active_grants()
+            .map(|(producer, instance)| (instance, producer.clone()))
+            .collect();
+
+        for index in 0..self.trigger_definitions.len() {
+            let (grant_instance, existing_producer) = {
+                let entry = self
+                    .trigger_definitions
+                    .get(index)
+                    .expect("trigger definition index must remain valid");
+                let grant_instance = match &entry.occurrence {
+                    TriggerDefinitionOccurrenceRef::KeywordCompanion { grant_instance, .. }
+                    | TriggerDefinitionOccurrenceRef::CopyRetained { grant_instance, .. }
+                    | TriggerDefinitionOccurrenceRef::Granted { grant_instance }
+                    | TriggerDefinitionOccurrenceRef::ExpandedGrant { grant_instance, .. } => {
+                        Some(*grant_instance)
+                    }
+                    TriggerDefinitionOccurrenceRef::Printed { .. }
+                    | TriggerDefinitionOccurrenceRef::CopiedValue { .. }
+                    | TriggerDefinitionOccurrenceRef::Unmaterialized => None,
+                };
+                (grant_instance, entry.grant_producer.clone())
+            };
+            let Some(grant_instance) = grant_instance else {
+                continue;
+            };
+            let Some((_, producer)) = active_grants
+                .iter()
+                .find(|(instance, _)| *instance == grant_instance)
+            else {
+                return Err("grant trigger has no persisted producer provenance");
+            };
+            match existing_producer {
+                Some(existing) if existing != *producer => {
+                    return Err("grant trigger producer provenance does not match its instance");
+                }
+                Some(_) => {}
+                None => {
+                    self.trigger_definitions
+                        .get_mut(index)
+                        .expect("trigger definition index must remain valid")
+                        .grant_producer = Some(producer.clone());
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Apply an Alchemy "perpetually" modification to this card: record it on the
@@ -3004,6 +3061,7 @@ mod tests {
     use super::*;
     use crate::types::ability::{
         TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerEntry, TriggerGrantInstanceRef,
+        TriggerGrantProducerKey, TriggerProducerOrigin,
     };
     use crate::types::counter::parse_counter_type;
     use crate::types::triggers::TriggerMode;
@@ -3341,6 +3399,51 @@ mod tests {
             object.migrate_legacy_trigger_definitions(),
             Err("legacy runtime trigger payload has no provable producer or base slot"),
             "a payload-only runtime copied/granted trigger must not be guessed as printed"
+        );
+    }
+
+    #[test]
+    fn legacy_grant_trigger_restores_producer_from_persisted_instance() {
+        let mut object = trigger_test_object();
+        let producer = TriggerGrantProducerKey::Granted {
+            origin: TriggerProducerOrigin::Transient {
+                continuous_effect_id: 1,
+                modification_index: 0,
+            },
+            output_index: 0,
+        };
+        let grant_instance = object
+            .trigger_occurrence_state
+            .grant_instance_for(producer.clone())
+            .unwrap();
+        object.trigger_definitions = vec![TriggerEntry {
+            occurrence: TriggerDefinitionOccurrenceRef::Granted { grant_instance },
+            definition: TriggerDefinition::new(TriggerMode::Phase),
+            grant_producer: None,
+        }]
+        .into();
+
+        object
+            .migrate_legacy_trigger_provenance()
+            .expect("persisted grant instance proves the producer identity");
+        assert_eq!(object.trigger_definitions[0].grant_producer, Some(producer));
+    }
+
+    #[test]
+    fn grant_trigger_without_persisted_instance_is_rejected() {
+        let mut object = trigger_test_object();
+        object.trigger_definitions = vec![TriggerEntry {
+            occurrence: TriggerDefinitionOccurrenceRef::Granted {
+                grant_instance: TriggerGrantInstanceRef(7),
+            },
+            definition: TriggerDefinition::new(TriggerMode::Phase),
+            grant_producer: None,
+        }]
+        .into();
+
+        assert_eq!(
+            object.migrate_legacy_trigger_provenance(),
+            Err("grant trigger has no persisted producer provenance")
         );
     }
 

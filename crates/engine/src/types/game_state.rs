@@ -313,6 +313,54 @@ where
     Ok(objects)
 }
 
+/// Migrates the legacy MaxTimes ledger representation after object trigger
+/// provenance has been restored. A legacy definition key is safe to promote
+/// only when its exact recipient-local grant instance identifies one persisted
+/// producer; equal definition payloads are never used as a fallback.
+fn migrate_legacy_trigger_fire_counts(state: &mut GameState) -> Result<(), String> {
+    let mut producers_by_definition = HashMap::new();
+    for (_, object) in state.objects.iter() {
+        for entry in object.trigger_definitions.iter_all() {
+            let Some(producer) = entry.grant_producer.as_ref() else {
+                continue;
+            };
+            let definition = object.trigger_definition_ref(entry);
+            if let Some(previous) = producers_by_definition.insert(definition, producer.clone()) {
+                if previous != *producer {
+                    return Err(
+                        "legacy trigger ledger definition maps to conflicting grant producers"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+    }
+
+    let legacy_counts: Vec<_> = state
+        .trigger_fire_counts_this_turn
+        .iter()
+        .filter_map(|(key, count)| match key {
+            TriggerFireLedgerKey::Definition(definition) => producers_by_definition
+                .get(definition)
+                .cloned()
+                .map(|producer| (definition.clone(), producer, *count)),
+            TriggerFireLedgerKey::Grant(_) => None,
+        })
+        .collect();
+
+    for (definition, producer, count) in legacy_counts {
+        let grant_key = TriggerFireLedgerKey::Grant(producer);
+        if state.trigger_fire_counts_this_turn.contains_key(&grant_key) {
+            return Err("legacy trigger ledger migration collides with a grant count".to_string());
+        }
+        state
+            .trigger_fire_counts_this_turn
+            .remove(&TriggerFireLedgerKey::Definition(definition));
+        state.trigger_fire_counts_this_turn.insert(grant_key, count);
+    }
+    Ok(())
+}
+
 /// Tracks whether the game is in day or night state (CR 730).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DayNight {
@@ -15985,6 +16033,7 @@ impl GameStateDecode {
         let mut state = serde_json::from_value::<ResolutionStateWire>(value)
             .map(ResolutionStateWire::into_game_state)
             .map_err(|error| error.to_string())?;
+        migrate_legacy_trigger_fire_counts(&mut state)?;
         validate_restored_zone_change_replay_keys(&state)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         validate_trigger_firing_coherence(&state)?;
@@ -16010,6 +16059,7 @@ impl GameStateDecode {
             )?;
         }
         let mut state = Self::materialize_prepared(value)?;
+        migrate_legacy_trigger_fire_counts(&mut state)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         validate_trigger_firing_coherence(&state)?;
         // Both decode entry points guard, because they are genuinely two ingresses:
@@ -22519,6 +22569,7 @@ mod tests {
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, Effect, PostReplacementContinuation, QuantityExpr,
         ResolvedAbility, TargetFilter, TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef,
+        TriggerEntry, TriggerGrantProducerKey, TriggerProducerOrigin,
     };
     use crate::types::deterministic_serde::test_support::ReverseBuildHasher;
     use crate::types::identifiers::{
@@ -28441,6 +28492,55 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn game_state_deserialize_migrates_legacy_grant_fire_count_to_producer_key() {
+        let object_id = ObjectId(993);
+        let mut state = GameState::new_two_player(42);
+        let mut object = GameObject::new(
+            object_id,
+            CardId(993),
+            PlayerId(0),
+            "Legacy granted trigger".to_string(),
+            Zone::Battlefield,
+        );
+        let producer = TriggerGrantProducerKey::Granted {
+            origin: TriggerProducerOrigin::Static {
+                source: ObjectIncarnationRef::from_object(&object),
+                definition_index: 0,
+                modification_index: 0,
+            },
+            output_index: 0,
+        };
+        let grant_instance = object
+            .trigger_occurrence_state
+            .grant_instance_for(producer.clone())
+            .expect("grant instance allocates");
+        let entry = TriggerEntry::with_grant_producer(
+            TriggerDefinitionOccurrenceRef::Granted { grant_instance },
+            TriggerDefinition::new(crate::types::triggers::TriggerMode::Attacks),
+            producer.clone(),
+        );
+        let definition = object.trigger_definition_ref(&entry);
+        object.trigger_definitions.push(entry);
+        state.objects.insert(object_id, object);
+        state
+            .trigger_fire_counts_this_turn
+            .insert(TriggerFireLedgerKey::Definition(definition), 2);
+
+        let mut snapshot = serde_json::to_value(state).expect("serialize fixture state");
+        snapshot["objects"][object_id.0.to_string()]["trigger_definitions"][0]
+            .as_object_mut()
+            .expect("identity-bearing trigger serializes as an object")
+            .remove("grant_producer");
+
+        let restored: GameState = serde_json::from_value(snapshot)
+            .expect("legacy grant provenance and ledger count restore");
+        assert_eq!(
+            restored.trigger_fire_counts_this_turn,
+            HashMap::from([(TriggerFireLedgerKey::Grant(producer), 2)])
+        );
     }
 
     #[test]
