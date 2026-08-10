@@ -237,6 +237,17 @@ impl<'a> PolicyContext<'a> {
                 TargetRef::Player(_) => false,
             })
     }
+
+    /// Does the pending spell carry an inherently-mass effect (`DestroyAll`,
+    /// CR 701.8) with a non-empty OPPONENT population under the resolver's
+    /// NON-targeted semantics (CR 115.10a; team-aware via `is_opponent`)? The
+    /// engine's tactical gate (redundant-removal suppression) and the
+    /// cast-commit anti-whiff scoring both consult this BEFORE any
+    /// target-legality gate: a wipe line that clears an un-targetable
+    /// (hexproof/protected) population is a real removal line, not a whiff.
+    pub(crate) fn has_opposing_mass_population(&self) -> bool {
+        super::removal_lethality::has_opposing_mass_population(self)
+    }
 }
 
 /// Walk a ResolvedAbility's sub_ability chain, collecting all effects.

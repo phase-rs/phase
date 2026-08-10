@@ -47,6 +47,7 @@
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::GameObject;
 use engine::game::keywords::object_has_effective_keyword_kind;
+use engine::game::players::is_opponent;
 use engine::game::quantity::{resolve_quantity, resolve_quantity_with_targets_slice};
 use engine::game::targeting::find_legal_targets;
 use engine::types::ability::{
@@ -477,9 +478,10 @@ pub(crate) fn can_kill_any_legal_target(ctx: &PolicyContext<'_>) -> bool {
             // A harmful removal spell is only useful against an OPPONENT's
             // creature — a target the caster controls would be self-targeting
             // (anti-self-harm, handled separately). Mirror the gating
-            // `has_targetable_opponent_creature` (`controller != ai_player`).
+            // `has_targetable_opponent_creature` via `players::is_opponent`
+            // (CR 102.2 / CR 102.3: team-aware — a teammate is not an opponent).
             let Some(object) = ctx.state.objects.get(&object_id).filter(|object| {
-                object.controller != ctx.ai_player
+                is_opponent(ctx.state, ctx.ai_player, object.controller)
                     && object.card_types.core_types.contains(&CoreType::Creature)
             }) else {
                 continue;
@@ -504,6 +506,27 @@ pub(crate) fn can_kill_any_legal_target(ctx: &PolicyContext<'_>) -> bool {
     // modelled target survived — i.e. `model_any_target && !any_escape`. The
     // empty-set case (`!modelled_any_target`) fails open by contract.
     !modelled_any_target
+}
+
+/// Cast-commit seam query: does ANY inherently-mass non-`DealDamage` effect
+/// on the pending spell (currently `DestroyAll`, CR 701.8) have a non-empty
+/// opposing population under the resolver's semantics — NON-targeted (CR
+/// 115.10a), team-aware (`is_opponent`, CR 102.2/102.3), indestructible
+/// skipped? Independent of target legality: consulted by
+/// `anti_self_harm::score_pre_cast` BEFORE the `has_targetable_opponent_creature`
+/// gate so a useful wipe line rescues a mixed spell whose only opposing
+/// creatures are hexproof/protected (un-targetable, but wiped).
+pub(crate) fn has_opposing_mass_population(ctx: &PolicyContext<'_>) -> bool {
+    let Some(source) = ctx.source_object() else {
+        return false;
+    };
+    ctx.effects().iter().any(|effect| {
+        matches!(
+            effect,
+            Effect::DestroyAll { target, .. }
+                if mass_effect_has_opposing_population(ctx, source, target)
+        )
+    })
 }
 
 /// Does this non-`DealDamage` effect currently have a legal target or
@@ -541,7 +564,11 @@ fn effect_has_legal_opposing_line(ctx: &PolicyContext<'_>, effect: &Effect) -> b
             matches!(
                 target,
                 TargetRef::Object(id)
-                    if ctx.state.objects.get(&id).is_some_and(|o| o.controller != ctx.ai_player)
+                    if ctx
+                        .state
+                        .objects
+                        .get(&id)
+                        .is_some_and(|o| is_opponent(ctx.state, ctx.ai_player, o.controller))
             )
         })
 }
@@ -571,7 +598,7 @@ fn mass_effect_has_opposing_population(
         let Some(obj) = ctx.state.objects.get(&id) else {
             return false;
         };
-        obj.controller != ctx.ai_player
+        is_opponent(ctx.state, ctx.ai_player, obj.controller)
             && !obj.has_keyword(&Keyword::Indestructible)
             && matches_target_filter(ctx.state, id, effective, &filter_ctx)
     })
@@ -910,9 +937,10 @@ mod tests {
     /// Mixed removal spell with a wipe line: "deal 1 damage to target creature;
     /// destroy all creatures". The 1-damage half is a whiff on the 3/3, but the
     /// `DestroyAll` half (CR 701.8) is an independent, useful mass-removal
-    /// line. `extract_target_filter` surfaces `DestroyAll`'s population filter
-    /// and the cast-commit gate resolves it against the real opposing
-    /// population (the 3/3) through the resolver-mirroring mass path
+    /// line. `Effect::DestroyAll` is dispatched DIRECTLY (it bypasses the
+    /// target-only `extract_target_filter`) and the cast-commit gate resolves
+    /// it against the real opposing population (the 3/3) through the
+    /// resolver-mirroring mass path
     /// (`mass_effect_has_opposing_population` — battlefield population matched
     /// with `matches_target_filter`, CR 115.10a; DestroyAll is non-targeted),
     /// not via `find_legal_targets`, which gates target legality.
@@ -989,10 +1017,13 @@ mod tests {
     /// declares `TargetFilter::None`. The engine resolver (`destroy.rs`
     /// `resolve_all`) treats `None` as its DEFAULT population — all creatures —
     /// so the 3/3 is a wipe target even though the spell declares no filter
-    /// (CR 701.8). Pre-fix, `extract_target_filter` surfaced the raw `None`
-    /// into `find_legal_targets`, which reads an empty set: the wipe half was
-    /// not credited and the 1-damage half vetoed the whole cast. The gate must
-    /// fail open via the resolver-mirroring mass path (CR 115.10a).
+    /// (CR 701.8). Pre-fix, the gate fed the raw `None` through
+    /// `find_legal_targets` (the extraction-as-target error), which reads an
+    /// empty set: the wipe half was not credited and the 1-damage half vetoed
+    /// the whole cast. Post-fix the dispatch is direct — `Effect::DestroyAll`
+    /// bypasses the target-only `extract_target_filter` and is resolved
+    /// resolver-mirroring, so the gate must fail open via the
+    /// mass-population path (CR 115.10a).
     #[test]
     fn can_kill_fails_open_on_default_population_destroy_all() {
         let mut state = make_state();
@@ -1585,6 +1616,156 @@ mod tests {
             can_kill_any_legal_target(&ctx),
             "a sibling non-creature-only deal-X means X is castable-lethal; the \
              spell must fail open despite the creature-only half being a whiff"
+        );
+    }
+
+    /// Two-Headed Giant teammate regression: a teammate's creature is a LEGAL
+    /// target (in `find_legal_targets`) and sits in any battlefield population,
+    /// but is NOT an opponent under the team-aware relation (CR 102.2 /
+    /// CR 102.3 + 2HG topology: P0/P1 are teammates, P2/P3 are P0's opponents).
+    /// Pre-fix, the removal-line predicates used `controller != ai_player`,
+    /// which wrongly credited a teammate-only creature/population as an
+    /// opposing removal line. `players::is_opponent` is the authority.
+    #[test]
+    fn opposing_lines_are_team_aware_in_two_headed_giant() {
+        let mut state = GameState::new(
+            engine::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        // P1 is P0's teammate in 2HG (topology: team_id = player.0 / team_size).
+        add_creature(&mut state, PlayerId(1), "Teammate Bear", 2, 2);
+
+        // Teammate only — a legal target, but no opposing removal line.
+        with_mixed_gain_control_spell(
+            &mut state,
+            TargetFilter::Typed(TypedFilter::creature()),
+            |ctx| {
+                let gc = Effect::GainControl {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                };
+                assert!(
+                    !effect_has_legal_opposing_line(ctx, &gc),
+                    "a teammate's creature must NOT be an opposing removal line: it is a \
+                     legal target but not an opponent (CR 102.2/102.3 + 2HG topology)"
+                );
+                assert!(
+                    !mass_effect_has_opposing_population(
+                        ctx,
+                        ctx.source_object().unwrap(),
+                        &TargetFilter::Typed(TypedFilter::creature())
+                    ),
+                    "a teammate's creature must NOT be an opposing wipe population \
+                     (CR 102.2/102.3 + 2HG topology)"
+                );
+            },
+        );
+
+        // P2 IS P0's opponent in 2HG — the same shapes must now credit it.
+        add_creature(&mut state, PlayerId(2), "Enemy Bear", 3, 3);
+        with_mixed_gain_control_spell(
+            &mut state,
+            TargetFilter::Typed(TypedFilter::creature()),
+            |ctx| {
+                let gc = Effect::GainControl {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                };
+                assert!(
+                    effect_has_legal_opposing_line(ctx, &gc),
+                    "an enemy (P2) creature must be an opposing removal line \
+                     (CR 102.2/102.3 + 2HG topology)"
+                );
+                assert!(
+                    mass_effect_has_opposing_population(
+                        ctx,
+                        ctx.source_object().unwrap(),
+                        &TargetFilter::Typed(TypedFilter::creature())
+                    ),
+                    "an enemy (P2) creature must be an opposing wipe population \
+                     (CR 102.2/102.3 + 2HG topology)"
+                );
+            },
+        );
+    }
+
+    /// Direct seam test: `has_opposing_mass_population` — the cast-commit seam
+    /// consulted by `anti_self_harm::score_pre_cast` BEFORE the target-legality
+    /// gate — must report TRUE for a mixed damage+wipe spell whose only opposing
+    /// creature is HEXPROOF. The wipe is NON-targeted (CR 115.10a), so the
+    /// hexproof 3/3 is in its resolver population even though it has no legal
+    /// target (hexproof gates targeting only, CR 702.11a). This is the
+    /// population truth that rescues the mixed spell from the :397 no-target
+    /// penalty.
+    #[test]
+    fn seam_has_opposing_mass_population_counts_hexproof_opponent() {
+        let mut state = make_state();
+        add_creature(&mut state, PlayerId(0), "My Bear", 2, 1);
+        let hexproof_bear = add_creature(&mut state, PlayerId(1), "Hexproof Bear", 3, 3);
+        state
+            .objects
+            .get_mut(&hexproof_bear)
+            .unwrap()
+            .keywords
+            .push(Keyword::Hexproof);
+
+        let spell_id = create_object(
+            &mut state,
+            CardId(90_009),
+            PlayerId(0),
+            "Wipe Plus Damage".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&spell_id).unwrap();
+        obj.abilities = Arc::new(vec![
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    damage_source: None,
+                    excess: None,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DestroyAll {
+                    target: TargetFilter::None,
+                    cant_regenerate: false,
+                },
+            ),
+        ]);
+
+        let config = AiConfig::default();
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: spell_id,
+                card_id: CardId(90_009),
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
+        };
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert!(
+            has_opposing_mass_population(&ctx),
+            "the mixed wipe's resolver-mirroring population must include the hexproof 3/3 \
+             (CR 115.10a: the wipe is NON-targeted, so hexproof gates targeting only, \
+             CR 702.11a)"
         );
     }
 }

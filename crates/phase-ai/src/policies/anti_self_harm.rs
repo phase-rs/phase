@@ -393,8 +393,16 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
         penalty += ctx.penalties().wasted_cast_penalty;
     }
 
-    // Harmful creature-only spell (e.g. Murder) but no targetable opponent creatures.
-    if has_harmful_creature_only_target && !has_targetable_opponent_creature {
+    // Harmful creature-only spell (e.g. Murder) but no targetable opponent
+    // creatures. A MIXED spell carrying a useful wipe line (`DestroyAll`,
+    // CR 701.8) is NOT a whiff even when every opposing creature is
+    // hexproof/protected: the wipe is NON-targeted and hits the population
+    // (CR 115.10a), so consult the resolver-mirroring mass seam before
+    // charging the no-target penalty.
+    if has_harmful_creature_only_target
+        && !has_targetable_opponent_creature
+        && !ctx.has_opposing_mass_population()
+    {
         penalty += ctx.penalties().wasted_cast_penalty;
     }
 
@@ -5567,6 +5575,108 @@ mod tests {
             score < -5.0,
             "Casting a dynamic burn whose 1 damage kills no opponent creature \
              should be penalised, got {score}"
+        );
+    }
+
+    /// Cast-commit seam regression (the blocker): a MIXED spell coupling a
+    /// creature-only damage half with a `DestroyAll` wipe (CR 701.8) must NOT
+    /// be charged the -8 no-target penalty when its ONLY opposing creature is
+    /// HEXPROOF. Hexproof (`Keyword::Hexproof`) gates TARGETING only
+    /// (CR 702.11a) — an affected object is not a target — while the wipe is
+    /// NON-targeted and hits the battlefield POPULATION regardless
+    /// (CR 115.10a). So `has_targetable_opponent_creature` is false here, but
+    /// `removal_lethality::has_opposing_mass_population` is true, and
+    /// `score_pre_cast` must consult the mass seam BEFORE charging the :397
+    /// no-target penalty. Pre-fix, the ordering charged the -8 penalty — a
+    /// false positive for a spell whose wipe genuinely clears the hexproof
+    /// 3/3. The AI's OWN bear exists solely so the damage half is announceable
+    /// (CR 601.2c); this test pins the PENALTY question, not castability.
+    #[test]
+    fn pre_cast_does_not_penalise_mixed_wipe_when_only_population_is_hexproof() {
+        let mut state = make_state();
+        // AI's own creature makes the dynamic ObjectCount amount resolve to 1.
+        add_creature(&mut state, PlayerId(0), "My Bear", 2, 1);
+        // The ONLY opposing creature is hexproof (un-targetable, CR 702.11a)
+        // but is in the wipe's NON-targeted population (CR 115.10a).
+        let hexproof_bear = add_creature(&mut state, PlayerId(1), "Hexproof Bear", 3, 3);
+        state
+            .objects
+            .get_mut(&hexproof_bear)
+            .unwrap()
+            .keywords
+            .push(Keyword::Hexproof);
+
+        let spell_id = create_object(
+            &mut state,
+            CardId(90_001),
+            PlayerId(0),
+            "Hexproof-Proof Judgement".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&spell_id).unwrap();
+        let mut my_filter = TypedFilter::creature();
+        my_filter.controller = Some(ControllerRef::You);
+        let amount = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(my_filter),
+            },
+        };
+        obj.abilities = Arc::new(vec![
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DealDamage {
+                    amount,
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    damage_source: None,
+                    excess: None,
+                },
+            ),
+            // `None` is the serde default for `DestroyAll.target`; construct it
+            // explicitly so the resolver's `None` -> all-creatures population
+            // (destroy.rs `resolve_all`) is the point under test.
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DestroyAll {
+                    target: TargetFilter::None,
+                    cant_regenerate: false,
+                },
+            ),
+        ]);
+
+        let config = AiConfig::default();
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: spell_id,
+                card_id: CardId(90_001),
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
+        };
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        let score = AntiSelfHarmPolicy.score(&ctx);
+        assert!(
+            score > -5.0,
+            "A mixed deal-1 + destroy-all vs a hexproof-only opposing board \
+             ({score:.3}) must NOT be charged the no-target penalty: the wipe is \
+             NON-targeted (CR 115.10a) and hits the hexproof 3/3's population \
+             (hexproof gates targeting only, CR 702.11a), so the mass seam \
+             rescues the mixed spell from the :397 wasted-cast penalty"
         );
     }
 }

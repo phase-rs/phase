@@ -20,6 +20,7 @@ use engine::types::card_type::{CardType, CoreType};
 use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::{PlayerDeckPool, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::Keyword;
 use engine::types::mana::ManaCost;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -583,7 +584,7 @@ fn mixed_damage_and_destroy_is_not_penalized_as_a_damage_whiff() {
     // `can_kill_any_legal_target` penalizes the mixed spell with the same -8
     // whiff penalty, collapsing this inequality.
     assert!(
-        mixed_score > pure_score + 1.0,
+        mixed_score > pure_score + config.policy_penalties.wasted_cast_penalty.abs() * 0.5,
         "mixed deal-1 + destroy ({mixed_score:.3}) must outrank the identical pure \
          burn whiff ({pure_score:.3}): Destroy is a useful removal line the gate \
          must not penalize as a damage whiff"
@@ -684,7 +685,7 @@ fn mixed_damage_and_gain_control_is_not_penalized_as_a_damage_whiff() {
     // fail-open, `can_kill_any_legal_target` penalizes the mixed spell with the
     // same -8 whiff penalty, collapsing this inequality.
     assert!(
-        mixed_score > pure_score + 1.0,
+        mixed_score > pure_score + config.policy_penalties.wasted_cast_penalty.abs() * 0.5,
         "mixed deal-1 + gain control of a permanent ({mixed_score:.3}) must outrank \
          the identical pure burn whiff ({pure_score:.3}): stealing the opponent's \
          permanent is a useful control line (CR 613.1b) the gate must not penalize \
@@ -792,12 +793,144 @@ fn mixed_damage_and_destroy_all_is_not_penalized_as_a_damage_whiff() {
     // path, `can_kill_any_legal_target` penalizes the mixed spell with the same
     // -8 whiff penalty, collapsing this inequality.
     assert!(
-        mixed_score > pure_score + 1.0,
+        mixed_score > pure_score + config.policy_penalties.wasted_cast_penalty.abs() * 0.5,
         "mixed deal-1 + default-population destroy-all ({mixed_score:.3}) must outrank \
          the identical pure burn whiff ({pure_score:.3}): the wipe's default \
          all-creatures population (CR 701.8 / destroy.rs `resolve_all`) makes the \
          3/3 a wipe target and the wipe is non-targeted (CR 115.10a), so the gate \
-         must not penalize the spell as a damage whiff"
+        must not penalize the spell as a damage whiff"
+    );
+}
+
+/// Production-pipeline differential pinning BOTH seams that the whiff-gate
+/// blocker fix restores for a MIXED wipe spell on a board whose only opposing
+/// creature is HEXPROOF:
+///
+/// * **Targeting is gated, the wipe population is not.** Hexproof (CR 702.11a)
+///   prevents the creature being *targeted* by the spell's "deal 1 damage to
+///   target creature" half — but `DestroyAll` is NON-targeted (CR 115.10a), so
+///   hexproof never answers it. With `TargetFilter::None` (CR 701.8) the
+///   resolver's population defaults to ALL creatures, so the hexproof 3/3 is a
+///   genuine wipe target.
+/// * **Own bear gives the damage half a legal ANNOUNCE target (CR 601.2c).**
+///   The AI's own 2/1 means the DealDamage half has a legal target to name when
+///   the spell is cast, so the PENDING spell is valid and the cast pipeline
+///   reaches the cast-commit scoring.
+///
+/// The reference R is a PURE `DestroyAll{None}` wipe (NOT pure burn): on a
+/// board with no targetable opponent creature, pure burn is hard-REJECTED by
+/// `is_redundant_creature_only_removal` (whose creature-only half has no live
+/// opponent target), so it is never offered and cannot be a comparable
+/// reference. The pure wipe R has no creature-only half, is offered, and is
+/// the honest baseline: the mixed spell M (DealDamage half + wipe) must carry
+/// the SAME cast-commit score as R (modulo the small margin), because both
+/// clear the hexproof population and M's dead damage half adds a no-target
+/// whiff only if the rescue fails.
+///
+/// This pins TWO fixes:
+///   1. **Tactical gate mass-awareness** (tactical_gate.rs) — pre-fix M is
+///      hard-REJECTED by `is_redundant_creature_only_removal` (its creature-only
+///      half has no live opponent target on a hexproof board), so the
+///      `CastSpell` reach-guard on M fails (only `PassPriority` is offered).
+///   2. **anti_self_harm :397 rescue** — pre-rescue M carries the -8
+///      `wasted_cast_penalty` no-target penalty (M ≈ R − 8), failing the
+///      differential; post-rescue M ≈ R.
+#[test]
+fn mixed_destroy_all_not_penalized_when_only_population_is_hexproof() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // The AI's own 2/1 gives the DealDamage half a legal ANNOUNCE target so the
+    // pending spell is valid (CR 601.2c), and resolves the dynamic ObjectCount
+    // amount to 1. The opponent's ONLY creature is hexproof (CR 702.11a): an
+    // illegal TARGET for the damage half, but in the wipe's resolver population
+    // (CR 115.10a non-targeted; CR 701.8 default all-creatures for `None`).
+    scenario.add_creature(P0, "My Bear", 2, 1);
+    scenario
+        .add_creature(P1, "Hexproof Bear", 3, 3)
+        .with_keyword(Keyword::Hexproof);
+
+    let mut my_filter = TypedFilter::creature();
+    my_filter.controller = Some(ControllerRef::You);
+    let amount = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(my_filter),
+        },
+    };
+
+    // Mixed "deal 1 damage to target creature + destroy all creatures" — the
+    // damage half is announceable (own bear) but NOT lethal/useful by target;
+    // the DestroyAll half clears the hexproof population.
+    let mixed = scenario
+        .add_spell_to_hand(P0, "Charred Judgement", true)
+        .with_ability(Effect::DealDamage {
+            amount: amount.clone(),
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            damage_source: None,
+            excess: None,
+        })
+        .with_ability(Effect::DestroyAll {
+            target: TargetFilter::None,
+            cant_regenerate: false,
+        })
+        .id();
+
+    // Reference: PURE wipe (CR 701.8, CR 115.10a) — the honest comparable. Pure
+    // burn would be hard-rejected by `is_redundant_creature_only_removal` on this
+    // board (no live opponent target), so it is NOT a valid reference.
+    let reference = scenario
+        .add_spell_to_hand(P0, "Pure Wipe", true)
+        .with_ability(Effect::DestroyAll {
+            target: TargetFilter::None,
+            cant_regenerate: false,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+
+    let config = create_config(AiDifficulty::Easy, Platform::Native);
+    let scored = phase_ai::score_candidates(runner.state(), P0, &config);
+
+    // Reach-guard: BOTH must be offered as CastSpell. The M reach-guard is the
+    // DISCRIMINATING guard for the tactical-gate fix: pre-fix M is hard-rejected
+    // (only PassPriority), so this unwrap panics.
+    let mixed_score = scored
+        .iter()
+        .find(|(a, _)| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == mixed))
+        .map(|(_, s)| *s)
+        .unwrap_or_else(|| {
+            panic!(
+                "mixed spell {mixed:?} must be offered as CastSpell (tactical gate must be \
+                    mass-aware), got {scored:?}"
+            )
+        });
+    let ref_score = scored
+        .iter()
+        .find(|(a, _)| {
+            matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == reference)
+        })
+        .map(|(_, s)| *s)
+        .unwrap_or_else(|| {
+            panic!("reference pure wipe {reference:?} must be offered as CastSpell, got {scored:?}")
+        });
+
+    // M's wipe clears the hexproof population exactly like R, so M must NOT be
+    // meaningfully below R. Pre-rescue M carried the -8 no-target penalty
+    // (M ≈ R − 8 < R − 4); post-rescue M ≈ R. The dead damage half is harmless
+    // once the wipe line rescues the spell, so the allowed gap is only the
+    // half-penalty margin.
+    assert!(
+        mixed_score > ref_score - config.policy_penalties.wasted_cast_penalty.abs() * 0.5,
+        "mixed deal-1 + destroy-all on a hexproof-only board ({mixed_score:.3}) must not be \
+         penalized below the pure wipe ({ref_score:.3}): the DestroyAll population is \
+         NON-targeted (CR 115.10a) and clears the hexproof 3/3 (CR 702.11a gates \
+         targeting only), so M is a real removal line, not a whiff"
     );
 }
 
