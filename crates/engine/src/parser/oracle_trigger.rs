@@ -7893,7 +7893,7 @@ fn split_cross_subject_event_compound(cond_lower: &str, condition: &str) -> Opti
     if is_enters_or_haunted_creature_dies_compound(cond_lower) {
         return None;
     }
-    let (after_lower, _) = parse_cross_subject_or_split(cond_lower).ok()?;
+    let (after_lower, before_lower) = parse_cross_subject_or_split(cond_lower).ok()?;
     let (after_original, before_original) = parse_cross_subject_or_split(condition).ok()?;
 
     // Check if what follows " or " starts with a valid subject phrase
@@ -7922,6 +7922,38 @@ fn split_cross_subject_event_compound(cond_lower: &str, condition: &str) -> Opti
     //     -> Unknown("Whenever ~") + Taps   (correct today: ONE Taps with an Or subject)
     // Both yield a bogus first half with no event at all.
     scan_preceded(after_trimmed, |i| parse_event_verb_start(i))?;
+
+    // CR 603.1 + CR 603.2: symmetric gate — a genuine CROSS-SUBJECT compound
+    // carries an event on BOTH sides of the "or" (Norin the Wary: "a player
+    // casts a spell" / "a creature attacks"). A SUBJECT disjunction shares one
+    // event between two subjects, so its first half is a bare noun phrase
+    // ("whenever ~", "whenever this creature"). Splitting that strands the
+    // leading subject in a trigger with no event at all and silently drops the
+    // self leg, so the card fires only for its second subject.
+    //
+    // This is the same `Unknown("Whenever ~")` husk the comment above keeps the
+    // SECOND-half gate narrow to avoid; the two gates close the failure from
+    // opposite sides. Donna Noble and The Bus Runner never reach this arm (their
+    // second half carries no narrow-lexicon verb, so the gate above already
+    // declines) and are unaffected here. What slips past that gate is a subject
+    // disjunction whose second subject IS followed by an active-voice verb —
+    // Ironsoul Enforcer's "or a commander you control attacks alone", which the
+    // scan above cannot tell apart from a second event.
+    // `parse_trigger_subject` already folds these into one `TargetFilter::Or`
+    // subject, which is the CR 603.1-correct single trigger.
+    //
+    // Measured over the MTGJSON corpus, this recovers the dropped leading leg on
+    // Ironsoul Enforcer, Campsite Cuisine, Calix, Syr Carah, Shipwreck Sifters,
+    // Long Feng and Surrak — four distinct event families (Attacks, ChangesZone,
+    // DamageDone, BecomesTarget) — and splits zero lines it split before.
+    //
+    // This gate uses the WIDE `parse_event_head_start` on purpose: it must
+    // decline only when the leading half has NO event of any kind. A
+    // state-change or passive leading leg ("whenever ~ becomes tapped or a
+    // creature you control attacks") is still a real two-event compound and
+    // must keep splitting, so narrowing this to `parse_event_verb_start` would
+    // collapse it into a bogus single trigger.
+    scan_preceded(before_lower.trim(), |i| parse_event_head_start(i))?;
 
     let (_, keyword) = parse_trigger_keyword_prefix(cond_lower).ok()?;
 

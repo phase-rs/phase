@@ -284,6 +284,7 @@ mod integration_landfall;
 mod interaction_contract;
 mod invoke_calamity_free_cast;
 mod ir_spell_node_readers;
+mod ironsoul_enforcer_commander_attacks_alone;
 mod issue_1005_suffer_the_past;
 mod issue_1007_fractal_harness_attach;
 mod issue_1008_korvold_sacrifice_triggers;
