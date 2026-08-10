@@ -3961,6 +3961,7 @@ pub(super) fn handle_resolution_choice(
                 primary_enter_tapped,
                 rest_destination,
             };
+            state.waiting_for = WaitingFor::Priority { player };
             let events_before_partition = events.len();
             match apply_search_partition(
                 state,

@@ -861,7 +861,7 @@ pub(crate) fn move_object_with_terminal(
                 ReplacementResult::NeedsChoice(player) => {
                     // CR 616.1: park at the single unparked origin (mirrors
                     // `execute_zone_move`'s NeedsChoice arm) so the prompt surfaces.
-                    replacement::park_waiting_for(state, player);
+                    state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
                     // CR 701.24a: stash the requested library placement on the
                     // parked record so the resume path
                     // (`engine_replacement::handle_replacement_choice`) threads it
@@ -938,7 +938,7 @@ pub(crate) fn move_object_with_terminal(
                 // `valid_card: None` class is destination-gated to Graveyard), so
                 // this is unreachable for the current pool — parked for
                 // correctness if a future to-Hand redirect surfaces a choice.
-                replacement::park_waiting_for(state, player);
+                state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
                 ZoneMoveTerminalResult::NeedsChoice(player)
             }
         };
@@ -3134,7 +3134,7 @@ fn execute_zone_move_with_applied_terminal(
             // delivery-tail NeedsChoice path above is NOT parked here — its
             // wait state is already set by the counter-pause / devour machinery
             // (`replacement_pause_delivery_result` reads it).
-            replacement::park_waiting_for(state, player);
+            state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
             ZoneMoveTerminalResult::NeedsChoice(player)
         }
     }
