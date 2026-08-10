@@ -6,8 +6,9 @@ use engine::game::effects::resolve_ability_chain;
 use engine::game::scenario::{GameScenario, P0};
 use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{
-    AbilityKind, ChoiceType, ChosenAttribute, ContinuousModification, DelayedTriggerCondition,
-    Effect, TargetFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ChosenAttribute,
+    ContinuousModification, DelayedTriggerCondition, Effect, QuantityExpr, QuantityRef,
+    ReplacementDefinition, TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -16,6 +17,7 @@ use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
 const EMPEROR_COUNTER_TRIGGER_EFFECT: &str = "put a creature card exiled with this creature onto \
@@ -255,33 +257,88 @@ fn emperor_of_bones_resumes_riders_after_anointed_peacekeepers_as_enters_choices
     );
 }
 
+/// A synthetic as-enters replacement that opens a PayAmountChoice before the
+/// returning permanent finishes entering. This mirrors the shape of a printed
+/// Moved replacement while keeping the regression independent of card data.
+fn pay_amount_choice_replacement() -> ReplacementDefinition {
+    ReplacementDefinition::new(ReplacementEvent::Moved)
+        .destination_zone(Zone::Battlefield)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PayCost {
+                cost: AbilityCost::PayLife {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                },
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+        ))
+}
+
+/// CR 614.12a + CR 400.7j: A previously unlisted resolution-owned prompt must
+/// survive the replacement pause and resume the Emperor continuation.
 #[test]
-fn park_waiting_for_preserves_search_choice() {
-    let mut scenario = GameScenario::new();
-    let library_card = scenario.add_card_to_library_top(P0, "Forest");
-    let mut runner = scenario.build();
-    runner.state_mut().waiting_for = WaitingFor::SearchChoice {
-        player: P0,
-        library_owner: Some(P0),
-        cards: vec![library_card],
-        count: 1,
-        reveal: true,
-        up_to: false,
-        allows_partial_find: false,
-        constraint: Default::default(),
-        split: None,
+fn emperor_of_bones_preserves_pay_amount_choice_through_replacement_pipeline() {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let emperor = scenario.add_creature(P0, "Emperor of Bones", 2, 2).id();
+    let peacekeeper = {
+        let mut builder = scenario.add_creature_to_exile(P0, "Anointed Peacekeeper", 3, 3);
+        builder.from_oracle_text(ANOINTED_PEACEKEEPER);
+        builder.id()
     };
 
-    engine::game::replacement::park_waiting_for(runner.state_mut(), P0);
+    let mut runner = scenario.build();
+    runner.state_mut().exile_links.push(ExileLink {
+        exiled_id: peacekeeper,
+        source_id: emperor,
+        kind: ExileLinkKind::TrackedBySource,
+    });
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&peacekeeper)
+        .unwrap()
+        .replacement_definitions = vec![pay_amount_choice_replacement()].into();
 
-    let WaitingFor::SearchChoice { cards, .. } = &runner.state().waiting_for else {
+    let definition = parse_effect_chain(EMPEROR_COUNTER_TRIGGER_EFFECT, AbilityKind::Spell);
+    let ability = build_resolved_from_def(&definition, emperor, P0);
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)
+        .expect("Emperor of Bones return must reach the replacement PayAmountChoice");
+
+    let WaitingFor::PayAmountChoice {
+        player, min, max, ..
+    } = runner.state().waiting_for.clone()
+    else {
         panic!(
-            "an existing SearchChoice must remain active, got {}",
+            "the replacement must preserve its PayAmountChoice, got {}",
             runner.waiting_for_kind()
         );
     };
-    assert!(
-        cards.contains(&library_card),
-        "the preserved SearchChoice must retain the seeded library card"
+    assert_eq!(player, P0);
+    assert_eq!(min, 0);
+    assert!(max > 0);
+
+    runner
+        .act(GameAction::SubmitPayAmount { amount: 0 })
+        .expect("answer the replacement PayAmountChoice through GameRunner::act");
+
+    let state = runner.state();
+    assert_eq!(state.objects[&peacekeeper].zone, Zone::Battlefield);
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert!(state.stack.is_empty());
+    assert_eq!(
+        state.delayed_triggers.len(),
+        1,
+        "the Emperor delayed sacrifice rider must resume after the replacement choice"
     );
 }
