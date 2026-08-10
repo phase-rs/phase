@@ -436,7 +436,7 @@ fn is_redundant_creature_only_removal(ctx: &PolicyContext<'_>, effects: &[&Effec
 
     // A MIXED spell carrying a useful MASS wipe is never "redundant creature-only
     // removal": the wipe's NON-targeted population (CR 115.10a) is an independent
-    // line that can clear creatures hexproof/protected FROM TARGETING (CR 702.11a)
+    // line that can clear creatures hexproof/protected FROM TARGETING (CR 702.11b)
     // — so a creature-only half with no live opponent TARGET must not suppress the
     // cast. Consult the resolver-mirroring mass seam (`ctx.has_opposing_mass_population`)
     // before declaring redundancy.

@@ -1693,7 +1693,7 @@ mod tests {
     /// gate — must report TRUE for a mixed damage+wipe spell whose only opposing
     /// creature is HEXPROOF. The wipe is NON-targeted (CR 115.10a), so the
     /// hexproof 3/3 is in its resolver population even though it has no legal
-    /// target (hexproof gates targeting only, CR 702.11a). This is the
+    /// target (hexproof gates targeting only, CR 702.11b). This is the
     /// population truth that rescues the mixed spell from the :397 no-target
     /// penalty.
     #[test]
@@ -1765,7 +1765,7 @@ mod tests {
             has_opposing_mass_population(&ctx),
             "the mixed wipe's resolver-mirroring population must include the hexproof 3/3 \
              (CR 115.10a: the wipe is NON-targeted, so hexproof gates targeting only, \
-             CR 702.11a)"
+             CR 702.11b)"
         );
     }
 }

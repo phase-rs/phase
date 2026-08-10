@@ -5582,7 +5582,7 @@ mod tests {
     /// creature-only damage half with a `DestroyAll` wipe (CR 701.8) must NOT
     /// be charged the -8 no-target penalty when its ONLY opposing creature is
     /// HEXPROOF. Hexproof (`Keyword::Hexproof`) gates TARGETING only
-    /// (CR 702.11a) — an affected object is not a target — while the wipe is
+    /// (CR 702.11b) — an affected object is not a target — while the wipe is
     /// NON-targeted and hits the battlefield POPULATION regardless
     /// (CR 115.10a). So `has_targetable_opponent_creature` is false here, but
     /// `removal_lethality::has_opposing_mass_population` is true, and
@@ -5596,7 +5596,7 @@ mod tests {
         let mut state = make_state();
         // AI's own creature makes the dynamic ObjectCount amount resolve to 1.
         add_creature(&mut state, PlayerId(0), "My Bear", 2, 1);
-        // The ONLY opposing creature is hexproof (un-targetable, CR 702.11a)
+        // The ONLY opposing creature is hexproof (un-targetable, CR 702.11b)
         // but is in the wipe's NON-targeted population (CR 115.10a).
         let hexproof_bear = add_creature(&mut state, PlayerId(1), "Hexproof Bear", 3, 3);
         state
@@ -5675,7 +5675,7 @@ mod tests {
             "A mixed deal-1 + destroy-all vs a hexproof-only opposing board \
              ({score:.3}) must NOT be charged the no-target penalty: the wipe is \
              NON-targeted (CR 115.10a) and hits the hexproof 3/3's population \
-             (hexproof gates targeting only, CR 702.11a), so the mass seam \
+             (hexproof gates targeting only, CR 702.11b), so the mass seam \
              rescues the mixed spell from the :397 wasted-cast penalty"
         );
     }

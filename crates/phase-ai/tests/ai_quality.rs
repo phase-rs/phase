@@ -806,7 +806,7 @@ fn mixed_damage_and_destroy_all_is_not_penalized_as_a_damage_whiff() {
 /// blocker fix restores for a MIXED wipe spell on a board whose only opposing
 /// creature is HEXPROOF:
 ///
-/// * **Targeting is gated, the wipe population is not.** Hexproof (CR 702.11a)
+/// * **Targeting is gated, the wipe population is not.** Hexproof (CR 702.11b)
 ///   prevents the creature being *targeted* by the spell's "deal 1 damage to
 ///   target creature" half — but `DestroyAll` is NON-targeted (CR 115.10a), so
 ///   hexproof never answers it. With `TargetFilter::None` (CR 701.8) the
@@ -842,7 +842,7 @@ fn mixed_destroy_all_not_penalized_when_only_population_is_hexproof() {
 
     // The AI's own 2/1 gives the DealDamage half a legal ANNOUNCE target so the
     // pending spell is valid (CR 601.2c), and resolves the dynamic ObjectCount
-    // amount to 1. The opponent's ONLY creature is hexproof (CR 702.11a): an
+    // amount to 1. The opponent's ONLY creature is hexproof (CR 702.11b): an
     // illegal TARGET for the damage half, but in the wipe's resolver population
     // (CR 115.10a non-targeted; CR 701.8 default all-creatures for `None`).
     scenario.add_creature(P0, "My Bear", 2, 1);
@@ -929,7 +929,7 @@ fn mixed_destroy_all_not_penalized_when_only_population_is_hexproof() {
         mixed_score > ref_score - config.policy_penalties.wasted_cast_penalty.abs() * 0.5,
         "mixed deal-1 + destroy-all on a hexproof-only board ({mixed_score:.3}) must not be \
          penalized below the pure wipe ({ref_score:.3}): the DestroyAll population is \
-         NON-targeted (CR 115.10a) and clears the hexproof 3/3 (CR 702.11a gates \
+         NON-targeted (CR 115.10a) and clears the hexproof 3/3 (CR 702.11b gates \
          targeting only), so M is a real removal line, not a whiff"
     );
 }
