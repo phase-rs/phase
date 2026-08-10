@@ -16,6 +16,7 @@ use super::ability::{
     PermanentEntryMode, PileSource, QuantityExpr, ResolvedAbility, SearchDestinationSplit,
     SearchSelectionConstraint, StaticCondition, TapCreaturesAggregate, TargetFilter, TargetRef,
     ThisWayCause, TriggerCondition, TriggerDefinition, TriggerDefinitionRef, TriggerEntry,
+    TriggerFireLedgerKey,
 };
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, PrintedCardRef, TokenImageRef};
@@ -227,7 +228,8 @@ mod tuple_key_map {
 /// Serde adapter for trigger occurrence ledgers. JSON object keys must be
 /// strings, while a `TriggerDefinitionRef` is structured identity; encode the
 /// map as an explicit entry list rather than flattening or guessing a key.
-mod trigger_definition_ref_map {
+#[cfg(test)]
+mod legacy_trigger_definition_ref_map {
     use super::*;
 
     pub fn serialize<S, H>(
@@ -250,6 +252,44 @@ mod trigger_definition_ref_map {
     {
         Vec::<(TriggerDefinitionRef, u32)>::deserialize(deserializer)
             .map(|entries| entries.into_iter().collect())
+    }
+}
+
+mod trigger_definition_ref_map {
+    use super::*;
+
+    pub fn serialize<S, H>(
+        map: &HashMap<TriggerFireLedgerKey, u32, H>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut entries: Vec<_> = map.iter().collect();
+        entries.sort_unstable_by_key(|(key, _)| *key);
+        entries.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<HashMap<TriggerFireLedgerKey, u32>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Current(Vec<(TriggerFireLedgerKey, u32)>),
+            Legacy(Vec<(TriggerDefinitionRef, u32)>),
+        }
+
+        Wire::deserialize(deserializer).map(|wire| match wire {
+            Wire::Current(entries) => entries.into_iter().collect(),
+            Wire::Legacy(entries) => entries
+                .into_iter()
+                .map(|(key, count)| (TriggerFireLedgerKey::Definition(key), count))
+                .collect(),
+        })
     }
 }
 
@@ -14749,7 +14789,7 @@ declare_game_state! {
         skip_serializing_if = "HashMap::is_empty",
         with = "trigger_definition_ref_map"
     )]
-    pub trigger_fire_counts_this_turn: HashMap<TriggerDefinitionRef, u32>,
+    pub trigger_fire_counts_this_turn: HashMap<TriggerFireLedgerKey, u32>,
     /// CR 603.2: Tracks per-opponent-per-turn firing for
     /// OncePerOpponentPerTurn. Keyed by exact occurrence and opponent.
     #[serde(default)]
@@ -22494,7 +22534,7 @@ mod tests {
 
     #[derive(Serialize)]
     struct TriggerRefFixture<'a> {
-        #[serde(serialize_with = "trigger_definition_ref_map::serialize")]
+        #[serde(serialize_with = "legacy_trigger_definition_ref_map::serialize")]
         values: &'a HashMap<TriggerDefinitionRef, u32, ReverseBuildHasher>,
     }
 
@@ -22604,7 +22644,7 @@ mod tests {
             .expect("trigger-ref fixture should serialize"),
             r#"{"values":[[{"source":{"object_id":7,"incarnation":3},"occurrence":{"type":"Printed","data":{"base_set":1,"printed_index":0}}},10],[{"source":{"object_id":7,"incarnation":3},"occurrence":{"type":"Printed","data":{"base_set":1,"printed_index":1}}},11],[{"source":{"object_id":7,"incarnation":3},"occurrence":{"type":"Printed","data":{"base_set":1,"printed_index":2}}},12]]}"#
         );
-        let trigger_round_trip = trigger_definition_ref_map::deserialize(
+        let trigger_round_trip = legacy_trigger_definition_ref_map::deserialize(
             &mut serde_json::Deserializer::from_str(
                 r#"[[{"source":{"object_id":7,"incarnation":3},"occurrence":{"type":"Printed","data":{"base_set":1,"printed_index":2}}},12],[{"source":{"object_id":7,"incarnation":3},"occurrence":{"type":"Printed","data":{"base_set":1,"printed_index":0}}},10]]"#,
             ),

@@ -92,29 +92,36 @@ mod trigger_occurrence_tests {
     fn identical_grants_from_distinct_producers_remain_distinct_entries() {
         let definition = TriggerDefinition::new(TriggerMode::Attacks);
         let mut state = TriggerOccurrenceState::default();
+        let first_producer = TriggerGrantProducerKey::Granted {
+            origin: static_origin(),
+            output_index: 0,
+        };
+        let second_producer = TriggerGrantProducerKey::Granted {
+            origin: TriggerProducerOrigin::Transient {
+                continuous_effect_id: 19,
+                modification_index: 0,
+            },
+            output_index: 0,
+        };
         let entries = state
             .reconcile_trigger_entries(vec![
-                (
-                    TriggerGrantProducerKey::Granted {
-                        origin: static_origin(),
-                        output_index: 0,
-                    },
-                    definition.clone(),
-                ),
-                (
-                    TriggerGrantProducerKey::Granted {
-                        origin: TriggerProducerOrigin::Transient {
-                            continuous_effect_id: 19,
-                            modification_index: 0,
-                        },
-                        output_index: 0,
-                    },
-                    definition,
-                ),
+                (first_producer.clone(), definition.clone()),
+                (second_producer.clone(), definition),
             ])
             .unwrap();
         assert_eq!(entries.len(), 2);
         assert_ne!(entries[0].occurrence, entries[1].occurrence);
+        assert_ne!(
+            TriggerFireLedgerKey::Grant(first_producer),
+            TriggerFireLedgerKey::Grant(second_producer.clone())
+        );
+        assert_ne!(
+            TriggerFireLedgerKey::Grant(second_producer.clone()),
+            TriggerFireLedgerKey::Definition(TriggerDefinitionRef {
+                source: ObjectIncarnationRef::of(ObjectId(8), 0),
+                occurrence: entries[0].occurrence.clone(),
+            })
+        );
     }
 
     #[test]
@@ -21817,7 +21824,7 @@ pub struct CopyEffectInstanceRef {
 
 /// Payload-free identity of the continuous-effect occurrence which produced a
 /// Layer-6 trigger candidate.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum TriggerProducerOrigin {
     Static {
@@ -21836,7 +21843,7 @@ pub enum TriggerProducerOrigin {
 /// This is deliberately independent of `TriggerDefinition`: byte-identical
 /// grants from distinct producers remain independently functioning abilities
 /// (CR 113.2c).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum TriggerGrantProducerKey {
     KeywordCompanion {
@@ -21862,6 +21869,18 @@ pub enum TriggerGrantProducerKey {
         provider: Box<TriggerDefinitionRef>,
         provider_output_index: usize,
     },
+}
+
+/// Identity used only by the MaxTimesPerTurn ledger.
+///
+/// A granted trigger's occurrence includes a recipient-local generation, so it
+/// cannot serve as a producer-wide cap key. Full TriggerDefinitionRef remains
+/// the identity for event matching and look-back semantics.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum TriggerFireLedgerKey {
+    Definition(TriggerDefinitionRef),
+    Grant(TriggerGrantProducerKey),
 }
 
 /// The immutable occurrence component of a live trigger definition identity.
@@ -21922,6 +21941,8 @@ pub struct TriggerDefinitionRef {
 pub struct TriggerEntry {
     pub occurrence: TriggerDefinitionOccurrenceRef,
     pub definition: TriggerDefinition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_producer: Option<TriggerGrantProducerKey>,
 }
 
 impl TriggerEntry {
@@ -21929,6 +21950,19 @@ impl TriggerEntry {
         Self {
             occurrence,
             definition,
+            grant_producer: None,
+        }
+    }
+
+    pub fn with_grant_producer(
+        occurrence: TriggerDefinitionOccurrenceRef,
+        definition: TriggerDefinition,
+        grant_producer: TriggerGrantProducerKey,
+    ) -> Self {
+        Self {
+            occurrence,
+            definition,
+            grant_producer: Some(grant_producer),
         }
     }
 
@@ -21959,6 +21993,8 @@ enum TriggerEntryWire {
     IdentityBearing {
         occurrence: TriggerDefinitionOccurrenceRef,
         definition: TriggerDefinition,
+        #[serde(default)]
+        grant_producer: Option<TriggerGrantProducerKey>,
     },
     LegacyPayload(TriggerDefinition),
 }
@@ -21972,7 +22008,12 @@ impl<'de> Deserialize<'de> for TriggerEntry {
             TriggerEntryWire::IdentityBearing {
                 occurrence,
                 definition,
-            } => Ok(Self::new(occurrence, definition)),
+                grant_producer,
+            } => Ok(Self {
+                occurrence,
+                definition,
+                grant_producer,
+            }),
             // A later GameState normalization validates this only for a
             // provable printed/base slot. Keeping the marker here preserves the
             // distinction instead of guessing copied/granted provenance from
@@ -22088,9 +22129,10 @@ impl TriggerOccurrenceState {
                         .iter()
                         .find(|active| active.instance == grant_instance)
                         .expect("reconciled grant instance must remain active");
-                    TriggerEntry::new(
+                    TriggerEntry::with_grant_producer(
                         occurrence_for_grant(&producer.producer, grant_instance),
                         definition,
+                        producer.producer.clone(),
                     )
                 })
                 .collect()
@@ -22118,9 +22160,10 @@ impl TriggerOccurrenceState {
                             .iter()
                             .find(|active| active.instance == grant_instance)
                             .expect("reconciled grant instance must remain active");
-                        TriggerEntry::new(
+                        TriggerEntry::with_grant_producer(
                             occurrence_for_grant(&producer.producer, grant_instance),
                             definition,
+                            producer.producer.clone(),
                         )
                     })
                     .collect()

@@ -453,10 +453,16 @@ pub fn apply_resolved_ledger_edit(
                     return Err(ResolvedLedgerEditReplayInvariantError::TriggerAlreadyRecorded);
                 }
             }
-            ResolvedTriggerLedgerEdit::MaxTimesPerTurn { expected_old } => {
+            ResolvedTriggerLedgerEdit::MaxTimesPerTurn {
+                expected_old,
+                ledger_key,
+            } => {
+                let key = ledger_key.as_ref().cloned().unwrap_or_else(|| {
+                    crate::types::ability::TriggerFireLedgerKey::Definition(trigger.clone())
+                });
                 let found = state
                     .trigger_fire_counts_this_turn
-                    .get(trigger)
+                    .get(&key)
                     .copied()
                     .unwrap_or(0);
                 if found != *expected_old {
@@ -470,9 +476,7 @@ pub fn apply_resolved_ledger_edit(
                 let next = expected_old
                     .checked_add(1)
                     .ok_or(ResolvedLedgerEditReplayInvariantError::CounterOverflow)?;
-                state
-                    .trigger_fire_counts_this_turn
-                    .insert(trigger.clone(), next);
+                state.trigger_fire_counts_this_turn.insert(key, next);
             }
         },
         ResolvedLedgerEdit::OncePerTurnPermission { source, permission } => {

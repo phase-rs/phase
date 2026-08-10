@@ -12,7 +12,7 @@ use engine::types::ability::{
     AbilityDefinition, AbilityKind, CastVariantPaid, DrawReplacementScope, Effect, ModalChoice,
     QuantityExpr, QuantityModification, QuantityRef, ReplacementCondition, ReplacementDefinition,
     ReplacementMode, StaticDefinition, TargetFilter, TriggerCondition, TriggerConstraint,
-    TriggerDefinition,
+    TriggerDefinition, TriggerFireLedgerKey,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -578,7 +578,8 @@ fn max_times_per_turn_below_cap_rewards() {
         let entry = obj.trigger_definitions.iter_unchecked().next().unwrap();
         obj.trigger_definition_ref(entry)
     };
-    st.trigger_fire_counts_this_turn.insert(key, 1); // 1 < 2 → can still fire
+    st.trigger_fire_counts_this_turn
+        .insert(TriggerFireLedgerKey::Definition(key), 1); // 1 < 2 → can still fire
 
     let (oid, cid) = draw_spell(&mut st);
     let context = context(&config, session(0.9));
@@ -602,7 +603,8 @@ fn max_times_per_turn_at_cap_is_neutral() {
         let entry = obj.trigger_definitions.iter_unchecked().next().unwrap();
         obj.trigger_definition_ref(entry)
     };
-    st.trigger_fire_counts_this_turn.insert(key, 2); // 2 == max → exhausted
+    st.trigger_fire_counts_this_turn
+        .insert(TriggerFireLedgerKey::Definition(key), 2); // 2 == max → exhausted
 
     let (oid, cid) = draw_spell(&mut st);
     let context = context(&config, session(0.9));

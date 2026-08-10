@@ -769,7 +769,11 @@ pub enum ResolvedTriggerLedgerEdit {
     /// CR 603.2c: This trigger occurrence has used this opponent's per-turn fact.
     OncePerOpponentPerTurn { opponent: PlayerId },
     /// Increment from the captured prior count for MaxTimesPerTurn.
-    MaxTimesPerTurn { expected_old: u32 },
+    MaxTimesPerTurn {
+        expected_old: u32,
+        #[serde(default)]
+        ledger_key: Option<super::ability::TriggerFireLedgerKey>,
+    },
 }
 
 /// A named once-per-turn permission slot consumed by a completed play or cast.
@@ -3252,7 +3256,7 @@ pub(crate) fn ledger_edit_is_invalid(edit: &ResolvedLedgerEdit) -> bool {
                 || *resulting_first_card_drawn_this_turn != expected_first
         }
         ResolvedLedgerEdit::TriggerFired {
-            edit: ResolvedTriggerLedgerEdit::MaxTimesPerTurn { expected_old },
+            edit: ResolvedTriggerLedgerEdit::MaxTimesPerTurn { expected_old, .. },
             ..
         } => *expected_old == u32::MAX,
         ResolvedLedgerEdit::TriggerFired { .. }
