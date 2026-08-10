@@ -203,6 +203,7 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 29 — Added requester-correlated ResolveAllRejected response frames.
  * 28 — Added native ResolveAll request/result frames.
  * 27 — Added DraftKind.Sealed, serialized by draft WebSocket messages.
  * 26 — Added ActionNoOp acknowledgement for accepted transport no-ops.
@@ -235,7 +236,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 28;
+export const PROTOCOL_VERSION = 29;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -326,6 +327,7 @@ function playerNamesFromWire(names: string[]): Record<number, string> {
 export class WebSocketAdapter implements EngineAdapter {
   readonly supportsMatchConcede = true;
   readonly supportsServerRewind = true;
+  readonly resolveAllUsesServerAi: true | undefined;
   private ws: PhaseSocketTransport | null = null;
   /**
    * The single cached engine pair, rebuilt (and re-stamped) once per inbound
@@ -410,6 +412,7 @@ export class WebSocketAdapter implements EngineAdapter {
     private readonly displayName = "Player",
     private readonly options: WebSocketAdapterOptions = {},
   ) {
+    this.resolveAllUsesServerAi = options.nativeAi ? true : undefined;
     // 0 is terminal, not "retry once": `attemptReconnect` compares
     // `reconnectAttempt >= maxReconnectAttempts`, so 0 >= 0 is true on the
     // very first attempt — it emits `reconnectFailed` and returns without
@@ -1479,9 +1482,6 @@ export class WebSocketAdapter implements EngineAdapter {
           );
           this.pendingResolve = null;
           this.pendingReject = null;
-        } else if (this.pendingResolveAll) {
-          this.pendingResolveAll.reject(actionRejectionError(data.reason));
-          this.pendingResolveAll = null;
         } else {
           // No in-flight action owns this rejection, so it answers a
           // fire-and-forget request — `sendRequestTakeback` is the only one
@@ -1521,6 +1521,15 @@ export class WebSocketAdapter implements EngineAdapter {
             itemsResolved: data.items_resolved,
             total: data.total,
           });
+          this.pendingResolveAll = null;
+        }
+        break;
+      }
+
+      case "ResolveAllRejected": {
+        const data = msg.data as { request_id: number; reason: string };
+        if (this.pendingResolveAll?.requestId === data.request_id) {
+          this.pendingResolveAll.reject(actionRejectionError(data.reason));
           this.pendingResolveAll = null;
         }
         break;
@@ -1720,10 +1729,6 @@ export class WebSocketAdapter implements EngineAdapter {
         this.rejectInitialization(initializationError);
         this.rejectPregameMutation(actionRejectionError(data.message));
         this.rejectAbandon(actionRejectionError(data.message));
-        if (this.pendingResolveAll) {
-          this.pendingResolveAll.reject(actionRejectionError(data.message));
-          this.pendingResolveAll = null;
-        }
         this.emit({ type: "error", message: data.message });
         break;
       }

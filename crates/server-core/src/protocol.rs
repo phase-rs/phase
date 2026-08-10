@@ -504,6 +504,12 @@ pub enum ServerMessage {
     /// transition. The submitting adapter resolves its pending request without
     /// caching or publishing a replacement snapshot.
     ActionNoOp,
+    /// Requester-only rejection for a native Resolve All batch. The request
+    /// identifier prevents unrelated action failures from settling this promise.
+    ResolveAllRejected {
+        request_id: u64,
+        reason: String,
+    },
     /// Requester-only acknowledgement for a native Resolve All batch. The
     /// matching StateUpdate is sent first and carries the authoritative state.
     ResolveAllResult {
@@ -2314,8 +2320,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_28() {
-        assert_eq!(PROTOCOL_VERSION, 28);
+    fn protocol_version_is_29() {
+        assert_eq!(PROTOCOL_VERSION, 29);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -2325,7 +2331,7 @@ mod tests {
     /// understand.
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
-    /// this guards — and this test reds while `protocol_version_is_28` stays
+    /// this guards — and this test reds while `protocol_version_is_29` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
@@ -2369,6 +2375,15 @@ mod tests {
             r#"{"type":"ResolveAllResult","data":{"request_id":7,"items_resolved":3,"total":52}}"#
         );
         assert!(!json.contains("waiting_for"));
+
+        let rejected = ServerMessage::ResolveAllRejected {
+            request_id: 7,
+            reason: "Resolve All requires your priority".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&rejected).unwrap(),
+            r#"{"type":"ResolveAllRejected","data":{"request_id":7,"reason":"Resolve All requires your priority"}}"#
+        );
     }
 
     /// R15. The last-action frame the client actually sends carries **no**

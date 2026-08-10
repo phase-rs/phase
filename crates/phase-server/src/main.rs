@@ -497,12 +497,15 @@ fn build_state_update_message(
 
 /// Resolve All can collect thousands of engine events. They are needed for
 /// authoritative transition bookkeeping, but replaying them in one wire frame
-/// defeats the batch path and breaches the snapshot payload guard. Publish the
-/// final, fully-derived state only; the requester acknowledgement carries
-/// progress metadata separately.
+/// defeats the batch path and breaches the snapshot payload guard. Preserve a
+/// bounded tail of engine-authored logs alongside the final, fully-derived
+/// state; the requester acknowledgement carries progress metadata separately.
+const MAX_RESOLVE_ALL_LOG_ENTRIES: usize = 128;
+
 #[allow(clippy::too_many_arguments)]
 fn build_resolve_all_state_update_message(
     raw_state: &GameState,
+    log_entries: &[GameLogEntry],
     legal_actions: &[GameAction],
     spell_costs: &HashMap<engine::types::identifiers::ObjectId, engine::types::mana::ManaCost>,
     legal_actions_by_object: &HashMap<engine::types::identifiers::ObjectId, Vec<GameAction>>,
@@ -537,7 +540,7 @@ fn build_resolve_all_state_update_message(
         end_continuous_effect_offers,
         mana_payment_shortcut_actions,
         eliminated_players,
-        log_entries: Vec::new(),
+        log_entries: log_entries.to_vec(),
         spell_costs: if is_actor {
             spell_costs.clone()
         } else {
@@ -4179,7 +4182,6 @@ async fn handle_full_game_submission(
 async fn handle_resolve_all(
     request_id: u64,
     max_resolutions: u32,
-    socket: &mut WebSocket,
     state: &SharedState,
     draft_state: &SharedDraftState,
     connections: &SharedConnections,
@@ -4193,12 +4195,11 @@ async fn handle_resolve_all(
         identity.player_token.clone(),
         identity.player_id,
     ) else {
-        let msg = ServerMessage::ActionRejected {
+        let msg = ServerMessage::ResolveAllRejected {
+            request_id,
             reason: "Not in a game".to_string(),
         };
-        if let Ok(json) = serde_json::to_string(&msg) {
-            let _ = socket.send(Message::text(json)).await;
-        }
+        let _ = tx.send(msg);
         return;
     };
 
@@ -4249,10 +4250,7 @@ async fn handle_resolve_all(
         match processed {
             Ok(processed) => processed,
             Err(reason) => {
-                let msg = ServerMessage::ActionRejected { reason };
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = tx.send(ServerMessage::ResolveAllRejected { request_id, reason });
                 return;
             }
         };
@@ -4266,20 +4264,18 @@ async fn handle_resolve_all(
         let _ = tx.send(acknowledgement);
         return;
     };
-    let (raw_state, _events, legal_actions, _logs, _auto_pass, spell_costs, by_object) = &result;
+    let (raw_state, _events, legal_actions, logs, _auto_pass, spell_costs, by_object) = &result;
+    let log_entries = &logs[logs.len().saturating_sub(MAX_RESOLVE_ALL_LOG_ENTRIES)..];
 
     if let Err(reason) = guard_state_snapshot_broadcast(StateSnapshotParts {
         state: raw_state,
         events: &[],
-        log_entries: &[],
+        log_entries,
         legal_actions,
         legal_actions_by_object: by_object,
         spell_costs,
     }) {
-        let msg = ServerMessage::error(reason);
-        if let Ok(json) = serde_json::to_string(&msg) {
-            let _ = socket.send(Message::text(json)).await;
-        }
+        let _ = tx.send(ServerMessage::ResolveAllRejected { request_id, reason });
         return;
     }
 
@@ -4287,10 +4283,10 @@ async fn handle_resolve_all(
         Some(artifact) => match prepare_full_terminal(game_db, artifact).await {
             Ok(deliveries) => deliveries,
             Err(error) => {
-                let msg = ServerMessage::error(error);
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
+                let _ = tx.send(ServerMessage::ResolveAllRejected {
+                    request_id,
+                    reason: error,
+                });
                 return;
             }
         },
@@ -4301,6 +4297,7 @@ async fn handle_resolve_all(
     // sender in order; the adapter resolves only after this cached snapshot.
     let requester_update = build_resolve_all_state_update_message(
         raw_state,
+        log_entries,
         legal_actions,
         spell_costs,
         by_object,
@@ -4322,6 +4319,7 @@ async fn handle_resolve_all(
                 if let Some(sender) = players.get(&player) {
                     let _ = sender.send(build_resolve_all_state_update_message(
                         raw_state,
+                        log_entries,
                         legal_actions,
                         spell_costs,
                         by_object,
@@ -4335,7 +4333,7 @@ async fn handle_resolve_all(
         }
     }
     if let Ok(spectator_update) =
-        build_spectator_state_update_message(raw_state, &[], &[], revision)
+        build_spectator_state_update_message(raw_state, &[], log_entries, revision)
     {
         let mut spectators = game_spectators.lock().await;
         if let Some(senders) = spectators.get_mut(&game_code) {
@@ -4371,6 +4369,8 @@ async fn handle_resolve_all(
         )
         .await;
         state.lock().await.remove_game(&game_code);
+        connections.lock().await.remove(&game_code);
+        game_spectators.lock().await.remove(&game_code);
     }
 }
 
@@ -4759,7 +4759,6 @@ async fn handle_client_message(
             handle_resolve_all(
                 request_id,
                 max_resolutions,
-                socket,
                 state,
                 draft_state,
                 connections,
@@ -7668,6 +7667,7 @@ mod state_transport_derived_tests {
         ActiveSearchDecisionAuthority, ActiveSearchDecisionControl, PriorityPassingMode, WaitingFor,
     };
     use engine::types::identifiers::ObjectId;
+    use engine::types::log::{GameLogEntry, LogCategory, LogSegment};
     use engine::types::phase::Phase;
 
     fn low_use_window_priority_result(
@@ -7714,6 +7714,47 @@ mod state_transport_derived_tests {
                 auto_pass_recommended,
                 ..
             } => (legal_actions.len(), auto_pass_recommended),
+            other => panic!("expected StateUpdate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_all_snapshot_keeps_a_bounded_tail_of_engine_logs() {
+        let state = GameState::new_two_player(42);
+        let logs: Vec<_> = (0..=MAX_RESOLVE_ALL_LOG_ENTRIES)
+            .map(|seq| GameLogEntry {
+                seq: seq as u32,
+                turn: 1,
+                phase: Phase::PreCombatMain,
+                category: LogCategory::Game,
+                segments: vec![LogSegment::Text(format!("entry {seq}"))],
+                presentation: Default::default(),
+            })
+            .collect();
+        let tail = &logs[logs.len().saturating_sub(MAX_RESOLVE_ALL_LOG_ENTRIES)..];
+
+        let update = build_resolve_all_state_update_message(
+            &state,
+            tail,
+            &[],
+            &HashMap::new(),
+            &HashMap::new(),
+            1,
+            PlayerId(0),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        match update {
+            ServerMessage::StateUpdate {
+                log_entries,
+                events,
+                ..
+            } => {
+                assert!(events.is_empty());
+                assert_eq!(log_entries.as_slice(), tail);
+                assert_eq!(log_entries.len(), MAX_RESOLVE_ALL_LOG_ENTRIES);
+            }
             other => panic!("expected StateUpdate, got {other:?}"),
         }
     }

@@ -200,11 +200,36 @@ describe("WebSocketAdapter", () => {
     });
   });
 
-  it("rejects Resolve All when the server reports a batch error", async () => {
+  it("settles Resolve All only from its correlated server response", async () => {
     const resultPromise = adapter.resolveAll(0, [{ playerId: 1, difficulty: "Medium" }], 5);
+    const settled = vi.fn();
+    void resultPromise.then(settled, settled);
+
     ws.dispatchSynthetic(
       "message",
       JSON.stringify({ type: "Error", data: { message: "batch snapshot rejected" } }),
+    );
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({ type: "ActionRejected", data: { reason: "stale action rejection" } }),
+    );
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({
+        type: "ResolveAllRejected",
+        data: { request_id: 2, reason: "a different batch" },
+      }),
+    );
+
+    await Promise.resolve();
+    expect(settled).not.toHaveBeenCalled();
+
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({
+        type: "ResolveAllRejected",
+        data: { request_id: 1, reason: "batch snapshot rejected" },
+      }),
     );
 
     await expect(resultPromise).rejects.toMatchObject({ message: "batch snapshot rejected" });

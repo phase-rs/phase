@@ -979,11 +979,14 @@ export async function dispatchResolveAll(
     debugLog("dispatchResolveAll: no adapter");
     return;
   }
-  if (!batchAdapter.resolveAll || aiSeats.length === 0) {
-    // No batch drain (transports without the capability), or no AI deciders for the other
-    // seats (local hotseat — every seat is a human, #4978): those seats are
-    // humans, and CR 117.4 entitles each of them to their own priority window
-    // before anything resolves — the engine must not pass on their behalf.
+  if (
+    !batchAdapter.resolveAll
+    || (aiSeats.length === 0 && batchAdapter.resolveAllUsesServerAi !== true)
+  ) {
+    // No batch drain (transports without the capability), or no AI deciders for
+    // the other seats (local hotseat — every seat is a human, #4978). A native
+    // adapter explicitly vouches that its authenticated server owns AI-seat
+    // selection; all other transports must preserve human priority windows.
     // Arena-style "Resolve All" instead: an engine-side auto-yield for THIS
     // seat only (AutoPassMode::UntilStackEmpty), which auto-passes whenever
     // this player receives priority and clears itself when the stack empties

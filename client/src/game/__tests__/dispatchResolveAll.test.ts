@@ -167,6 +167,28 @@ describe("dispatchResolveAll progress", () => {
     );
   });
 
+  it("uses an empty AI-seat list when the adapter delegates native AI ownership to its server", async () => {
+    const resolveAll = vi.fn<EngineResolveAll>().mockResolvedValue(chunk(0, 2));
+    const getState = vi.fn().mockResolvedValue(stateWithStack(0));
+    const submitAction = vi.fn();
+    useGameStore.setState({
+      gameState: stateWithStack(2),
+      adapter: {
+        resolveAll,
+        resolveAllUsesServerAi: true,
+        submitAction,
+        getState,
+        getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
+        getSnapshot: snapshotVia(getState),
+      } as never,
+    });
+
+    await dispatchResolveAll(0, []);
+
+    expect(resolveAll).toHaveBeenCalledWith(0, [], 5);
+    expect(submitAction).not.toHaveBeenCalled();
+  });
+
   it("falls back to an engine-side UntilStackEmpty auto-pass when the adapter has no batch resolveAll (multiplayer)", async () => {
     const submitAction = vi
       .fn<(action: unknown, actor: number) => Promise<{ events: never[] }>>()

@@ -3841,6 +3841,8 @@ export interface EngineAdapter {
     aiSeats: { playerId: number; difficulty: string }[],
     maxResolutions?: number,
   ): Promise<BatchResolveResult>;
+  /** True when Resolve All delegates AI decisions to the authenticated server. */
+  readonly resolveAllUsesServerAi?: true;
   restoreState(state: PersistedGameState): void | Promise<void>;
   /** Trusted local persistence snapshot, when this adapter owns the engine. */
   exportPersistenceState?(): Promise<string>;
