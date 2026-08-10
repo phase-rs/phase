@@ -58,6 +58,13 @@ fn scythecat_cub_doubles_counters_on_second_landfall_resolution() {
 
     let mut runner = scenario.build();
     runner.state_mut().max_lands_per_turn = 2;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&cobra_id)
+        .expect("Lotus Cobra should start on the battlefield")
+        .counters
+        .insert(CounterType::Plus1Plus1, 1);
 
     resolve_cub_landfall(&mut runner, first_land_id, cobra_id);
     assert_eq!(
@@ -65,8 +72,8 @@ fn scythecat_cub_doubles_counters_on_second_landfall_resolution() {
             .counters
             .get(&CounterType::Plus1Plus1)
             .copied(),
-        Some(1),
-        "the first landfall resolution should place one +1/+1 counter"
+        Some(2),
+        "the first landfall resolution should place one +1/+1 counter on the seeded target"
     );
 
     resolve_cub_landfall(&mut runner, second_land_id, cobra_id);
@@ -75,8 +82,8 @@ fn scythecat_cub_doubles_counters_on_second_landfall_resolution() {
             .counters
             .get(&CounterType::Plus1Plus1)
             .copied(),
-        Some(2),
-        "the second landfall resolution should double Lotus Cobra's counter"
+        Some(4),
+        "the second landfall resolution should double Lotus Cobra's counters"
     );
     assert_eq!(
         runner
