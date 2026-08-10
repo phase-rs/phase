@@ -2087,6 +2087,28 @@ mod tests {
         use draft_core::types::*;
         use draft_core::view::{DraftPlayerView, DraftPoolGroups};
 
+        let first_pull = DraftCardInstance {
+            instance_id: "pack-1-card-1".to_string(),
+            name: "First Pull".to_string(),
+            set_code: "TST".to_string(),
+            collector_number: "1".to_string(),
+            rarity: "common".to_string(),
+            colors: vec!["W".to_string()],
+            cmc: 1,
+            type_line: "Creature — Test".to_string(),
+        };
+        let second_pull = DraftCardInstance {
+            instance_id: "pack-2-card-1".to_string(),
+            name: "Second Pull".to_string(),
+            set_code: "TST".to_string(),
+            collector_number: "2".to_string(),
+            rarity: "uncommon".to_string(),
+            colors: vec!["U".to_string()],
+            cmc: 2,
+            type_line: "Instant".to_string(),
+        };
+        let pool = vec![first_pull.clone(), second_pull.clone()];
+        let pool_groups = DraftPoolGroups::from_pool(&pool);
         let view = DraftPlayerView {
             status: DraftStatus::Deckbuilding,
             kind: DraftKind::Sealed,
@@ -2094,51 +2116,9 @@ mod tests {
             pick_number: 2,
             pass_direction: PassDirection::Left,
             current_pack: None,
-            pool: vec![
-                DraftCardInstance {
-                    instance_id: "pack-1-card-1".to_string(),
-                    name: "First Pull".to_string(),
-                    set_code: "TST".to_string(),
-                    collector_number: "1".to_string(),
-                    rarity: "common".to_string(),
-                    colors: vec!["W".to_string()],
-                    cmc: 1,
-                    type_line: "Creature — Test".to_string(),
-                },
-                DraftCardInstance {
-                    instance_id: "pack-2-card-1".to_string(),
-                    name: "Second Pull".to_string(),
-                    set_code: "TST".to_string(),
-                    collector_number: "2".to_string(),
-                    rarity: "uncommon".to_string(),
-                    colors: vec!["U".to_string()],
-                    cmc: 2,
-                    type_line: "Instant".to_string(),
-                },
-            ],
-            pool_groups: DraftPoolGroups::default(),
-            sealed_packs: Some(vec![
-                vec![DraftCardInstance {
-                    instance_id: "pack-1-card-1".to_string(),
-                    name: "First Pull".to_string(),
-                    set_code: "TST".to_string(),
-                    collector_number: "1".to_string(),
-                    rarity: "common".to_string(),
-                    colors: vec!["W".to_string()],
-                    cmc: 1,
-                    type_line: "Creature — Test".to_string(),
-                }],
-                vec![DraftCardInstance {
-                    instance_id: "pack-2-card-1".to_string(),
-                    name: "Second Pull".to_string(),
-                    set_code: "TST".to_string(),
-                    collector_number: "2".to_string(),
-                    rarity: "uncommon".to_string(),
-                    colors: vec!["U".to_string()],
-                    cmc: 2,
-                    type_line: "Instant".to_string(),
-                }],
-            ]),
+            pool,
+            pool_groups,
+            sealed_packs: Some(vec![vec![first_pull], vec![second_pull]]),
             seats: Vec::new(),
             cards_per_pack: 14,
             pack_count: 3,
@@ -2160,6 +2140,7 @@ mod tests {
                 assert_eq!(v.status, DraftStatus::Deckbuilding);
                 assert_eq!(v.pick_number, 2);
                 assert_eq!(v.timer_remaining_ms, Some(5000));
+                assert_eq!(v.pool_groups, view.pool_groups);
                 assert_eq!(
                     v.sealed_packs
                         .as_ref()

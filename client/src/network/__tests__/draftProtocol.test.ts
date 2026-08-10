@@ -146,9 +146,72 @@ describe("draftProtocol", () => {
           },
         ],
         pool_groups: {
-          color_groups: [],
-          type_groups: [],
-          cmc_groups: [],
+          color_groups: [
+            { kind: "white", total: 1, cards: [{ card: {
+              instance_id: "pack-1-card-1",
+              name: "First Pull",
+              set_code: "TST",
+              collector_number: "101",
+              rarity: "common",
+              colors: ["W"],
+              cmc: 1,
+              type_line: "Creature — Test",
+            }, count: 1 }] },
+            { kind: "blue", total: 1, cards: [{ card: {
+              instance_id: "pack-2-card-1",
+              name: "Second Pull",
+              set_code: "TST",
+              collector_number: "102",
+              rarity: "uncommon",
+              colors: ["U"],
+              cmc: 2,
+              type_line: "Instant",
+            }, count: 1 }] },
+          ],
+          type_groups: [
+            { kind: "creature", total: 1, cards: [{ card: {
+              instance_id: "pack-1-card-1",
+              name: "First Pull",
+              set_code: "TST",
+              collector_number: "101",
+              rarity: "common",
+              colors: ["W"],
+              cmc: 1,
+              type_line: "Creature — Test",
+            }, count: 1 }] },
+            { kind: "instant", total: 1, cards: [{ card: {
+              instance_id: "pack-2-card-1",
+              name: "Second Pull",
+              set_code: "TST",
+              collector_number: "102",
+              rarity: "uncommon",
+              colors: ["U"],
+              cmc: 2,
+              type_line: "Instant",
+            }, count: 1 }] },
+          ],
+          cmc_groups: [
+            { kind: "mana_value1", total: 1, cards: [{ card: {
+              instance_id: "pack-1-card-1",
+              name: "First Pull",
+              set_code: "TST",
+              collector_number: "101",
+              rarity: "common",
+              colors: ["W"],
+              cmc: 1,
+              type_line: "Creature — Test",
+            }, count: 1 }] },
+            { kind: "mana_value2", total: 1, cards: [{ card: {
+              instance_id: "pack-2-card-1",
+              name: "Second Pull",
+              set_code: "TST",
+              collector_number: "102",
+              rarity: "uncommon",
+              colors: ["U"],
+              cmc: 2,
+              type_line: "Instant",
+            }, count: 1 }] },
+          ],
           color_counts: { white: 1, blue: 1, black: 0, red: 0, green: 0 },
         },
         sealed_packs: [
@@ -192,6 +255,7 @@ describe("draftProtocol", () => {
       expect(decoded).toEqual(msg);
       if (decoded.type === "draft_state_update") {
         expect(decoded.view.sealed_packs).toEqual(longView.sealed_packs);
+        expect(decoded.view.pool_groups).toEqual(longView.pool_groups);
       }
     });
 

@@ -149,7 +149,7 @@ export function PoolPanel({ onCardHover, view: viewOverride }: PoolPanelProps = 
             {groups.map((group) => (
               <div key={group.kind}>
                 <div className="mb-1 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
-                  {t(POOL_GROUP_LABEL_KEYS[group.kind])} ({group.cards.length})
+                  {t(POOL_GROUP_LABEL_KEYS[group.kind])} ({group.total})
                 </div>
                 <div className="space-y-0.5">
                   {group.cards.map(({ card, count }) => (

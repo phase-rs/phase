@@ -30,13 +30,13 @@ export type DraftPoolGroupKind =
   | "planeswalker"
   | "land"
   | "other"
-  | "mana_value_0"
-  | "mana_value_1"
-  | "mana_value_2"
-  | "mana_value_3"
-  | "mana_value_4"
-  | "mana_value_5"
-  | "mana_value_6_plus";
+  | "mana_value0"
+  | "mana_value1"
+  | "mana_value2"
+  | "mana_value3"
+  | "mana_value4"
+  | "mana_value5"
+  | "mana_value6_plus";
 
 export interface DraftPoolEntry {
   card: DraftCardInstance;
@@ -45,6 +45,7 @@ export interface DraftPoolEntry {
 
 export interface DraftPoolGroup {
   kind: DraftPoolGroupKind;
+  total: number;
   cards: DraftPoolEntry[];
 }
 

@@ -83,6 +83,8 @@ pub struct DraftPoolEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DraftPoolGroup {
     pub kind: DraftPoolGroupKind,
+    /// Number of physical cards before duplicate entries are collapsed.
+    pub total: usize,
     pub cards: Vec<DraftPoolEntry>,
 }
 
@@ -104,6 +106,19 @@ pub struct DraftPoolGroups {
     pub type_groups: Vec<DraftPoolGroup>,
     pub cmc_groups: Vec<DraftPoolGroup>,
     pub color_counts: DraftPoolColorCounts,
+}
+
+impl DraftPoolGroups {
+    /// Builds the engine-owned ordering, grouping, and duplicate counts for a
+    /// limited pool display.
+    pub fn from_pool(pool: &[DraftCardInstance]) -> Self {
+        Self {
+            color_groups: groups_for(pool, &COLOR_GROUP_ORDER, color_group, true),
+            type_groups: groups_for(pool, &TYPE_GROUP_ORDER, type_group, true),
+            cmc_groups: groups_for(pool, &CMC_GROUP_ORDER, mana_value_group, false),
+            color_counts: color_counts(pool),
+        }
+    }
 }
 
 /// Filtered draft state for a specific player. Built from scratch (not a reference
@@ -312,7 +327,7 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
             .map(ToOwned::to_owned)
             .collect()
     });
-    let pool_groups = grouped_pool(&pool);
+    let pool_groups = DraftPoolGroups::from_pool(&pool);
 
     let is_drafting = session.status == DraftStatus::Drafting;
 
@@ -421,15 +436,6 @@ const CMC_GROUP_ORDER: [DraftPoolGroupKind; 7] = [
     DraftPoolGroupKind::ManaValue6Plus,
 ];
 
-fn grouped_pool(pool: &[DraftCardInstance]) -> DraftPoolGroups {
-    DraftPoolGroups {
-        color_groups: groups_for(pool, &COLOR_GROUP_ORDER, color_group, true),
-        type_groups: groups_for(pool, &TYPE_GROUP_ORDER, type_group, true),
-        cmc_groups: groups_for(pool, &CMC_GROUP_ORDER, mana_value_group, false),
-        color_counts: color_counts(pool),
-    }
-}
-
 fn groups_for(
     pool: &[DraftCardInstance],
     order: &[DraftPoolGroupKind],
@@ -444,8 +450,10 @@ fn groups_for(
                 .filter(|card| classify(card) == *kind)
                 .cloned()
                 .collect();
+            let total = cards.len();
             (!cards.is_empty()).then(|| DraftPoolGroup {
                 kind: *kind,
+                total,
                 cards: sorted_entries(cards, sort_by_cmc),
             })
         })
@@ -763,7 +771,7 @@ mod tests {
             draft_card("Field", &[], 0, "Land"),
         ];
 
-        let groups = grouped_pool(&pool);
+        let groups = DraftPoolGroups::from_pool(&pool);
 
         assert_eq!(
             groups
@@ -779,6 +787,7 @@ mod tests {
             ]
         );
         assert_eq!(groups.color_groups[0].cards[0].count, 2);
+        assert_eq!(groups.color_groups[0].total, 2);
         assert_eq!(
             groups
                 .type_groups
@@ -796,6 +805,23 @@ mod tests {
         assert_eq!(groups.type_groups[0].cards[0].count, 2);
         assert_eq!(groups.color_counts.white, 2);
         assert_eq!(groups.color_counts.red, 2);
+    }
+
+    #[test]
+    fn mana_value_group_kinds_match_the_wire_contract() {
+        let values = [
+            (DraftPoolGroupKind::ManaValue0, "mana_value0"),
+            (DraftPoolGroupKind::ManaValue1, "mana_value1"),
+            (DraftPoolGroupKind::ManaValue2, "mana_value2"),
+            (DraftPoolGroupKind::ManaValue3, "mana_value3"),
+            (DraftPoolGroupKind::ManaValue4, "mana_value4"),
+            (DraftPoolGroupKind::ManaValue5, "mana_value5"),
+            (DraftPoolGroupKind::ManaValue6Plus, "mana_value6_plus"),
+        ];
+
+        for (kind, expected) in values {
+            assert_eq!(serde_json::to_value(kind).unwrap(), expected);
+        }
     }
 
     #[test]

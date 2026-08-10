@@ -40,7 +40,7 @@ const VIEW: DraftPlayerView = {
   pool_groups: {
     color_groups: [],
     type_groups: [
-      { kind: "creature", cards: [{ card: {
+      { kind: "creature", total: 1, cards: [{ card: {
         instance_id: "creature",
         name: "Silvercoat Lion",
         set_code: "m19",
@@ -50,7 +50,7 @@ const VIEW: DraftPlayerView = {
         cmc: 2,
         type_line: "Creature — Cat",
       }, count: 1 }] },
-      { kind: "instant", cards: [{ card: {
+      { kind: "instant", total: 1, cards: [{ card: {
         instance_id: "instant",
         name: "Shock",
         set_code: "m19",

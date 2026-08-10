@@ -140,7 +140,7 @@ function SealedPoolReview({ groups, poolSize, onComplete }: {
       {groups.map((group) => (
         <section key={group.kind}>
           <h3 className="mb-3 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-400">
-            {t(POOL_GROUP_LABEL_KEYS[group.kind])} ({group.cards.length})
+            {t(POOL_GROUP_LABEL_KEYS[group.kind])} ({group.total})
           </h3>
           <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8">
             {group.cards.map(({ card, count }, index) => (
