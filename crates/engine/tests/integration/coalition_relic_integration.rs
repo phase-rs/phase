@@ -235,4 +235,12 @@ fn coalition_relic_with_zero_charge_counters_produces_no_mana() {
         0,
         "zero counters → zero mana"
     );
+    assert!(
+        matches!(
+            state.waiting_for,
+            engine::types::game_state::WaitingFor::Priority { .. }
+        ),
+        "zero counters must not prompt for a mana color; got {:?}",
+        state.waiting_for
+    );
 }

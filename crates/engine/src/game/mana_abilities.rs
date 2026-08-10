@@ -943,7 +943,13 @@ pub(crate) fn mana_choice_prompt(
     };
     match produced {
         ManaProduction::AnyOneColor { color_options, .. } if color_options.len() > 1 => {
-            Some(ManaChoicePrompt::SingleColor {
+            let produces_mana = ability
+                .map(|ability| {
+                    !super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
+                        .is_empty()
+                })
+                .unwrap_or(true);
+            produces_mana.then(|| ManaChoicePrompt::SingleColor {
                 options: color_options.iter().map(mana_color_to_type).collect(),
             })
         }
@@ -978,7 +984,13 @@ pub(crate) fn mana_choice_prompt(
             .into_iter()
             .map(|color| mana_color_to_type(&color))
             .collect::<Vec<_>>();
-            if options.len() > 1 {
+            let produces_mana = ability
+                .map(|ability| {
+                    !super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
+                        .is_empty()
+                })
+                .unwrap_or(true);
+            if options.len() > 1 && produces_mana {
                 Some(ManaChoicePrompt::SingleColor { options })
             } else {
                 None
@@ -1038,7 +1050,13 @@ pub(crate) fn mana_choice_prompt(
                 owner,
                 source_id,
             );
-            if options.len() > 1 {
+            let produces_mana = ability
+                .map(|ability| {
+                    !super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
+                        .is_empty()
+                })
+                .unwrap_or(true);
+            if options.len() > 1 && produces_mana {
                 Some(ManaChoicePrompt::SingleColor { options })
             } else {
                 None
@@ -1051,7 +1069,13 @@ pub(crate) fn mana_choice_prompt(
         ManaProduction::AnyInCommandersColorIdentity { .. } => {
             let owner = state.objects.get(&source_id).map(|obj| obj.controller)?;
             let identity = super::commander::commander_color_identity(state, owner);
-            if identity.len() > 1 {
+            let produces_mana = ability
+                .map(|ability| {
+                    !super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
+                        .is_empty()
+                })
+                .unwrap_or(true);
+            if identity.len() > 1 && produces_mana {
                 Some(ManaChoicePrompt::SingleColor {
                     options: identity.iter().map(mana_color_to_type).collect(),
                 })
@@ -1067,7 +1091,13 @@ pub(crate) fn mana_choice_prompt(
         ManaProduction::OpponentLandColors { .. } => {
             let owner = state.objects.get(&source_id).map(|obj| obj.controller)?;
             let options = super::mana_sources::opponent_land_color_options(state, owner);
-            if options.len() > 1 {
+            let produces_mana = ability
+                .map(|ability| {
+                    !super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
+                        .is_empty()
+                })
+                .unwrap_or(true);
+            if options.len() > 1 && produces_mana {
                 Some(ManaChoicePrompt::SingleColor { options })
             } else {
                 None
