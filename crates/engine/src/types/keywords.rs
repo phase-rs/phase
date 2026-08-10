@@ -502,7 +502,7 @@ pub enum ProtectionTarget {
     /// resolved at runtime from the source permanent's `chosen_attributes`
     /// (the `CardType` chosen as the permanent entered). Parallels `ChosenColor`.
     ChosenCardType,
-    /// CR 702.16 + CR 109.4: "Protection from the chosen player" — resolved
+    /// CR 702.16: "Protection from the chosen player" — resolved
     /// at runtime from the protected permanent's persisted player choice.
     ChosenPlayer,
     /// CR 702.16j: "Protection from everything" — protection from each object
@@ -2886,7 +2886,7 @@ pub(crate) fn parse_protection_target(s: &str) -> ProtectionTarget {
         // CR 702.16 + CR 205.2: "the chosen card type" resolves at
         // runtime from the source permanent's chosen `CardType` attribute.
         "the chosen card type" | "chosen card type" => ProtectionTarget::ChosenCardType,
-        // CR 702.16 + CR 109.4: "the chosen player" resolves from the
+        // CR 702.16: "the chosen player" resolves from the
         // protected permanent's persisted `ChosenAttribute::Player`.
         "the chosen player" | "chosen player" => ProtectionTarget::ChosenPlayer,
         // CR 702.16j: "protection from everything" — typed variant, not stringly-typed
