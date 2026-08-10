@@ -379,7 +379,7 @@ fn grant_from_keyword(keyword: &Keyword) -> Vec<DefensiveGrant> {
     }
 }
 
-/// CR 702.18a / CR 702.11a: targeting immunity answers only harmful effects
+/// CR 702.18a / CR 702.11b: targeting immunity answers only harmful effects
 /// that select the protected permanent as a target — not player burn, beneficial
 /// buffs, or untargeted mass removal.
 fn any_stack_harmful_answerable_by_grants(
