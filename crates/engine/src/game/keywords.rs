@@ -542,6 +542,11 @@ pub fn source_matches_protection_target(
             .chosen_card_type()
             .and_then(|ct| ct.protection_quality_str())
             .is_some_and(|quality| source_matches_card_type(source, quality)),
+        // CR 702.16 + CR 109.4: the source is protected against objects
+        // controlled by the player chosen for the protected permanent.
+        ProtectionTarget::ChosenPlayer => protected
+            .chosen_player()
+            .is_some_and(|player| source.controller == player),
         // CR 702.16j: "Protection from everything" — protection from each object
         // regardless of the source's characteristic values.
         ProtectionTarget::Everything => true,
