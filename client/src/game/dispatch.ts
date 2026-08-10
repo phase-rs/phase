@@ -1079,6 +1079,9 @@ export async function dispatchResolveAll(
     if (gameId && adapter && newState) {
       await saveAuthoritativeGame(gameId, adapter, newState);
     }
+  } catch (err) {
+    debugLog(`Resolve All error: ${err instanceof Error ? err.message : String(err)}`);
+    showActionError({ type: "PassPriority" }, err);
   } finally {
     batchResolveInProgress = false;
     setIsResolvingAll(false);

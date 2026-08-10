@@ -4275,7 +4275,19 @@ async fn handle_resolve_all(
         legal_actions_by_object: by_object,
         spell_costs,
     }) {
-        let _ = tx.send(ServerMessage::ResolveAllRejected { request_id, reason });
+        warn!(game = %game_code, %reason, "Resolve All snapshot exceeds broadcast bounds after commit");
+        let _ = tx.send(build_resolve_all_state_update_message(
+            raw_state,
+            log_entries,
+            legal_actions,
+            spell_costs,
+            by_object,
+            revision,
+            requester,
+            eliminated.clone(),
+            rewind_targets.clone(),
+        ));
+        let _ = tx.send(acknowledgement);
         return;
     }
 
@@ -4283,10 +4295,19 @@ async fn handle_resolve_all(
         Some(artifact) => match prepare_full_terminal(game_db, artifact).await {
             Ok(deliveries) => deliveries,
             Err(error) => {
-                let _ = tx.send(ServerMessage::ResolveAllRejected {
-                    request_id,
-                    reason: error,
-                });
+                error!(game = %game_code, %error, "Resolve All terminal preparation failed after commit");
+                let _ = tx.send(build_resolve_all_state_update_message(
+                    raw_state,
+                    log_entries,
+                    legal_actions,
+                    spell_costs,
+                    by_object,
+                    revision,
+                    requester,
+                    eliminated.clone(),
+                    rewind_targets.clone(),
+                ));
+                let _ = tx.send(acknowledgement);
                 return;
             }
         },
