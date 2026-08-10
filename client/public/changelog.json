@@ -1,6 +1,20 @@
 {
   "entries": [
     {
+      "id": 189,
+      "date": "2026-08-09",
+      "title": "Sealed packs and Marvel heroes",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Sealed is now a peer of Quick Draft and Cube Draft: open six packs one at a time, see each pack’s pulls, then review a pool grouped by card type before building\n• Captain Marvel, Apex Avenger; Conduit of Worlds; Galactus; and Avenge now have their core card interactions supported\n\n🛠️ Cards That Now Work Right\n• Brainspoil, Hawkeye, Dwarven Armorer, Archnemesis, Batroc the Leaper, Doom’s Time Platform, Dragon Man, Black Bolt, Galvanic Iteration, and Endless Ranks of HYDRA now follow more of their printed targets, costs, counters, or trigger conditions\n• Delayed-trigger payloads retain their following instructions in the correct order, fixing affected multi-clause cards such as Codie and Power Pack\n• Mana abilities that move cards to or from a library are no longer treated as mana abilities\n\n⚔️ Combat & Gameplay\n• Conditional forced-attack requirements such as Galactus’s now parse and enforce the correct defender choices\n• Cleanup discard triggers, player choices, and restored game state retain their correct game context more reliably\n\n🖥️ Interface\n• The game timeline is easier to act on, and remote scry outcomes no longer get lost when several finish together\n\n🤖 AI\n• AI keeps its choices within the actions the engine issued, handles target-dependent optional costs more safely, and recovers gracefully if an AI worker times out",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1536203698454274138"
+    },
+    {
       "id": 188,
       "date": "2026-08-08",
       "title": "Assimilate the Borg arrives",
