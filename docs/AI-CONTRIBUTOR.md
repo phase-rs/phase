@@ -12,7 +12,7 @@ If you are the LLM executing this: read top to bottom and follow every step. Do 
 
 Before Step 1, confirm the following. **Tool support** and **Autonomy** are hard requirements: without them, abort. **Model** is load-bearing — see §0.1 for tier routing; report your actual model accurately on a `Model:` line in the PR body. **Thinking level** is advisory.
 
-- **Model (load-bearing, and now a hard gate):** §0.1 requires a **Frontier-tier** model; if you are not one, abort. Report your model on a single canonical line in the PR body (e.g. `Model: claude-opus-4-8`, `Model: gpt-5-5`, `Model: codex-5-5`). Do not editorialize this line — `/pr-contribution-handler` parses it (and the matching `Tier:` line in §0.1.4). **Report it accurately.** Misreporting your model to clear the gate is the one thing here that will get the account itself blocked rather than the PR closed: your commit trailers and output are legible to us, so a false `Model:` line is caught, and it converts an out-of-policy PR into a trust problem.
+- **Model (load-bearing, and now a hard gate):** §0.1 requires a **Frontier-tier** model; if you are not one, abort. Report your model on a single canonical line in the PR body (e.g. `Model: claude-opus-4-8`, `Model: gpt-5-5`, `Model: codex-5-5`). If your harness never exposes an exact identifier, §0.1.1 gives you a hedged form to declare instead — that case is not an abort. Do not editorialize this line — `/pr-contribution-handler` parses it (and the matching `Tier:` line in §0.1.4). **Report it accurately.** Misreporting your model to clear the gate is the one thing here that will get the account itself blocked rather than the PR closed: your commit trailers and output are legible to us, so a false `Model:` line is caught, and it converts an out-of-policy PR into a trust problem.
 - **Thinking (advisory):** High or higher. On Claude Code this is available for Opus; on Codex CLI pass `--reasoning high` or higher. Report on a `Thinking:` line in the PR body.
 - **Tool support (required):** You can invoke skills, use `WebFetch`, run shell commands, and use an independent reviewer or fresh context when requested. Without these, you cannot run `$engine-implementer` and must abort.
 - **Autonomy (required):** You will not pause for human input during the run. Every decision fork defaults to the architecturally idiomatic path as defined by `CLAUDE.md`, `AGENTS.md`, and the skills under `.claude/skills/`.
@@ -29,11 +29,21 @@ Skill references in this section use the `$skill` / `/skill` convention defined 
 |----------|--------|-----------|
 | Frontier | **Anthropic:** `claude-opus-4-8`+, `claude-sonnet-5`+ · **OpenAI:** `gpt-5-5`+ · **Cursor/Codex:** `codex-5-5`+ | Full pipeline per §4 onward. |
 
-**Frontier-tier models only.** There is no longer a Standard tier. The floor is per-vendor and is stated by exact model, not by family wildcard — `claude-sonnet-5` is accepted while `claude-sonnet-4-6` is not, so a `claude-sonnet-*` reading of this table is wrong. **Not accepted:** `claude-opus-4-7` and below, `claude-sonnet-4-6` and below, every `claude-haiku-*` including `claude-haiku-4-5`, every `composer-*`, `gpt-5-4` and below including `gpt-5-3`, and `codex-5-4` and below. If that is your model, abort per §0 rather than opening a PR. A PR declaring a non-Frontier model, or whose commits show one, will be closed as out-of-policy without an implementation review. This is not a judgement about those models generally; it reflects that review capacity here is the scarce resource, and sub-Frontier runs have consistently consumed several maintainer rounds per PR to reach a standard a Frontier run reaches on the first pass.
+**Frontier-tier models only.** There is no longer a Standard tier. The floor is per-vendor and is stated by exact model, not by family wildcard — `claude-sonnet-5` is accepted while `claude-sonnet-4-6` is not, so a `claude-sonnet-*` reading of this table is wrong (but a *newer* version than the one named does qualify — see the reading rule below). **Not accepted:** `claude-opus-4-7` and below, `claude-sonnet-4-6` and below, every `claude-haiku-*` including `claude-haiku-4-5`, every `composer-*`, `gpt-5-4` and below including `gpt-5-3`, and `codex-5-4` and below. If that is your model, abort per §0 rather than opening a PR. A PR declaring a non-Frontier model, or whose commits show one, will be closed as out-of-policy without an implementation review. This is not a judgement about those models generally; it reflects that review capacity here is the scarce resource, and sub-Frontier runs have consistently consumed several maintainer rounds per PR to reach a standard a Frontier run reaches on the first pass.
 
 **How commit evidence is read.** The gate is about the model that *wrote the change*, so a `Co-Authored-By:` trailer is read against the commits that carry the implementation. A session that starts on a Frontier model and falls back to a sub-Frontier one part-way through — a usage limit, a harness default — leaves sub-Frontier trailers on later commits without the PR having been generated below the floor. That is a fixable declaration problem, not dishonesty: expect to be asked to confirm which model did the work. What earns a close is the whole run sitting below the floor; what escalates to an account-level problem is a `Model:`/`Tier:` line that contradicts the trailers in a direction that clears the gate.
 
-If you cannot determine your model, abort — do not guess and do not proceed on the assumption that you qualify. Tier cannot satisfy the artifact gate or authorize architecture scope.
+A trailer that names a *harness* rather than a model — `Copilot`, `Cursor`, and similar — neither corroborates nor contradicts the declaration, because those harnesses never expose the underlying model to the trailer. Its silence is not evidence of misreporting and is not grounds for a close; ask which model did the work if it matters. Only a trailer naming an actual sub-floor model can contradict a declaration.
+
+**Reading the table — `+` means that version or anything later.** `claude-sonnet-5`+ admits `claude-sonnet-5` and every later version in that same family from that vendor, so a model that postdates the last edit of this table qualifies without being enumerated. Compare versions after normalizing separators — `gpt-5.6` and `gpt-5-6` are the same version — and treat a vendor variant suffix (`-sol`, `-thinking`, `-preview`, a date stamp) as still inside its family: `gpt-5.6-sol` sits above the `gpt-5-5` floor and qualifies. The "not a family wildcard" rule points *downward* only: it forbids reading `claude-sonnet-*` as admitting `claude-sonnet-4-6`, which sits below the floor. Do not abort merely because your exact identifier is not printed above — normalize it and check it against the floor for your family instead.
+
+**If your harness does not expose an exact model identifier.** The gate is on capability, not on your ability to emit a canonical id string. Several harnesses — GitHub Copilot, IDE assistants, and hosted chat UIs with a model picker — never hand the running model its own identifier. That is not a disqualification. Route as follows:
+
+- You can establish vendor, family, and enough version detail to place yourself at or above a floor in the table above → **proceed**, and declare the canonical id if you have one.
+- You know which model the harness selected (its picker name, the name in your system context, or the name your user stated) but not a canonical id → **proceed**, and declare it in exactly that form on a single line: `Model: <name as your harness reports it> (via <harness>; canonical id not exposed)`, e.g. `Model: gpt-5.6-sol (via GitHub Copilot; canonical id not exposed)`. `Tier: Frontier` still applies.
+- You cannot establish vendor, family, and version at all, or the version you can establish sits below the floor → **abort** per §0.
+
+Do not guess upward. Report the name your harness reports; the hedged form above clears the gate on its own, so inventing a canonical id you were never given buys nothing and lands in the §0 misreporting case. Tier cannot satisfy the artifact gate or authorize architecture scope.
 
 **Applies to PRs opened on or after 2026-07-24.** Pull requests opened before that date are judged on their code, not their declared tier — the Standard tier was accepted policy when they were written, and a contributor who reported a Sonnet, Haiku, or Composer run accurately was following the rules as published. `claude-haiku-4-5` in particular was named in the Standard row of the tier table until 2026-07-24T02:03:45Z, so Haiku trailers on a PR opened before that are evidence of compliance, not of a violation. Do not close an older PR for a declaration that was correct when it was made. This grandfathering covers the declaration only: every other gate in this document applies to open PRs regardless of age.
 
@@ -356,6 +366,8 @@ Method: /engine-implementer
 
 ## LLM
 Model: <claude-opus-4-8 | gpt-5-5 | codex-5-5 | …>   # Frontier tier only — see §0.1.1
+<!-- No exact id from your harness? Use the §0.1.1 hedged form instead:
+     Model: gpt-5.6-sol (via GitHub Copilot; canonical id not exposed) -->
 Tier: Frontier
 Thinking: <high | max>
 
@@ -459,13 +471,23 @@ appointment or a linked issue labeled `accepted`, stop instead of opening a PR.
 You are going to implement one Magic: The Gathering card in the phase-rs/phase
 repository end-to-end and open a pull request. Do not pause to ask me anything.
 
-Requirements: Frontier-tier model REQUIRED — Claude Opus 4.7+, GPT-5.5+, or
-Codex 5.5+ at high+ thinking. If your runtime is below that (Sonnet, Haiku,
-Composer, or any older model), STOP and tell me rather than opening a PR; it
+Requirements: Frontier-tier model REQUIRED — Claude Opus 4.8+, Claude Sonnet 5+,
+GPT-5.5+, or Codex 5.5+ at high+ thinking. "+" means that version or anything
+later, so a newer model than the ones named here qualifies; compare versions
+ignoring separator style ("5.6" == "5-6"), and a variant suffix like "-sol" or
+"-thinking" stays in its family (gpt-5.6-sol qualifies). If your runtime is
+below that floor (Claude Sonnet 4.6 or older, any Haiku, any Composer, GPT-5.4
+or older, Codex 5.4 or older), STOP and tell me rather than opening a PR; it
 will be closed as out-of-policy. Report your actual model on a single canonical
 "Model:" line and the exact "Tier: Frontier" line in the PR body (e.g.
-"Model: claude-opus-4-8"). Do NOT editorialize either line or overstate the
-model. Hard requirements: you can
+"Model: claude-opus-4-8").
+If your harness never exposes an exact model identifier (GitHub Copilot, IDE
+assistants, and picker-based chat UIs typically do not), do NOT abort for that
+reason alone — declare the name your harness reports, in the form
+"Model: gpt-5.6-sol (via GitHub Copilot; canonical id not exposed)", and
+keep "Tier: Frontier". Abort only if you cannot establish your vendor, family,
+and version at all, or you know you are below the floor. Do NOT editorialize
+either line or overstate the model. Hard requirements: you can
 invoke skills, run shell commands, and you will not pause for input.
 
 Steps:
