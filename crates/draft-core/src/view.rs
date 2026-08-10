@@ -62,6 +62,10 @@ pub struct DraftPlayerView {
     pub current_pack: Option<Vec<DraftCardInstance>>,
     /// The viewer's drafted pool
     pub pool: Vec<DraftCardInstance>,
+    /// Each of the viewer's sealed packs, in opening order. Present only for
+    /// sealed events so clients can present the engine-generated pulls without
+    /// reconstructing packs from a flattened pool.
+    pub sealed_packs: Option<Vec<Vec<DraftCardInstance>>>,
     /// Public info for all seats
     pub seats: Vec<SeatPublicView>,
     /// Total cards per pack (for UI progress display)
@@ -238,6 +242,11 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
         .map(|p| p.0.clone());
 
     let pool = session.pools.get(idx).cloned().unwrap_or_default();
+    let sealed_packs = (session.kind == DraftKind::Sealed).then(|| {
+        pool.chunks(usize::from(session.config.cards_per_pack))
+            .map(ToOwned::to_owned)
+            .collect()
+    });
 
     let is_drafting = session.status == DraftStatus::Drafting;
 
@@ -298,6 +307,7 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
         pass_direction: session.pass_direction,
         current_pack,
         pool,
+        sealed_packs,
         seats,
         cards_per_pack: session.config.cards_per_pack,
         pack_count: session.config.pack_count,
@@ -491,6 +501,24 @@ mod tests {
         let view = filter_for_player(&session, 0);
         assert_eq!(view.pool.len(), 1);
         assert_eq!(view.pool[0].instance_id, session.pools[0][0].instance_id);
+    }
+
+    #[test]
+    fn sealed_view_preserves_the_viewers_pack_boundaries() {
+        let (mut session, source) = test_session(2);
+        session.kind = DraftKind::Sealed;
+        session.config.kind = DraftKind::Sealed;
+        session.config.pack_count = 6;
+        session::apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
+
+        let view = filter_for_player(&session, 0);
+        let sealed_packs = view
+            .sealed_packs
+            .expect("sealed view includes opening packs");
+
+        assert_eq!(sealed_packs.len(), 6);
+        assert!(sealed_packs.iter().all(|pack| pack.len() == 14));
+        assert_eq!(sealed_packs.concat(), view.pool);
     }
 
     #[test]

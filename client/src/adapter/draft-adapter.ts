@@ -111,6 +111,8 @@ export interface DraftPlayerView {
   pass_direction: "Left" | "Right";
   current_pack: DraftCardInstance[] | null;
   pool: DraftCardInstance[];
+  /** Engine-provided sealed packs in opening order. Absent for draft events. */
+  sealed_packs?: DraftCardInstance[][] | null;
   seats: SeatPublicView[];
   cards_per_pack: number;
   pack_count: number;

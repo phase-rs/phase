@@ -2095,6 +2095,7 @@ mod tests {
             pass_direction: PassDirection::Left,
             current_pack: None,
             pool: Vec::new(),
+            sealed_packs: None,
             seats: Vec::new(),
             cards_per_pack: 14,
             pack_count: 3,

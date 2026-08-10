@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
 import { useNavigate, useSearchParams } from "react-router";
 
-import { useDraftStore, type LocalDraftKind } from "../stores/draftStore";
+import { useDraftStore } from "../stores/draftStore";
 import type { CardHoverInfo } from "../components/card/CardPreview";
 import { HoverCardPreview } from "../components/card/HoverCardPreview";
 import { BotDifficultySelector } from "../components/draft/BotDifficultySelector";
@@ -15,6 +15,7 @@ import { PackDisplay } from "../components/draft/PackDisplay";
 import { PoolPanel } from "../components/draft/PoolPanel";
 import { DraftProgress } from "../components/draft/DraftProgress";
 import { LimitedDeckBuilder } from "../components/draft/LimitedDeckBuilder";
+import { SealedPackOpening } from "../components/draft/SealedPackOpening";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { menuButtonClass } from "../components/menu/buttonStyles";
 import { MenuShell } from "../components/menu/MenuShell";
@@ -29,7 +30,7 @@ const FORMAT_OPTIONS: Array<{ value: DraftRunFormat; labelKey: string; descKey: 
   { value: "run", labelKey: "formatPicker.run.label", descKey: "formatPicker.run.description" },
 ];
 
-type DraftSetupMode = "set" | "cube";
+type DraftSetupMode = "quick" | "sealed" | "cube";
 
 function FormatPicker({ onLaunch, supportsBo3 }: { onLaunch: () => void; supportsBo3: boolean }) {
   const { t } = useTranslation("draft");
@@ -309,9 +310,10 @@ export function DraftPage() {
   const [introDismissed, setIntroDismissed] = useState(false);
   const [resumeLoading, setResumeLoading] = useState(false);
   const [setupMode, setSetupMode] = useState<DraftSetupMode>(() =>
-    requestedSetupMode === "cube" ? "cube" : "set",
+    requestedSetupMode === "cube" || requestedSetupMode === "sealed"
+      ? requestedSetupMode
+      : "quick",
   );
-  const [localKind, setLocalKind] = useState<LocalDraftKind>("Quick");
 
   useEffect(() => {
     if (searchParams.get("resume") !== "1") return;
@@ -333,7 +335,11 @@ export function DraftPage() {
   }, [searchParams]);
 
   useEffect(() => {
-    setSetupMode(requestedSetupMode === "cube" ? "cube" : "set");
+    setSetupMode(
+      requestedSetupMode === "cube" || requestedSetupMode === "sealed"
+        ? requestedSetupMode
+        : "quick",
+    );
   }, [requestedSetupMode]);
 
   useEffect(() => {
@@ -352,13 +358,13 @@ export function DraftPage() {
       const setPool = allPools[setCode.toLowerCase()] ?? allPools[setCode.toUpperCase()];
       if (!setPool) throw new Error(`No pool data for set: ${setCode}`);
 
-      if (localKind === "Sealed") {
+      if (setupMode === "sealed") {
         await startSealedDraft(JSON.stringify(setPool), setCode, setName, difficulty);
       } else {
         await startDraft(JSON.stringify(setPool), setCode, setName, difficulty);
       }
     },
-    [localKind],
+    [setupMode],
   );
 
   const handleLaunchMatch = useCallback(async () => {
@@ -402,51 +408,31 @@ export function DraftPage() {
             <h1 className="mb-8 menu-display text-3xl text-white">
               {setupMode === "cube"
                 ? t("page.cubeDraftTitle")
-                : localKind === "Sealed"
+                : setupMode === "sealed"
                   ? t("page.sealedTitle")
                   : t("page.quickDraftTitle")}
             </h1>
             <div className="mb-5 inline-flex rounded-lg border border-white/10 bg-black/25 p-1">
-              {(["set", "cube"] as const).map((mode) => (
+              {(["quick", "sealed", "cube"] as const).map((mode) => (
                 <button
                   key={mode}
                   type="button"
                   onClick={() => setSetupMode(mode)}
-                  className={`rounded-md px-4 py-2 text-sm font-medium transition-colors ${
+                  className={`min-h-11 rounded-md px-4 py-2 text-sm font-medium transition-colors ${
                     setupMode === mode
                       ? "bg-emerald-400/18 text-emerald-100"
                       : "text-white/50 hover:bg-white/6 hover:text-white/75"
                   }`}
                 >
-                  {mode === "set" ? t("page.setDraftTab") : t("page.cubeTab")}
+                  {mode === "quick"
+                    ? t("page.quickDraftTitle")
+                    : mode === "sealed"
+                      ? t("page.sealedTitle")
+                      : t("page.cubeDraftTitle")}
                 </button>
               ))}
             </div>
-            {setupMode === "set" ? (
-              <div className="flex flex-col gap-6">
-                <div className="flex items-center gap-4 text-sm text-white/70">
-                  <label className="flex min-h-11 items-center gap-2 py-2">
-                    <input
-                      type="radio"
-                      name="localDraftKind"
-                      checked={localKind === "Quick"}
-                      onChange={() => setLocalKind("Quick")}
-                    />
-                    {t("page.quickDraftTitle")}
-                  </label>
-                  <label className="flex min-h-11 items-center gap-2 py-2">
-                    <input
-                      type="radio"
-                      name="localDraftKind"
-                      checked={localKind === "Sealed"}
-                      onChange={() => setLocalKind("Sealed")}
-                    />
-                    {t("page.sealedTitle")}
-                  </label>
-                </div>
-                <SetSelector onStartDraft={handleStartDraft} />
-              </div>
-            ) : (
+            {setupMode === "cube" ? (
               <div className="flex flex-col gap-6">
                 <BotDifficultySelector />
                 <CubeSetupPanel
@@ -456,6 +442,8 @@ export function DraftPage() {
                   }}
                 />
               </div>
+            ) : (
+              <SetSelector onStartDraft={handleStartDraft} />
             )}
           </div>
         )}
@@ -483,6 +471,13 @@ export function DraftPage() {
 
         {phase === "deckbuilding" && (
           <LimitedDeckBuilder />
+        )}
+
+        {phase === "opening" && draftView && (
+          <SealedPackOpening
+            view={draftView}
+            onComplete={() => useDraftStore.getState().completeSealedOpening()}
+          />
         )}
 
         {phase === "launching" && (

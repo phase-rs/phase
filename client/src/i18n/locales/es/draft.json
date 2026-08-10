@@ -82,6 +82,19 @@
     "picking": "Eligiendo…",
     "autoPick": "Elección automática"
   },
+  "sealedOpening": {
+    "title": "Open your sealed pool",
+    "subtitle": "Open six packs, one at a time.",
+    "packProgress": "Pack {{current}} of {{total}}",
+    "openPack": "Open pack",
+    "openPackArt": "Open pack artwork",
+    "pulls": "Your pulls",
+    "nextPack": "Next pack",
+    "viewPool": "View your pool",
+    "poolTitle": "Your sealed pool",
+    "poolSubtitle": "All {{count}} cards, grouped by type.",
+    "buildDeck": "Build deck"
+  },
   "pool": {
     "cardsDrafted": "{{count}} cartas drafteadas",
     "empty": "Aún no se ha drafteado ninguna carta",
@@ -129,6 +142,10 @@
       "title": "Draft Rápido",
       "description": "Draftea 3 sobres con 7 drafters de IA, construye un mazo de 40 cartas y luego juega una partida Bo1 contra uno de ellos."
     },
+    "sealed": {
+      "title": "Sealed",
+      "description": "Open six packs, review the full pool, then build a 40-card deck for a Bo1 match."
+    },
     "cubeDraft": {
       "title": "Cube Draft",
       "description": "Pega o carga una lista de cube, ajusta las reglas de sobres y mazo, y luego draftea rápido contra bots de IA."
@@ -159,6 +176,7 @@
   },
   "quickPhase": {
     "drafting": "Drafteando",
+    "opening": "Opening Packs",
     "deckbuilding": "Construcción de mazo",
     "matchRecord": "Partida {{number}} — {{wins}}V-{{losses}}D",
     "record": "{{wins}}V-{{losses}}D",

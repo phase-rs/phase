@@ -82,6 +82,19 @@
     "picking": "Wybieranie…",
     "autoPick": "Wybór automatyczny"
   },
+  "sealedOpening": {
+    "title": "Open your sealed pool",
+    "subtitle": "Open six packs, one at a time.",
+    "packProgress": "Pack {{current}} of {{total}}",
+    "openPack": "Open pack",
+    "openPackArt": "Open pack artwork",
+    "pulls": "Your pulls",
+    "nextPack": "Next pack",
+    "viewPool": "View your pool",
+    "poolTitle": "Your sealed pool",
+    "poolSubtitle": "All {{count}} cards, grouped by type.",
+    "buildDeck": "Build deck"
+  },
   "pool": {
     "cardsDrafted": "{{count}} wybranych kart",
     "empty": "Nie wybrano jeszcze żadnych kart",
@@ -129,6 +142,10 @@
       "title": "Szybki draft",
       "description": "Zdraftuj 3 boostery z 7 botami, zbuduj talię z 40 kart, a potem rozegraj mecz Bo1 przeciwko jednemu z nich."
     },
+    "sealed": {
+      "title": "Sealed",
+      "description": "Open six packs, review the full pool, then build a 40-card deck for a Bo1 match."
+    },
     "cubeDraft": {
       "title": "Draft kostki",
       "description": "Wklej lub wczytaj listę kostki, dostosuj zasady boosterów i talii, a potem zdraftuj szybko przeciwko botom."
@@ -159,6 +176,7 @@
   },
   "quickPhase": {
     "drafting": "Draftowanie",
+    "opening": "Opening Packs",
     "deckbuilding": "Budowanie talii",
     "matchRecord": "Mecz {{number}} — {{wins}}W-{{losses}}P",
     "record": "{{wins}}W-{{losses}}P",

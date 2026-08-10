@@ -82,6 +82,19 @@
     "picking": "Sélection…",
     "autoPick": "Sélection auto"
   },
+  "sealedOpening": {
+    "title": "Open your sealed pool",
+    "subtitle": "Open six packs, one at a time.",
+    "packProgress": "Pack {{current}} of {{total}}",
+    "openPack": "Open pack",
+    "openPackArt": "Open pack artwork",
+    "pulls": "Your pulls",
+    "nextPack": "Next pack",
+    "viewPool": "View your pool",
+    "poolTitle": "Your sealed pool",
+    "poolSubtitle": "All {{count}} cards, grouped by type.",
+    "buildDeck": "Build deck"
+  },
   "pool": {
     "cardsDrafted": "{{count}} cartes draftées",
     "empty": "Aucune carte draftée pour l'instant",
@@ -129,6 +142,10 @@
       "title": "Quick Draft",
       "description": "Draftez 3 boosters avec 7 drafteurs IA, construisez un deck de 40 cartes, puis jouez un match Bo1 contre l'un d'eux."
     },
+    "sealed": {
+      "title": "Sealed",
+      "description": "Open six packs, review the full pool, then build a 40-card deck for a Bo1 match."
+    },
     "cubeDraft": {
       "title": "Cube Draft",
       "description": "Collez ou chargez une liste de cube, ajustez les règles de booster et de deck, puis faites un quick draft contre des bots IA."
@@ -159,6 +176,7 @@
   },
   "quickPhase": {
     "drafting": "Draft",
+    "opening": "Opening Packs",
     "deckbuilding": "Construction de deck",
     "matchRecord": "Match {{number}} — {{wins}}V-{{losses}}D",
     "record": "{{wins}}V-{{losses}}D",
