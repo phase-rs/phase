@@ -254,3 +254,34 @@ fn emperor_of_bones_resumes_riders_after_anointed_peacekeepers_as_enters_choices
         vec![engine::types::ability::TargetRef::Object(peacekeeper)]
     );
 }
+
+#[test]
+fn park_waiting_for_preserves_search_choice() {
+    let mut scenario = GameScenario::new();
+    let library_card = scenario.add_card_to_library_top(P0, "Forest");
+    let mut runner = scenario.build();
+    runner.state_mut().waiting_for = WaitingFor::SearchChoice {
+        player: P0,
+        library_owner: Some(P0),
+        cards: vec![library_card],
+        count: 1,
+        reveal: true,
+        up_to: false,
+        allows_partial_find: false,
+        constraint: Default::default(),
+        split: None,
+    };
+
+    engine::game::replacement::park_waiting_for(runner.state_mut(), P0);
+
+    let WaitingFor::SearchChoice { cards, .. } = &runner.state().waiting_for else {
+        panic!(
+            "an existing SearchChoice must remain active, got {}",
+            runner.waiting_for_kind()
+        );
+    };
+    assert!(
+        cards.contains(&library_card),
+        "the preserved SearchChoice must retain the seeded library card"
+    );
+}

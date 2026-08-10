@@ -1008,12 +1008,9 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
 pub fn park_waiting_for(state: &mut GameState, player: PlayerId) {
     if matches!(
         state.waiting_for,
-        WaitingFor::EffectZoneChoice { .. }
-            | WaitingFor::CopyTargetChoice { .. }
-            | WaitingFor::ChooseOneOfBranch { .. }
-            | WaitingFor::NamedChoice { .. }
-            | WaitingFor::ReturnAsAuraTarget { .. }
-    ) {
+        WaitingFor::CopyTargetChoice { .. } | WaitingFor::ReturnAsAuraTarget { .. }
+    ) || super::engine_resolution_choices::handles(&state.waiting_for)
+    {
         return;
     }
     state.waiting_for = replacement_choice_waiting_for(player, state);
