@@ -152,6 +152,10 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::BecomesPlotted { .. }
         | GameEvent::StackPushed { .. }
         | GameEvent::StackResolved { .. }
+        // CR 714.2a: bookkeeping the engine publishes so meta-triggers can
+        // observe a chapter ability finishing; the chapter's own effects carry
+        // the player-visible signal.
+        | GameEvent::SagaChapterAbilityResolved { .. }
         | GameEvent::DamageCleared { .. }
         | GameEvent::ResolutionHalted { .. }
         | GameEvent::DamagePrevented { .. }
@@ -296,6 +300,9 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::LandPlayed { .. }
         | GameEvent::StackPushed { .. }
         | GameEvent::StackResolved { .. }
+        // CR 714.2a: neither good nor bad news on its own — the drain or token
+        // the observing trigger produces is what carries tone.
+        | GameEvent::SagaChapterAbilityResolved { .. }
         | GameEvent::Discarded { .. }
         | GameEvent::Cycled { .. }
         | GameEvent::DamageCleared { .. }
@@ -416,6 +423,10 @@ fn should_exclude_event(event: &GameEvent, state: &GameState) -> bool {
         // StackPushed/StackResolved are low-signal bookkeeping —
         // the meaningful info is in SpellCast/AbilityActivated and EffectResolved
         GameEvent::StackPushed { .. } | GameEvent::StackResolved { .. } => true,
+        // CR 714.2a: the chapter-resolution notification exists so meta-triggers
+        // can observe it; the player already saw the chapter ability itself
+        // resolve. Same low-signal bookkeeping class as StackResolved.
+        GameEvent::SagaChapterAbilityResolved { .. } => true,
         _ => false,
     }
 }
@@ -491,6 +502,8 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::KeywordAbilityActivated { .. }
         | GameEvent::StackPushed { .. }
         | GameEvent::StackResolved { .. }
+        // CR 714.2a: a chapter ability finishing resolution is a stack event.
+        | GameEvent::SagaChapterAbilityResolved { .. }
         | GameEvent::SpellCountered { .. } => LogCategory::Stack,
 
         GameEvent::AttackersDeclared { .. }
@@ -796,6 +809,10 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::StackResolved { object_id } => {
             vec![card_seg(state, *object_id), text(" resolves")]
         }
+
+        // CR 714.2a: filtered out by `is_low_signal` above — the chapter
+        // ability's own resolution line already told the player what happened.
+        GameEvent::SagaChapterAbilityResolved { .. } => vec![],
 
         GameEvent::SpellCountered {
             object_id,

@@ -1185,6 +1185,9 @@ fn trigger_axis(trig: &TriggerDefinition) -> Option<AxisKey> {
         | TriggerMode::RoomEntered
         | TriggerMode::PlanarDice
         | TriggerMode::Planeswalked { .. }
+        // CR 714.2a: a Saga-chapter meta-trigger consumes another permanent's
+        // chapter-ability lifecycle; no modeled producer axis.
+        | TriggerMode::SagaChapterAbility { .. }
         | TriggerMode::ChaosEnsues
         | TriggerMode::RolledDie
         | TriggerMode::RolledDieOnce

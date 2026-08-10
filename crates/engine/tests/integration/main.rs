@@ -817,6 +817,7 @@ mod mutable_pupa_perpetual_keyword_mirror;
 mod mycoloth_upkeep_trigger;
 mod myrkul_crew_phase1_incarnation;
 mod mystic_forge_regression;
+mod narci_fable_singer_final_chapter_drain;
 mod narset_jeskai_waymaster_draw_spells_cast;
 mod natural_balance;
 mod necrodominance_pay_any_life_draw;

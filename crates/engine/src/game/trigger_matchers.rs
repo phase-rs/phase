@@ -10,7 +10,9 @@ use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{GameState, TriggerSourceContext};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
-use crate::types::triggers::{PlaneswalkRole, TriggerMode};
+use crate::types::triggers::{
+    AbilityLifecyclePoint, PlaneswalkRole, SagaChapterScope, TriggerMode,
+};
 use crate::types::zones::Zone;
 
 use super::triggers::TriggerMatcher;
@@ -126,6 +128,10 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         // matcher that reads the `PlaneswalkRole` off the trigger's mode — `From`
         // and `To` bind the source to that endpoint, `Any` is source-independent.
         TriggerMode::Planeswalked { .. } => match_planeswalked,
+        // CR 714.2a + CR 714.4: "whenever the final chapter ability of a Saga
+        // you control triggers/resolves" — one matcher reads both axes off the
+        // mode.
+        TriggerMode::SagaChapterAbility { .. } => match_saga_chapter_ability,
         // CR 904.9 / CR 701.32b: "When you set this scheme in motion" fires for
         // the scheme set in motion.
         TriggerMode::SetInMotion => match_set_in_motion,
@@ -402,6 +408,20 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         PlaneswalkRole::Any,
     ] {
         r.insert(TriggerMode::Planeswalked { role }, match_planeswalked);
+    }
+    // CR 714.2a + CR 714.4: one matcher for every (chapter, lifecycle) pair; it
+    // reads both axes off the trigger's mode. Each pair is a distinct registry
+    // key (both participate in `TriggerMode`'s Hash/Eq).
+    for chapter in [SagaChapterScope::Any, SagaChapterScope::Final] {
+        for lifecycle in [
+            AbilityLifecyclePoint::Triggered,
+            AbilityLifecyclePoint::Resolved,
+        ] {
+            r.insert(
+                TriggerMode::SagaChapterAbility { chapter, lifecycle },
+                match_saga_chapter_ability,
+            );
+        }
     }
     // CR 904.9 / CR 701.32b / CR 701.33b: Archenemy scheme triggers
     r.insert(TriggerMode::SetInMotion, match_set_in_motion);
@@ -1064,6 +1084,9 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::StartingPlayerContest { .. }
         | GameEvent::Foretold { .. }
         | GameEvent::BecameForetold { .. }
+        // CR 714.2a: names a Saga, but chapter-ability meta-triggers are never
+        // batched ("one or more" has no reading over chapter resolutions).
+        | GameEvent::SagaChapterAbilityResolved { .. }
         | GameEvent::HiddenSearchViewed { .. } => 0,
     }
 }
@@ -2202,6 +2225,105 @@ pub(super) fn match_counter_added(
         true
     } else {
         false
+    }
+}
+
+/// CR 714.2a + CR 714.4: "Whenever [the final] chapter ability of a Saga you
+/// control triggers/resolves" (Historian's Boon, Narci, Fable Singer, Tom
+/// Bombadil).
+///
+/// The observed Saga is constrained by the trigger's ordinary `valid_card`
+/// filter ("a Saga you control"), matched with last-known information: a Saga
+/// that reached its final chapter is sacrificed by CR 704.5s the moment its
+/// chapter ability leaves the stack, and a chapter ability may remove the Saga
+/// itself (Fable of the Mirror-Breaker III), so the permanent frequently no
+/// longer exists when this trigger is collected.
+///
+/// The two lifecycle points read different events because they ARE different
+/// events (CR 603.2 vs CR 608.2):
+///
+/// * `Triggered` — chapter abilities have no event of their own; they *are* the
+///   Saga's lore-counter threshold triggers, so the trigger event is the same
+///   `CounterAdded { Lore }` that `match_counter_added` consumes.
+/// * `Resolved` — `SagaChapterAbilityResolved`, published by `stack.rs` only on
+///   the path where a triggered ability genuinely finished resolving.
+pub(super) fn match_saga_chapter_ability(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_context: &TriggerSourceContext,
+    state: &GameState,
+) -> bool {
+    // The registry only routes `SagaChapterAbility` triggers here, but read the
+    // axes off the mode rather than assuming them.
+    let TriggerMode::SagaChapterAbility { chapter, lifecycle } = &trigger.mode else {
+        return false;
+    };
+
+    match (lifecycle, event) {
+        (
+            AbilityLifecyclePoint::Resolved,
+            GameEvent::SagaChapterAbilityResolved {
+                saga_id,
+                chapter: resolved_chapter,
+                final_chapter,
+                ..
+            },
+        ) => {
+            if !valid_card_matches_with_lki(trigger, state, *saga_id, source_context) {
+                return false;
+            }
+            match chapter {
+                SagaChapterScope::Any => true,
+                SagaChapterScope::Final => resolved_chapter == final_chapter,
+            }
+        }
+        (
+            AbilityLifecyclePoint::Triggered,
+            // CR 714.2a: the chapter ability's own trigger event. `actor` (who
+            // placed the counter) is irrelevant — CR 714.3c's turn-based action
+            // and any effect that adds lore both make chapter abilities trigger.
+            GameEvent::CounterAdded {
+                object_id,
+                counter_type,
+                count,
+                ..
+            },
+        ) => {
+            if *counter_type != crate::types::counter::CounterType::Lore {
+                return false;
+            }
+            if !valid_card_matches_with_lki(trigger, state, *object_id, source_context) {
+                return false;
+            }
+            // CR 714.2a: a chapter ability triggers when the lore count crosses
+            // its chapter number — `previous < n <= current`. The same crossing
+            // arithmetic `match_counter_added` performs for the Saga's own
+            // chapter triggers, evaluated here against the observed Saga.
+            let Some(saga) = state.objects.get(object_id) else {
+                return false;
+            };
+            let current = saga
+                .counters
+                .get(&crate::types::counter::CounterType::Lore)
+                .copied()
+                .unwrap_or(0);
+            let previous = current.saturating_sub(*count);
+            let crosses = |n: u32| previous < n && n <= current;
+            match chapter {
+                // CR 714.2c: a single addition can cross several chapter
+                // thresholds at once, triggering that many chapter abilities.
+                // This event-driven matcher fires once for such a batch. No
+                // printed card observes `Any` today (all three cards in the
+                // class say "the final chapter ability"), so the parser never
+                // produces this combination against a real card; the arm exists
+                // so the axis is total rather than silently absent.
+                SagaChapterScope::Any => saga.saga_chapter_numbers().any(crosses),
+                // A lore counter added to a Saga already past its final chapter
+                // (proliferate before CR 704.5s sacrifices it) crosses nothing.
+                SagaChapterScope::Final => saga.final_chapter_number().is_some_and(crosses),
+            }
+        }
+        _ => false,
     }
 }
 

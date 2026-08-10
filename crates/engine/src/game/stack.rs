@@ -990,6 +990,44 @@ pub(crate) fn bind_resolution_scope(
     true
 }
 
+/// CR 714.2a + CR 714.4: The Saga-chapter identity of a stack entry that is
+/// about to resolve, or `None` if the entry is not a Saga chapter ability.
+///
+/// Captured BEFORE the ability executes: a chapter ability may move its own
+/// Saga off the battlefield as its effect (Fable of the Mirror-Breaker III
+/// exiles and returns it transformed; CR 714.4's sacrifice follows the final
+/// chapter), and neither the chapter number nor the final chapter number can be
+/// re-derived once the permanent is gone.
+struct ResolvingSagaChapter {
+    saga_id: ObjectId,
+    controller: PlayerId,
+    chapter: u32,
+    final_chapter: u32,
+}
+
+/// CR 714.2a: Classify an about-to-resolve stack entry as a Saga chapter
+/// ability, via the exact trigger occurrence that fired rather than any
+/// re-derivation from the Saga's current lore count.
+fn resolving_saga_chapter(state: &GameState, entry: &StackEntry) -> Option<ResolvingSagaChapter> {
+    let StackEntryKind::TriggeredAbility {
+        source_id, ability, ..
+    } = &entry.kind
+    else {
+        return None;
+    };
+    let occurrence = &ability.trigger_definition_ref.as_ref()?.occurrence;
+    let (chapter, final_chapter) = state
+        .objects
+        .get(source_id)?
+        .saga_chapter_for_occurrence(occurrence)?;
+    Some(ResolvingSagaChapter {
+        saga_id: *source_id,
+        controller: entry.controller,
+        chapter,
+        final_chapter,
+    })
+}
+
 /// CR 608.2: Resolve the top object on the stack.
 pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 603.3c + CR 603.3d: The top of the stack may be a trigger entry that
@@ -1088,6 +1126,12 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         state.resolution_source_relatch = None;
         return;
     }
+
+    // CR 714.2a: Snapshot the Saga-chapter identity while the Saga is still
+    // reachable — the chapter ability's own effect may remove it. Only the
+    // success path below publishes it; a fizzle (CR 608.2b) or a failed
+    // intervening-if (CR 603.4) leaves the stack without resolving.
+    let saga_chapter = resolving_saga_chapter(state, &entry);
 
     // Extract the resolved ability from the stack entry. `KeywordAction` is
     // handled by the early return above and never reaches this match.
@@ -2494,6 +2538,20 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     events.push(GameEvent::StackResolved {
         object_id: entry.id,
     });
+    // CR 714.2a + CR 608.2: This is the only exit from `resolve_top` on which a
+    // triggered ability actually RESOLVED — the fizzle, no-legal-target and
+    // failed-intervening-if paths returned earlier, each pushing their own
+    // `StackResolved`. Publishing the chapter-resolution event only here is what
+    // keeps "whenever the final chapter ability of a Saga you control resolves"
+    // (Narci, Fable Singer) from firing on a chapter ability that never did.
+    if let Some(chapter) = saga_chapter {
+        events.push(GameEvent::SagaChapterAbilityResolved {
+            saga_id: chapter.saga_id,
+            controller: chapter.controller,
+            chapter: chapter.chapter,
+            final_chapter: chapter.final_chapter,
+        });
+    }
     // The popped object remains the resolving carrier through every typed
     // resolution frame, including a direct optional-choice frame. In particular,
     // a self-moving trigger needs that carrier to establish its CR 400.7j

@@ -238,6 +238,12 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         | TriggerMode::CounterAddedOnce
         | TriggerMode::CounterAddedAll
         | TriggerMode::CounterTypeAddedAll => push(TriggerEventKey::CounterAdded),
+        // CR 714.2a + CR 714.4: a Saga-chapter meta-trigger's match shape is
+        // dynamic — "the final chapter" is derived from the OBSERVED Saga's own
+        // trigger set, not from anything statically on this trigger. Route to
+        // `unclassified` (the documented safety net for dynamic shapes); the
+        // three printed cards in the class make the consult cost irrelevant.
+        TriggerMode::SagaChapterAbility { .. } => return (keys, true),
         // CR 107.14: "Whenever you get one or more {E}" — energy uses the
         // player-counter event key, not the object-counter key.
         TriggerMode::CounterPlayerAddedAll => push(TriggerEventKey::PlayerCounterChanged),
@@ -608,6 +614,9 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::DamagePrevented { .. } => push(TriggerEventKey::DamagePrevented),
         GameEvent::SpellCountered { .. } => {}
         GameEvent::CounterAdded { .. } => push(TriggerEventKey::CounterAdded),
+        // CR 714.2a: consumed only by `SagaChapterAbility { lifecycle: Resolved }`
+        // triggers, which live in the `unclassified` bucket. No key of its own.
+        GameEvent::SagaChapterAbilityResolved { .. } => {}
         GameEvent::Evolved { .. } => {}
         GameEvent::ObjectIntensified { .. } => {}
         GameEvent::CounterRemoved { .. } => push(TriggerEventKey::CounterRemoved),

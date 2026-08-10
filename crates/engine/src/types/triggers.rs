@@ -218,6 +218,32 @@ pub enum PlaneswalkRole {
     Any,
 }
 
+/// CR 714.2a + CR 714.4: which chapter ability of a Saga a meta-trigger listens
+/// for. A Saga's chapter abilities are its lore-counter threshold triggers
+/// (CR 714.2a); the *final* chapter ability is the one whose chapter number is
+/// the greatest among them (CR 714.4 — reaching it is what makes the Saga's
+/// controller sacrifice it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SagaChapterScope {
+    /// Any chapter ability of the Saga.
+    Any,
+    /// CR 714.4: only the final (highest-numbered) chapter ability.
+    Final,
+}
+
+/// CR 603.2 + CR 608.2: the point in another ability's lifecycle that a
+/// meta-trigger observes. The two points are distinct events with distinct
+/// timing consequences: an ability that triggers may still be countered
+/// (CR 701.5) or have its intervening-if fail (CR 603.4) and therefore never
+/// resolve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AbilityLifecyclePoint {
+    /// CR 603.2: the observed ability's trigger condition was met.
+    Triggered,
+    /// CR 608.2: the observed ability finished resolving.
+    Resolved,
+}
+
 /// All trigger modes from Forge's TriggerType enum (CR 603).
 ///
 /// Triggered abilities have a trigger condition and an effect, written as
@@ -597,6 +623,21 @@ pub enum TriggerMode {
     /// `ExileLinkKind::Haunt` link. Matched by
     /// `game::haunt::match_haunted_creature_dies`.
     HauntedCreatureDies,
+
+    /// CR 714.2a + CR 714.4: a meta-trigger on another permanent's Saga chapter
+    /// abilities — "whenever the final chapter ability of a Saga you control
+    /// resolves" (Narci, Fable Singer; Tom Bombadil) / "… triggers"
+    /// (Historian's Boon). Parameterized on the two independent axes the class
+    /// varies over: WHICH chapter ability is observed (`chapter`) and WHICH
+    /// point of that ability's lifecycle fires this trigger (`lifecycle`).
+    ///
+    /// The Saga itself is constrained by the trigger's ordinary `valid_card`
+    /// filter ("a Saga you control"), so no Saga-specific filter axis is needed
+    /// here.
+    SagaChapterAbility {
+        chapter: SagaChapterScope,
+        lifecycle: AbilityLifecyclePoint,
+    },
 
     /// Fallback for unrecognized trigger mode strings.
     Unknown(String),

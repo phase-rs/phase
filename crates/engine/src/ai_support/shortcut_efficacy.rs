@@ -3371,25 +3371,29 @@ mod tests {
         let body = body.split_once("\n}").expect("…and terminated").0;
 
         // The names this enumeration cannot construct, PINNED so the gap cannot
-        // grow silently. Three carry payloads and have no bare-name spelling for
+        // grow silently. Four carry payloads and have no bare-name spelling for
         // `FromStr`; the other three are PRE-EXISTING gaps in
         // `types::triggers`'s own decoder — they are declared on the enum but have
         // no `FromStr` arm, so `from_str` degrades them to `Unknown`. That gap is
         // not this module's to fix (and `types/triggers.rs` is outside this
-        // change), but it IS this row's to disclose: none of the six is in the
+        // change), but it IS this row's to disclose: none of the seven is in the
         // relieved list above, so the reverse containment below covers 165 of the
-        // enum's 171 variants and this constant names the remaining six.
+        // enum's 172 variants and this constant names the remaining seven.
         // Sorted, and compared as a SET: this row's subject is which variants are
         // undecodable, not where they sit in the declaration. Pinning declaration
         // order would red this `ai_support` row on a no-op reordering of
         // `TriggerMode` — a failure that says nothing about either module.
-        const UNCONSTRUCTIBLE: [&str; 6] = [
+        const UNCONSTRUCTIBLE: [&str; 7] = [
             "Copied",                  // no `FromStr` arm
             "Explored",                // no `FromStr` arm
             "HauntedCreatureDies",     // no `FromStr` arm
             "KeywordAbilityActivated", // payload
             "Planeswalked",            // payload
-            "Unknown",                 // payload
+            // Payload, and deliberately without a `FromStr` arm: Forge has no
+            // Saga-chapter meta-trigger type, so there is no Forge string to
+            // decode from. Inventing one would fabricate a mapping.
+            "SagaChapterAbility", // payload
+            "Unknown",            // payload
         ];
         let mut undecodable = Vec::new();
 

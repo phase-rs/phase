@@ -4700,6 +4700,15 @@ fn parse_object_possessive_scope(input: &str) -> OracleResult<'_, ObjectScope> {
         value(ObjectScope::Target, tag("target creature's")),
         value(ObjectScope::Target, tag("target permanent's")),
         value(ObjectScope::EventSource, tag("that spell's")),
+        // CR 608.2k + CR 714.2a: "that Saga's mana value" (Narci, Fable Singer).
+        // Same shape as the "that spell's" arm above and bound the same way: an
+        // untargeted back-reference to the object the TRIGGER CONDITION named,
+        // not a threaded target. The "that <core type>'s" arms below bind to
+        // `Target` because their referent is a target this ability announced;
+        // a Saga-chapter meta-trigger announces none, so `EventSource` — the
+        // Saga carried by `GameEvent::SagaChapterAbilityResolved` — is the only
+        // referent that exists.
+        value(ObjectScope::EventSource, tag("that saga's")),
         // CR 202.3 + CR 608.2c: "that <type> card's" — the type-qualified anaphor
         // for the exile-until hit ("that nonland card's mana value", Lady Loki).
         // The type qualifier is REQUIRED, not optional: a bare "that card's" is
