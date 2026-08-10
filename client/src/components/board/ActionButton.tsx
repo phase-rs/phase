@@ -426,7 +426,7 @@ export function ActionButton() {
                 // empty list so dispatchResolveAll falls back to the per-seat
                 // engine auto-yield instead of handing human seats to the AI.
                 let seats: { playerId: number; difficulty: string }[] = [];
-                if (gameMode === "ai") {
+                if (gameMode === "ai" || gameMode === "native-ai") {
                   const playerCount = gs?.players?.length ?? 2;
                   const aiSeats = usePreferencesStore.getState().aiSeats;
                   seats = Array.from({ length: playerCount - 1 }, (_, i) => ({

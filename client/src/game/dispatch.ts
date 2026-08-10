@@ -980,7 +980,7 @@ export async function dispatchResolveAll(
     return;
   }
   if (!batchAdapter.resolveAll || aiSeats.length === 0) {
-    // No batch drain (multiplayer transports), or no AI deciders for the other
+    // No batch drain (transports without the capability), or no AI deciders for the other
     // seats (local hotseat — every seat is a human, #4978): those seats are
     // humans, and CR 117.4 entitles each of them to their own priority window
     // before anything resolves — the engine must not pass on their behalf.
@@ -1041,9 +1041,8 @@ export async function dispatchResolveAll(
       // One atomic pair per chunk, committed through the single authority. The
       // store's `waitingFor` therefore comes from the snapshot's own state, not
       // from `batchResult.waitingFor` — the pair must stay self-consistent.
-      // Equivalent or fresher: only `WasmAdapter` implements `resolveAll`, and
-      // worker FIFO guarantees this snapshot reflects at least the chunk's end
-      // state.
+      // Equivalent or fresher: worker FIFO or ordered WebSocket state updates
+      // guarantee this snapshot reflects at least the chunk's end state.
       const snapshot = await batchAdapter.getSnapshot();
       useGameStore.getState().commitEngineSnapshot(snapshot);
 

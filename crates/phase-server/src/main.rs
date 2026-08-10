@@ -495,6 +495,65 @@ fn build_state_update_message(
     })
 }
 
+/// Resolve All can collect thousands of engine events. They are needed for
+/// authoritative transition bookkeeping, but replaying them in one wire frame
+/// defeats the batch path and breaches the snapshot payload guard. Publish the
+/// final, fully-derived state only; the requester acknowledgement carries
+/// progress metadata separately.
+#[allow(clippy::too_many_arguments)]
+fn build_resolve_all_state_update_message(
+    raw_state: &GameState,
+    legal_actions: &[GameAction],
+    spell_costs: &HashMap<engine::types::identifiers::ObjectId, engine::types::mana::ManaCost>,
+    legal_actions_by_object: &HashMap<engine::types::identifiers::ObjectId, Vec<GameAction>>,
+    state_revision: u64,
+    player: PlayerId,
+    eliminated_players: Vec<PlayerId>,
+    rewind_targets: Vec<RewindOption>,
+) -> ServerMessage {
+    let is_actor = server_core::is_acting(raw_state, player);
+    let filtered = server_core::filter_state_for_player(raw_state, player);
+    let end_continuous_effect_offers = if is_actor {
+        engine_end_continuous_effect_offers(legal_actions)
+    } else {
+        Vec::new()
+    };
+    let mana_payment_shortcut_actions = if is_actor {
+        engine_mana_payment_shortcut_actions(raw_state, legal_actions_by_object)
+    } else {
+        Vec::new()
+    };
+
+    ServerMessage::StateUpdate {
+        state_revision,
+        state: filtered.clone(),
+        events: Vec::new(),
+        legal_actions: if is_actor {
+            legal_actions.to_vec()
+        } else {
+            Vec::new()
+        },
+        auto_pass_recommended: engine_auto_pass_for_viewer(raw_state, player, legal_actions),
+        end_continuous_effect_offers,
+        mana_payment_shortcut_actions,
+        eliminated_players,
+        log_entries: Vec::new(),
+        spell_costs: if is_actor {
+            spell_costs.clone()
+        } else {
+            HashMap::new()
+        },
+        legal_actions_by_object: if is_actor {
+            object_action_payloads(legal_actions_by_object)
+        } else {
+            HashMap::new()
+        },
+        derived: derive_transport_views(raw_state, &filtered, Some(player)),
+        viewer_interaction: derive_viewer_interaction(raw_state, &filtered, player),
+        rewind_targets,
+    }
+}
+
 /// Build the public spectator view for an in-progress game.
 ///
 /// Spectators are modeled as a non-seat viewer (`PlayerId(u8::MAX)`), which
@@ -893,6 +952,7 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
         ClientMessage::CreateGame { .. }
         | ClientMessage::JoinGame { .. }
         | ClientMessage::Action { .. }
+        | ClientMessage::ResolveAll { .. }
         | ClientMessage::Interaction { .. }
         | ClientMessage::PreviewManaPayment { .. }
         | ClientMessage::Reconnect { .. }
@@ -4112,6 +4172,208 @@ async fn handle_full_game_submission(
     }
 }
 
+/// Handle the authenticated native Resolve All capability. Unlike ordinary
+/// actions, this sends one compact final state snapshot and a requester-only
+/// progress acknowledgement rather than replaying the entire batch event log.
+#[allow(clippy::too_many_arguments)]
+async fn handle_resolve_all(
+    request_id: u64,
+    max_resolutions: u32,
+    socket: &mut WebSocket,
+    state: &SharedState,
+    draft_state: &SharedDraftState,
+    connections: &SharedConnections,
+    tx: &mpsc::UnboundedSender<ServerMessage>,
+    game_db: &SharedGameDb,
+    game_spectators: &SharedGameSpectators,
+    identity: &SocketIdentity,
+) {
+    let (Some(game_code), Some(player_token), Some(requester)) = (
+        identity.game_code.clone(),
+        identity.player_token.clone(),
+        identity.player_id,
+    ) else {
+        let msg = ServerMessage::ActionRejected {
+            reason: "Not in a game".to_string(),
+        };
+        if let Ok(json) = serde_json::to_string(&msg) {
+            let _ = socket.send(Message::text(json)).await;
+        }
+        return;
+    };
+
+    let processed = {
+        let mut mgr = state.lock().await;
+        match mgr.resolve_all_for_player(&game_code, &player_token, max_resolutions) {
+            Ok((transition, summary)) => {
+                let session = mgr
+                    .sessions
+                    .get(&game_code)
+                    .expect("Resolve All retains its session");
+                let eliminated = session.state.eliminated_players.clone();
+                let rewind_targets = session.rewind_options();
+                let player_count = session.player_count;
+                let game_over_winner = match &session.state.waiting_for {
+                    engine::types::game_state::WaitingFor::GameOver { winner } => Some(*winner),
+                    _ => None,
+                };
+                let terminal = if let Some(winner) = game_over_winner {
+                    let ranked_result = ranked_duel_players(session).and_then(|players| {
+                        ranked_result_for_duel(game_db, &game_code, &players, winner)
+                    });
+                    terminal_artifact(session, winner, "Game ended".to_string(), ranked_result)
+                        .map(Some)
+                } else if transition.is_some() {
+                    persist_full_session_async(game_db, session);
+                    Ok(None)
+                } else {
+                    Ok(None)
+                };
+                terminal.map(|terminal| {
+                    (
+                        transition,
+                        summary,
+                        eliminated,
+                        rewind_targets,
+                        player_count,
+                        game_over_winner,
+                        terminal,
+                    )
+                })
+            }
+            Err(error) => Err(error),
+        }
+    };
+
+    let (transition, summary, eliminated, rewind_targets, player_count, game_over_winner, terminal) =
+        match processed {
+            Ok(processed) => processed,
+            Err(reason) => {
+                let msg = ServerMessage::ActionRejected { reason };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
+        };
+
+    let acknowledgement = ServerMessage::ResolveAllResult {
+        request_id,
+        items_resolved: summary.items_resolved,
+        total: summary.total,
+    };
+    let Some((revision, result)) = transition else {
+        let _ = tx.send(acknowledgement);
+        return;
+    };
+    let (raw_state, _events, legal_actions, _logs, _auto_pass, spell_costs, by_object) = &result;
+
+    if let Err(reason) = guard_state_snapshot_broadcast(StateSnapshotParts {
+        state: raw_state,
+        events: &[],
+        log_entries: &[],
+        legal_actions,
+        legal_actions_by_object: by_object,
+        spell_costs,
+    }) {
+        let msg = ServerMessage::error(reason);
+        if let Ok(json) = serde_json::to_string(&msg) {
+            let _ = socket.send(Message::text(json)).await;
+        }
+        return;
+    }
+
+    let terminal_deliveries = match terminal {
+        Some(artifact) => match prepare_full_terminal(game_db, artifact).await {
+            Ok(deliveries) => deliveries,
+            Err(error) => {
+                let msg = ServerMessage::error(error);
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
+        },
+        None => Vec::new(),
+    };
+
+    // Queue the requester's final state and acknowledgement through its direct
+    // sender in order; the adapter resolves only after this cached snapshot.
+    let requester_update = build_resolve_all_state_update_message(
+        raw_state,
+        legal_actions,
+        spell_costs,
+        by_object,
+        revision,
+        requester,
+        eliminated.clone(),
+        rewind_targets.clone(),
+    );
+    let _ = tx.send(requester_update);
+
+    {
+        let conns = connections.lock().await;
+        if let Some(players) = conns.get(&game_code) {
+            for player in 0..player_count {
+                let player = PlayerId(player);
+                if player == requester {
+                    continue;
+                }
+                if let Some(sender) = players.get(&player) {
+                    let _ = sender.send(build_resolve_all_state_update_message(
+                        raw_state,
+                        legal_actions,
+                        spell_costs,
+                        by_object,
+                        revision,
+                        player,
+                        eliminated.clone(),
+                        rewind_targets.clone(),
+                    ));
+                }
+            }
+        }
+    }
+    if let Ok(spectator_update) =
+        build_spectator_state_update_message(raw_state, &[], &[], revision)
+    {
+        let mut spectators = game_spectators.lock().await;
+        if let Some(senders) = spectators.get_mut(&game_code) {
+            senders.retain(|sender| sender.send(spectator_update.clone()).is_ok());
+            if senders.is_empty() {
+                spectators.remove(&game_code);
+            }
+        }
+    }
+    let _ = tx.send(acknowledgement);
+
+    if !terminal_deliveries.is_empty() {
+        let conns = connections.lock().await;
+        if let Some(players) = conns.get(&game_code) {
+            for (player, delivery) in &terminal_deliveries {
+                if *player == requester {
+                    let _ = tx.send(ServerMessage::TerminalResult {
+                        delivery: Some(delivery.clone()),
+                    });
+                } else if let Some(sender) = players.get(player) {
+                    let _ = sender.send(ServerMessage::TerminalResult {
+                        delivery: Some(delivery.clone()),
+                    });
+                }
+            }
+        }
+        drop(conns);
+        report_draft_game_over(
+            draft_state,
+            connections,
+            &game_code,
+            game_over_winner.flatten(),
+        )
+        .await;
+        state.lock().await.remove_game(&game_code);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_client_message(
     client_msg: ClientMessage,
@@ -4480,6 +4742,25 @@ async fn handle_client_message(
                 socket,
                 state,
                 db,
+                draft_state,
+                connections,
+                tx,
+                game_db,
+                game_spectators,
+                identity,
+            )
+            .await;
+        }
+
+        ClientMessage::ResolveAll {
+            request_id,
+            max_resolutions,
+        } => {
+            handle_resolve_all(
+                request_id,
+                max_resolutions,
+                socket,
+                state,
                 draft_state,
                 connections,
                 tx,

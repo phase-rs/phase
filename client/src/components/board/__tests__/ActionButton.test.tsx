@@ -181,6 +181,27 @@ describe("ActionButton", () => {
     ]);
   });
 
+  it("builds the AI seat list for native AI Resolve All", () => {
+    useGameStore.setState({
+      gameMode: "native-ai",
+      gameState: {
+        ...createGameState(priorityPrompt()),
+        phase: "PostCombatMain",
+        auto_pass: {},
+        stack: [spellStackEntry()],
+      },
+      waitingFor: priorityPrompt(),
+      legalActions: [],
+    });
+
+    render(<ActionButton />);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Resolve All/ }));
+    expect(vi.mocked(dispatchResolveAll)).toHaveBeenLastCalledWith(0, [
+      { playerId: 1, difficulty: "Medium" },
+    ]);
+  });
+
   it("uses the live controller's bot seat binding for a Bot draft match", () => {
     useGameStore.setState({
       gameMode: "draft-match",

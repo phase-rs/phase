@@ -153,6 +153,12 @@ pub enum ClientMessage {
     Action {
         action: GameAction,
     },
+    /// Server-authoritative fast-forward of repeated priority passes. The
+    /// authenticated session supplies both the requester and AI seats.
+    ResolveAll {
+        request_id: u64,
+        max_resolutions: u32,
+    },
     /// Read-only simulation of an exact automatic spell-cast action. The
     /// authenticated session, rather than the client, determines the actor.
     PreviewManaPayment {
@@ -498,6 +504,13 @@ pub enum ServerMessage {
     /// transition. The submitting adapter resolves its pending request without
     /// caching or publishing a replacement snapshot.
     ActionNoOp,
+    /// Requester-only acknowledgement for a native Resolve All batch. The
+    /// matching StateUpdate is sent first and carries the authoritative state.
+    ResolveAllResult {
+        request_id: u64,
+        items_resolved: u32,
+        total: u32,
+    },
     /// Acknowledges a host-authorized permanent game cleanup.
     GameAbandoned {
         game_code: String,
@@ -2301,8 +2314,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_27() {
-        assert_eq!(PROTOCOL_VERSION, 27);
+    fn protocol_version_is_28() {
+        assert_eq!(PROTOCOL_VERSION, 28);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -2312,7 +2325,7 @@ mod tests {
     /// understand.
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
-    /// this guards — and this test reds while `protocol_version_is_27` stays
+    /// this guards — and this test reds while `protocol_version_is_28` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
@@ -2332,6 +2345,30 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
         assert!(matches!(parsed, ClientMessage::RequestTakeback(None)));
+    }
+
+    #[test]
+    fn resolve_all_wire_frames_carry_only_server_safe_metadata() {
+        let request = ClientMessage::ResolveAll {
+            request_id: 7,
+            max_resolutions: 5_000,
+        };
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"type":"ResolveAll","data":{"request_id":7,"max_resolutions":5000}}"#
+        );
+
+        let result = ServerMessage::ResolveAllResult {
+            request_id: 7,
+            items_resolved: 3,
+            total: 52,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"ResolveAllResult","data":{"request_id":7,"items_resolved":3,"total":52}}"#
+        );
+        assert!(!json.contains("waiting_for"));
     }
 
     /// R15. The last-action frame the client actually sends carries **no**
