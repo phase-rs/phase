@@ -83,24 +83,48 @@
     "autoPick": "Sélection auto"
   },
   "sealedOpening": {
-    "title": "Open your sealed pool",
-    "subtitle": "Open six packs, one at a time.",
-    "packProgress": "Pack {{current}} of {{total}}",
-    "openPack": "Open pack",
-    "openPackArt": "Open pack artwork",
-    "pulls": "Your pulls",
-    "nextPack": "Next pack",
-    "viewPool": "View your pool",
-    "poolTitle": "Your sealed pool",
-    "poolSubtitle": "All {{count}} cards, grouped by type.",
-    "buildDeck": "Build deck"
+    "title": "Ouvrez votre pool scellé",
+    "subtitle": "Ouvrez six boosters, un à la fois.",
+    "packProgress": "Booster {{current}} sur {{total}}",
+    "openPack": "Ouvrir le booster",
+    "openPackArt": "Ouvrir l’illustration du booster",
+    "pulls": "Vos cartes",
+    "nextPack": "Booster suivant",
+    "viewPool": "Voir votre pool",
+    "poolTitle": "Votre pool scellé",
+    "poolSubtitle": "Les {{count}} cartes, regroupées par type.",
+    "buildDeck": "Construire le deck"
   },
   "pool": {
     "cardsDrafted": "{{count}} cartes draftées",
     "empty": "Aucune carte draftée pour l'instant",
     "sortColor": "Couleur",
     "sortType": "Type",
-    "sortCmc": "CMC"
+    "sortCmc": "CMC",
+    "groups": {
+      "white": "Blanc",
+      "blue": "Bleu",
+      "black": "Noir",
+      "red": "Rouge",
+      "green": "Vert",
+      "multicolor": "Multicolore",
+      "colorless": "Incolore",
+      "creature": "Créature",
+      "instant": "Éphémère",
+      "sorcery": "Rituel",
+      "enchantment": "Enchantement",
+      "artifact": "Artefact",
+      "planeswalker": "Planeswalker",
+      "land": "Terrain",
+      "other": "Autre",
+      "manaValue0": "0 CMC",
+      "manaValue1": "1 CMC",
+      "manaValue2": "2 CMC",
+      "manaValue3": "3 CMC",
+      "manaValue4": "4 CMC",
+      "manaValue5": "5 CMC",
+      "manaValue6Plus": "6+ CMC"
+    }
   },
   "standings": {
     "title": "Classement — Manche {{round}}",
@@ -144,7 +168,7 @@
     },
     "sealed": {
       "title": "Sealed",
-      "description": "Open six packs, review the full pool, then build a 40-card deck for a Bo1 match."
+      "description": "Ouvrez six boosters, consultez le pool complet, puis construisez un deck de 40 cartes pour un match en une partie."
     },
     "cubeDraft": {
       "title": "Cube Draft",
@@ -176,7 +200,7 @@
   },
   "quickPhase": {
     "drafting": "Draft",
-    "opening": "Opening Packs",
+    "opening": "Ouverture des boosters",
     "deckbuilding": "Construction de deck",
     "matchRecord": "Match {{number}} — {{wins}}V-{{losses}}D",
     "record": "{{wins}}V-{{losses}}D",

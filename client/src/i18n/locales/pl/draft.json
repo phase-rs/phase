@@ -83,24 +83,48 @@
     "autoPick": "Wybór automatyczny"
   },
   "sealedOpening": {
-    "title": "Open your sealed pool",
-    "subtitle": "Open six packs, one at a time.",
-    "packProgress": "Pack {{current}} of {{total}}",
-    "openPack": "Open pack",
-    "openPackArt": "Open pack artwork",
-    "pulls": "Your pulls",
-    "nextPack": "Next pack",
-    "viewPool": "View your pool",
-    "poolTitle": "Your sealed pool",
-    "poolSubtitle": "All {{count}} cards, grouped by type.",
-    "buildDeck": "Build deck"
+    "title": "Otwórz swoją pulę Sealed",
+    "subtitle": "Otwórz sześć boosterów, po jednym na raz.",
+    "packProgress": "Booster {{current}} z {{total}}",
+    "openPack": "Otwórz booster",
+    "openPackArt": "Otwórz grafikę boostera",
+    "pulls": "Twoje karty",
+    "nextPack": "Następny booster",
+    "viewPool": "Zobacz swoją pulę",
+    "poolTitle": "Twoja pula Sealed",
+    "poolSubtitle": "Wszystkie {{count}} karty, pogrupowane według typu.",
+    "buildDeck": "Zbuduj talię"
   },
   "pool": {
     "cardsDrafted": "{{count}} wybranych kart",
     "empty": "Nie wybrano jeszcze żadnych kart",
     "sortColor": "Kolor",
     "sortType": "Typ",
-    "sortCmc": "CMC"
+    "sortCmc": "CMC",
+    "groups": {
+      "white": "Biały",
+      "blue": "Niebieski",
+      "black": "Czarny",
+      "red": "Czerwony",
+      "green": "Zielony",
+      "multicolor": "Wielokolorowy",
+      "colorless": "Bezkolorowy",
+      "creature": "Stworzenie",
+      "instant": "Instant",
+      "sorcery": "Sorcery",
+      "enchantment": "Enchantment",
+      "artifact": "Artefakt",
+      "planeswalker": "Planeswalker",
+      "land": "Ląd",
+      "other": "Inne",
+      "manaValue0": "0 CMC",
+      "manaValue1": "1 CMC",
+      "manaValue2": "2 CMC",
+      "manaValue3": "3 CMC",
+      "manaValue4": "4 CMC",
+      "manaValue5": "5 CMC",
+      "manaValue6Plus": "6+ CMC"
+    }
   },
   "standings": {
     "title": "Klasyfikacja — Runda {{round}}",
@@ -144,7 +168,7 @@
     },
     "sealed": {
       "title": "Sealed",
-      "description": "Open six packs, review the full pool, then build a 40-card deck for a Bo1 match."
+      "description": "Otwórz sześć boosterów, przejrzyj całą pulę, a potem zbuduj talię z 40 kart na mecz Bo1."
     },
     "cubeDraft": {
       "title": "Draft kostki",
@@ -176,7 +200,7 @@
   },
   "quickPhase": {
     "drafting": "Draftowanie",
-    "opening": "Opening Packs",
+    "opening": "Otwieranie boosterów",
     "deckbuilding": "Budowanie talii",
     "matchRecord": "Mecz {{number}} — {{wins}}W-{{losses}}P",
     "record": "{{wins}}W-{{losses}}P",

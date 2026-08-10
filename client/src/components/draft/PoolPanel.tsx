@@ -1,15 +1,26 @@
-import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useDraftStore } from "../../stores/draftStore";
 import type { PoolSortMode } from "../../stores/draftStore";
-import type { DraftPlayerView } from "../../adapter/draft-adapter";
+import type { DraftPoolColorCounts, DraftPlayerView } from "../../adapter/draft-adapter";
 import type { CardHoverInfo } from "../card/CardPreview";
-import { groupDraftPool } from "./poolGrouping";
+import { POOL_GROUP_LABEL_KEYS } from "./poolGroupLabels";
 
-// ── Sorting helpers ─────────────────────────────────────────────────────
-// These are display-layer grouping of engine-provided enriched fields
-// (DraftCardInstance.colors, cmc, type_line) — not game logic computation.
+const EMPTY_COLOR_COUNTS: DraftPoolColorCounts = {
+  white: 0,
+  blue: 0,
+  black: 0,
+  red: 0,
+  green: 0,
+};
+
+const COLOR_COUNT_KEYS = {
+  W: "white",
+  U: "blue",
+  B: "black",
+  R: "red",
+  G: "green",
+} as const;
 
 // ── Rarity badge ────────────────────────────────────────────────────────
 
@@ -74,25 +85,15 @@ export function PoolPanel({ onCardHover, view: viewOverride }: PoolPanelProps = 
   const togglePoolPanel = useDraftStore((s) => s.togglePoolPanel);
   const view = viewOverride !== undefined ? viewOverride : quickView;
 
-  const pool = useMemo(() => view?.pool ?? [], [view?.pool]);
-
-  const groups = useMemo(
-    () => groupDraftPool(pool, poolSortMode),
-    [pool, poolSortMode],
-  );
-
-  // WUBRG pool tally — a multicolor card counts toward each of its colors
-  // (standard draft-tracker convention), so the strip reads as "how deep am I
-  // in each color" rather than a mono-only count.
-  const colorCounts = useMemo(() => {
-    const counts: Record<string, number> = { W: 0, U: 0, B: 0, R: 0, G: 0 };
-    for (const card of pool) {
-      for (const color of card.colors) {
-        if (color in counts) counts[color]++;
-      }
-    }
-    return counts;
-  }, [pool]);
+  const pool = view?.pool ?? [];
+  const groups = view
+    ? poolSortMode === "color"
+      ? view.pool_groups.color_groups
+      : poolSortMode === "type"
+        ? view.pool_groups.type_groups
+        : view.pool_groups.cmc_groups
+    : [];
+  const colorCounts = view?.pool_groups.color_counts ?? EMPTY_COLOR_COUNTS;
 
   return (
     <div className="flex h-full flex-col">
@@ -119,8 +120,8 @@ export function PoolPanel({ onCardHover, view: viewOverride }: PoolPanelProps = 
             {(["W", "U", "B", "R", "G"] as const).map((c) => (
               <div key={c} className="flex flex-col items-center gap-1 rounded-[8px] bg-black/24 py-1.5">
                 <span className={`h-3 w-3 rounded-full ${COLOR_PIP[c]} shadow-[inset_0_0_0_1px_rgba(0,0,0,0.3)]`} />
-                <span className={`font-mono text-[11px] tabular-nums ${colorCounts[c] ? "text-slate-300" : "text-slate-600"}`}>
-                  {colorCounts[c]}
+                <span className={`font-mono text-[11px] tabular-nums ${colorCounts[COLOR_COUNT_KEYS[c]] ? "text-slate-300" : "text-slate-600"}`}>
+                  {colorCounts[COLOR_COUNT_KEYS[c]]}
                 </span>
               </div>
             ))}
@@ -146,9 +147,9 @@ export function PoolPanel({ onCardHover, view: viewOverride }: PoolPanelProps = 
           {/* Card groups */}
           <div className="flex-1 space-y-3 overflow-y-auto px-3 py-2">
             {groups.map((group) => (
-              <div key={group.label}>
+              <div key={group.kind}>
                 <div className="mb-1 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
-                  {group.label} ({group.cards.length})
+                  {t(POOL_GROUP_LABEL_KEYS[group.kind])} ({group.cards.length})
                 </div>
                 <div className="space-y-0.5">
                   {group.cards.map(({ card, count }) => (

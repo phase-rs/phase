@@ -14,6 +14,63 @@ export interface DraftCardInstance {
   type_line: string;
 }
 
+export type DraftPoolGroupKind =
+  | "white"
+  | "blue"
+  | "black"
+  | "red"
+  | "green"
+  | "multicolor"
+  | "colorless"
+  | "creature"
+  | "instant"
+  | "sorcery"
+  | "enchantment"
+  | "artifact"
+  | "planeswalker"
+  | "land"
+  | "other"
+  | "mana_value_0"
+  | "mana_value_1"
+  | "mana_value_2"
+  | "mana_value_3"
+  | "mana_value_4"
+  | "mana_value_5"
+  | "mana_value_6_plus";
+
+export interface DraftPoolEntry {
+  card: DraftCardInstance;
+  count: number;
+}
+
+export interface DraftPoolGroup {
+  kind: DraftPoolGroupKind;
+  cards: DraftPoolEntry[];
+}
+
+export interface DraftPoolColorCounts {
+  white: number;
+  blue: number;
+  black: number;
+  red: number;
+  green: number;
+}
+
+export interface DraftPoolGroups {
+  color_groups: DraftPoolGroup[];
+  type_groups: DraftPoolGroup[];
+  cmc_groups: DraftPoolGroup[];
+  color_counts: DraftPoolColorCounts;
+}
+
+/** Empty engine-shaped pool data for a lobby before a draft session exists. */
+export const EMPTY_DRAFT_POOL_GROUPS: DraftPoolGroups = {
+  color_groups: [],
+  type_groups: [],
+  cmc_groups: [],
+  color_counts: { white: 0, blue: 0, black: 0, red: 0, green: 0 },
+};
+
 // @sync-with: crates/draft-core/src/view.rs
 export interface SeatPublicView {
   seat_index: number;
@@ -111,6 +168,8 @@ export interface DraftPlayerView {
   pass_direction: "Left" | "Right";
   current_pack: DraftCardInstance[] | null;
   pool: DraftCardInstance[];
+  /** Engine-owned grouping, ordering, and duplicate counts for the pool. */
+  pool_groups: DraftPoolGroups;
   /** Engine-provided sealed packs in opening order. Absent for draft events. */
   sealed_packs?: DraftCardInstance[][] | null;
   seats: SeatPublicView[];

@@ -2085,17 +2085,60 @@ mod tests {
     #[test]
     fn server_message_draft_state_update_roundtrips() {
         use draft_core::types::*;
-        use draft_core::view::DraftPlayerView;
+        use draft_core::view::{DraftPlayerView, DraftPoolGroups};
 
         let view = DraftPlayerView {
-            status: DraftStatus::Drafting,
-            kind: DraftKind::Premier,
+            status: DraftStatus::Deckbuilding,
+            kind: DraftKind::Sealed,
             current_pack_number: 0,
             pick_number: 2,
             pass_direction: PassDirection::Left,
             current_pack: None,
-            pool: Vec::new(),
-            sealed_packs: None,
+            pool: vec![
+                DraftCardInstance {
+                    instance_id: "pack-1-card-1".to_string(),
+                    name: "First Pull".to_string(),
+                    set_code: "TST".to_string(),
+                    collector_number: "1".to_string(),
+                    rarity: "common".to_string(),
+                    colors: vec!["W".to_string()],
+                    cmc: 1,
+                    type_line: "Creature — Test".to_string(),
+                },
+                DraftCardInstance {
+                    instance_id: "pack-2-card-1".to_string(),
+                    name: "Second Pull".to_string(),
+                    set_code: "TST".to_string(),
+                    collector_number: "2".to_string(),
+                    rarity: "uncommon".to_string(),
+                    colors: vec!["U".to_string()],
+                    cmc: 2,
+                    type_line: "Instant".to_string(),
+                },
+            ],
+            pool_groups: DraftPoolGroups::default(),
+            sealed_packs: Some(vec![
+                vec![DraftCardInstance {
+                    instance_id: "pack-1-card-1".to_string(),
+                    name: "First Pull".to_string(),
+                    set_code: "TST".to_string(),
+                    collector_number: "1".to_string(),
+                    rarity: "common".to_string(),
+                    colors: vec!["W".to_string()],
+                    cmc: 1,
+                    type_line: "Creature — Test".to_string(),
+                }],
+                vec![DraftCardInstance {
+                    instance_id: "pack-2-card-1".to_string(),
+                    name: "Second Pull".to_string(),
+                    set_code: "TST".to_string(),
+                    collector_number: "2".to_string(),
+                    rarity: "uncommon".to_string(),
+                    colors: vec!["U".to_string()],
+                    cmc: 2,
+                    type_line: "Instant".to_string(),
+                }],
+            ]),
             seats: Vec::new(),
             cards_per_pack: 14,
             pack_count: 3,
@@ -2107,16 +2150,29 @@ mod tests {
             tournament_format: TournamentFormat::Swiss,
             pod_policy: PodPolicy::Competitive,
             pairings: Vec::new(),
-            match_config: DraftKind::Premier.match_config(),
+            match_config: DraftKind::Sealed.match_config(),
         };
         let msg = ServerMessage::DraftStateUpdate { view: view.clone() };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ServerMessage::DraftStateUpdate { view: v } => {
-                assert_eq!(v.status, DraftStatus::Drafting);
+                assert_eq!(v.status, DraftStatus::Deckbuilding);
                 assert_eq!(v.pick_number, 2);
                 assert_eq!(v.timer_remaining_ms, Some(5000));
+                assert_eq!(
+                    v.sealed_packs
+                        .as_ref()
+                        .expect("sealed packs survive JSON transport")
+                        .iter()
+                        .map(|pack| {
+                            pack.iter()
+                                .map(|card| card.instance_id.as_str())
+                                .collect::<Vec<_>>()
+                        })
+                        .collect::<Vec<_>>(),
+                    vec![vec!["pack-1-card-1"], vec!["pack-2-card-1"]]
+                );
             }
             _ => panic!("wrong variant"),
         }

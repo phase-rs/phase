@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
-import type { DraftCardInstance, DraftPlayerView } from "../../adapter/draft-adapter";
+import type { DraftCardInstance, DraftPoolGroup, DraftPlayerView } from "../../adapter/draft-adapter";
 import { useCardImage } from "../../hooks/useCardImage";
 import { menuButtonClass } from "../menu/buttonStyles";
-import { groupDraftPoolByType } from "./poolGrouping";
+import { POOL_GROUP_LABEL_KEYS } from "./poolGroupLabels";
 
 interface SealedPackOpeningProps {
   view: DraftPlayerView;
@@ -124,20 +124,23 @@ function OpenedPack({ cards, packNumber, packCount, onNext }: {
   );
 }
 
-function SealedPoolReview({ pool, onComplete }: { pool: DraftCardInstance[]; onComplete: () => void }) {
+function SealedPoolReview({ groups, poolSize, onComplete }: {
+  groups: DraftPoolGroup[];
+  poolSize: number;
+  onComplete: () => void;
+}) {
   const { t } = useTranslation("draft");
-  const groups = useMemo(() => groupDraftPoolByType(pool), [pool]);
 
   return (
     <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="flex flex-col gap-7">
       <div className="text-center">
         <h2 className="menu-display text-3xl text-white">{t("sealedOpening.poolTitle")}</h2>
-        <p className="mt-2 text-sm text-white/50">{t("sealedOpening.poolSubtitle", { count: pool.length })}</p>
+        <p className="mt-2 text-sm text-white/50">{t("sealedOpening.poolSubtitle", { count: poolSize })}</p>
       </div>
       {groups.map((group) => (
-        <section key={group.label}>
+        <section key={group.kind}>
           <h3 className="mb-3 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-400">
-            {group.label} ({group.cards.length})
+            {t(POOL_GROUP_LABEL_KEYS[group.kind])} ({group.cards.length})
           </h3>
           <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8">
             {group.cards.map(({ card, count }, index) => (
@@ -189,7 +192,12 @@ export function SealedPackOpening({ view, onComplete }: SealedPackOpeningProps) 
       )}
       <AnimatePresence mode="wait">
         {showReview ? (
-          <SealedPoolReview key="pool-review" pool={view.pool} onComplete={onComplete} />
+          <SealedPoolReview
+            key="pool-review"
+            groups={view.pool_groups.type_groups}
+            poolSize={view.pool.length}
+            onComplete={onComplete}
+          />
         ) : opened ? (
           <OpenedPack
             key={`opened-${packIndex}`}

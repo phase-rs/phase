@@ -12,7 +12,7 @@
 import type Peer from "peerjs";
 import type { DataConnection } from "peerjs";
 
-import { DraftAdapter } from "./draft-adapter";
+import { DraftAdapter, EMPTY_DRAFT_POOL_GROUPS } from "./draft-adapter";
 import type { DraftPlayerView, MultiplayerSeatDescriptor, PairingView, PoolInput, SeatPublicView } from "./draft-adapter";
 import type { PodPolicy, TournamentFormat } from "./draft-adapter";
 import {
@@ -2015,6 +2015,7 @@ export class P2PDraftHost {
       pass_direction: "Left",
       current_pack: null,
       pool: [],
+      pool_groups: EMPTY_DRAFT_POOL_GROUPS,
       seats: this.buildSeatPublicViews(),
       cards_per_pack: 14,
       pack_count: 3,

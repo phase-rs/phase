@@ -10,8 +10,8 @@ import type { DraftP2PMessage } from "../draftProtocol";
 
 describe("draftProtocol", () => {
   describe("DRAFT_PROTOCOL_VERSION", () => {
-    it("is version 8", () => {
-      expect(DRAFT_PROTOCOL_VERSION).toBe(8);
+    it("is version 9", () => {
+      expect(DRAFT_PROTOCOL_VERSION).toBe(9);
     });
   });
 
@@ -108,8 +108,8 @@ describe("draftProtocol", () => {
     it("round-trips a large message (gzip path)", async () => {
       // Build a message large enough to trigger compression
       const longView = {
-        status: "Drafting",
-        kind: "Premier",
+        status: "Deckbuilding",
+        kind: "Sealed",
         current_pack_number: 1,
         pick_number: 3,
         pass_direction: "Left",
@@ -123,7 +123,56 @@ describe("draftProtocol", () => {
           cmc: i % 7,
           type_line: "Creature - Human Wizard",
         })),
-        pool: [],
+        pool: [
+          {
+            instance_id: "pack-1-card-1",
+            name: "First Pull",
+            set_code: "TST",
+            collector_number: "101",
+            rarity: "common",
+            colors: ["W"],
+            cmc: 1,
+            type_line: "Creature — Test",
+          },
+          {
+            instance_id: "pack-2-card-1",
+            name: "Second Pull",
+            set_code: "TST",
+            collector_number: "102",
+            rarity: "uncommon",
+            colors: ["U"],
+            cmc: 2,
+            type_line: "Instant",
+          },
+        ],
+        pool_groups: {
+          color_groups: [],
+          type_groups: [],
+          cmc_groups: [],
+          color_counts: { white: 1, blue: 1, black: 0, red: 0, green: 0 },
+        },
+        sealed_packs: [
+          [{
+            instance_id: "pack-1-card-1",
+            name: "First Pull",
+            set_code: "TST",
+            collector_number: "101",
+            rarity: "common",
+            colors: ["W"],
+            cmc: 1,
+            type_line: "Creature — Test",
+          }],
+          [{
+            instance_id: "pack-2-card-1",
+            name: "Second Pull",
+            set_code: "TST",
+            collector_number: "102",
+            rarity: "uncommon",
+            colors: ["U"],
+            cmc: 2,
+            type_line: "Instant",
+          }],
+        ],
         seats: [],
         cards_per_pack: 14,
         pack_count: 3,
@@ -141,6 +190,9 @@ describe("draftProtocol", () => {
 
       const decoded = await decodeDraftWireMessage(encoded);
       expect(decoded).toEqual(msg);
+      if (decoded.type === "draft_state_update") {
+        expect(decoded.view.sealed_packs).toEqual(longView.sealed_packs);
+      }
     });
 
     it("round-trips a deck-carrying draft match start message", async () => {

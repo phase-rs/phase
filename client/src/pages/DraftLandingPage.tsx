@@ -93,7 +93,7 @@ export function DraftLandingPage() {
 
             {/* Same bento action tiles as the home dashboard — one accent tone
                 per mode — so the draft landing shares the home card grammar. */}
-            <div className="grid grid-cols-1 gap-4 min-[640px]:grid-cols-2 xl:grid-cols-4">
+            <div className="grid grid-cols-1 gap-4 min-[640px]:grid-cols-2">
               <MenuActionTile
                 tone="arcane"
                 motif="pack"

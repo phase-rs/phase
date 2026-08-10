@@ -100,7 +100,31 @@
     "empty": "No cards drafted yet",
     "sortColor": "Color",
     "sortType": "Type",
-    "sortCmc": "CMC"
+    "sortCmc": "CMC",
+    "groups": {
+      "white": "White",
+      "blue": "Blue",
+      "black": "Black",
+      "red": "Red",
+      "green": "Green",
+      "multicolor": "Multicolor",
+      "colorless": "Colorless",
+      "creature": "Creature",
+      "instant": "Instant",
+      "sorcery": "Sorcery",
+      "enchantment": "Enchantment",
+      "artifact": "Artifact",
+      "planeswalker": "Planeswalker",
+      "land": "Land",
+      "other": "Other",
+      "manaValue0": "0 CMC",
+      "manaValue1": "1 CMC",
+      "manaValue2": "2 CMC",
+      "manaValue3": "3 CMC",
+      "manaValue4": "4 CMC",
+      "manaValue5": "5 CMC",
+      "manaValue6Plus": "6+ CMC"
+    }
   },
   "standings": {
     "title": "Standings — Round {{round}}",
