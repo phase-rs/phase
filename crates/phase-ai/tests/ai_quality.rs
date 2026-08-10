@@ -802,8 +802,8 @@ fn mixed_damage_and_destroy_all_is_not_penalized_as_a_damage_whiff() {
     );
 }
 
-/// Production-pipeline differential pinning BOTH seams that the whiff-gate
-/// blocker fix restores for a MIXED wipe spell on a board whose only opposing
+/// Production-pipeline differential pinning BOTH seams restored by the
+/// whiff-gate fix, for a MIXED wipe spell on a board whose only opposing
 /// creature is HEXPROOF:
 ///
 /// * **Targeting is gated, the wipe population is not.** Hexproof (CR 702.11b)
@@ -832,7 +832,7 @@ fn mixed_damage_and_destroy_all_is_not_penalized_as_a_damage_whiff() {
 ///      hard-REJECTED by `is_redundant_creature_only_removal` (its creature-only
 ///      half has no live opponent target on a hexproof board), so the
 ///      `CastSpell` reach-guard on M fails (only `PassPriority` is offered).
-///   2. **anti_self_harm :397 rescue** — pre-rescue M carries the -8
+///   2. **anti_self_harm no-target rescue** — pre-rescue M carries the -8
 ///      `wasted_cast_penalty` no-target penalty (M ≈ R − 8), failing the
 ///      differential; post-rescue M ≈ R.
 #[test]

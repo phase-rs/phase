@@ -1694,8 +1694,8 @@ mod tests {
     /// creature is HEXPROOF. The wipe is NON-targeted (CR 115.10a), so the
     /// hexproof 3/3 is in its resolver population even though it has no legal
     /// target (hexproof gates targeting only, CR 702.11b). This is the
-    /// population truth that rescues the mixed spell from the :397 no-target
-    /// penalty.
+    /// population truth that rescues the mixed spell from the no-target
+    /// penalty in `anti_self_harm::score_pre_cast`.
     #[test]
     fn seam_has_opposing_mass_population_counts_hexproof_opponent() {
         let mut state = make_state();
