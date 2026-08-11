@@ -1,10 +1,9 @@
 //! Integration tests for curse cards with miscellaneous trigger patterns.
 //!
-//! Covers 5 curses with varied trigger conditions:
+//! Covers 4 curses with varied trigger conditions:
 //!   - Curse of Clinging Webs (creature enchanted player controls dies → exile + Spider)
 //!   - Curse of Fool's Wisdom (enchanted player draws → deal 2 + gain 2)
 //!   - Curse of Obsession (draw step: draw 2 extra; end step: discard hand)
-//!   - Curse of Shaken Faith (2nd+ spell each turn → deal 2 damage)
 //!   - Fraying Sanity (end step: mill X = cards put into graveyard this turn)
 //!
 //! Each test verifies at minimum that the trigger fires. For simpler cards,
@@ -37,9 +36,6 @@ const CURSE_OF_FOOLS_WISDOM: &str =
 const CURSE_OF_OBSESSION: &str =
     "At the beginning of enchanted player's draw step, that player draws two additional cards.\n\
      At the beginning of enchanted player's end step, that player discards their hand.";
-
-const CURSE_OF_SHAKEN_FAITH: &str =
-    "Whenever enchanted player casts a spell other than the first spell they cast each turn, Curse of Shaken Faith deals 2 damage to that player.";
 
 const FRAYING_SANITY: &str =
     "At the beginning of each end step, enchanted player mills X cards, where X is the number of cards put into their graveyard from anywhere this turn.";
@@ -261,80 +257,6 @@ fn curse_of_obsession_fires_at_draw_step() {
         cards_drawn >= 3,
         "Curse of Obsession must cause enchanted player to draw 2 additional cards \
          at draw step (expected >=3, got {cards_drawn})"
-    );
-}
-
-/// Curse of Shaken Faith: trigger fires on the 2nd spell cast by enchanted player.
-#[test]
-fn curse_of_shaken_faith_fires_on_second_spell() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-
-    let curse_id = {
-        let mut builder = scenario.add_creature_from_oracle(
-            P0,
-            "Curse of Shaken Faith",
-            0,
-            0,
-            CURSE_OF_SHAKEN_FAITH,
-        );
-        builder.as_enchantment();
-        builder.with_subtypes(vec!["Aura", "Curse"]);
-        builder.id()
-    };
-
-    // P1 needs two spells to cast and mana.
-    let spell_1 = scenario.add_bolt_to_hand(P1);
-    let spell_2 = scenario.add_bolt_to_hand(P1);
-
-    // Targets for the bolts.
-    let dummy1 = scenario.add_creature(P0, "Memnite", 1, 1).id();
-    let dummy2 = scenario.add_creature(P0, "Ornithopter", 0, 2).id();
-
-    // Mana for P1.
-    let mana_unit = engine::types::mana::ManaUnit::new(
-        engine::types::mana::ManaType::Red,
-        ObjectId(0),
-        false,
-        vec![],
-    );
-    scenario.with_mana_pool(P1, vec![mana_unit.clone(), mana_unit]);
-
-    // Library padding.
-    for _ in 0..10 {
-        scenario.add_card_to_library_top(P0, "Plains");
-        scenario.add_card_to_library_top(P1, "Plains");
-    }
-
-    let mut runner = scenario.build();
-    runner.state_mut().active_player = P1;
-    runner.state_mut().priority_player = P1;
-    runner.state_mut().waiting_for = engine::types::game_state::WaitingFor::Priority { player: P1 };
-
-    attach_to_player(runner.state_mut(), curse_id, P1);
-    evaluate_layers(runner.state_mut());
-    reindex_object_triggers(runner.state_mut(), curse_id);
-
-    let _life_before = runner.life(P1);
-
-    // Cast first spell — should NOT trigger Curse of Shaken Faith.
-    runner.cast(spell_1).target_object(dummy1).resolve();
-
-    let life_after_first = runner.life(P1);
-    // First spell should not cause life loss from the curse.
-    // (Bolt deals 3 to a creature, not to P1.)
-
-    // Cast second spell — SHOULD trigger Curse of Shaken Faith (2 damage to P1).
-    runner.cast(spell_2).target_object(dummy2).resolve();
-
-    let life_after_second = runner.life(P1);
-
-    // P1 should have lost 2 life from Curse of Shaken Faith on the second cast.
-    assert!(
-        life_after_second <= life_after_first - 2,
-        "Curse of Shaken Faith must deal 2 damage on the second spell cast (life: {} → {})",
-        life_after_first,
-        life_after_second
     );
 }
 

@@ -15978,9 +15978,11 @@ fn parse_other_than_first_spell_trigger(input: &str) -> OtherThanFirstSpellParse
     .parse(after_actor) else {
         return OtherThanFirstSpellParse::NotCandidate;
     };
-    let Ok((after_repeated, repeated_qualifier)) =
-        terminated(take_until(" spell "), tag(" spell ")).parse(after_marker)
-    else {
+    let Ok((after_repeated, repeated_qualifier)) = alt((
+        terminated(take_until(" spell "), tag(" spell ")),
+        value("", tag::<_, _, OracleError<'_>>("spell ")),
+    ))
+    .parse(after_marker) else {
         return OtherThanFirstSpellParse::Rejected;
     };
     let pronoun_is_valid = match actor {

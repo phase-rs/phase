@@ -11324,6 +11324,21 @@ fn trigger_other_than_first_supports_you_and_any_player_actors() {
             filter: Some(TargetFilter::Typed(TypedFilter { ref type_filters, .. })),
         }) if type_filters == &vec![TypeFilter::Creature]
     ));
+
+    let untyped = parse_trigger_line(
+        "Whenever a player casts a spell other than the first spell that player casts each turn, draw a card.",
+        "Untyped nonfirst fixture",
+    );
+    assert_eq!(untyped.mode, TriggerMode::SpellCast);
+    assert_eq!(untyped.valid_target, None);
+    assert_eq!(
+        untyped.constraint,
+        Some(TriggerConstraint::NthSpellThisTurn {
+            n: 1,
+            comparator: Comparator::GT,
+            filter: None,
+        })
+    );
 }
 
 #[test]
