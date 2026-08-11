@@ -6,8 +6,8 @@ use crate::game::combat::AttackTarget;
 use crate::game::zones::create_object;
 use crate::parser::oracle::parse_oracle_text;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect,
-    EffectScope, FilterProp, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, Comparator, ControllerRef,
+    Effect, EffectScope, FilterProp, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef,
     ReplacementDefinition, ReplacementMode, ResolvedAbility, TapStateChange, TargetFilter,
     TargetRef, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
 };
@@ -1174,6 +1174,7 @@ fn setup_esper_sentinel_unless_payment(pay_mana: bool) -> GameState {
             ))
             .constraint(TriggerConstraint::NthSpellThisTurn {
                 n: 1,
+                comparator: Comparator::EQ,
                 filter: Some(TargetFilter::Typed(
                     TypedFilter::default()
                         .with_type(TypeFilter::Non(Box::new(TypeFilter::Creature))),

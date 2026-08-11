@@ -4168,10 +4168,21 @@ fn fmt_trigger_constraint(c: &crate::types::ability::TriggerConstraint) -> Strin
         TC::OncePerTurn => "once per turn".into(),
         TC::OncePerGame => "once per game".into(),
         TC::OnlyDuringYourTurn => "only during your turn".into(),
-        TC::NthSpellThisTurn { n, filter } => match filter {
-            Some(f) => format!("on your {n}th {} spell this turn", fmt_target(f)),
-            None => format!("on your {n}th spell this turn"),
-        },
+        TC::NthSpellThisTurn {
+            n,
+            comparator,
+            filter,
+        } => {
+            let ordinal = match comparator {
+                Comparator::EQ => format!("your {n}th"),
+                Comparator::GT if *n == 1 => "after your first".to_string(),
+                _ => format!("when your spell count {} {n}", fmt_comparator(comparator)),
+            };
+            match filter {
+                Some(f) => format!("on {ordinal} {} spell this turn", fmt_target(f)),
+                None => format!("on {ordinal} spell this turn"),
+            }
+        }
         TC::NthDrawThisTurn { n } => format!("on your {n}th draw this turn"),
         TC::OnlyDuringOpponentsTurn => "only during opponent's turn".into(),
         TC::OnlyDuringYourMainPhase => "only during your main phase".into(),

@@ -9539,7 +9539,11 @@ fn check_trigger_constraint_with_ref(
         // CR 603.2: Per-caster spell count. The caster is extracted from the SpellCast
         // event; the count comes from the per-player map (not the global counter).
         // When `filter` contains `TypeFilter::Non(Creature)`, use the noncreature counter.
-        TriggerConstraint::NthSpellThisTurn { n, filter } => {
+        TriggerConstraint::NthSpellThisTurn {
+            n,
+            comparator,
+            filter,
+        } => {
             let caster = match event {
                 Some(GameEvent::SpellCast { controller: c, .. }) => *c,
                 _ => return false,
@@ -9571,7 +9575,7 @@ fn check_trigger_constraint_with_ref(
                     })
                     .count() as u32,
             });
-            count == *n
+            comparator.evaluate(count as i32, *n as i32)
         }
         // CR 121.2: Use the ordinal stamped onto the individual draw event
         // rather than the final per-turn count after a multi-card draw batch.
@@ -25606,6 +25610,7 @@ pub mod tests {
             let mut d = make_trigger(TriggerMode::SpellCast);
             d.constraint = Some(TriggerConstraint::NthSpellThisTurn {
                 n: 1,
+                comparator: Comparator::EQ,
                 filter: Some(TargetFilter::Typed(
                     TypedFilter::default().properties(vec![FilterProp::HasXInManaCost]),
                 )),
@@ -25833,7 +25838,11 @@ pub mod tests {
                     .valid_target(TargetFilter::Typed(
                         TypedFilter::default().controller(ControllerRef::You),
                     ))
-                    .constraint(TriggerConstraint::NthSpellThisTurn { n: 2, filter: None })
+                    .constraint(TriggerConstraint::NthSpellThisTurn {
+                        n: 2,
+                        comparator: Comparator::EQ,
+                        filter: None,
+                    })
                     .execute(AbilityDefinition::new(
                         AbilityKind::Database,
                         Effect::Draw {
