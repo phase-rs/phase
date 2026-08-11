@@ -790,6 +790,33 @@ pub fn choose_blockers_with_profile(
         .collect();
     let blocker_value = |id: &ObjectId| -> f64 { blocker_values.get(id).copied().unwrap_or(0.0) };
 
+    // CR 509.1b + CR 702.111b: the minimum number of creatures that must block a
+    // given attacker. Menace is only the most common source of that floor — a
+    // `MinBlockers` restriction ("can't be blocked except by three or more
+    // creatures", e.g. Pathrazer of Ulamog) imposes an arbitrary one, and every
+    // pass below must respect it or the declaration it builds is illegal and gets
+    // rewritten to the empty witness by `complete_blocker_proposal` (issue #7183).
+    //
+    // `min_blockers_required` is the engine's single authority for the floor — the
+    // same value `validate_blockers` enforces and `block_requirements_for_player`
+    // shows the UI — so the AI can never plan against a rule different from the one
+    // enforced. Read through it rather than through `block_requirements_for_player`
+    // because that helper derives from `state.combat`, which callers that evaluate
+    // a hypothetical block (lookahead, tests) may not have populated; the floor is
+    // a property of the attacker's own restrictions, not of the combat record.
+    //
+    // The block-restriction statics are collected once here and threaded through
+    // the precomputed variant: every pass below reads this per attacker, and the
+    // non-precomputed entry point re-walks the battlefield on each call.
+    let block_restriction_statics = engine::game::combat::collect_block_restriction_statics(state);
+    let required_blockers = |attacker_id: &ObjectId| -> usize {
+        engine::game::combat::min_blockers_required_from_precomputed(
+            state,
+            *attacker_id,
+            &block_restriction_statics,
+        ) as usize
+    };
+
     // Sort attackers by value (highest first) to prioritize blocking high-value threats
     let mut sorted_attackers: Vec<(ObjectId, f64)> = attacker_ids
         .iter()
@@ -798,13 +825,13 @@ pub fn choose_blockers_with_profile(
     sorted_attackers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     // First pass: assign deathtouch blockers to highest-value attackers.
-    // CR 702.111b: Skip menace attackers — they require 2+ blockers (handled in gang-block pass).
+    // CR 509.1b: Skip attackers with a minimum-blocker floor above 1 — a lone
+    // blocker is an illegal declaration against them (handled in gang-block pass).
     for &(attacker_id, _) in &sorted_attackers {
-        let attacker = match state.objects.get(&attacker_id) {
-            Some(a) => a,
-            None => continue,
-        };
-        if attacker.has_keyword(&Keyword::Menace) {
+        if !state.objects.contains_key(&attacker_id) {
+            continue;
+        }
+        if required_blockers(&attacker_id) > 1 {
             continue;
         }
 
@@ -827,7 +854,8 @@ pub fn choose_blockers_with_profile(
     }
 
     // Second pass: assign remaining blockers where they'd survive.
-    // CR 702.111b: Skip menace attackers — they require 2+ blockers (handled in gang-block pass).
+    // CR 509.1b: Skip attackers with a minimum-blocker floor above 1 — a lone
+    // blocker is an illegal declaration against them (handled in gang-block pass).
     for &(attacker_id, attacker_value) in &sorted_attackers {
         if blocked_attackers.contains(&attacker_id) {
             continue; // Already blocked
@@ -837,7 +865,7 @@ pub fn choose_blockers_with_profile(
             Some(a) => a,
             None => continue,
         };
-        if attacker.has_keyword(&Keyword::Menace) {
+        if required_blockers(&attacker_id) > 1 {
             continue;
         }
 
@@ -968,10 +996,11 @@ pub fn choose_blockers_with_profile(
         gang_candidates.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
 
         // Skip if any single blocker can already kill it (handled in second pass above).
-        // CR 702.111b: Exception — menace attackers MUST be gang-blocked even when a
-        // single blocker could kill them, because single blocks are illegal.
-        let has_menace = attacker.has_keyword(&Keyword::Menace);
-        if !has_menace
+        // CR 509.1b: Exception — an attacker with a minimum-blocker floor MUST be
+        // gang-blocked even when a single blocker could kill it, because a lone
+        // block is an illegal declaration.
+        let needed_blockers = required_blockers(&attacker_id);
+        if needed_blockers <= 1
             && gang_candidates.iter().any(|&(bid, _, _)| {
                 state
                     .objects
@@ -1027,25 +1056,70 @@ pub fn choose_blockers_with_profile(
             }
         }
 
-        // CR 702.111b: Menace requires at least 2 blockers. If the gang set is too
-        // small, try to add another blocker even if combined power already suffices.
-        if has_menace && gang_set.len() < 2 {
-            if let Some(&(bid, power, value)) = effective_candidates
+        // CR 509.1b: The declaration needs at least `needed_blockers` creatures on
+        // this attacker. Top the gang set up to that floor even when combined power
+        // already suffices — a short set is an illegal declaration, not a cheaper
+        // one. Loops rather than adding a single blocker: menace's floor is 2, but a
+        // `MinBlockers` restriction can require any number (Pathrazer of Ulamog
+        // requires 3), so one top-up is not enough (issue #7183).
+        while gang_set.len() < needed_blockers {
+            let Some(&(bid, power, value)) = effective_candidates
                 .iter()
                 .find(|(bid, _, _)| !gang_set.contains(bid))
-            {
-                combined_power += power;
-                gang_set.push(bid);
-                gang_value += value;
-            }
+            else {
+                break;
+            };
+            combined_power += power;
+            gang_set.push(bid);
+            gang_value += value;
         }
 
-        // Only gang-block if combined power can kill AND total value risked <= attacker value.
-        // For menace attackers, also require at least 2 blockers.
-        let min_blockers = if has_menace { 2 } else { 1 };
-        if combined_power >= attacker_toughness
-            && gang_set.len() >= min_blockers
-            && gang_value <= attacker_value
+        // CR 509.1b + CR 704.5a: Survival override, restricted to attackers that a
+        // minimum-blocker floor routes here. Such an attacker is skipped by BOTH
+        // single-blocker chump passes, which are the only places carrying a
+        // survival override (`should_chump_stabilize`), so this gang pass is its
+        // sole blocking route — and the kill-and-trade gates below are a pure value
+        // heuristic that declines a legal, life-saving block. That is how a menace /
+        // "can't be blocked except by three or more creatures" attacker (Pathrazer
+        // of Ulamog) walks past a full board for lethal (issue #7183).
+        //
+        // Deliberately NOT applied when the floor is 1: those attackers already ran
+        // through the single-blocker passes with their full guard set, so widening
+        // the gate here would double-count their chump decision.
+        //
+        // Mirrors the single-blocker pass guard-for-guard: the same
+        // `effective_life <= attacker_power * 3` threshold with the CR 903.10a
+        // commander-damage tightening, the same `commander_chump_unsafe` rejection
+        // (evaluated against the gang's combined toughness, since trample assigns
+        // lethal damage to every blocker before any tramples through, CR 702.19b),
+        // and the same exclusion of damage-reflection blockers, which hand the
+        // attacker's power straight back to the player and so save nothing.
+        let p_life = state.players[player.0 as usize].life;
+        let effective_life = commander_lethal_headroom(state, player, attacker_id)
+            .map(|headroom| p_life.min(headroom as i32))
+            .unwrap_or(p_life);
+        let gang_toughness: i32 = gang_set
+            .iter()
+            .filter_map(|bid| state.objects.get(bid).and_then(|b| b.toughness))
+            .sum();
+        let gang_reflects_damage = gang_set.iter().any(|bid| {
+            state
+                .objects
+                .get(bid)
+                .is_some_and(has_damage_reflection_to_controller)
+        });
+        let gang_stabilize = needed_blockers > 1
+            && matches!(objective, CombatObjective::Stabilize)
+            && effective_life <= attacker_power * 3
+            && !gang_reflects_damage
+            && !commander_chump_unsafe(state, player, attacker_id, gang_toughness);
+
+        // Only gang-block if combined power can kill AND total value risked <=
+        // attacker value — or if declining loses the game outright. Never below the
+        // CR 509.1b floor, which would make the declaration illegal.
+        if gang_set.len() >= needed_blockers
+            && ((combined_power >= attacker_toughness && gang_value <= attacker_value)
+                || gang_stabilize)
         {
             for bid in gang_set {
                 assignments.push((bid, attacker_id));
@@ -1096,8 +1170,9 @@ pub fn choose_blockers_with_profile(
                     Some(a) => a,
                     None => continue,
                 };
-                // CR 702.111b: Skip menace attackers — single chump blocks are illegal.
-                if attacker.has_keyword(&Keyword::Menace) {
+                // CR 509.1b: Skip attackers with a minimum-blocker floor above 1 —
+                // a single chump block is an illegal declaration against them.
+                if required_blockers(&attacker_id) > 1 {
                     continue;
                 }
                 // Find any unused blocker that can legally block this attacker.
@@ -1142,8 +1217,9 @@ pub fn choose_blockers_with_profile(
                 Some(a) => a,
                 None => continue,
             };
-            // CR 702.111b: Menace requires 2+ blockers — handled by gang-block, not chump.
-            if attacker.has_keyword(&Keyword::Menace) {
+            // CR 509.1b: A minimum-blocker floor above 1 is handled by the
+            // gang-block pass, not by a single-creature chump.
+            if required_blockers(&attacker_id) > 1 {
                 continue;
             }
             let Some(headroom) = commander_lethal_headroom(state, player, attacker_id) else {
@@ -4247,6 +4323,151 @@ mod tests {
             ),
             "combat_lookahead == false must map to Disabled in measurement mode too — \
              measurement must not enable a projection the tier never takes"
+        );
+    }
+
+    // ── CR 509.1b minimum-blocker floors (issue #7183) ────────────────────────
+    //
+    // These exercise the *class* — any attacker whose minimum-blocker floor
+    // exceeds 1 — through both of its sources: the Menace keyword (CR 702.111b,
+    // floor 2) and a `CantBeBlockedExceptBy { MinBlockers { min } }` static
+    // (CR 509.1b, arbitrary floor). Before the fix the AI keyed on the Menace
+    // keyword alone, so a `MinBlockers` attacker was routed through the
+    // single-blocker passes, produced an illegal lone block, and had it rewritten
+    // to the empty declaration by `complete_blocker_proposal` — the AI never
+    // blocked Pathrazer of Ulamog even at lethal.
+
+    /// Give `attacker` a "can't be blocked except by `min` or more creatures"
+    /// restriction — the static half of the CR 509.1b floor, as parsed from
+    /// Pathrazer of Ulamog's second line.
+    fn add_min_blockers_restriction(state: &mut GameState, attacker: ObjectId, min: u32) {
+        use engine::types::ability::StaticDefinition;
+        use engine::types::statics::BlockExceptionKind;
+
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantBeBlockedExceptBy {
+                kind: BlockExceptionKind::MinBlockers { min },
+            }));
+    }
+
+    /// Board where `blockers` 4/4s face one lethal attacker at `life`.
+    fn lethal_attacker_board(life: i32, blockers: usize) -> (GameState, ObjectId, Vec<ObjectId>) {
+        let mut state = setup();
+        state.players[1].life = life;
+        let attacker = add_creature(&mut state, PlayerId(0), "Attacker", 11, 11, vec![]);
+        let blocker_ids = (0..blockers)
+            .map(|i| {
+                add_creature(
+                    &mut state,
+                    PlayerId(1),
+                    &format!("Blocker {i}"),
+                    4,
+                    4,
+                    vec![],
+                )
+            })
+            .collect();
+        (state, attacker, blocker_ids)
+    }
+
+    /// CR 509.1b: an attacker with a `MinBlockers { min: 3 }` restriction must be
+    /// gang-blocked by at least three creatures. The AI is at 6 life facing 11
+    /// power, so declining loses the game outright while a legal three-creature
+    /// block is available.
+    #[test]
+    fn min_blockers_three_attacker_is_gang_blocked_at_lethal() {
+        let (mut state, attacker, _) = lethal_attacker_board(6, 10);
+        add_min_blockers_restriction(&mut state, attacker, 3);
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        let on_attacker = assignments.iter().filter(|&&(_, a)| a == attacker).count();
+        assert!(
+            on_attacker >= 3,
+            "a 'can't be blocked except by three or more creatures' attacker must be \
+             gang-blocked by at least 3 at lethal, got {assignments:?}"
+        );
+        // The declaration the engine would actually accept — proves the proposal is
+        // legal rather than silently rewritten to the empty witness.
+        assert_eq!(
+            engine::game::combat::complete_blocker_proposal(&state, PlayerId(1), &assignments),
+            engine::types::actions::GameAction::DeclareBlockers {
+                assignments: assignments.clone()
+            },
+            "the AI's declaration must survive the CR 509.1c completion authority"
+        );
+    }
+
+    /// CR 702.111b: the Menace floor of 2 is the same class and must behave
+    /// identically — the fix must not be specific to the static form.
+    #[test]
+    fn menace_attacker_is_gang_blocked_at_lethal() {
+        let (mut state, attacker, _) = lethal_attacker_board(6, 10);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Menace);
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        let on_attacker = assignments.iter().filter(|&&(_, a)| a == attacker).count();
+        assert!(
+            on_attacker >= 2,
+            "a menace attacker must be gang-blocked by at least 2 at lethal, got {assignments:?}"
+        );
+    }
+
+    /// A floor above 1 must never produce a *short* declaration. With only two
+    /// creatures available against a `MinBlockers { min: 3 }` attacker no legal
+    /// block exists, so the AI must decline rather than offer an illegal pair
+    /// (which the completion authority would rewrite to empty anyway).
+    #[test]
+    fn min_blockers_floor_is_never_under_filled() {
+        let (mut state, attacker, _) = lethal_attacker_board(6, 2);
+        add_min_blockers_restriction(&mut state, attacker, 3);
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        let on_attacker = assignments.iter().filter(|&&(_, a)| a == attacker).count();
+        assert!(
+            on_attacker == 0 || on_attacker >= 3,
+            "a declaration against a min-3 attacker is either absent or at least 3 \
+             creatures — never a short, illegal set. Got {assignments:?}"
+        );
+    }
+
+    /// The survival override is scoped to lethal pressure: at a comfortable life
+    /// total the AI must still decline an unprofitable gang block rather than
+    /// throwing three 4/4s at a 5/5. Guards against the fix over-blocking.
+    #[test]
+    fn min_blockers_attacker_is_not_gang_blocked_when_not_under_pressure() {
+        let mut state = setup();
+        state.players[1].life = 40;
+        let attacker = add_creature(&mut state, PlayerId(0), "Attacker", 5, 5, vec![]);
+        add_min_blockers_restriction(&mut state, attacker, 3);
+        for i in 0..10 {
+            add_creature(
+                &mut state,
+                PlayerId(1),
+                &format!("Blocker {i}"),
+                4,
+                4,
+                vec![],
+            );
+        }
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        assert!(
+            assignments.is_empty(),
+            "at 40 life a 5/5 is not worth three 4/4s — the survival override must not \
+             fire outside Stabilize. Got {assignments:?}"
         );
     }
 }

@@ -74,6 +74,14 @@ pub struct CandidateAction {
 const SELECTION_POOL_CAP: usize = 12;
 const SELECTION_CANDIDATE_CAP: usize = 64;
 
+/// Bounds for gang-block proposal enumeration against a CR 509.1b
+/// minimum-blocker restriction. Sized so the widest realistic case stays cheap:
+/// `C(10, 3) = 120` combinations trimmed to 32 per attacker, mirroring the
+/// `SELECTION_*` precedent above — take the first `pool_cap` eligible blockers in
+/// the engine's deterministic order, then cap the emitted set.
+const GANG_BLOCK_POOL_CAP: usize = 10;
+const GANG_BLOCK_CANDIDATE_CAP: usize = 32;
+
 fn collect_mana_combinations(
     count: usize,
     options: &[ManaType],
@@ -947,8 +955,15 @@ pub fn candidate_actions_broad_with_probe(
             player,
             valid_blocker_ids,
             valid_block_targets,
+            block_requirements,
             ..
-        } => blocker_actions(state, *player, valid_blocker_ids, valid_block_targets),
+        } => blocker_actions(
+            state,
+            *player,
+            valid_blocker_ids,
+            valid_block_targets,
+            block_requirements,
+        ),
         WaitingFor::UntapChoice {
             player, candidates, ..
         } => candidates
@@ -4448,6 +4463,10 @@ fn blocker_actions(
         crate::types::identifiers::ObjectId,
         Vec<crate::types::identifiers::ObjectId>,
     >,
+    block_requirements: &std::collections::HashMap<
+        crate::types::identifiers::ObjectId,
+        crate::game::combat::BlockRequirement,
+    >,
 ) -> Vec<CandidateAction> {
     let mut proposals = vec![Vec::new()];
 
@@ -4456,6 +4475,46 @@ fn blocker_actions(
             for &attacker_id in targets {
                 proposals.push(vec![(blocker_id, attacker_id)]);
             }
+        }
+    }
+
+    // CR 509.1b + CR 702.111b: an attacker carrying menace or a `MinBlockers`
+    // restriction can't be blocked except by `count` or more creatures, so every
+    // one-blocker proposal seeded above is an illegal declaration against it and
+    // `complete_blocker_proposals` collapses each to the same tax-free witness.
+    // Without an explicit gang-block seed the defending player's whole candidate
+    // set degenerates to "don't block" and the AI can never block a menace-class
+    // attacker at all. Seed the bounded set of `count`-sized combinations drawn
+    // from that attacker's own eligible blockers; legality is still decided by
+    // `complete_blocker_proposals` below, which is the single authority.
+    //
+    // `block_requirements` only carries attackers whose floor exceeds 1 (see
+    // `block_requirements_for_player`); the `<= 1` guard keeps that contract
+    // local rather than assumed. Attackers are visited in `ObjectId` order so a
+    // `HashMap` iteration order can't perturb candidate ordering (issue #4878).
+    let mut gang_attackers: Vec<_> = block_requirements
+        .iter()
+        .filter(|(_, requirement)| requirement.count > 1)
+        .map(|(&attacker_id, requirement)| (attacker_id, requirement.count as usize))
+        .collect();
+    gang_attackers.sort_unstable();
+    for (attacker_id, needed) in gang_attackers {
+        let eligible: Vec<crate::types::identifiers::ObjectId> = valid_blocker_ids
+            .iter()
+            .copied()
+            .filter(|blocker_id| {
+                valid_block_targets
+                    .get(blocker_id)
+                    .is_some_and(|targets| targets.contains(&attacker_id))
+            })
+            .collect();
+        for combo in bounded_combinations_for_sizes(
+            &eligible,
+            [needed],
+            GANG_BLOCK_POOL_CAP,
+            GANG_BLOCK_CANDIDATE_CAP,
+        ) {
+            proposals.push(combo.into_iter().map(|b| (b, attacker_id)).collect());
         }
     }
 
