@@ -82,12 +82,49 @@
     "picking": "Sélection…",
     "autoPick": "Sélection auto"
   },
+  "sealedOpening": {
+    "title": "Ouvrez votre pool scellé",
+    "subtitle": "Ouvrez six boosters, un à la fois.",
+    "packProgress": "Booster {{current}} sur {{total}}",
+    "openPack": "Ouvrir le booster",
+    "openPackArt": "Ouvrir l’illustration du booster",
+    "pulls": "Vos cartes",
+    "nextPack": "Booster suivant",
+    "viewPool": "Voir votre pool",
+    "poolTitle": "Votre pool scellé",
+    "poolSubtitle": "Les {{count}} cartes, regroupées par type.",
+    "buildDeck": "Construire le deck"
+  },
   "pool": {
     "cardsDrafted": "{{count}} cartes draftées",
     "empty": "Aucune carte draftée pour l'instant",
     "sortColor": "Couleur",
     "sortType": "Type",
-    "sortCmc": "CMC"
+    "sortCmc": "CMC",
+    "groups": {
+      "white": "Blanc",
+      "blue": "Bleu",
+      "black": "Noir",
+      "red": "Rouge",
+      "green": "Vert",
+      "multicolor": "Multicolore",
+      "colorless": "Incolore",
+      "creature": "Créature",
+      "instant": "Éphémère",
+      "sorcery": "Rituel",
+      "enchantment": "Enchantement",
+      "artifact": "Artefact",
+      "planeswalker": "Planeswalker",
+      "land": "Terrain",
+      "other": "Autre",
+      "manaValue0": "0 CMC",
+      "manaValue1": "1 CMC",
+      "manaValue2": "2 CMC",
+      "manaValue3": "3 CMC",
+      "manaValue4": "4 CMC",
+      "manaValue5": "5 CMC",
+      "manaValue6Plus": "6+ CMC"
+    }
   },
   "standings": {
     "title": "Classement — Manche {{round}}",
@@ -104,9 +141,12 @@
     "mainDeck": "Deck principal",
     "emptyDeckHint": "Cliquez sur des cartes du pool pour les ajouter à votre deck.",
     "addableCards": "Cartes ajoutables",
+    "searchAddableCards": "Rechercher des cartes ajoutables...",
     "autoLands": "Terrains auto",
     "suggestDeck": "Suggérer un deck",
     "submitDeck": "Soumettre le deck",
+    "validationTitle": "Le deck nécessite votre attention",
+    "submitFailed": "Impossible de soumettre le deck",
     "removeCard": "Retirer {{name}}",
     "addCard": "Ajouter {{name}}",
     "cardCount": "/ {{min}} cartes",
@@ -125,6 +165,10 @@
     "quickDraft": {
       "title": "Quick Draft",
       "description": "Draftez 3 boosters avec 7 drafteurs IA, construisez un deck de 40 cartes, puis jouez un match Bo1 contre l'un d'eux."
+    },
+    "sealed": {
+      "title": "Sealed",
+      "description": "Ouvrez six boosters, consultez le pool complet, puis construisez un deck de 40 cartes pour un match en une partie."
     },
     "cubeDraft": {
       "title": "Cube Draft",
@@ -156,6 +200,7 @@
   },
   "quickPhase": {
     "drafting": "Draft",
+    "opening": "Ouverture des boosters",
     "deckbuilding": "Construction de deck",
     "matchRecord": "Match {{number}} — {{wins}}V-{{losses}}D",
     "record": "{{wins}}V-{{losses}}D",
@@ -236,6 +281,7 @@
   "page": {
     "cubeDraftTitle": "Cube Draft",
     "quickDraftTitle": "Quick Draft",
+    "sealedTitle": "Scellé",
     "setDraftTab": "Draft d'extension",
     "cubeTab": "Cube"
   },
@@ -261,6 +307,8 @@
     "kindPremierDesc": "Matchs de tournoi en meilleur des un après la construction. Manches plus rapides, pas de réserve entre les parties.",
     "kindTraditional": "Traditionnel",
     "kindTraditionalDesc": "Matchs de tournoi en meilleur des trois après la construction, avec réserve entre les parties.",
+    "kindSealed": "Scellé",
+    "kindSealedDesc": "Ouvrez six boosters directement dans la réserve de chaque joueur, puis construisez un deck de tournoi en meilleur des un.",
     "tournamentFormat": "Format du tournoi",
     "tournamentSwiss": "Suisse",
     "tournamentSwissDesc": "Tout le monde continue de jouer sur trois manches, même après une défaite.",

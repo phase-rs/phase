@@ -311,6 +311,7 @@ fn rewrite_bound_x_in_mana_production(
         | ManaProduction::AnyCombination { count, .. }
         | ManaProduction::AnyCombinationOfObjectColors { count, .. }
         | ManaProduction::ChosenColor { count, .. }
+        | ManaProduction::NotedType { count }
         | ManaProduction::OpponentLandColors { count }
         | ManaProduction::AnyTypeProduceableBy { count, .. }
         | ManaProduction::AnyInCommandersColorIdentity { count, .. } => {
@@ -403,6 +404,9 @@ fn rewrite_bound_x_in_ability_cost(cost: &mut AbilityCost, binding: &QuantityExp
         // CR 118.9: the borrowed keyword cost is read at runtime from the cast
         // spell's keyword — it carries no X-bound `QuantityExpr` to rewrite.
         | AbilityCost::KeywordCostOfCastSpell { .. }
+        // CR 702.21a: `count` is a fixed `u32`, not a `QuantityExpr` — no
+        // X-bound amount to rewrite.
+        | AbilityCost::GetPlayerCounters { .. }
         | AbilityCost::Unimplemented { .. } => 0,
     }
 }
@@ -612,10 +616,12 @@ fn rewrite_any_target_filter_in_effect(effect: &mut Effect, typed: &TargetFilter
         {
             *target = Some(typed.clone());
         }
-        // LoseLife and Mana also carry Option<TargetFilter>.
-        Effect::LoseLife { ref mut target, .. } | Effect::Mana { ref mut target, .. }
-            if target.as_ref() == Some(&TargetFilter::Any) =>
-        {
+        // LoseLife also carries Option<TargetFilter>. `Effect::Mana`'s target is
+        // a `ManaTargetRole`, not a bare filter, so it cannot share this
+        // or-pattern; dropping it is behavior-preserving because mtgish
+        // constructs `Effect::Mana` with `target: None` at every site, making
+        // the `Some(Any)` guard dead for Mana.
+        Effect::LoseLife { ref mut target, .. } if target.as_ref() == Some(&TargetFilter::Any) => {
             *target = Some(typed.clone());
         }
         // Effects with a direct `target: TargetFilter` field.
@@ -5472,6 +5478,11 @@ fn build_create_trigger_until(
     Ok(Effect::CreateDelayedTrigger {
         condition: DelayedTriggerCondition::WheneverEvent {
             trigger: Box::new(trigger_def),
+            // CR 603.7b: only `Expiration::UntilEndOfTurn` reaches here (others
+            // strict-fail above), so the trigger ends at cleanup — the default
+            // `EndOfTurn` expiry. Mapping other mtgish expirations onto the new
+            // `UntilControllersNextTurn` slot is deferred mtgish-coverage work.
+            expiry: engine::types::ability::WheneverEventExpiry::EndOfTurn,
         },
         effect: Box::new(body_ability),
         uses_tracked_set: false,

@@ -60,6 +60,27 @@ describe("TargetingOverlay", () => {
     expect(screen.getByText("a player")).toBeInTheDocument();
   });
 
+  it("uses the native keep-tapped skip action for an untap decision", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const permanent = buildGameObject({ id: 10, zone: "Battlefield", tapped: true });
+    const gameState = createGameState({
+      objects: buildObjectMap(permanent),
+      battlefield: [10],
+      waiting_for: { type: "UntapChoice", data: { player: 0, candidates: [10] } },
+    });
+    act(() => {
+      useGameStore.setState({ gameState, waitingFor: gameState.waiting_for, dispatch });
+    });
+
+    render(<TargetingOverlay />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Keep tapped" }));
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "ChooseUntap",
+      data: { object_id: 10, untap: false },
+    });
+  });
+
   it("labels an 'of an opponent's choice' slot for the announcing viewer", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
     // CR 601.2c: the engine routes the prompt to the slot's announcer, who is the

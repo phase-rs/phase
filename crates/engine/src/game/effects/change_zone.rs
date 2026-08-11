@@ -63,11 +63,29 @@ fn resolve_forward_result_search_attach_host(
     let targets = forward_result_attach_host_targets(ability);
     match target {
         TargetFilter::SelfRef => Some(AttachTarget::Object(ability.source_id)),
+        // CR 303.4b + CR 109.4: "attached to you" (Lynde, Cheerful Tormentor)
+        // binds the Aura host to the resolving ability's controller.
+        TargetFilter::Controller => Some(AttachTarget::Player(ability.controller)),
         TargetFilter::ParentTarget => targets
             .first()
             .map(|target| match target {
                 TargetRef::Object(id) => AttachTarget::Object(*id),
                 TargetRef::Player(id) => AttachTarget::Player(*id),
+            })
+            .or_else(|| {
+                // CR 603.2 + CR 608.2c + CR 701.3a: Event-subject return Auras
+                // ("return this … attached to that creature" — Dragon Breath,
+                // Smoke Shroud) bind ParentTarget to the trigger-event referent
+                // (entering creature), not the Aura's prior host.
+                crate::game::targeting::resolve_event_context_target(
+                    state,
+                    &TargetFilter::ParentTarget,
+                    ability.source_id,
+                )
+                .map(|target| match target {
+                    TargetRef::Object(id) => AttachTarget::Object(id),
+                    TargetRef::Player(id) => AttachTarget::Player(id),
+                })
             })
             .or_else(|| {
                 // CR 303.4b + CR 608.2c: Aura search-put "attached to that/enchanted
@@ -517,6 +535,27 @@ pub fn resolve(
         // remains (for example, a Warp delayed exile after a blink), the zone-scan
         // fallback must not rediscover a same-id return by raw equality.
         if matches!(target_filter, TargetFilter::SelfRef) && !ability.self_ref_is_current(state) {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+                subject: None,
+            });
+            return Ok(());
+        }
+
+        // CR 400.7 + CR 603.7c: a delayed ability whose pinned referent became a
+        // new object affects nothing. Return before the untargeted zone-scan
+        // below, which must not rediscover a same-id return — the same reason
+        // the SelfRef guard above exists. `filter.rs`'s never-match arm makes
+        // that scan inert for ParentTarget today; this guard does not rely on
+        // that distant `_ => false` arm.
+        //
+        // Emits EffectResolved first, exactly as the three sibling guards in
+        // this block do (CR 115.6 optional targeting, CR 400.7 SelfRef,
+        // CR 701.23b fail-to-find): the trigger DID fire and DID resolve
+        // (CR 603.7b) — it simply affected nothing, and the game log / event
+        // observers / chain machinery must see that.
+        if ability.pinned_object_targets_all_stale(state) {
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -4470,6 +4509,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
         let mut events = Vec::new();
@@ -6081,6 +6121,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 
@@ -6205,6 +6246,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
         state.waiting_for = WaitingFor::Priority {
@@ -9517,6 +9559,7 @@ mod tests {
                 casting_restrictions: vec![],
                 casting_options: vec![],
                 layout_kind: None,
+                parse_warnings: vec![],
             });
         }
 

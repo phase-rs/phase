@@ -976,19 +976,66 @@ pub fn parse_target_with_syntax<'a>(
                 syntax,
             );
         }
-        // "target opponent"
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("opponent").parse(after_target) {
-            return (
+        // CR 115.1: A coordinated target noun phrase may elide "target" after
+        // its first player leg: "target opponent, creature an opponent
+        // controls, or planeswalker an opponent controls." All coordinated
+        // nouns still describe one target slot, whose legal domain is the
+        // union of the player and object legs. Parse the player head and the
+        // separator compositionally, then delegate the complete object tail to
+        // the shared type-phrase grammar so controller/type qualifiers retain
+        // their ordinary semantics.
+        if let Ok((after_player, player_filter)) = alt((
+            value(
                 TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
-                &text[lower.len() - rest.len()..],
-                syntax,
-            );
-        }
-        // "target player"
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("player").parse(after_target) {
+                tag::<_, _, OracleError<'_>>("opponent"),
+            ),
+            value(TargetFilter::Player, tag("player")),
+        ))
+        .parse(after_target)
+        {
+            if let Ok((object_tail, _)) = alt((
+                tag::<_, _, OracleError<'_>>(", and/or "),
+                tag(", and "),
+                tag(", or "),
+                tag(", "),
+            ))
+            .parse(after_player)
+            {
+                if starts_with_type_word(object_tail) {
+                    let mut combined = player_filter.clone();
+                    let mut leg_text = &text[lower.len() - object_tail.len()..];
+                    let mut merged_any = false;
+                    loop {
+                        let (leg, rest) = parse_type_phrase_with_ctx(leg_text, ctx);
+                        if matches!(leg, TargetFilter::Any) {
+                            if merged_any {
+                                return (combined, leg_text, syntax);
+                            }
+                            break;
+                        }
+                        combined = merge_or_filters(combined, leg);
+                        merged_any = true;
+
+                        let rest_lower = rest.to_lowercase();
+                        let Ok((next_leg, _)) = alt((
+                            tag::<_, _, OracleError<'_>>(", and/or "),
+                            tag(", and "),
+                            tag(", or "),
+                            tag(", "),
+                        ))
+                        .parse(rest_lower.as_str()) else {
+                            return (combined, rest, syntax);
+                        };
+                        if !starts_with_type_word(next_leg) {
+                            return (combined, rest, syntax);
+                        }
+                        leg_text = &rest[rest_lower.len() - next_leg.len()..];
+                    }
+                }
+            }
             return (
-                TargetFilter::Player,
-                &text[lower.len() - rest.len()..],
+                player_filter,
+                &text[lower.len() - after_player.len()..],
                 syntax,
             );
         }
@@ -2015,7 +2062,7 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
 /// ("…, all artifacts, and all enchantments"). Longest-match-first over the
 /// comma / "and" / "or" connectors. Returns `None` when `lower` does not start
 /// with a union separator.
-fn match_mass_union_separator(lower: &str) -> Option<usize> {
+pub(crate) fn match_mass_union_separator(lower: &str) -> Option<usize> {
     alt((
         tag::<_, _, OracleError<'_>>(", and/or "),
         tag(", and "),
@@ -6725,20 +6772,12 @@ pub(crate) fn parse_that_clause_suffix<'a>(
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
 
-    // CR 303.4 + CR 301.5: "that's enchanted or equipped" / "that's enchanted" /
+    // CR 303.4b + CR 301.5a: "that's enchanted or equipped" / "that's enchanted" /
     // "that's equipped" — relative clause attaching an attachment-presence
     // predicate to the enclosing type phrase. Covers the compound-subject grant
     // class (Reyav, Master Smith; Dogmeat, Ever Loyal). Composes with disjunction
     // via `FilterProp::HasAnyAttachmentOf` (kinds.len() == 2 for the "or" form).
-    let intro = alt((
-        tag::<_, _, OracleError<'_>>("that's "),
-        tag("that is "),
-        tag("that are "),
-    ))
-    .parse(trimmed);
-    if let Ok((after_intro, _)) = intro {
-        // Note: `parse_that_isnt_subtype_suffix` runs first in `parse_type_phrase`
-        // and consumes "that's not …", so this branch only sees positive forms.
+    if let Some((after_intro, intro_len, negated)) = parse_relative_clause_intro(trimmed) {
         if let Ok((rest, kinds)) = parse_attachment_kind_disjunction(after_intro) {
             // Word-boundary check: the next char must terminate the adjective so
             // we don't false-match e.g. "that's enchanted by something else".
@@ -6748,8 +6787,15 @@ pub(crate) fn parse_that_clause_suffix<'a>(
                 .next()
                 .is_none_or(|c| !c.is_alphanumeric() && c != '_');
             if next_char_is_boundary {
-                let consumed = leading_ws + trimmed.len() - rest.len();
+                let consumed = leading_ws + intro_len + after_intro.len() - rest.len();
                 let prop = attachment_kinds_filter_prop(kinds, None);
+                let prop = if negated {
+                    FilterProp::Not {
+                        prop: Box::new(prop),
+                    }
+                } else {
+                    prop
+                };
                 return Some((vec![prop], consumed));
             }
         }
@@ -9573,6 +9619,64 @@ mod tests {
     }
 
     #[test]
+    fn target_opponent_with_elided_coordinated_object_alternatives() {
+        let (filter, rest) = parse_target(
+            "target opponent, creature an opponent controls, or planeswalker an opponent controls",
+        );
+
+        assert_eq!(rest, "");
+        assert_eq!(
+            filter,
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                    TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::Opponent)
+                    ),
+                    TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Planeswalker)
+                            .controller(ControllerRef::Opponent)
+                    ),
+                ],
+            },
+            "the player and both opponent-controlled object alternatives share one target slot"
+        );
+    }
+
+    #[test]
+    fn coordinated_player_and_object_target_preserves_plain_player_behavior() {
+        let (filter, rest) = parse_target("target player, creature you control");
+
+        assert_eq!(rest, "");
+        assert_eq!(
+            filter,
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Player,
+                    TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn coordinated_player_and_object_target_accepts_and_connector() {
+        let (filter, rest) = parse_target("target player, and creature you control");
+
+        assert_eq!(rest, "");
+        assert_eq!(
+            filter,
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Player,
+                    TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                ],
+            },
+            "the ordinary `, and` connector must retain the object alternative"
+        );
+    }
+
+    #[test]
     fn or_type_distributes_controller() {
         // "creature or artifact you control" → both branches get You controller
         let (f, _) = parse_target("target creature or artifact you control");
@@ -10432,7 +10536,8 @@ mod tests {
 
     #[test]
     fn creature_with_power_3_or_greater() {
-        let (f, _) = parse_type_phrase("creature with power 3 or greater");
+        let (f, rest) = parse_type_phrase("creature with power 3 or greater");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
         assert_eq!(
             f,
             TargetFilter::Typed(TypedFilter::creature().properties(vec![
@@ -14179,23 +14284,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_type_phrase_comma_or_three_types() {
-        // CR 205.3a: "artifact, creature, or enchantment" — all 3 must appear in Or
-        let (filter, rest) = parse_type_phrase("artifact, creature, or enchantment");
-        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
-        if let TargetFilter::Or { filters } = &filter {
-            assert_eq!(
-                filters.len(),
-                3,
-                "expected 3 Or branches, got {}",
-                filters.len()
-            );
-        } else {
-            panic!("Expected Or filter");
-        }
-    }
-
-    #[test]
     fn parse_type_phrase_comma_or_with_controller() {
         // "artifact, creature, or enchantment you control" — controller distributes
         let (filter, rest) = parse_type_phrase("artifact, creature, or enchantment you control");
@@ -14896,6 +14984,121 @@ mod tests {
     }
 
     #[test]
+    fn that_isnt_enchanted_negates_aura_attachment() {
+        let (props, consumed) = parse_that_clause_suffix(" that isn't enchanted", None)
+            .expect("negated Aura attachment clause must parse");
+        assert_eq!(consumed, " that isn't enchanted".len());
+        assert_eq!(
+            props,
+            vec![FilterProp::Not {
+                prop: Box::new(FilterProp::HasAttachment {
+                    kind: AttachmentKind::Aura,
+                    controller: None,
+                    exclude_source: crate::types::ability::SourceExclusion::Include,
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn that_isnt_equipped_negates_equipment_attachment() {
+        let (props, consumed) = parse_that_clause_suffix(" that isn't equipped", None)
+            .expect("negated Equipment attachment clause must parse");
+        assert_eq!(consumed, " that isn't equipped".len());
+        assert_eq!(
+            props,
+            vec![FilterProp::Not {
+                prop: Box::new(FilterProp::HasAttachment {
+                    kind: AttachmentKind::Equipment,
+                    controller: None,
+                    exclude_source: crate::types::ability::SourceExclusion::Include,
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn that_isnt_enchanted_or_equipped_negates_attachment_disjunction() {
+        let (props, consumed) = parse_that_clause_suffix(" that isn't enchanted or equipped", None)
+            .expect("negated compound attachment clause must parse");
+        assert_eq!(consumed, " that isn't enchanted or equipped".len());
+        assert_eq!(
+            props,
+            vec![FilterProp::Not {
+                prop: Box::new(FilterProp::HasAnyAttachmentOf {
+                    kinds: vec![AttachmentKind::Aura, AttachmentKind::Equipment],
+                    controller: None,
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn that_arent_enchanted_negates_aura_attachment() {
+        let clause = " that aren't enchanted";
+        let (props, consumed) =
+            parse_that_clause_suffix(clause, None).expect("plural negated Aura clause must parse");
+        assert_eq!(
+            consumed,
+            clause.len(),
+            "the complete plural clause must be consumed"
+        );
+        assert_eq!(
+            props,
+            vec![FilterProp::Not {
+                prop: Box::new(FilterProp::HasAttachment {
+                    kind: AttachmentKind::Aura,
+                    controller: None,
+                    exclude_source: crate::types::ability::SourceExclusion::Include,
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn that_arent_equipped_negates_equipment_attachment() {
+        let clause = " that aren't equipped";
+        let (props, consumed) = parse_that_clause_suffix(clause, None)
+            .expect("plural negated Equipment clause must parse");
+        assert_eq!(
+            consumed,
+            clause.len(),
+            "the complete plural clause must be consumed"
+        );
+        assert_eq!(
+            props,
+            vec![FilterProp::Not {
+                prop: Box::new(FilterProp::HasAttachment {
+                    kind: AttachmentKind::Equipment,
+                    controller: None,
+                    exclude_source: crate::types::ability::SourceExclusion::Include,
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn that_arent_enchanted_or_equipped_negates_attachment_disjunction() {
+        let clause = " that aren't enchanted or equipped";
+        let (props, consumed) = parse_that_clause_suffix(clause, None)
+            .expect("plural negated compound attachment clause must parse");
+        assert_eq!(
+            consumed,
+            clause.len(),
+            "the complete plural clause must be consumed"
+        );
+        assert_eq!(
+            props,
+            vec![FilterProp::Not {
+                prop: Box::new(FilterProp::HasAnyAttachmentOf {
+                    kinds: vec![AttachmentKind::Aura, AttachmentKind::Equipment],
+                    controller: None,
+                }),
+            }]
+        );
+    }
+
+    #[test]
     fn that_s_red_or_green_emits_color_disjunction() {
         let result = parse_that_clause_suffix(" that's red or green", None);
         let (props, consumed) = result.expect("should parse");
@@ -15486,30 +15689,6 @@ mod tests {
             assert!(tf
                 .type_filters
                 .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))));
-        } else {
-            panic!("Expected Typed filter, got {filter:?}");
-        }
-    }
-
-    #[test]
-    fn parse_type_phrase_creature_with_power_3_or_greater() {
-        let (filter, rest) = parse_type_phrase("creature with power 3 or greater");
-        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
-        if let TargetFilter::Typed(tf) = &filter {
-            assert!(tf.type_filters.contains(&TypeFilter::Creature));
-            assert!(
-                tf.properties.iter().any(|p| matches!(
-                    p,
-                    FilterProp::PtComparison {
-                        stat: PtStat::Power,
-                        scope: PtValueScope::Current,
-                        comparator: Comparator::GE,
-                        value: QuantityExpr::Fixed { value: 3 }
-                    }
-                )),
-                "Expected PtComparison(Power, GE, 3) in {:?}",
-                tf.properties
-            );
         } else {
             panic!("Expected Typed filter, got {filter:?}");
         }
@@ -16164,19 +16343,6 @@ mod tests {
                 }
             )));
         }
-    }
-
-    /// CR 205.2a: "artifact or creature" is an OR-union of the two core types,
-    /// NOT a conjunction. The separator " or " breaks out of the conjunction
-    /// loop and builds a TargetFilter::Or with two branches.
-    #[test]
-    fn parse_type_phrase_artifact_or_creature_stays_union() {
-        let (filter, rest) = parse_type_phrase("artifact or creature");
-        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
-        let TargetFilter::Or { filters } = &filter else {
-            panic!("Expected Or filter, got {filter:?}");
-        };
-        assert_eq!(filters.len(), 2);
     }
 
     /// CR 205.2a + CR 110.1: "artifact creature you control" — conjunction

@@ -1,4 +1,5 @@
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use rand::{Rng, SeedableRng};
@@ -8,7 +9,7 @@ use wasm_bindgen::prelude::*;
 
 use engine::ai_support::{
     auto_pass_recommended, auto_pass_recommended_for_viewer, end_continuous_effect_offers,
-    legal_actions_for_viewer, legal_actions_full,
+    legal_actions_for_viewer, legal_actions_full, AiDecisionContract,
 };
 use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracket};
 use engine::database::{CardDatabase, CardSearchQuery};
@@ -37,13 +38,199 @@ use engine::types::{GameAction, GameState, PlayerId, ReplayHeader, ReplayLog};
 
 use engine::game::resolve_player_deck_list;
 use engine::starter_decks;
+use phase_ai::choose_action_with_session_diagnostic;
 use phase_ai::deck_profile::{ArchetypeClassification, DeckArchetype, DeckProfile};
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx, SeatMutation, SeatState};
 
-fn decode_restored_game_state(json_str: &str) -> Result<GameState, JsValue> {
-    serde_json::from_str::<PersistedGameState>(json_str)
+/// Enrich local diagnostic receipts with names already known to the engine.
+/// This remains at the WASM boundary: AI ranking stays state-agnostic, while
+/// the display receives the exact card/permanent an action refers to.
+fn attach_receipt_object_names(
+    state: &GameState,
+    receipt: &mut phase_ai::decision_receipt::AiDecisionDiagnosticReceipt,
+) {
+    for candidate in &mut receipt.candidates {
+        let object_id = match &candidate.action {
+            GameAction::CastSpell { object_id, .. }
+            | GameAction::PlayLand { object_id, .. }
+            | GameAction::Foretell { object_id, .. } => Some(*object_id),
+            GameAction::ActivateAbility { source_id, .. } => Some(*source_id),
+            _ => None,
+        };
+        candidate.object_name = object_id
+            .and_then(|id| state.objects.get(&id))
+            .map(|object| object.name.clone());
+        candidate.details = serde_json::to_value(&candidate.action)
+            .ok()
+            .and_then(|action| {
+                action
+                    .get("data")
+                    .and_then(serde_json::Value::as_object)
+                    .cloned()
+            })
+            .map(|data| {
+                data.into_iter()
+                    .map(
+                        |(label, value)| phase_ai::decision_receipt::AiDecisionDiagnosticField {
+                            label: humanize_diagnostic_field(&label),
+                            value: format_diagnostic_value(&value),
+                        },
+                    )
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+}
+
+fn humanize_diagnostic_field(field: &str) -> String {
+    field
+        .split('_')
+        .map(|word| match word {
+            "id" => "ID".to_string(),
+            _ => {
+                let mut chars = word.chars();
+                match chars.next() {
+                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                    None => String::new(),
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn format_diagnostic_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "None".to_string(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::String(value) => value.clone(),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(format_diagnostic_value)
+            .collect::<Vec<_>>()
+            .join(", "),
+        serde_json::Value::Object(values) => values
+            .iter()
+            .map(|(label, value)| {
+                format!(
+                    "{}: {}",
+                    humanize_diagnostic_field(label),
+                    format_diagnostic_value(value)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
+#[derive(Debug)]
+struct DecodedRestoredGameState {
+    state: GameState,
+    debug_permitted_was_serialized: bool,
+}
+
+fn decode_restored_game_state(json_str: &str) -> Result<DecodedRestoredGameState, String> {
+    let serialized = serde_json::from_str::<serde_json::Value>(json_str)
+        .map_err(|error| format!("Failed to deserialize GameState: {error}"))?;
+    let state = serialized
+        .get("state")
+        .and_then(serde_json::Value::as_object)
+        .or_else(|| serialized.as_object());
+    let debug_permitted_was_serialized =
+        state.is_some_and(|state| state.contains_key("debug_permitted"));
+    let state = serde_json::from_value::<PersistedGameState>(serialized)
         .map(PersistedGameState::into_game_state)
-        .map_err(|e| JsValue::from_str(&format!("Failed to deserialize GameState: {e}")))
+        .map_err(|error| format!("Failed to deserialize GameState: {error}"))?;
+    state
+        .format_config
+        .reject_unimplemented_range_of_influence()
+        .map_err(|error| format!("Failed to restore GameState: {error}"))?;
+    Ok(DecodedRestoredGameState {
+        state,
+        debug_permitted_was_serialized,
+    })
+}
+
+fn validate_external_format_config(config: &FormatConfig, player_count: u8) -> Result<(), String> {
+    config.validate_for_player_count(player_count)?;
+    config.reject_unimplemented_range_of_influence()
+}
+
+fn parse_initialize_format_config(
+    decoded: Result<FormatConfig, String>,
+) -> Result<FormatConfig, serde_json::Value> {
+    decoded.map_err(|error| {
+        serde_json::json!({
+            "error": true,
+            "reasons": [format!("Format config deserialization failed: {error}")],
+        })
+    })
+}
+
+#[cfg(test)]
+mod external_format_config_tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use engine::types::format::RangeOfInfluenceConfig;
+
+    #[test]
+    fn external_initialization_rejects_limited_range_configuration() {
+        let mut config = FormatConfig::standard();
+        config.range_of_influence = Some(Box::new(RangeOfInfluenceConfig {
+            default_range: 0,
+            player_overrides: BTreeMap::new(),
+        }));
+
+        assert!(validate_external_format_config(&config, 2)
+            .expect_err("limited range must remain disabled at the WASM boundary")
+            .contains("not supported"));
+    }
+
+    #[test]
+    fn malformed_initialize_format_config_returns_an_error_envelope() {
+        let malformed_js_config = serde_json::json!(42);
+        let decoded = serde_json::from_value::<FormatConfig>(malformed_js_config)
+            .map_err(|error| error.to_string());
+
+        let error = parse_initialize_format_config(decoded)
+            .expect_err("malformed JS config must not fall back to Standard");
+
+        assert_eq!(error["error"], true);
+        assert!(error["reasons"][0]
+            .as_str()
+            .expect("error reason is a string")
+            .contains("Format config deserialization failed"));
+    }
+
+    #[test]
+    fn restored_state_with_limited_range_is_rejected_before_rehydration() {
+        let mut state = GameState::new_two_player(42);
+        state.format_config.range_of_influence = Some(Box::new(RangeOfInfluenceConfig {
+            default_range: 0,
+            player_overrides: BTreeMap::new(),
+        }));
+        let json = serde_json::to_string(&state).expect("state serializes");
+
+        assert!(decode_restored_game_state(&json)
+            .expect_err("limited range must remain disabled at the restore boundary")
+            .contains("not supported"));
+    }
+
+    #[test]
+    fn legacy_scalar_range_restore_reaches_the_feature_gate() {
+        let mut serialized =
+            serde_json::to_value(GameState::new_two_player(42)).expect("state serializes");
+        serialized["format_config"]["range_of_influence"] = serde_json::json!(1);
+        let json = serde_json::to_string(&serialized).expect("legacy state serializes");
+
+        let error = decode_restored_game_state(&json)
+            .expect_err("legacy enabled range must be rejected after migration");
+
+        assert!(error.contains("not supported"));
+        assert!(!error.contains("deserialize"));
+    }
 }
 
 /// Bind the engine's interaction authority for the one game this module hosts.
@@ -117,8 +304,8 @@ fn to_js<T: Serialize + ?Sized>(value: &T) -> JsValue {
 
 use phase_ai::config::{create_config_for_players, AiDifficulty, Platform};
 use phase_ai::{
-    choose_action_with_session, fallback_action, score_candidates_with_session, AiSession,
-    SessionCache,
+    choose_action_with_session, score_candidates_for_parallel_worker,
+    select_safe_action_from_scores, AiSession, SessionCache,
 };
 thread_local! {
     /// Game state uses Cell<Option<T>> with take/set to avoid RefCell borrow poisoning.
@@ -150,6 +337,117 @@ thread_local! {
     /// Entirely independent of GAME_STATE / REPLAY_LOG — loading or seeking a
     /// replay never touches (or requires) a live game.
     static REPLAY_PLAYER: Cell<Option<ReplayPlayer>> = const { Cell::new(None) };
+    /// Opaque AI proposals are capabilities issued by this live WASM authority.
+    /// They deliberately do not serialize with `GameState`: a restore/new game
+    /// starts a new generation even when the state revision happens to match.
+    static AI_PROPOSALS: RefCell<AiProposalRegistry> = RefCell::new(AiProposalRegistry::default());
+}
+
+#[derive(Debug, Clone)]
+struct StoredAiProposal {
+    generation: u64,
+    contract: AiDecisionContract,
+}
+
+#[derive(Default)]
+struct AiProposalRegistry {
+    generation: u64,
+    serial: u64,
+    proposals: HashMap<String, StoredAiProposal>,
+}
+
+impl AiProposalRegistry {
+    fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.proposals.clear();
+    }
+
+    fn insert(&mut self, contract: AiDecisionContract) -> String {
+        self.serial = self.serial.wrapping_add(1);
+        // A newer proposal supersedes this pending player's earlier token, but
+        // concurrent decisions (such as simultaneous mulligans) each retain
+        // their own bounded capability. There can be at most one live token
+        // per semantic owner in this authority generation.
+        self.proposals
+            .retain(|_, proposal| proposal.contract.semantic_owner != contract.semantic_owner);
+        let token = format!(
+            "ai-{}-{}-{:016x}",
+            self.generation,
+            self.serial,
+            rand::rng().random::<u64>()
+        );
+        self.proposals.insert(
+            token.clone(),
+            StoredAiProposal {
+                generation: self.generation,
+                contract,
+            },
+        );
+        token
+    }
+
+    fn proposal(&self, token: &str) -> Option<&StoredAiProposal> {
+        self.proposals
+            .get(token)
+            .filter(|proposal| proposal.generation == self.generation)
+    }
+}
+
+fn invalidate_ai_proposals() {
+    AI_PROPOSALS.with(|registry| registry.borrow_mut().invalidate());
+}
+
+#[cfg(test)]
+mod ai_proposal_registry_tests {
+    use super::*;
+
+    fn contract() -> AiDecisionContract {
+        AiDecisionContract {
+            semantic_owner: PlayerId(0),
+            authorized_actor: PlayerId(0),
+            state_revision: 7,
+            candidates: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn invalidation_revokes_every_token_even_when_a_restored_state_reuses_its_revision() {
+        let mut registry = AiProposalRegistry::default();
+        let token = registry.insert(contract());
+        assert!(registry.proposal(&token).is_some());
+
+        // Restore/new-game boundaries advance the live authority generation;
+        // the serialized GameState revision is deliberately irrelevant here.
+        registry.invalidate();
+        assert!(registry.proposal(&token).is_none());
+    }
+
+    #[test]
+    fn token_is_an_opaque_capability_not_a_reusable_contract_key() {
+        let mut registry = AiProposalRegistry::default();
+        let first = registry.insert(contract());
+        let second = registry.insert(contract());
+
+        assert_ne!(first, second);
+        assert!(registry.proposal(&first).is_none());
+        assert!(registry.proposal(&second).is_some());
+        assert_eq!(registry.proposals.len(), 1);
+        assert!(registry.proposal("forged-token").is_none());
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase", tag = "status")]
+enum AiProposalSubmission {
+    Applied {
+        result: Box<engine::types::game_state::ActionResult>,
+    },
+    Stale {
+        reason: &'static str,
+    },
+    Rejected {
+        reason: String,
+    },
 }
 
 /// Toggle the multiplayer enforcement flag. Called by multiplayer adapters
@@ -209,6 +507,41 @@ fn ai_session_for(state: &GameState) -> Arc<AiSession> {
         cell.set(cache);
         session
     })
+}
+
+/// Resolve the seat whose live prompt owns an AI decision. The requested seat
+/// is retained for simultaneous prompts where it is still entitled to act.
+fn ai_semantic_owner(state: &GameState, requested_ai: PlayerId) -> PlayerId {
+    if state.waiting_for.acting_players().contains(&requested_ai) {
+        requested_ai
+    } else {
+        state
+            .waiting_for
+            .acting_player()
+            .or_else(|| state.waiting_for.acting_players().first().copied())
+            .unwrap_or(requested_ai)
+    }
+}
+
+/// Mint an opaque proposal only after the engine's current decision contract
+/// accepts the selected action.
+fn mint_ai_action_proposal(
+    state: &GameState,
+    semantic_owner: PlayerId,
+    contract: AiDecisionContract,
+    action: GameAction,
+) -> JsValue {
+    if !contract.contains_action(state, &action) {
+        return JsValue::NULL;
+    }
+    let actor = contract.authorized_actor;
+    let token = AI_PROPOSALS.with(|registry| registry.borrow_mut().insert(contract));
+    to_js(&serde_json::json!({
+        "token": token,
+        "semanticOwner": semantic_owner.0,
+        "actor": actor.0,
+        "action": action,
+    }))
 }
 
 /// Drop the cached session so the next `ai_session_for` rebuilds from scratch.
@@ -291,6 +624,7 @@ pub fn clear_game_state() {
     GAME_STATE.with(|cell| cell.set(None));
     clear_ai_session_cache();
     REPLAY_LOG.with(|cell| cell.set(None));
+    invalidate_ai_proposals();
 }
 
 /// Verify WASM integration works.
@@ -319,30 +653,23 @@ pub fn load_card_database(json_str: &str) -> Result<u32, JsValue> {
     Ok(count)
 }
 
-/// Build a game-scoped AI card-database subset from the loaded full database and
-/// the live game state, serialized as the `AiCardSubsetResult` tagged union
-/// (`{"kind":"full"}` or `{"kind":"subset","json":...,"count":N}`). The MAIN
-/// worker (full CARD_DB + live GAME_STATE) calls this; the AI worker pool loads
-/// the returned subset so its WASM instances don't each parse the full ~93MB
-/// corpus. Returns `{"kind":"full"}` defensively when the database or game state
-/// is absent (the engine is the single authority for this fallback — see
-/// `card_subset::build_ai_card_subset_or_full`). The game state is taken out of
-/// and restored to the thread-local on every path.
+/// Build the bounded card corpus for parallel AI scoring workers. The live
+/// main engine remains the only authority that owns the full card database.
 #[wasm_bindgen]
 pub fn build_ai_card_subset() -> Result<String, JsValue> {
     let result = CARD_DB.with(|db_cell| {
-        let db_ref = db_cell.borrow();
-        GAME_STATE.with(|gs_cell| {
-            let state_opt = gs_cell.take();
-            let r = engine::game::card_subset::build_ai_card_subset_or_full(
-                state_opt.as_ref(),
-                db_ref.as_ref(),
+        let db = db_cell.borrow();
+        GAME_STATE.with(|state_cell| {
+            let state = state_cell.take();
+            let result = engine::game::card_subset::build_ai_card_subset_or_full(
+                state.as_ref(),
+                db.as_ref(),
             );
-            gs_cell.set(state_opt);
-            r
+            state_cell.set(state);
+            result
         })
     });
-    serde_json::to_string(&result).map_err(|e| JsValue::from_str(&e.to_string()))
+    serde_json::to_string(&result).map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
 /// Look up a card face by name from the loaded card database.
@@ -709,14 +1036,19 @@ pub fn initialize_game(
     let seed = seed.map(|s| s as u64).unwrap_or(42);
 
     let format_config = if !format_config_js.is_null() && !format_config_js.is_undefined() {
-        serde_wasm_bindgen::from_value::<FormatConfig>(format_config_js)
-            .unwrap_or_else(|_| FormatConfig::standard())
+        match parse_initialize_format_config(
+            serde_wasm_bindgen::from_value::<FormatConfig>(format_config_js)
+                .map_err(|error| error.to_string()),
+        ) {
+            Ok(config) => config,
+            Err(error) => return to_js(&error),
+        }
     } else {
         FormatConfig::standard()
     };
     let count = player_count.unwrap_or(2);
     let game_format = format_config.format;
-    if let Err(reason) = format_config.validate_for_player_count(count) {
+    if let Err(reason) = validate_external_format_config(&format_config, count) {
         return to_js(&serde_json::json!({
             "error": true,
             "reasons": [reason],
@@ -724,18 +1056,7 @@ pub fn initialize_game(
     }
 
     let mut state = GameState::new(format_config.clone(), count, seed);
-    state.debug_mode = true;
-    // Sandbox capability: in a P2P-host (WASM-authoritative) game, the
-    // `submit_action` gate checks `debug_permitted`, mirroring server-core's
-    // WebSocket gate. server-core seeds every seat when `allow_debug_actions`
-    // is set (session.rs); the WASM host must do the same or sandbox Debug
-    // actions are rejected for everyone — the host included. Every seat is
-    // permitted by default; the host's grant/revoke flow still narrows it.
-    if state.format_config.allow_debug_actions {
-        for i in 0..count {
-            state.debug_permitted.insert(PlayerId(i));
-        }
-    }
+    initialize_debug_permissions(&mut state, is_multiplayer_mode());
     let match_config = if !match_config_js.is_null() && !match_config_js.is_undefined() {
         serde_wasm_bindgen::from_value::<MatchConfig>(match_config_js)
             .unwrap_or_else(|_| MatchConfig::default())
@@ -954,6 +1275,7 @@ pub fn initialize_game(
 
     GAME_STATE.with(|cell| cell.set(Some(state)));
     clear_ai_session_cache();
+    invalidate_ai_proposals();
 
     to_js(&result)
 }
@@ -996,15 +1318,43 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
         }
     }
 
+    if let GameAction::Debug(debug_action) = &action {
+        if debug_action.is_zero_count_create() {
+            return match with_state(|state| {
+                engine::game::preflight_debug_action(state, actor, debug_action)?;
+                Ok::<_, engine::game::EngineError>(engine::types::game_state::ActionResult {
+                    events: vec![],
+                    waiting_for: state.waiting_for.clone(),
+                    log_entries: vec![],
+                })
+            }) {
+                Ok(Ok(result)) => to_js(&result),
+                Ok(Err(error)) => JsValue::from_str(&format!("Engine error: {error}")),
+                Err(error) => error,
+            };
+        }
+    }
+
     if let GameAction::Debug(engine::types::actions::DebugAction::CreateCard {
         ref card_name,
         owner,
         zone,
+        count,
         attach_to,
         run_etb,
+        nonlegendary,
     }) = action
     {
-        return handle_debug_create_card(card_name, owner, zone, attach_to, run_etb);
+        return handle_debug_create_card(DebugCreateCardRequest {
+            actor,
+            card_name,
+            owner,
+            zone,
+            count,
+            attach_to,
+            run_etb,
+            nonlegendary,
+        });
     }
 
     // Cloned before `apply` consumes `action` — recorded into REPLAY_LOG only
@@ -1015,6 +1365,7 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
     match with_state_mut(|state| match apply(state, actor, action) {
         Ok(result) => {
             record_replay_action(is_debug_action, actor, action_for_replay);
+            invalidate_ai_proposals();
             to_js(&result)
         }
         Err(e) => {
@@ -1044,6 +1395,7 @@ pub fn submit_interaction_js(actor: u8, submission: JsValue) -> JsValue {
     match with_state_mut(|state| submit_interaction(state, actor, submission)) {
         Ok(Ok(applied)) => {
             record_replay_action(false, actor, applied.action);
+            invalidate_ai_proposals();
             to_js(&applied.result)
         }
         Ok(Err(error)) => JsValue::from_str(&format!("Engine error: {:?}", error.code)),
@@ -1054,8 +1406,8 @@ pub fn submit_interaction_js(actor: u8, submission: JsValue) -> JsValue {
 /// Record a successfully-applied action into REPLAY_LOG, or invalidate any
 /// in-progress recording if it was a (non-CreateCard) debug action.
 ///
-/// Every `GameAction::Debug` variant other than `CreateCard` reaches this
-/// point (unlike CreateCard, they mutate state already tracked by
+/// Every successful nonzero `GameAction::Debug` variant other than
+/// `CreateCard` reaches this point (unlike CreateCard, they mutate state already tracked by
 /// `GameState` rather than resolving against the WASM-local `CardDatabase`,
 /// so they aren't intercepted earlier in `submit_action`) — but
 /// `reconstruct_initial_state` (`game/replay.rs`) never sets `debug_mode`
@@ -1083,16 +1435,21 @@ fn record_replay_action(is_debug_action: bool, actor: PlayerId, action_for_repla
     });
 }
 
-fn handle_debug_create_card(
-    card_name: &str,
+struct DebugCreateCardRequest<'a> {
+    actor: PlayerId,
+    card_name: &'a str,
     owner: PlayerId,
     zone: engine::types::zones::Zone,
+    count: u32,
     attach_to: Option<engine::game::game_object::AttachTarget>,
     run_etb: bool,
-) -> JsValue {
-    match handle_debug_create_card_inner(card_name, owner, zone, attach_to, run_etb) {
+    nonlegendary: bool,
+}
+
+fn handle_debug_create_card(request: DebugCreateCardRequest<'_>) -> JsValue {
+    match handle_debug_create_card_inner(request) {
         Ok(result) => to_js(&result),
-        Err(msg) => JsValue::from_str(msg),
+        Err(msg) => JsValue::from_str(&msg),
     }
 }
 
@@ -1102,29 +1459,65 @@ fn handle_debug_create_card(
 /// plain `cargo test`. See `bracket_estimate_tests::estimate_bracket_inner`
 /// for the same split.
 fn handle_debug_create_card_inner(
-    card_name: &str,
-    owner: PlayerId,
-    zone: engine::types::zones::Zone,
-    attach_to: Option<engine::game::game_object::AttachTarget>,
-    run_etb: bool,
-) -> Result<engine::types::game_state::ActionResult, &'static str> {
-    let face = CARD_DB.with(|cell| {
+    request: DebugCreateCardRequest<'_>,
+) -> Result<engine::types::game_state::ActionResult, String> {
+    let DebugCreateCardRequest {
+        actor,
+        card_name,
+        owner,
+        zone,
+        count,
+        attach_to,
+        run_etb,
+        nonlegendary,
+    } = request;
+    let debug_action = engine::types::actions::DebugAction::CreateCard {
+        card_name: card_name.to_string(),
+        owner,
+        zone,
+        count,
+        attach_to,
+        run_etb,
+        nonlegendary,
+    };
+    let waiting_for = with_state(|state| {
+        engine::game::preflight_debug_action(state, actor, &debug_action)
+            .map_err(|error| format!("Engine error: {error}"))?;
+        Ok(state.waiting_for.clone())
+    })
+    .unwrap_or_else(|_| Err(NOT_INITIALIZED_ERR.to_string()))?;
+    if count == 0 {
+        return Ok(engine::types::game_state::ActionResult {
+            events: vec![],
+            waiting_for,
+            log_entries: vec![],
+        });
+    }
+    let source = CARD_DB.with(|cell| {
         let db = cell.borrow();
         let Some(db) = db.as_ref() else {
-            return Err("Engine error: card database not loaded");
+            return Err("Engine error: card database not loaded".to_string());
         };
         match db.get_face_by_name(card_name) {
-            Some(face) => Ok(face.clone()),
-            None => Err("Engine error: card not found in database"),
+            Some(face) => Ok(engine::game::debug_card_entry_source(db, face)),
+            None => Err("Engine error: card not found in database".to_string()),
         }
     })?;
     with_state_mut(|state| {
-        if !state.debug_mode {
-            return Err("Engine error: Debug actions require debug_mode to be enabled");
-        }
-        if !state.players.iter().any(|p| p.id == owner) {
-            return Err("Engine error: Debug: invalid owner player id");
-        }
+        let result = engine::game::create_debug_cards(
+            state,
+            engine::game::DebugCardCreateRequest {
+                actor,
+                source,
+                owner,
+                zone,
+                count,
+                attach_to,
+                run_etb,
+                nonlegendary,
+            },
+        )
+        .map_err(|error| format!("Engine error: {error}"))?;
         // Debug-spawned cards are resolved against the WASM-local CARD_DB and
         // never recorded into REPLAY_LOG (unlike normal actions in
         // `submit_action`), so a faithful replay can't reconstruct this
@@ -1133,89 +1526,13 @@ fn handle_debug_create_card_inner(
         // so `export_replay_log` can't produce a log that silently omits a
         // debug spawn.
         REPLAY_LOG.with(|cell| cell.set(None));
-        // CR 400.7: For battlefield destination, stage the object in Hand
-        // first, then route through the real ETB pipeline so replacements,
-        // triggers, and SBAs all fire. Direct creation in Battlefield (the
-        // old path) bypassed all of these and left Auras stranded with
-        // `attached_to: None` plus a `entered_battlefield_turn` stamp that
-        // survived later zone moves.
-        let staging_zone = if zone == engine::types::zones::Zone::Battlefield {
-            engine::types::zones::Zone::Hand
-        } else {
-            zone
-        };
-        let card_id = engine::types::identifiers::CardId(state.next_object_id);
-        let obj_id =
-            engine::game::create_object(state, card_id, owner, face.name.clone(), staging_zone);
-        let obj = state.objects.get_mut(&obj_id).expect("just created");
-        engine::game::printed_cards::apply_card_face_to_object(obj, &face);
-        state.layers_dirty.mark_full();
-
-        // Hydrate `back_face` for dual-faced spawns (MDFC, Transform, Adventure,
-        // Omen, Meld, Prepare). `apply_card_face_to_object` only writes the named
-        // face; without this, a debug-spawned Esika, God of the Tree has no
-        // Prismatic Bridge back face, so Ctrl-to-flip preview and MDFC face-choice
-        // casting silently no-op until a page refresh re-runs deck hydration. This
-        // is the same canonical primitive `load_and_hydrate_decks` uses, so the
-        // debug-spawn path can't drift from the normal load path. The new object
-        // already carries `printed_ref` (set by `apply_card_face_to_object`), which
-        // rehydrate uses to resolve the card and its other face.
-        CARD_DB.with(|cell| {
-            if let Some(db) = cell.borrow().as_ref() {
-                engine::game::printed_cards::rehydrate_game_from_card_db(state, db);
-            }
-        });
-
-        // CR 303.4f + CR 704.5n: When the user picks an attachment target,
-        // wire the host through the engine's attach resolvers BEFORE routing
-        // through the ETB pipeline. The resolvers (`attach_to`,
-        // `attach_to_player`) own all legality checks (CR 301.5 / 303.4i,
-        // `CantBeAttached` / `CantBeEnchanted` / `CantBeEquipped` statics) and
-        // back-link bookkeeping (host's `attachments` list, `layers_dirty`),
-        // so the WASM bridge stays a thin transport layer with zero attachment
-        // logic. Doing this pre-ETB means the post-ETB SBA pass sees the
-        // attachment with a legal host instead of an orphan (CR 704.5n) and
-        // any "becomes attached" trigger fires from the same resolved state
-        // a real cast would produce. Only honored for Battlefield spawns —
-        // Auras in Hand/Library/Exile/Graveyard have no battlefield host.
-        if zone == engine::types::zones::Zone::Battlefield {
-            if let Some(target) = attach_to {
-                use engine::game::game_object::AttachTarget;
-                match target {
-                    AttachTarget::Object(target_id) => {
-                        if state.objects.contains_key(&target_id) {
-                            engine::game::effects::attach::attach_to(state, obj_id, target_id);
-                        }
-                    }
-                    AttachTarget::Player(target_player) => {
-                        if state.players.iter().any(|p| p.id == target_player) {
-                            engine::game::effects::attach::attach_to_player(
-                                state,
-                                obj_id,
-                                target_player,
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        let result = if zone == engine::types::zones::Zone::Battlefield {
-            engine::game::route_debug_create_to_battlefield(state, obj_id, run_etb)
-        } else {
-            engine::types::game_state::ActionResult {
-                events: vec![],
-                waiting_for: state.waiting_for.clone(),
-                log_entries: vec![],
-            }
-        };
 
         engine::game::public_state::bump_state_revision(state);
         engine::game::public_state::mark_public_state_all_dirty(state);
         engine::game::public_state::finalize_public_state(state);
         Ok(result)
     })
-    .unwrap_or(Err(NOT_INITIALIZED_ERR))
+    .unwrap_or_else(|_| Err(NOT_INITIALIZED_ERR.to_string()))
 }
 
 /// Get the current game state as a `ClientGameState` wire envelope
@@ -1359,8 +1676,8 @@ pub fn legal_targets_for_castables_js(object_ids: JsValue) -> JsValue {
 /// the TS side accepts it via structural typing.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ViewerSnapshot {
-    state: GameState,
+struct ViewerSnapshot<'a> {
+    state: engine::game::derived_views::ClientGameStateRef<'a>,
     actions: Vec<GameAction>,
     auto_pass_recommended: bool,
     end_continuous_effect_offers: Vec<GameAction>,
@@ -1401,6 +1718,7 @@ fn legal_actions_result_for_viewer(state: &GameState, viewer: PlayerId) -> Legal
 #[cfg(test)]
 mod viewer_priority_tests {
     use super::*;
+    use engine::types::format::FormatConfig;
     use engine::types::game_state::{PriorityPassingMode, WaitingFor};
     use engine::types::phase::Phase;
 
@@ -1439,6 +1757,23 @@ mod viewer_priority_tests {
             "the controlled viewer is not authorized to act and must receive false"
         );
     }
+
+    #[test]
+    fn local_debug_permission_is_explicit_but_non_sandbox_p2p_stays_empty() {
+        let mut local = GameState::new(FormatConfig::standard(), 2, 42);
+        initialize_debug_permissions(&mut local, false);
+        assert!(local.debug_mode);
+        assert!(local.debug_permitted.contains(&PlayerId(0)));
+        assert!(!local.debug_permitted.contains(&PlayerId(1)));
+
+        let mut p2p = GameState::new(FormatConfig::standard(), 2, 42);
+        initialize_debug_permissions(&mut p2p, true);
+        assert!(p2p.debug_mode);
+        assert!(
+            p2p.debug_permitted.is_empty(),
+            "normal P2P must not receive the debug-library capability"
+        );
+    }
 }
 
 #[wasm_bindgen]
@@ -1451,7 +1786,11 @@ pub fn get_viewer_snapshot_js(player_id: u32) -> JsValue {
         let viewer_interaction =
             engine::game::interaction::derive_viewer_interaction(state, &filtered, viewer);
         to_js(&ViewerSnapshot {
-            state: filtered,
+            state: engine::game::derived_views::ClientGameStateRef::wrap_filtered(
+                state,
+                &filtered,
+                Some(viewer),
+            ),
             actions: legal.actions,
             auto_pass_recommended: legal.auto_pass_recommended,
             end_continuous_effect_offers: legal.end_continuous_effect_offers,
@@ -1589,6 +1928,70 @@ pub fn export_game_state_json() -> Result<String, JsValue> {
     })?
 }
 
+fn rehydrate_restored_state_from_card_db(state: &mut GameState) -> Result<(), String> {
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let db = db.as_ref().ok_or_else(|| {
+            "Cannot restore game state: card database is not loaded. Call load_card_database first."
+                .to_string()
+        })?;
+        rehydrate_game_from_card_db(state, db);
+        Ok(())
+    })
+}
+
+fn decode_and_rehydrate_restored_game_state(
+    json_str: &str,
+) -> Result<DecodedRestoredGameState, String> {
+    let mut restored = decode_restored_game_state(json_str)?;
+    rehydrate_restored_state_from_card_db(&mut restored.state)?;
+    Ok(restored)
+}
+
+/// Sets the explicit debug capability that client projections consume. Local
+/// games authorize their perspective seat; multiplayer reserves debug access
+/// for the sandbox permission set so ordinary P2P games cannot expose it.
+fn initialize_debug_permissions(state: &mut GameState, multiplayer: bool) {
+    state.debug_mode = true;
+    if state.format_config.allow_debug_actions {
+        state
+            .debug_permitted
+            .extend(state.players.iter().map(|player| player.id));
+    } else if !multiplayer {
+        state.debug_permitted.insert(PlayerId(0));
+    }
+}
+
+/// Reconstructs the capability set omitted by saves created before
+/// `debug_permitted` was persisted. Current saves carry the field even when
+/// its intentionally empty, so their grant/revoke state remains authoritative.
+fn backfill_legacy_debug_permissions(
+    state: &mut GameState,
+    debug_permitted_was_serialized: bool,
+    multiplayer: bool,
+) {
+    if debug_permitted_was_serialized {
+        return;
+    }
+    if state.format_config.allow_debug_actions {
+        state
+            .debug_permitted
+            .extend(state.players.iter().map(|player| player.id));
+    } else if !multiplayer {
+        state.debug_permitted.insert(PlayerId(0));
+    }
+}
+
+#[cfg(test)]
+fn load_minimal_test_card_database() {
+    CARD_DB.with(|cell| {
+        *cell.borrow_mut() = Some(
+            CardDatabase::from_json_str("{}")
+                .expect("an empty test card database must deserialize"),
+        );
+    });
+}
+
 /// Restore the game state from a JSON string.
 /// Uses serde_json which handles string-keyed maps (from localStorage round-trip)
 /// correctly deserializing into HashMap<ObjectId, V>.
@@ -1603,7 +2006,9 @@ pub fn restore_game_state(json_str: &str) -> Result<(), JsValue> {
             "restore_game_state refused: undo is disabled in multiplayer sessions",
         ));
     }
-    let mut state = decode_restored_game_state(json_str)?;
+    let restored = decode_and_rehydrate_restored_game_state(json_str)
+        .map_err(|error| JsValue::from_str(&error))?;
+    let mut state = restored.state;
     // Reseed the skipped `rng` and fast-forward it to the offset captured at
     // export (issue #5466) so the restored game draws the values that would have
     // come NEXT rather than replaying from origin. The engine owns this logic
@@ -1611,11 +2016,7 @@ pub fn restore_game_state(json_str: &str) -> Result<(), JsValue> {
     // and reproduce the previous rewind-to-origin behavior.
     state.rehydrate_rng();
     state.debug_mode = true;
-    CARD_DB.with(|cell| {
-        if let Some(db) = cell.borrow().as_ref() {
-            rehydrate_game_from_card_db(&mut state, db);
-        }
-    });
+    backfill_legacy_debug_permissions(&mut state, restored.debug_permitted_was_serialized, false);
     finalize_public_state(&mut state);
     bind_interaction_session(&mut state);
     GAME_STATE.with(|cell| cell.set(Some(state)));
@@ -1623,6 +2024,7 @@ pub fn restore_game_state(json_str: &str) -> Result<(), JsValue> {
     // `initialize_game`) invalidates any in-progress recording — the restored
     // state's history no longer matches the recorded action sequence.
     REPLAY_LOG.with(|cell| cell.set(None));
+    invalidate_ai_proposals();
     Ok(())
 }
 
@@ -1667,7 +2069,10 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<(), JsValue> {
         ));
     }
 
-    let mut state = decode_restored_game_state(json_str)?;
+    let restored = decode_and_rehydrate_restored_game_state(json_str)
+        .map_err(|error| JsValue::from_str(&error))?;
+    let mut state = restored.state;
+    backfill_legacy_debug_permissions(&mut state, restored.debug_permitted_was_serialized, true);
 
     // Deliberately re-roll a fresh seed on multiplayer host resume so continued
     // play diverges from any pre-save sequence (mirrors server-core). This is a
@@ -1680,11 +2085,6 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<(), JsValue> {
     state.rng = ChaCha20Rng::seed_from_u64(fresh_seed);
     state.rng_word_pos = 0;
 
-    CARD_DB.with(|cell| {
-        if let Some(db) = cell.borrow().as_ref() {
-            rehydrate_game_from_card_db(&mut state, db);
-        }
-    });
     finalize_public_state(&mut state);
     bind_interaction_session(&mut state);
 
@@ -1695,7 +2095,93 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<(), JsValue> {
     // `crates/engine/src/types/replay.rs`); ensure no stale local-game
     // recording from this worker's previous session lingers.
     REPLAY_LOG.with(|cell| cell.set(None));
+    invalidate_ai_proposals();
     Ok(())
+}
+
+#[cfg(test)]
+mod restored_card_db_requirements_tests {
+    use super::*;
+
+    #[test]
+    fn decoded_restore_requires_a_card_database_before_state_mutation() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        let json = serde_json::to_string(&GameState::new_two_player(17)).unwrap();
+
+        let error = decode_and_rehydrate_restored_game_state(&json)
+            .expect_err("restore must require CARD_DB");
+        assert!(error.contains("card database"));
+        assert!(GAME_STATE.with(|cell| cell.replace(None).is_none()));
+        assert!(!is_multiplayer_mode());
+    }
+}
+
+#[cfg(test)]
+mod legacy_debug_permission_restore_tests {
+    use super::*;
+
+    fn legacy_save_without_debug_permissions(state: GameState) -> String {
+        let mut serialized = serde_json::to_value(PersistedGameState::capture(state))
+            .expect("persisted test state must serialize");
+        serialized
+            .get_mut("state")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("trusted persisted state must contain a state object")
+            .remove("debug_permitted");
+        serde_json::to_string(&serialized).expect("legacy persisted test state must serialize")
+    }
+
+    #[test]
+    fn legacy_sandbox_save_backfills_every_seat() {
+        let json = legacy_save_without_debug_permissions(GameState::new(
+            FormatConfig::standard().with_sandbox(),
+            2,
+            42,
+        ));
+
+        let mut restored = decode_restored_game_state(&json).expect("legacy save must decode");
+        assert!(!restored.debug_permitted_was_serialized);
+        backfill_legacy_debug_permissions(&mut restored.state, false, false);
+
+        assert_eq!(
+            restored.state.debug_permitted,
+            [PlayerId(0), PlayerId(1)].into_iter().collect(),
+            "legacy sandbox saves predate per-seat grants and must retain sandbox access"
+        );
+    }
+
+    #[test]
+    fn current_empty_sandbox_permission_set_remains_revoked() {
+        let mut state = GameState::new(FormatConfig::standard().with_sandbox(), 2, 42);
+        state.debug_permitted.clear();
+        let json = serde_json::to_string(&PersistedGameState::capture(state))
+            .expect("current persisted state must serialize");
+
+        let mut restored = decode_restored_game_state(&json).expect("current save must decode");
+        assert!(restored.debug_permitted_was_serialized);
+        backfill_legacy_debug_permissions(&mut restored.state, true, false);
+
+        assert!(
+            restored.state.debug_permitted.is_empty(),
+            "an explicit empty set records intentional sandbox revocation"
+        );
+    }
+
+    #[test]
+    fn legacy_normal_p2p_save_does_not_gain_debug_access() {
+        let json =
+            legacy_save_without_debug_permissions(GameState::new(FormatConfig::standard(), 2, 42));
+
+        let mut restored = decode_restored_game_state(&json).expect("legacy save must decode");
+        backfill_legacy_debug_permissions(&mut restored.state, false, true);
+
+        assert!(
+            restored.state.debug_permitted.is_empty(),
+            "normal P2P restores must not gain a debug projection"
+        );
+    }
 }
 
 // ── Replay system ───────────────────────────────────────────────────────
@@ -1829,110 +2315,350 @@ pub fn clear_replay_playback() {
     REPLAY_PLAYER.with(|cell| cell.set(None));
 }
 
-/// Engine-owned AI escape action for the current waiting state.
+/// Mint an opaque, authority-bound proposal for the AI's next action.
 ///
-/// Returns the same deadlock-safe `fallback_action` the search path uses when
-/// scoring cannot choose — never invents from legal-action list order. Null
-/// when no legal escape exists (#6393).
+/// Callers must submit it through [`submit_ai_action_proposal`]. The registry
+/// is local to this live WASM instance and is cleared
+/// on every successful state mutation, restore, resume, reset, and new game.
 #[wasm_bindgen]
-pub fn get_ai_fallback_action() -> Result<JsValue, JsValue> {
-    with_state_mut(|state| {
-        // Freshly-restored states carry dirty layers; flush so candidate
-        // generation matches `get_ai_action` / `get_legal_actions_js`.
-        engine::game::layers::flush_layers(state);
-        // Escape uses policy penalties from config (sacrifice ordering); Medium
-        // is the controller's default seat difficulty for softlock recovery.
-        let config = create_config_for_players(
-            AiDifficulty::Medium,
-            Platform::Wasm,
-            state.players.len() as u8,
-        );
-        match fallback_action(state, &config) {
-            Some(action) => Ok(to_js(&action)),
-            None => Ok(JsValue::NULL),
-        }
-    })?
-}
-
-/// Get the AI's chosen action for the current game state.
-/// `difficulty` is one of: "VeryEasy", "Easy", "Medium", "Hard", "VeryHard",
-/// "CEDH" (case-insensitive; see `AiDifficulty::from_label`).
-/// `player_id` is the seat index of the AI player (0-based).
-#[wasm_bindgen]
-pub fn get_ai_action(difficulty: &str, player_id: u8) -> Result<JsValue, JsValue> {
+pub fn get_ai_action_proposal(difficulty: &str, player_id: u8) -> Result<JsValue, JsValue> {
     let ai_difficulty = AiDifficulty::from_label(difficulty);
-
     with_state_mut(|state| {
-        // Freshly-restored states carry `layers_dirty = Full` and a conservative
-        // all-present `static_mode_presence`; flush before read-only candidate
-        // generation so derived state and the presence index are precise
-        // (mirrors `get_legal_actions_js`). No-op when layers are clean.
         engine::game::layers::flush_layers(state);
+        // The caller identifies the AI configuration to use, but never the
+        // decision slot. The live prompt is the sole authority for semantic
+        // ownership; this matters when control effects make its authorized
+        // submitter a different player.
+        let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
+        let contract = AiDecisionContract::issue(state, semantic_owner);
         let config =
             create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
-
-        let ai_player = PlayerId(player_id);
         let mut rng = rand::rng();
         let session = ai_session_for(state);
+        let Some(action) =
+            choose_action_with_session(state, semantic_owner, &config, &mut rng, &session)
+        else {
+            return Ok(JsValue::NULL);
+        };
 
-        match choose_action_with_session(state, ai_player, &config, &mut rng, &session) {
-            Some(action) => Ok(to_js(&action)),
-            None => Ok(JsValue::NULL),
-        }
+        Ok(mint_ai_action_proposal(
+            state,
+            semantic_owner,
+            contract,
+            action,
+        ))
     })?
 }
 
-/// Score all candidate actions and return `[GameAction, score]` tuples.
-/// Used by AI workers for root parallelism — each worker scores independently,
-/// then results are merged on the main thread.
-/// `rng_seed` seeds the game state's RNG so each worker's beam search explores
-/// different orderings, producing diverse score vectors.
+/// Mint a proposal using the existing tactical floor without entering
+/// rollout search. This is the engine-owned escape for a timed-out optional
+/// scorer; it still issues and validates the current decision contract.
+#[wasm_bindgen]
+pub fn get_ai_tactical_action_proposal(
+    difficulty: &str,
+    player_id: u8,
+) -> Result<JsValue, JsValue> {
+    let ai_difficulty = AiDifficulty::from_label(difficulty);
+    with_state_mut(|state| {
+        engine::game::layers::flush_layers(state);
+        let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
+        let contract = AiDecisionContract::issue(state, semantic_owner);
+        let mut config =
+            create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
+        // A pre-expired search deadline selects the established tactical floor
+        // while retaining the same engine-owned candidate and contract checks.
+        config.search.time_budget_ms = Some(0);
+        let mut rng = rand::rng();
+        let session = ai_session_for(state);
+        let Some(action) =
+            choose_action_with_session(state, semantic_owner, &config, &mut rng, &session)
+        else {
+            return Ok(JsValue::NULL);
+        };
+        Ok(mint_ai_action_proposal(
+            state,
+            semantic_owner,
+            contract,
+            action,
+        ))
+    })?
+}
+
+/// Mint an ordinary opaque proposal together with a local-only diagnostic
+/// receipt. The receipt is an observation of the minted capability, never an
+/// additional action-selection API.
+#[wasm_bindgen]
+pub fn get_ai_action_proposal_with_diagnostics(
+    difficulty: &str,
+    player_id: u8,
+) -> Result<JsValue, JsValue> {
+    let ai_difficulty = AiDifficulty::from_label(difficulty);
+    with_state_mut(|state| {
+        engine::game::layers::flush_layers(state);
+        let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
+        let contract = AiDecisionContract::issue(state, semantic_owner);
+        let config =
+            create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
+        let mut rng = rand::rng();
+        let session = ai_session_for(state);
+        let selection = choose_action_with_session_diagnostic(
+            state,
+            semantic_owner,
+            &config,
+            &mut rng,
+            &session,
+        );
+        let Some(action) = selection.action else {
+            return Ok(JsValue::NULL);
+        };
+        if !contract.contains_action(state, &action) {
+            return Ok(JsValue::NULL);
+        }
+        let actor = contract.authorized_actor;
+        let mut receipt = selection
+            .receipt
+            .expect("diagnostic chooser must observe its selected action");
+        attach_receipt_object_names(state, &mut receipt);
+        let token = AI_PROPOSALS.with(|registry| registry.borrow_mut().insert(contract));
+        Ok(to_js(&serde_json::json!({
+            "proposal": { "token": token, "semanticOwner": semantic_owner.0, "actor": actor.0, "action": action },
+            "receipt": receipt,
+        })))
+    })?
+}
+
+/// Diagnostic counterpart of [`get_ai_tactical_action_proposal`].
+#[wasm_bindgen]
+pub fn get_ai_tactical_action_proposal_with_diagnostics(
+    difficulty: &str,
+    player_id: u8,
+) -> Result<JsValue, JsValue> {
+    let ai_difficulty = AiDifficulty::from_label(difficulty);
+    with_state_mut(|state| {
+        engine::game::layers::flush_layers(state);
+        let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
+        let contract = AiDecisionContract::issue(state, semantic_owner);
+        let mut config =
+            create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
+        config.search.time_budget_ms = Some(0);
+        let mut rng = rand::rng();
+        let session = ai_session_for(state);
+        let selection = choose_action_with_session_diagnostic(
+            state,
+            semantic_owner,
+            &config,
+            &mut rng,
+            &session,
+        );
+        let Some(action) = selection.action else {
+            return Ok(JsValue::NULL);
+        };
+        if !contract.contains_action(state, &action) {
+            return Ok(JsValue::NULL);
+        }
+        let actor = contract.authorized_actor;
+        let mut receipt = selection
+            .receipt
+            .expect("diagnostic chooser must observe its selected action");
+        attach_receipt_object_names(state, &mut receipt);
+        let token = AI_PROPOSALS.with(|registry| registry.borrow_mut().insert(contract));
+        Ok(to_js(&serde_json::json!({
+            "proposal": { "token": token, "semanticOwner": semantic_owner.0, "actor": actor.0, "action": action },
+            "receipt": receipt,
+        })))
+    })?
+}
+
+/// Score candidates inside an isolated AI worker. These are plain,
+/// serializable hints rather than capabilities: they cannot cross the action
+/// boundary until the live main engine reissues an exact proposal.
 #[wasm_bindgen]
 pub fn get_ai_scored_candidates(
     difficulty: &str,
     player_id: u8,
     rng_seed: u64,
 ) -> Result<JsValue, JsValue> {
-    let ai_difficulty = AiDifficulty::from_label(difficulty);
-
+    let difficulty = AiDifficulty::from_label(difficulty);
     with_state_mut(|state| {
-        // Pool workers restore a deserialized state per decision: `layers_dirty =
-        // Full`, presence index conservatively all-present. Flush before scoring so
-        // candidate generation runs on precise derived state (mirrors
-        // `get_legal_actions_js`). No-op when layers are clean.
         engine::game::layers::flush_layers(state);
-        // Re-seed the state RNG so each parallel worker explores different
-        // beam-search rollout paths and tie-breaking orders.
         state.rng = ChaCha20Rng::seed_from_u64(rng_seed);
         let config =
-            create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
-        let ai_player = PlayerId(player_id);
+            create_config_for_players(difficulty, Platform::Wasm, state.players.len() as u8);
         let session = ai_session_for(state);
-        let scored = score_candidates_with_session(state, ai_player, &config, &session);
-        Ok(to_js(&scored))
+        Ok(to_js(&score_candidates_for_parallel_worker(
+            state,
+            PlayerId(player_id),
+            &config,
+            Some(&session),
+        )))
     })?
 }
 
-/// Select an action from merged scores using softmax.
-/// Called after collecting scored candidates from parallel workers and merging.
-/// `scores_json` is a JSON array of `[GameAction, score]` tuples.
-/// `difficulty` determines the softmax temperature (engine is the single
-/// authority for AI tuning parameters — the frontend never specifies temperature).
-/// `rng_seed` provides deterministic randomness.
+/// Convert score-only worker output into an authority-bound proposal.
+///
+/// The worker state may be old, from another game, or maliciously altered.
+/// Consequently this endpoint always derives a new decision contract from the
+/// main WASM state, discards every score whose action is not an exact member,
+/// and only then mints an opaque proposal. There is intentionally no public
+/// score-to-`GameAction` endpoint.
 #[wasm_bindgen]
-pub fn select_action_from_scores(
+pub fn get_ai_action_proposal_from_scores(
     scores_json: &str,
     difficulty: &str,
+    player_id: u8,
     rng_seed: u64,
 ) -> Result<JsValue, JsValue> {
-    let ai_difficulty = AiDifficulty::from_label(difficulty);
-    let config = phase_ai::config::create_config(ai_difficulty, Platform::Wasm);
     let scored: Vec<(GameAction, f64)> = serde_json::from_str(scores_json)
-        .map_err(|e| JsValue::from_str(&format!("Failed to deserialize scores: {e}")))?;
-    let mut rng = ChaCha20Rng::seed_from_u64(rng_seed);
-    match phase_ai::softmax_select_pairs(&scored, config.temperature, &mut rng) {
-        Some(action) => Ok(to_js(&action)),
-        None => Ok(JsValue::NULL),
+        .map_err(|error| JsValue::from_str(&format!("Failed to deserialize AI scores: {error}")))?;
+    let difficulty = AiDifficulty::from_label(difficulty);
+
+    with_state_mut(|state| {
+        engine::game::layers::flush_layers(state);
+        let requested_ai = PlayerId(player_id);
+        let semantic_owner = if state.waiting_for.acting_players().contains(&requested_ai) {
+            requested_ai
+        } else {
+            state
+                .waiting_for
+                .acting_player()
+                .or_else(|| state.waiting_for.acting_players().first().copied())
+                .unwrap_or(requested_ai)
+        };
+        let contract = AiDecisionContract::issue(state, semantic_owner);
+        let admissible_scores: Vec<(GameAction, f64)> = scored
+            .into_iter()
+            .filter(|(action, _)| contract.contains_action(state, action))
+            .collect();
+        let config =
+            create_config_for_players(difficulty, Platform::Wasm, state.players.len() as u8);
+        let mut rng = ChaCha20Rng::seed_from_u64(rng_seed);
+        let Some(action) =
+            select_safe_action_from_scores(state, &admissible_scores, config.temperature, &mut rng)
+        else {
+            return Ok(JsValue::NULL);
+        };
+
+        let actor = contract.authorized_actor;
+        let token = AI_PROPOSALS.with(|registry| registry.borrow_mut().insert(contract));
+        Ok(to_js(&serde_json::json!({
+            "token": token,
+            "semanticOwner": semantic_owner.0,
+            "actor": actor.0,
+            "action": action,
+        })))
+    })?
+}
+
+/// Diagnostic counterpart of score-worker proposal rebinding. It preserves the
+/// existing authority filter and selector; the returned receipt is local WASM
+/// observability data bound to the same opaque token.
+#[wasm_bindgen]
+pub fn get_ai_action_proposal_from_scores_with_diagnostics(
+    scores_json: &str,
+    difficulty: &str,
+    player_id: u8,
+    rng_seed: u64,
+) -> Result<JsValue, JsValue> {
+    let scored: Vec<(GameAction, f64)> = serde_json::from_str(scores_json)
+        .map_err(|error| JsValue::from_str(&format!("Failed to deserialize AI scores: {error}")))?;
+    let difficulty = AiDifficulty::from_label(difficulty);
+    with_state_mut(|state| {
+        engine::game::layers::flush_layers(state);
+        let requested_ai = PlayerId(player_id);
+        let semantic_owner = if state.waiting_for.acting_players().contains(&requested_ai) {
+            requested_ai
+        } else {
+            state
+                .waiting_for
+                .acting_player()
+                .or_else(|| state.waiting_for.acting_players().first().copied())
+                .unwrap_or(requested_ai)
+        };
+        let contract = AiDecisionContract::issue(state, semantic_owner);
+        let admissible_scores: Vec<(GameAction, f64)> = scored
+            .into_iter()
+            .filter(|(action, _)| contract.contains_action(state, action))
+            .collect();
+        let config =
+            create_config_for_players(difficulty, Platform::Wasm, state.players.len() as u8);
+        let mut rng = ChaCha20Rng::seed_from_u64(rng_seed);
+        let Some(selected_index) = phase_ai::select_safe_action_index_from_scores(
+            state,
+            &admissible_scores,
+            config.temperature,
+            &mut rng,
+        ) else {
+            return Ok(JsValue::NULL);
+        };
+        let action = admissible_scores[selected_index].0.clone();
+        let actor = contract.authorized_actor;
+        let mut receipt = phase_ai::decision_receipt::ranked_receipt(
+            &contract,
+            &admissible_scores,
+            Some(selected_index),
+            config.temperature,
+            action.clone(),
+        );
+        attach_receipt_object_names(state, &mut receipt);
+        let token = AI_PROPOSALS.with(|registry| registry.borrow_mut().insert(contract));
+        Ok(to_js(&serde_json::json!({
+            "proposal": { "token": token, "semanticOwner": semantic_owner.0, "actor": actor.0, "action": action },
+            "receipt": receipt,
+        })))
+    })?
+}
+
+/// Submit an action selected from an engine-issued AI proposal.
+///
+/// A stale or foreign proposal is a normal race outcome and is returned as a
+/// tagged value. Rejected actions leave the proposal live for diagnostics or a
+/// retry; only a successful apply invalidates the authority generation.
+#[wasm_bindgen]
+pub fn submit_ai_action_proposal(token: &str, actor: u8, action: JsValue) -> JsValue {
+    let action: GameAction = match serde_wasm_bindgen::from_value(action) {
+        Ok(action) => action,
+        Err(error) => {
+            return to_js(&AiProposalSubmission::Rejected {
+                reason: format!("failed to deserialize action: {error}"),
+            });
+        }
+    };
+    let actor = PlayerId(actor);
+    let Some(proposal) = AI_PROPOSALS.with(|registry| registry.borrow().proposal(token).cloned())
+    else {
+        return to_js(&AiProposalSubmission::Stale {
+            reason: "unknown_or_invalidated_token",
+        });
+    };
+
+    match with_state_mut(|state| {
+        if !proposal.contract.permits(state, actor, &action) {
+            return AiProposalSubmission::Stale {
+                reason: "decision_changed_or_action_outside_issued_bounds",
+            };
+        }
+        match engine::game::engine::apply_interaction(
+            state,
+            actor,
+            proposal.contract.semantic_owner,
+            action.clone(),
+        ) {
+            Ok(result) => {
+                record_replay_action(false, actor, action);
+                invalidate_ai_proposals();
+                AiProposalSubmission::Applied {
+                    result: Box::new(result),
+                }
+            }
+            Err(error) => AiProposalSubmission::Rejected {
+                reason: error.to_string(),
+            },
+        }
+    }) {
+        Ok(outcome) => to_js(&outcome),
+        Err(_) => to_js(&AiProposalSubmission::Stale {
+            reason: "state_unavailable",
+        }),
     }
 }
 
@@ -1985,9 +2711,19 @@ fn resolve_all_inner(
             let ai_difficulty = AiDifficulty::from_label(&seat.difficulty);
             let config =
                 create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
-            match choose_action_with_session(state, actor, &config, rng, &session) {
-                Some(action) => ResolveAllCallbackDecision::Action(action),
-                None => ResolveAllCallbackDecision::Stop,
+            let Some(semantic_owner) = state
+                .waiting_for
+                .acting_player()
+                .or_else(|| state.waiting_for.acting_players().first().copied())
+            else {
+                return ResolveAllCallbackDecision::Stop;
+            };
+            let contract = AiDecisionContract::issue(state, semantic_owner);
+            match choose_action_with_session(state, semantic_owner, &config, rng, &session) {
+                Some(action) if contract.permits(state, actor, &action) => {
+                    ResolveAllCallbackDecision::Proposal { contract, action }
+                }
+                Some(_) | None => ResolveAllCallbackDecision::Stop,
             }
         } else {
             ResolveAllCallbackDecision::Stop
@@ -2026,6 +2762,10 @@ pub fn resolve_all(
                 }
                 cell.set(log);
             });
+            // Resolve All advances the live state without travelling through
+            // `submit_action`, so it must invalidate proposal capabilities at
+            // the same authority boundary.
+            invalidate_ai_proposals();
         }
         result.events.clear();
         result.log_entries.clear();
@@ -2225,20 +2965,1165 @@ mod resolve_all_tests {
 #[cfg(all(test, target_arch = "wasm32"))]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
     use engine::game::deck_loading::create_object_from_card_face;
+    use engine::game::scenario::{GameScenario, P0, P1};
+    use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, ContinuousModification, Duration, Effect, QuantityExpr,
-        ResolvedAbility, TargetFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ChosenAttribute,
+        ContinuousModification, Duration, Effect, QuantityExpr, QuantityRef, ResolvedAbility,
+        TargetFilter, TargetRef,
     };
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType};
-    use engine::types::game_state::{StackEntry, StackEntryKind, WaitingFor};
-    use engine::types::identifiers::ObjectId;
+    use engine::types::counter::{CounterMatch, CounterType};
+    use engine::types::game_state::{
+        MulliganDecisionEntry, MulliganDecisionPhase, NamedChoiceSource, NamedChoiceSourceBinding,
+        OpponentGuessOwner, OpponentGuessSource, PromptSourceBinding, StackEntry, StackEntryKind,
+        WaitingFor,
+    };
+    use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::keywords::Keyword;
-    use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+    use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use engine::types::phase::Phase;
     use engine::types::player::PlayerId;
 
     use engine::types::zones::Zone;
+
+    fn proposal_outcome(token: &str, actor: PlayerId, action: &GameAction) -> serde_json::Value {
+        serde_wasm_bindgen::from_value(submit_ai_action_proposal(token, actor.0, to_js(action)))
+            .expect("proposal outcome must serialize")
+    }
+
+    #[test]
+    fn initialize_game_returns_error_for_malformed_format_config_without_standard_fallback() {
+        clear_game_state();
+        let malformed_format_config = serde_wasm_bindgen::to_value(&serde_json::json!(42))
+            .expect("malformed JSON value converts to a JS input");
+
+        let result = initialize_game(
+            JsValue::NULL,
+            Some(42.0),
+            malformed_format_config,
+            JsValue::NULL,
+            Some(2),
+            None,
+        );
+        let error: serde_json::Value =
+            serde_wasm_bindgen::from_value(result).expect("initializer error is a JS object");
+
+        assert_eq!(error["error"], true);
+        assert!(error["reasons"][0]
+            .as_str()
+            .expect("error reason is a string")
+            .contains("Format config deserialization failed"));
+        assert!(GAME_STATE.with(|cell| cell.replace(None).is_none()));
+    }
+
+    /// Installs a real engine state and returns the production finite decision
+    /// domain for `semantic_owner`. Tests must never fabricate a contract: the
+    /// contract is the authority that derives every bound from `WaitingFor`.
+    fn issue_contract(state: GameState, semantic_owner: PlayerId) -> AiDecisionContract {
+        clear_game_state();
+        GAME_STATE.with(|cell| cell.set(Some(state)));
+        with_state(|state| AiDecisionContract::issue(state, semantic_owner))
+            .expect("test state must remain installed")
+    }
+
+    /// Registers a production-issued contract only after proving `action` is
+    /// within its engine-issued bounds. This mirrors the public proposal
+    /// endpoint's issuance path without hand-authoring candidate metadata.
+    fn install_issued_candidate(
+        state: GameState,
+        semantic_owner: PlayerId,
+        action: &GameAction,
+    ) -> String {
+        let contract = issue_contract(state, semantic_owner);
+        assert!(
+            with_state(|state| contract.contains_action(state, action))
+                .expect("test state must remain installed"),
+            "action must come from the engine-issued domain: {action:?}"
+        );
+        AI_PROPOSALS.with(|registry| registry.borrow_mut().insert(contract))
+    }
+
+    fn install_issued_contract(state: GameState, semantic_owner: PlayerId) -> AiDecisionContract {
+        issue_contract(state, semantic_owner)
+    }
+
+    fn issue_public_proposal(state: GameState, player: PlayerId) -> serde_json::Value {
+        clear_game_state();
+        GAME_STATE.with(|cell| cell.set(Some(state)));
+        serde_wasm_bindgen::from_value(
+            get_ai_action_proposal("Medium", player.0)
+                .expect("the production issuer must not throw"),
+        )
+        .expect("proposal must serialize")
+    }
+
+    fn submit_public_proposal(proposal: &serde_json::Value) -> GameAction {
+        let token = proposal["token"].as_str().expect("opaque token");
+        let actor = proposal["actor"].as_u64().expect("proposal actor") as u8;
+        let action: GameAction = serde_json::from_value(proposal["action"].clone())
+            .expect("proposal action must be a GameAction");
+        let outcome = serde_wasm_bindgen::from_value::<serde_json::Value>(
+            submit_ai_action_proposal(token, actor, to_js(&action)),
+        )
+        .expect("submission outcome must serialize");
+        assert_eq!(
+            outcome["status"], "applied",
+            "production-issued {action:?} must cross the public action boundary"
+        );
+        action
+    }
+
+    /// Exercises the actual public capability path rather than registering a
+    /// test-only contract. This is the boundary used by both the browser AI
+    /// controller and worker-score rebinding.
+    fn issue_and_submit_public_proposal(state: GameState, player: PlayerId) -> GameAction {
+        let proposal = issue_public_proposal(state, player);
+        let action = submit_public_proposal(&proposal);
+        clear_game_state();
+        action
+    }
+
+    fn load_disruptor_flute_database() {
+        load_card_database(
+            r#"{
+                "disruptor flute": {
+                    "name": "Disruptor Flute",
+                    "mana_cost": { "type": "NoCost" },
+                    "card_type": { "supertypes": [], "core_types": ["Artifact"], "subtypes": [] },
+                    "power": null,
+                    "toughness": null,
+                    "loyalty": null,
+                    "defense": null,
+                    "oracle_text": "Flash\\nAs this artifact enters, choose a card name.",
+                    "abilities": [],
+                    "triggers": [],
+                    "static_abilities": [],
+                    "replacements": [],
+                    "keywords": []
+                }
+            }"#,
+        )
+        .expect("Disruptor Flute fixture database must load");
+    }
+
+    fn disruptor_flute_card_name_state() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        create_object(
+            &mut state,
+            CardId(880),
+            PlayerId(0),
+            "Disruptor Flute".to_string(),
+            Zone::Battlefield,
+        );
+        state.waiting_for = WaitingFor::NamedChoice {
+            player: PlayerId(0),
+            choice_type: ChoiceType::CardName,
+            options: Vec::new(),
+            source: None,
+            persist_player: None,
+        };
+        state
+    }
+
+    fn fireball_final_target_state(pool: usize) -> (GameState, TargetRef) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let first_target = scenario.add_creature(P1, "Fireball Target One", 3, 3).id();
+        let final_target = scenario.add_creature(P1, "Fireball Target Two", 3, 3).id();
+        let spell = scenario
+            .add_spell_to_hand(P0, "Fireball", true)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::Red],
+                generic: 0,
+            })
+            .with_strive_cost(ManaCost::Cost {
+                shards: Vec::new(),
+                generic: 1,
+            })
+            .with_ability_definition(
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::DealDamage {
+                        amount: QuantityExpr::Ref {
+                            qty: QuantityRef::CostXPaid,
+                        },
+                        target: TargetFilter::Any,
+                        damage_source: None,
+                        excess: None,
+                    },
+                )
+                .sub_ability(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::DealDamage {
+                        amount: QuantityExpr::Ref {
+                            qty: QuantityRef::CostXPaid,
+                        },
+                        target: TargetFilter::Any,
+                        damage_source: None,
+                        excess: None,
+                    },
+                )),
+            )
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            (0..pool)
+                .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, Vec::new()))
+                .collect(),
+        );
+
+        let mut state = scenario.build().state().clone();
+        engine::game::engine::apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: spell,
+                card_id: CardId(spell.0),
+                targets: Vec::new(),
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            },
+        )
+        .expect("Fireball announcement must reach ChooseX");
+        engine::game::engine::apply_as_current(&mut state, GameAction::ChooseX { value: 3 })
+            .expect("Fireball X announcement must reach target selection");
+        engine::game::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(first_target)),
+            },
+        )
+        .expect("first Fireball target must leave the final target slot pending");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ));
+        (state, TargetRef::Object(final_target))
+    }
+
+    /// The contract is only useful if every member can cross the public
+    /// proposal boundary. Reinstall the unchanged pre-decision state for each
+    /// member because a successful submission invalidates its siblings.
+    fn assert_every_issued_candidate_applies(state: &GameState, semantic_owner: PlayerId) {
+        let contract = install_issued_contract(state.clone(), semantic_owner);
+        assert!(
+            !contract.candidates.is_empty(),
+            "the real WaitingFor state must issue at least one candidate"
+        );
+        let actor = contract.authorized_actor;
+        for candidate in contract.candidates {
+            let token = install_issued_candidate(state.clone(), semantic_owner, &candidate.action);
+            assert_eq!(
+                proposal_outcome(&token, actor, &candidate.action)["status"],
+                "applied",
+                "every issued candidate must submit through the public boundary: {:?}",
+                candidate.action
+            );
+        }
+    }
+
+    fn priority_state(player: PlayerId) -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = player;
+        state.priority_player = player;
+        state.waiting_for = WaitingFor::Priority { player };
+        state
+    }
+
+    fn install_planeswalker(
+        state: &mut GameState,
+        owner: PlayerId,
+        loyalty: u32,
+        abilities: Vec<AbilityDefinition>,
+    ) -> ObjectId {
+        let object_id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            "Proposal Walker".to_string(),
+            Zone::Battlefield,
+        );
+        let object = state.objects.get_mut(&object_id).expect("created walker");
+        object.card_types.core_types.push(CoreType::Planeswalker);
+        object.loyalty = Some(loyalty);
+        object
+            .counters
+            .insert(engine::types::counter::CounterType::Loyalty, loyalty);
+        object.abilities = Arc::new(abilities);
+        object_id
+    }
+
+    fn loyalty_ability(amount: i32, effect: Effect) -> AbilityDefinition {
+        AbilityDefinition::new(AbilityKind::Activated, effect)
+            .cost(AbilityCost::Loyalty { amount })
+            .sorcery_speed()
+    }
+
+    fn minus_x_loyalty_ability(effect: Effect) -> AbilityDefinition {
+        AbilityDefinition::new(AbilityKind::Activated, effect)
+            .cost(AbilityCost::RemoveCounter {
+                count: engine::types::ability::REMOVE_COUNTER_COST_X,
+                counter_type: CounterMatch::OfType(CounterType::Loyalty),
+                target: None,
+                selection: engine::types::ability::CounterCostSelection::SingleObject,
+            })
+            .sorcery_speed()
+    }
+
+    fn card_predicate_guess_state() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(910),
+            PlayerId(0),
+            "Predicate guess source".to_string(),
+            Zone::Battlefield,
+        );
+        let context = engine::game::triggers::trigger_source_context_for_latch(
+            &state,
+            state.objects.get(&source_id).expect("created source"),
+        );
+        let predicates = ChoiceType::land_or_nonland_card_predicate_options();
+        state.waiting_for = WaitingFor::NamedChoice {
+            player: PlayerId(1),
+            choice_type: ChoiceType::CardPredicateGuess {
+                options: predicates.clone(),
+            },
+            options: ChoiceType::card_predicate_labels(&predicates),
+            source: Some(NamedChoiceSource::from_trigger_source(
+                context,
+                NamedChoiceSourceBinding::ResolutionContext,
+            )),
+            persist_player: None,
+        };
+        state
+    }
+
+    fn opponent_guess_state() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(911),
+            PlayerId(1),
+            "Opponent guess source".to_string(),
+            Zone::Battlefield,
+        );
+        let context = engine::game::triggers::trigger_source_context_for_latch(
+            &state,
+            state.objects.get(&source_id).expect("created source"),
+        );
+        state.waiting_for = WaitingFor::OpponentGuess {
+            player: PlayerId(0),
+            options: vec!["greater".to_string(), "not greater".to_string()],
+            choice_type: ChoiceType::Labeled {
+                options: vec!["greater".to_string(), "not greater".to_string()],
+            },
+            source: OpponentGuessSource {
+                prompt: PromptSourceBinding::from_trigger_source(&context),
+            },
+            owner: Some(OpponentGuessOwner {
+                context,
+                committed_choice: Some(ChosenAttribute::Number(7)),
+            }),
+            proposition_truth: Some(true),
+        };
+        state
+    }
+
+    #[test]
+    fn restored_disruptor_flute_card_name_proposal_applies_after_rehydration() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_disruptor_flute_database();
+        let json = serde_json::to_string(&disruptor_flute_card_name_state()).unwrap();
+
+        restore_game_state(&json).expect("restore must rehydrate CardName metadata");
+        let proposal: serde_json::Value = serde_wasm_bindgen::from_value(
+            get_ai_action_proposal("Medium", PlayerId(0).0)
+                .expect("public issuer must answer restored Flute prompt"),
+        )
+        .unwrap();
+        assert!(matches!(
+            serde_json::from_value::<GameAction>(proposal["action"].clone()),
+            Ok(GameAction::ChooseOption { ref choice }) if choice == "Disruptor Flute"
+        ));
+        submit_public_proposal(&proposal);
+        with_state(|state| assert!(matches!(state.waiting_for, WaitingFor::Priority { .. })))
+            .expect("applied card-name choice must leave a live successor");
+        clear_game_state();
+    }
+
+    #[test]
+    fn resumed_disruptor_flute_card_name_proposal_applies_after_rehydration() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_disruptor_flute_database();
+        let json = serde_json::to_string(&disruptor_flute_card_name_state()).unwrap();
+
+        resume_multiplayer_host_state(&json).expect("resume must rehydrate CardName metadata");
+        let proposal: serde_json::Value = serde_wasm_bindgen::from_value(
+            get_ai_action_proposal("Medium", PlayerId(0).0)
+                .expect("public issuer must answer resumed Flute prompt"),
+        )
+        .unwrap();
+        assert!(matches!(
+            serde_json::from_value::<GameAction>(proposal["action"].clone()),
+            Ok(GameAction::ChooseOption { ref choice }) if choice == "Disruptor Flute"
+        ));
+        submit_public_proposal(&proposal);
+        with_state(|state| assert!(matches!(state.waiting_for, WaitingFor::Priority { .. })))
+            .expect("applied card-name choice must leave a live successor");
+        assert!(is_multiplayer_mode());
+        clear_game_state();
+        set_multiplayer_mode(false);
+    }
+
+    #[test]
+    fn public_fireball_final_target_filters_unpayable_surcharge_and_keeps_payable_sibling() {
+        clear_game_state();
+        // {X}{R} with X=3 costs four mana for one target. The final second
+        // target adds the pinned Fireball/Strive-shaped {1} surcharge, so this
+        // exact reducer transition is rejected from a four-mana pool.
+        let (doomed_state, doomed_target) = fireball_final_target_state(4);
+        let doomed_action = GameAction::ChooseTarget {
+            target: Some(doomed_target.clone()),
+        };
+        let mut direct_doomed_state = doomed_state.clone();
+        let error =
+            engine::game::engine::apply_as_current(&mut direct_doomed_state, doomed_action.clone())
+                .expect_err(
+                    "reach guard: the final target must hit the unpayable payment boundary",
+                );
+        assert!(
+            error.to_string().contains("Cannot pay mana cost"),
+            "expected the production payment rejection, got {error}"
+        );
+        let doomed_contract = AiDecisionContract::issue(&doomed_state, P0);
+        assert!(
+            !doomed_contract.contains_action(&doomed_state, &doomed_action),
+            "the unpayable final target must not enter the issued contract"
+        );
+        assert!(doomed_contract.contains_action(&doomed_state, &GameAction::CancelCast));
+        assert!(
+            !engine::ai_support::legal_actions(&doomed_state).contains(&doomed_action),
+            "public legal actions must share the contract's filtered target domain"
+        );
+        GAME_STATE.with(|cell| cell.set(Some(doomed_state)));
+        let doomed_proposal: serde_json::Value = serde_wasm_bindgen::from_value(
+            get_ai_action_proposal("Medium", P0.0)
+                .expect("public issuer must expose the issued cancellation"),
+        )
+        .expect("proposal must serialize");
+        assert!(matches!(
+            serde_json::from_value::<GameAction>(doomed_proposal["action"].clone()),
+            Ok(GameAction::CancelCast)
+        ));
+        submit_public_proposal(&doomed_proposal);
+        clear_game_state();
+
+        let (payable_state, payable_target) = fireball_final_target_state(5);
+        let payable_action = GameAction::ChooseTarget {
+            target: Some(payable_target),
+        };
+        let payable_contract = AiDecisionContract::issue(&payable_state, P0);
+        assert!(
+            payable_contract.contains_action(&payable_state, &payable_action),
+            "the same final target must remain issued once its target-dependent cost is payable"
+        );
+        assert!(engine::ai_support::legal_actions(&payable_state).contains(&payable_action));
+        GAME_STATE.with(|cell| cell.set(Some(payable_state)));
+        let payable_proposal: serde_json::Value = serde_wasm_bindgen::from_value(
+            get_ai_action_proposal("Medium", P0.0)
+                .expect("public issuer must retain the payable target"),
+        )
+        .expect("proposal must serialize");
+        assert!(matches!(
+            serde_json::from_value::<GameAction>(payable_proposal["action"].clone()),
+            Ok(GameAction::ChooseTarget { target: Some(_) })
+        ));
+        submit_public_proposal(&payable_proposal);
+        clear_game_state();
+    }
+
+    #[test]
+    fn proposal_boundary_rejects_changed_x_target_and_payment_arguments() {
+        let player = PlayerId(0);
+        let mut x_state = priority_state(player);
+        let x_walker = install_planeswalker(
+            &mut x_state,
+            player,
+            3,
+            vec![minus_x_loyalty_ability(Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid,
+                },
+                player: TargetFilter::Controller,
+            })],
+        );
+        engine::game::engine::apply_as_current(
+            &mut x_state,
+            GameAction::ActivateAbility {
+                source_id: x_walker,
+                ability_index: 0,
+            },
+        )
+        .expect("real [-X] activation must issue an X prompt");
+        let x_contract = install_issued_contract(x_state.clone(), player);
+        assert_eq!(
+            x_contract
+                .candidates
+                .iter()
+                .filter(|candidate| matches!(candidate.action, GameAction::ChooseX { .. }))
+                .count(),
+            4,
+            "the real X prompt must expose its inclusive [0, 3] domain"
+        );
+        assert_every_issued_candidate_applies(&x_state, player);
+        let issued_x = GameAction::ChooseX { value: 1 };
+        let token = install_issued_candidate(x_state, player, &issued_x);
+        let outcome = proposal_outcome(&token, player, &GameAction::ChooseX { value: 4 });
+        assert_eq!(outcome["status"], "stale");
+        assert_eq!(
+            outcome["reason"],
+            "decision_changed_or_action_outside_issued_bounds"
+        );
+
+        let mut target_state = priority_state(player);
+        let target_walker = install_planeswalker(
+            &mut target_state,
+            player,
+            3,
+            vec![loyalty_ability(
+                -1,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Any,
+                },
+            )],
+        );
+        engine::game::engine::apply_as_current(
+            &mut target_state,
+            GameAction::ActivateAbility {
+                source_id: target_walker,
+                ability_index: 0,
+            },
+        )
+        .expect("real targeted loyalty activation must issue a target prompt");
+        let target_contract = install_issued_contract(target_state.clone(), player);
+        let issued_target = target_contract
+            .candidates
+            .iter()
+            .find(|candidate| {
+                matches!(
+                    candidate.action,
+                    GameAction::ChooseTarget {
+                        target: Some(engine::types::ability::TargetRef::Player(PlayerId(1)))
+                    }
+                )
+            })
+            .expect("the target prompt must bind player 1 as an actual candidate")
+            .action
+            .clone();
+        assert_every_issued_candidate_applies(&target_state, player);
+        let token = install_issued_candidate(target_state, player, &issued_target);
+        let outcome = proposal_outcome(
+            &token,
+            player,
+            &GameAction::ChooseTarget {
+                target: Some(engine::types::ability::TargetRef::Player(player)),
+            },
+        );
+        assert_eq!(outcome["status"], "stale");
+        assert_eq!(
+            outcome["reason"],
+            "decision_changed_or_action_outside_issued_bounds"
+        );
+
+        let mut payment_state = GameState::new_two_player(42);
+        payment_state.players[0].energy = 3;
+        let payment_ability = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: AbilityCost::PayEnergy {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                },
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(800),
+            player,
+        );
+        payment_state.stack.push_back(StackEntry {
+            id: ObjectId(801),
+            source_id: ObjectId(800),
+            controller: player,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: ObjectId(800),
+                ability: Box::new(payment_ability),
+            },
+        });
+        engine::game::stack::resolve_top(&mut payment_state, &mut Vec::new());
+        let payment_contract = install_issued_contract(payment_state.clone(), player);
+        let issued_payment = payment_contract
+            .candidates
+            .iter()
+            .find(|candidate| matches!(candidate.action, GameAction::SubmitPayAmount { amount: 1 }))
+            .expect("the real energy payment must expose amount 1")
+            .action
+            .clone();
+        assert_every_issued_candidate_applies(&payment_state, player);
+        let token = install_issued_candidate(payment_state, player, &issued_payment);
+        let outcome = proposal_outcome(&token, player, &GameAction::SubmitPayAmount { amount: 4 });
+        assert_eq!(outcome["status"], "stale");
+        assert_eq!(
+            outcome["reason"],
+            "decision_changed_or_action_outside_issued_bounds"
+        );
+        clear_game_state();
+    }
+
+    #[test]
+    fn proposal_boundary_rejects_wrong_actor_and_restore_invalidates_same_revision() {
+        let player = PlayerId(0);
+        let action = GameAction::PassPriority;
+        let token = install_issued_candidate(priority_state(player), player, &action);
+        assert_eq!(
+            proposal_outcome(&token, PlayerId(1), &action)["status"],
+            "stale"
+        );
+
+        let token = install_issued_candidate(priority_state(player), player, &action);
+        let state_json = export_game_state_json().expect("live state exports");
+        restore_game_state(&state_json).expect("same-revision restore succeeds");
+        assert_eq!(proposal_outcome(&token, player, &action)["status"], "stale");
+        clear_game_state();
+    }
+
+    #[test]
+    fn proposal_boundary_binds_semantic_owner_and_controlled_turn_actor() {
+        let owner = PlayerId(1);
+        let controller = PlayerId(0);
+        let action = GameAction::PassPriority;
+        let mut controlled = priority_state(owner);
+        controlled.turn_decision_controller = Some(controller);
+        controlled.priority_player = controller;
+        let token = install_issued_candidate(controlled, owner, &action);
+
+        // The authorized controller may act for the controlled semantic owner.
+        assert_eq!(
+            proposal_outcome(&token, controller, &action)["status"],
+            "applied"
+        );
+
+        // A proposal binds its semantic slot even when the actor is allowed to
+        // make decisions for another player: P0 cannot repurpose this token
+        // for P0's own prompt.
+        let mut controlled = priority_state(owner);
+        controlled.turn_decision_controller = Some(controller);
+        controlled.priority_player = controller;
+        let token = install_issued_candidate(controlled, owner, &action);
+        GAME_STATE.with(|cell| {
+            let mut state = cell.take().expect("test state");
+            state.waiting_for = WaitingFor::Priority { player: controller };
+            cell.set(Some(state));
+        });
+        assert_eq!(
+            proposal_outcome(&token, controller, &action)["status"],
+            "stale"
+        );
+
+        // Authorization is also live state, not a property the original
+        // submitter may retain after the turn-control mapping changes.
+        let mut controlled = priority_state(owner);
+        controlled.turn_decision_controller = Some(controller);
+        controlled.priority_player = controller;
+        let token = install_issued_candidate(controlled, owner, &action);
+        GAME_STATE.with(|cell| {
+            let mut state = cell.take().expect("test state");
+            state.turn_decision_controller = Some(PlayerId(1));
+            state.priority_player = PlayerId(1);
+            cell.set(Some(state));
+        });
+        assert_eq!(
+            proposal_outcome(&token, controller, &action)["status"],
+            "stale",
+            "an actor-remap race must invalidate the old controller's proposal"
+        );
+        clear_game_state();
+    }
+
+    #[test]
+    fn simultaneous_mulligan_proposals_are_scoped_to_the_named_pending_owner() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::MulliganDecision {
+            pending: vec![
+                MulliganDecisionEntry {
+                    player: PlayerId(0),
+                    mulligan_count: 0,
+                    phase: MulliganDecisionPhase::Declare,
+                },
+                MulliganDecisionEntry {
+                    player: PlayerId(1),
+                    mulligan_count: 0,
+                    phase: MulliganDecisionPhase::Declare,
+                },
+            ],
+            free_first_mulligan: false,
+        };
+        let keep = GameAction::MulliganDecision {
+            choice: engine::types::actions::MulliganChoice::Keep,
+        };
+
+        let p0_token = install_issued_candidate(state.clone(), PlayerId(0), &keep);
+        assert_eq!(
+            proposal_outcome(&p0_token, PlayerId(1), &keep)["status"],
+            "stale"
+        );
+
+        let p1_token = install_issued_candidate(state.clone(), PlayerId(1), &keep);
+        assert!(
+            AI_PROPOSALS.with(|registry| registry.borrow().proposal(&p1_token).is_some()),
+            "each simultaneous decision keeps one independently-live proposal"
+        );
+        assert_eq!(
+            proposal_outcome(&p0_token, PlayerId(0), &keep)["status"],
+            "applied",
+            "issuing a proposal for another simultaneous decision must not revoke this one"
+        );
+
+        let p1_token = install_issued_candidate(state, PlayerId(1), &keep);
+        assert_eq!(
+            proposal_outcome(&p1_token, PlayerId(1), &keep)["status"],
+            "applied"
+        );
+        clear_game_state();
+    }
+
+    #[test]
+    fn proposal_boundary_applies_an_issued_priority_candidate() {
+        let player = PlayerId(0);
+        let state = priority_state(player);
+        let contract = install_issued_contract(state.clone(), player);
+        assert!(
+            !contract.candidates.is_empty(),
+            "priority must issue a finite domain"
+        );
+
+        for candidate in contract.candidates {
+            let token = install_issued_candidate(state.clone(), player, &candidate.action);
+            assert_eq!(
+                proposal_outcome(&token, player, &candidate.action)["status"],
+                "applied"
+            );
+        }
+        clear_game_state();
+    }
+
+    #[test]
+    fn public_proposal_issuer_mints_a_submitable_priority_capability() {
+        let player = PlayerId(0);
+        clear_game_state();
+        GAME_STATE.with(|cell| cell.set(Some(priority_state(player))));
+
+        let proposal: serde_json::Value = serde_wasm_bindgen::from_value(
+            get_ai_action_proposal("Medium", player.0)
+                .expect("the production issuer must return a priority proposal"),
+        )
+        .expect("proposal must serialize");
+        assert_eq!(proposal["semanticOwner"], player.0);
+        assert_eq!(proposal["actor"], player.0);
+        assert_eq!(proposal["action"]["type"], "PassPriority");
+        let outcome =
+            serde_wasm_bindgen::from_value::<serde_json::Value>(submit_ai_action_proposal(
+                proposal["token"].as_str().expect("opaque token"),
+                player.0,
+                to_js(&proposal["action"]),
+            ))
+            .expect("submission outcome must serialize");
+        assert_eq!(outcome["status"], "applied");
+        clear_game_state();
+    }
+
+    #[test]
+    fn tactical_proposal_issuer_mints_a_submitable_priority_capability() {
+        let player = PlayerId(0);
+        clear_game_state();
+        GAME_STATE.with(|cell| cell.set(Some(priority_state(player))));
+
+        let proposal: serde_json::Value = serde_wasm_bindgen::from_value(
+            get_ai_tactical_action_proposal("VeryHard", player.0)
+                .expect("the tactical issuer must return a priority proposal"),
+        )
+        .expect("tactical proposal must serialize");
+        assert_eq!(proposal["semanticOwner"], player.0);
+        assert_eq!(proposal["actor"], player.0);
+        assert_eq!(proposal["action"]["type"], "PassPriority");
+        let outcome =
+            serde_wasm_bindgen::from_value::<serde_json::Value>(submit_ai_action_proposal(
+                proposal["token"].as_str().expect("opaque token"),
+                player.0,
+                to_js(&proposal["action"]),
+            ))
+            .expect("submission outcome must serialize");
+        assert_eq!(outcome["status"], "applied");
+        clear_game_state();
+    }
+
+    #[test]
+    fn public_proposal_issuer_submits_special_and_fallback_decision_families() {
+        let player = PlayerId(0);
+
+        // Tribute is a phase-ai special decision, not the generic planner.
+        let mut tribute = GameState::new_two_player(42);
+        tribute.active_player = player;
+        let tribute_source = create_object(
+            &mut tribute,
+            CardId(900),
+            PlayerId(1),
+            "Tribute source".to_string(),
+            Zone::Battlefield,
+        );
+        tribute.waiting_for = WaitingFor::TributeChoice {
+            player,
+            source_id: tribute_source,
+            count: 1,
+        };
+        assert!(matches!(
+            issue_and_submit_public_proposal(tribute, player),
+            GameAction::DecideOptionalEffect { .. }
+        ));
+
+        // Search has its own hidden-zone chooser. The selection must be a
+        // bounded engine candidate before it can reach the action boundary.
+        let mut search = GameState::new_two_player(42);
+        let card = create_object(
+            &mut search,
+            CardId(901),
+            player,
+            "Search card".to_string(),
+            Zone::Library,
+        );
+        search.waiting_for = WaitingFor::SearchChoice {
+            player,
+            library_owner: None,
+            cards: vec![card],
+            count: 1,
+            reveal: false,
+            up_to: false,
+            allows_partial_find: false,
+            constraint: Default::default(),
+            split: None,
+        };
+        assert!(matches!(
+            issue_and_submit_public_proposal(search, player),
+            GameAction::SelectCards { .. }
+        ));
+
+        // Combat bypasses the priority planner. Its deterministic empty-attack
+        // fallback remains a real bounded declaration, never a fabricated pass.
+        let mut combat = GameState::new_two_player(42);
+        combat.phase = Phase::DeclareAttackers;
+        combat.active_player = player;
+        combat.waiting_for = WaitingFor::DeclareAttackers {
+            player,
+            valid_attacker_ids: vec![],
+            valid_attack_targets: vec![engine::game::combat::AttackTarget::Player(PlayerId(1))],
+            valid_attack_targets_by_attacker: None,
+            attacker_constraints: Default::default(),
+        };
+        assert!(matches!(
+            issue_and_submit_public_proposal(combat, player),
+            GameAction::DeclareAttackers { .. }
+        ));
+    }
+
+    #[test]
+    fn public_proposal_issuer_submits_random_card_predicate_guess() {
+        let proposal = issue_public_proposal(card_predicate_guess_state(), PlayerId(1));
+        assert_eq!(proposal["semanticOwner"], 1);
+        assert!(matches!(
+            serde_json::from_value::<GameAction>(proposal["action"].clone()),
+            Ok(GameAction::ChooseOption { ref choice }) if choice == "Land" || choice == "Nonland"
+        ));
+        submit_public_proposal(&proposal);
+        clear_game_state();
+    }
+
+    #[test]
+    fn public_proposal_issuer_submits_opponent_guess() {
+        let proposal = issue_public_proposal(opponent_guess_state(), PlayerId(0));
+        assert_eq!(proposal["semanticOwner"], 0);
+        assert!(matches!(
+            serde_json::from_value::<GameAction>(proposal["action"].clone()),
+            Ok(GameAction::ChooseOption { ref choice }) if choice == "greater" || choice == "not greater"
+        ));
+        submit_public_proposal(&proposal);
+        clear_game_state();
+    }
+
+    #[test]
+    fn empty_worker_scores_fall_back_to_an_authoritative_public_proposal() {
+        let player = PlayerId(0);
+        clear_game_state();
+        GAME_STATE.with(|cell| cell.set(Some(priority_state(player))));
+
+        // An empty worker result has no action payload that the caller could
+        // dispatch. The adapter must obtain a fresh capability from the live
+        // authority instead of fabricating a fallback GameAction in TypeScript.
+        assert!(
+            get_ai_action_proposal_from_scores("[]", "VeryHard", player.0, 7)
+                .expect("empty score payload is valid")
+                .is_null()
+        );
+
+        let proposal: serde_json::Value = serde_wasm_bindgen::from_value(
+            get_ai_action_proposal("Medium", player.0)
+                .expect("authoritative fallback proposal issues"),
+        )
+        .expect("proposal serializes");
+        assert_eq!(proposal["action"]["type"], "PassPriority");
+        submit_public_proposal(&proposal);
+        clear_game_state();
+    }
+
+    #[test]
+    fn public_proposals_do_not_survive_session_supersession_and_reissue_for_controlled_turns() {
+        let owner = PlayerId(1);
+        let controller = PlayerId(0);
+        let mut controlled = priority_state(owner);
+        controlled.turn_decision_controller = Some(controller);
+        controlled.priority_player = controller;
+
+        let proposal = issue_public_proposal(controlled.clone(), owner);
+        assert_eq!(proposal["semanticOwner"], owner.0);
+        assert_eq!(proposal["actor"], controller.0);
+
+        // Replacing the live game is a new authority session even when the
+        // replacement happens to serialize to the same revision and prompt.
+        clear_game_state();
+        GAME_STATE.with(|cell| cell.set(Some(controlled)));
+        let old_action: GameAction =
+            serde_json::from_value(proposal["action"].clone()).expect("old action serializes");
+        assert_eq!(
+            proposal_outcome(
+                proposal["token"].as_str().expect("opaque token"),
+                controller,
+                &old_action,
+            )["status"],
+            "stale"
+        );
+
+        let reissued: serde_json::Value = serde_wasm_bindgen::from_value(
+            get_ai_action_proposal("Medium", owner.0)
+                .expect("the controlled decision reissues for its semantic owner"),
+        )
+        .expect("reissued proposal serializes");
+        assert_eq!(reissued["semanticOwner"], owner.0);
+        assert_eq!(reissued["actor"], controller.0);
+        submit_public_proposal(&reissued);
+        clear_game_state();
+    }
+
+    #[test]
+    fn public_proposal_issuer_submits_planeswalker_target_continuation() {
+        let player = PlayerId(0);
+        let mut state = priority_state(player);
+        let walker = install_planeswalker(
+            &mut state,
+            player,
+            2,
+            vec![loyalty_ability(
+                -1,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Any,
+                },
+            )],
+        );
+        engine::game::engine::apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: walker,
+                ability_index: 0,
+            },
+        )
+        .expect("real loyalty activation must issue a target continuation");
+        assert!(matches!(
+            issue_and_submit_public_proposal(state, player),
+            GameAction::ChooseTarget { .. }
+        ));
+    }
+
+    #[test]
+    fn score_only_workers_require_main_authority_rebinding_before_dispatch() {
+        let player = PlayerId(0);
+        clear_game_state();
+        GAME_STATE.with(|cell| cell.set(Some(priority_state(player))));
+
+        // A worker can return arbitrary serialized data, but a nonmember is
+        // discarded before any capability is minted; it has no dispatch path.
+        let foreign = serde_json::to_string(&vec![(GameAction::ChooseX { value: 99 }, 99.0)])
+            .expect("score tuple serializes");
+        assert!(
+            get_ai_action_proposal_from_scores(&foreign, "VeryHard", player.0, 7)
+                .expect("score rebind handles a foreign score")
+                .is_null()
+        );
+        assert_eq!(
+            proposal_outcome(
+                "fabricated-worker-token",
+                player,
+                &GameAction::ChooseX { value: 99 }
+            )["status"],
+            "stale"
+        );
+
+        // The same score becomes actionable only after the live main engine
+        // recognizes it as a current exact candidate and mints a new token.
+        let valid = serde_json::to_string(&vec![(GameAction::PassPriority, 1.0)])
+            .expect("score tuple serializes");
+        let proposal: serde_json::Value = serde_wasm_bindgen::from_value(
+            get_ai_action_proposal_from_scores(&valid, "VeryHard", player.0, 8)
+                .expect("main authority rebind succeeds"),
+        )
+        .expect("proposal serializes");
+        assert_eq!(proposal["semanticOwner"], player.0);
+        assert_eq!(proposal["action"]["type"], "PassPriority");
+        assert_eq!(
+            serde_wasm_bindgen::from_value::<serde_json::Value>(submit_ai_action_proposal(
+                proposal["token"].as_str().expect("opaque token"),
+                player.0,
+                to_js(&proposal["action"]),
+            ))
+            .expect("proposal result serializes")["status"],
+            "applied"
+        );
+        clear_game_state();
+    }
+
+    #[test]
+    fn planeswalker_proposals_apply_plus_and_targeted_minus_once_and_with_bounds() {
+        let player = PlayerId(0);
+        let mut state = priority_state(player);
+        let walker = install_planeswalker(
+            &mut state,
+            player,
+            3,
+            vec![
+                loyalty_ability(
+                    1,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                ),
+                loyalty_ability(
+                    -2,
+                    Effect::DealDamage {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Any,
+                    },
+                ),
+            ],
+        );
+
+        let initial_contract = install_issued_contract(state.clone(), player);
+        let plus = initial_contract
+            .candidates
+            .iter()
+            .find(|candidate| {
+                matches!(
+                    candidate.action,
+                    GameAction::ActivateAbility { source_id, ability_index: 0 } if source_id == walker
+                )
+            })
+            .expect("real issuer must offer the plus loyalty ability")
+            .action
+            .clone();
+        let token = install_issued_candidate(state.clone(), player, &plus);
+        assert_eq!(proposal_outcome(&token, player, &plus)["status"], "applied");
+
+        // The action boundary must not re-offer either loyalty ability after
+        // one was activated this turn (CR 606.3).
+        let after_plus: GameState = serde_wasm_bindgen::from_value(get_game_state()).unwrap();
+        assert!(!install_issued_contract(after_plus, player)
+            .candidates
+            .iter()
+            .any(|candidate| matches!(candidate.action, GameAction::ActivateAbility { source_id, .. } if source_id == walker)));
+
+        let mut minus_state = priority_state(player);
+        let minus_walker = install_planeswalker(
+            &mut minus_state,
+            player,
+            2,
+            vec![loyalty_ability(
+                -2,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Any,
+                },
+            )],
+        );
+        let minus_contract = install_issued_contract(minus_state.clone(), player);
+        let minus = minus_contract
+            .candidates
+            .iter()
+            .find(|candidate| {
+                matches!(
+                    candidate.action,
+                    GameAction::ActivateAbility { source_id, ability_index: 0 } if source_id == minus_walker
+                )
+            })
+            .expect("real issuer must offer the affordable targeted minus")
+            .action
+            .clone();
+        let token = install_issued_candidate(minus_state, player, &minus);
+        assert_eq!(
+            proposal_outcome(&token, player, &minus)["status"],
+            "applied"
+        );
+        let target_state: GameState = serde_wasm_bindgen::from_value(get_game_state()).unwrap();
+        let target_contract = install_issued_contract(target_state.clone(), player);
+        let target = target_contract
+            .candidates
+            .iter()
+            .find(|candidate| matches!(candidate.action, GameAction::ChooseTarget { .. }))
+            .expect("targeted loyalty ability must issue bounded target choices")
+            .action
+            .clone();
+        let token = install_issued_candidate(target_state, player, &target);
+        assert_eq!(
+            proposal_outcome(&token, player, &target)["status"],
+            "applied"
+        );
+
+        let mut insufficient = priority_state(player);
+        let insufficient_walker = install_planeswalker(
+            &mut insufficient,
+            player,
+            1,
+            vec![loyalty_ability(
+                -2,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )],
+        );
+        assert!(!install_issued_contract(insufficient, player)
+            .candidates
+            .iter()
+            .any(|candidate| matches!(candidate.action, GameAction::ActivateAbility { source_id, .. } if source_id == insufficient_walker)));
+        clear_game_state();
+    }
 
     fn make_face(name: &str, oracle_id: &str, keyword: Keyword) -> CardFace {
         CardFace {
@@ -2405,6 +4290,7 @@ mod tests {
 
     #[test]
     fn multiplayer_mode_refuses_restore_game_state() {
+        load_minimal_test_card_database();
         // Single-player baseline: restore succeeds.
         let state = GameState::new_two_player(7);
         let json = serde_json::to_string(&state).unwrap();
@@ -2434,6 +4320,7 @@ mod tests {
         // thread-local state.
         clear_game_state();
         set_multiplayer_mode(false);
+        load_minimal_test_card_database();
 
         // Seed a game so `resume_` sees it as "already initialized".
         let state = GameState::new_two_player(7);
@@ -2476,6 +4363,7 @@ mod tests {
     fn resume_multiplayer_host_state_stamps_fresh_rng_seed_and_enables_flag() {
         clear_game_state();
         set_multiplayer_mode(false);
+        load_minimal_test_card_database();
 
         let mut state = GameState::new_two_player(42);
         // Force a known "stale" seed so we can prove it was replaced.
@@ -2503,6 +4391,7 @@ mod tests {
 
     #[test]
     fn restore_keeps_legacy_state_without_printed_ref() {
+        load_minimal_test_card_database();
         let mut state = GameState::new_two_player(42);
         let object_id = ObjectId(1);
         state.objects.insert(
@@ -2609,6 +4498,7 @@ mod replay_bridge_tests {
     #[test]
     fn restore_game_state_invalidates_the_in_progress_recording() {
         clear_game_state();
+        load_minimal_test_card_database();
 
         let state = GameState::new_two_player(7);
         REPLAY_LOG.with(|cell| {
@@ -2645,7 +4535,7 @@ mod replay_bridge_tests {
                 "test card": {
                     "name": "Test Card",
                     "mana_cost": { "type": "NoCost" },
-                    "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+                    "card_type": { "supertypes": ["Legendary"], "core_types": ["Creature"], "subtypes": [] },
                     "power": "1",
                     "toughness": "1",
                     "loyalty": null,
@@ -2677,17 +4567,59 @@ mod replay_bridge_tests {
         GAME_STATE.with(|cell| cell.set(Some(state)));
         assert!(has_replay_recording());
 
-        let result = handle_debug_create_card_inner(
-            "Test Card",
-            PlayerId(0),
-            engine::types::zones::Zone::Hand,
-            None,
-            true,
+        let result = handle_debug_create_card_inner(DebugCreateCardRequest {
+            actor: PlayerId(0),
+            card_name: "Test Card",
+            owner: PlayerId(0),
+            zone: engine::types::zones::Zone::Hand,
+            count: 2,
+            attach_to: None,
+            run_etb: true,
+            nonlegendary: true,
+        })
+        .expect("debug create-card should succeed in this fixture");
+        assert_eq!(
+            result
+                .events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    engine::types::events::GameEvent::DebugActionUsed { .. }
+                ))
+                .count(),
+            1,
+            "the engine source-bound creator owns the audit event"
         );
-        assert!(
-            result.is_ok(),
-            "debug create-card should succeed in this fixture: {result:?}"
+        assert_eq!(
+            result.log_entries.len(),
+            1,
+            "the engine source-bound creator resolves the local audit log entry"
         );
+        with_state(|state| {
+            assert_eq!(
+                state
+                    .objects
+                    .values()
+                    .filter(|object| object.name == "Test Card")
+                    .count(),
+                2,
+                "a non-battlefield debug CreateCard batch materializes each card"
+            );
+            let card = state
+                .objects
+                .values()
+                .find(|object| object.name == "Test Card")
+                .expect("debug-created card should exist");
+            assert!(!card
+                .card_types
+                .supertypes
+                .contains(&engine::types::card_type::Supertype::Legendary));
+            assert!(!card
+                .base_card_types
+                .supertypes
+                .contains(&engine::types::card_type::Supertype::Legendary));
+        })
+        .expect("game state should remain initialized");
 
         assert!(
             !has_replay_recording(),
@@ -2699,6 +4631,197 @@ mod replay_bridge_tests {
 
         clear_game_state();
         CARD_DB.with(|c| *c.borrow_mut() = None);
+    }
+
+    #[test]
+    fn debug_create_card_battlefield_batch_uses_the_engine_entry_pipeline() {
+        use engine::database::CardDatabase;
+
+        clear_game_state();
+        let db = CardDatabase::from_json_str(
+            r#"{
+                "test card": {
+                    "name": "Test Card",
+                    "mana_cost": { "type": "NoCost" },
+                    "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+                    "power": "1",
+                    "toughness": "1",
+                    "loyalty": null,
+                    "defense": null,
+                    "oracle_text": null,
+                    "abilities": [],
+                    "triggers": [],
+                    "static_abilities": [],
+                    "replacements": [],
+                    "keywords": []
+                }
+            }"#,
+        )
+        .unwrap();
+        CARD_DB.with(|cell| *cell.borrow_mut() = Some(db));
+
+        let mut state = GameState::new_two_player(19);
+        state.debug_mode = true;
+        GAME_STATE.with(|cell| cell.set(Some(state)));
+
+        let result = handle_debug_create_card_inner(DebugCreateCardRequest {
+            actor: PlayerId(0),
+            card_name: "Test Card",
+            owner: PlayerId(0),
+            zone: engine::types::zones::Zone::Battlefield,
+            count: 2,
+            attach_to: None,
+            run_etb: true,
+            nonlegendary: false,
+        })
+        .expect("a real battlefield debug batch should succeed");
+
+        assert!(matches!(
+            result.waiting_for,
+            engine::types::game_state::WaitingFor::Priority { .. }
+        ));
+        assert_eq!(
+            result
+                .events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    engine::types::events::GameEvent::DebugActionUsed { .. }
+                ))
+                .count(),
+            1
+        );
+        with_state(|state| {
+            assert_eq!(
+                state
+                    .objects
+                    .values()
+                    .filter(|object| {
+                        object.name == "Test Card"
+                            && object.zone == engine::types::zones::Zone::Battlefield
+                    })
+                    .count(),
+                2
+            );
+            assert!(state.resolution_stack.is_empty());
+        })
+        .expect("game state should remain initialized");
+
+        clear_game_state();
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+    }
+
+    #[test]
+    fn debug_create_card_zero_preserves_replay_recording_without_card_database() {
+        clear_game_state();
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        let mut state = GameState::new_two_player(17);
+        state.debug_mode = true;
+        let revision = state.state_revision;
+        REPLAY_LOG.with(|cell| {
+            cell.set(Some(ReplayLog::new(ReplayHeader {
+                format_config: state.format_config.clone(),
+                match_config: state.match_config,
+                player_count: state.players.len() as u8,
+                first_player: Some(0),
+                seed: state.rng_seed,
+                deck_data: None,
+            })))
+        });
+        GAME_STATE.with(|cell| cell.set(Some(state)));
+
+        let result = handle_debug_create_card_inner(DebugCreateCardRequest {
+            actor: PlayerId(0),
+            card_name: "not loaded",
+            owner: PlayerId(0),
+            zone: engine::types::zones::Zone::Hand,
+            count: 0,
+            attach_to: None,
+            run_etb: true,
+            nonlegendary: false,
+        })
+        .expect("an authorized zero request is a no-op without a card database");
+        assert!(result.events.is_empty());
+        assert!(has_replay_recording());
+        with_state(|state| {
+            assert_eq!(state.state_revision, revision);
+            assert!(state.objects.is_empty());
+        })
+        .expect("game state should remain initialized");
+
+        clear_game_state();
+    }
+
+    #[test]
+    fn debug_create_card_preflight_runs_before_card_database_lookup() {
+        clear_game_state();
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        let mut state = GameState::new_two_player(23);
+        state.debug_mode = true;
+        state.waiting_for = WaitingFor::GameOver { winner: None };
+        let revision = state.state_revision;
+        let public_state_dirty = state.public_state_dirty.clone();
+        REPLAY_LOG.with(|cell| {
+            cell.set(Some(ReplayLog::new(ReplayHeader {
+                format_config: state.format_config.clone(),
+                match_config: state.match_config,
+                player_count: state.players.len() as u8,
+                first_player: Some(0),
+                seed: state.rng_seed,
+                deck_data: None,
+            })))
+        });
+        GAME_STATE.with(|cell| cell.set(Some(state)));
+
+        let owner_error = handle_debug_create_card_inner(DebugCreateCardRequest {
+            actor: PlayerId(0),
+            card_name: "not loaded",
+            owner: PlayerId(9),
+            zone: engine::types::zones::Zone::Hand,
+            count: 1,
+            attach_to: None,
+            run_etb: true,
+            nonlegendary: false,
+        })
+        .expect_err("an invalid owner must fail before database access");
+        assert!(owner_error.contains("invalid owner player id"));
+        assert!(!owner_error.contains("database"));
+
+        let priority_error = handle_debug_create_card_inner(DebugCreateCardRequest {
+            actor: PlayerId(0),
+            card_name: "not loaded",
+            owner: PlayerId(0),
+            zone: engine::types::zones::Zone::Battlefield,
+            count: 1,
+            attach_to: None,
+            run_etb: true,
+            nonlegendary: false,
+        })
+        .expect_err("a real entry off Priority must fail before database access");
+        assert!(priority_error.contains("Priority window"));
+        assert!(!priority_error.contains("database"));
+
+        let lookup_error = handle_debug_create_card_inner(DebugCreateCardRequest {
+            actor: PlayerId(0),
+            card_name: "not loaded",
+            owner: PlayerId(0),
+            zone: engine::types::zones::Zone::Hand,
+            count: 1,
+            attach_to: None,
+            run_etb: true,
+            nonlegendary: false,
+        })
+        .expect_err("a missing database must reject a valid nonzero request");
+        assert!(lookup_error.contains("card database not loaded"));
+
+        assert!(has_replay_recording());
+        with_state(|state| {
+            assert_eq!(state.state_revision, revision);
+            assert_eq!(state.public_state_dirty, public_state_dirty);
+            assert!(state.objects.is_empty());
+        })
+        .expect("game state should remain initialized");
+        clear_game_state();
     }
 
     /// A non-`CreateCard` debug action (e.g. `DrawCards`) reaches
@@ -2761,6 +4884,7 @@ mod rng_restore_bridge_tests {
         // `state.rehydrate_rng()` in restore turns it red. Asserts on consumed
         // randomness, not the stored `rng_word_pos` integer.
         clear_game_state();
+        load_minimal_test_card_database();
 
         // Seed a live game and consume randomness as gameplay would.
         let mut state = GameState::new_two_player(0x51A7_C0DE);

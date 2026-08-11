@@ -192,6 +192,66 @@ fn awbo_batched_multi_type_deals_total_single_firing() {
     );
 }
 
+/// Issue #5237: All Will Be One's coordinated target phrase denotes one target
+/// chosen from an opponent player, an opponent-controlled creature, or an
+/// opponent-controlled planeswalker. The parser used to stop after "target
+/// opponent", so the sole opponent was auto-selected even when object targets
+/// existed. Selecting the opponent's creature here drives the corrected union
+/// through trigger target discovery and damage resolution.
+#[test]
+fn awbo_can_target_opponent_controlled_creature_instead_of_opponent() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature_from_oracle(P0, "All Will Be One", 0, 3, ALL_WILL_BE_ONE)
+        .id();
+    let counter_recipient = scenario.add_creature(P0, "Grizzly Bear", 2, 2).id();
+    let damage_target = scenario.add_creature(P1, "Foe Giant", 5, 5).id();
+    let fangs = scenario
+        .add_spell_to_hand_from_oracle(P0, "Unexpected Fangs", true, UNEXPECTED_FANGS)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let mut runner = scenario.build();
+
+    let out = runner
+        .cast(fangs)
+        .target_objects(&[counter_recipient, damage_target])
+        .resolve();
+
+    assert_eq!(
+        out.counters(counter_recipient, CounterType::Plus1Plus1),
+        1,
+        "reach-guard: the counter event that fires All Will Be One occurred"
+    );
+    assert_eq!(
+        out.counters(counter_recipient, lifelink_counter()),
+        1,
+        "reach-guard: the batched event placed both counter kinds"
+    );
+
+    let damage_to_creature: Vec<u32> = out
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DamageDealt {
+                target: TargetRef::Object(object),
+                amount,
+                ..
+            } if *object == damage_target => Some(*amount),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        damage_to_creature,
+        vec![2],
+        "All Will Be One deals the batched counter amount to the selected creature"
+    );
+    assert!(
+        damage_to_p1(&out).is_empty(),
+        "the opponent is not silently auto-selected when its creature was chosen"
+    );
+}
+
 /// Batched AWBO single-KIND magnitude control: a single put-event placing TWO
 /// +1/+1 counters (one `CounterAdded` event, count == 2) makes AWBO deal 2 — the
 /// counter MAGNITUDE, not a subject headcount (which would be 1). This 1-event

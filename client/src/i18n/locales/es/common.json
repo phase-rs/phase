@@ -5,6 +5,11 @@
     "close": "Cerrar",
     "closeNamed": "Cerrar {{name}}"
   },
+  "scryOutcome": {
+    "title": "Adivinación completada",
+    "you": "Tú",
+    "result": "{{player}} — {{top}} arriba · {{bottom}} abajo"
+  },
   "modal": {
     "defaultEyebrow": "Herramienta del espacio de trabajo"
   },
@@ -48,7 +53,7 @@
     "updated": "actualizado"
   },
   "comboDetector": {
-    "label": "Detector de combos",
+    "label": "Detector de combos (experimental)",
     "title": "Detectar bucles infinitos: terminar bucles obligatorios automáticamente y mostrar recursos ∞ (desactivado por defecto)",
     "on": "Activado",
     "off": "Desactivado",
@@ -78,6 +83,7 @@
     "showAiHand": "Mostrar la mano de la IA",
     "hideAiHand": "Ocultar la mano de la IA",
     "requestTakeback": "Solicitar repetición",
+    "undoLastAction": "Deshacer última acción",
     "concede": "Conceder",
     "backToDraft": "Volver al Draft",
     "mainMenu": "Menú principal",

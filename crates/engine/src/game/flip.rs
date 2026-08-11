@@ -456,6 +456,7 @@ mod tests {
             casting_restrictions: vec![],
             casting_options: vec![],
             layout_kind: Some(crate::types::card::LayoutKind::Flip),
+            parse_warnings: vec![],
         });
 
         id

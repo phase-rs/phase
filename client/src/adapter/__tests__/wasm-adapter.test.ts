@@ -1,7 +1,12 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { WasmAdapter } from "../wasm-adapter";
 import { EngineWorkerClient } from "../engine-worker-client";
-import type { EngineAdapter, SubmitResult } from "../types";
+import type {
+  AiActionProposal,
+  AiDecisionDiagnosticReceipt,
+  EngineAdapter,
+  SubmitResult,
+} from "../types";
 import { AdapterError, AdapterErrorCode } from "../types";
 import { buildGameState } from "../../test/factories/gameStateFactory";
 
@@ -22,6 +27,7 @@ const mockWorkerClient = {
   initialize: vi.fn().mockResolvedValue(undefined),
   loadCardDb: vi.fn().mockResolvedValue(100),
   loadCardDbFromUrl: vi.fn().mockResolvedValue(100),
+  buildAiCardSubset: vi.fn(),
   evaluateDeckCompatibility: vi
     .fn()
     .mockResolvedValue({ standard: { compatible: true, reasons: [] } }),
@@ -34,13 +40,20 @@ const mockWorkerClient = {
   submitAction: vi
     .fn()
     .mockResolvedValue({ events: [], log_entries: [] } as SubmitResult),
+  submitInteraction: vi.fn().mockResolvedValue({ events: [], log_entries: [] } as SubmitResult),
+  getAiActionProposal: vi.fn(),
+  getAiActionProposalWithDiagnostics: vi.fn(),
+  getAiTacticalActionProposal: vi.fn(),
+  getAiTacticalActionProposalWithDiagnostics: vi.fn(),
+  getAiActionProposalFromScores: vi.fn(),
+  getAiActionProposalFromScoresWithDiagnostics: vi.fn(),
+  getAiScoredCandidates: vi.fn(),
+  submitAiActionProposal: vi.fn(),
   getState: vi.fn().mockResolvedValue(buildGameState({
     turn_number: 1,
     phase: "Untap",
   })),
   getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
-  getAiAction: vi.fn().mockResolvedValue(null),
-  getAiFallbackAction: vi.fn().mockResolvedValue(null),
   exportState: vi.fn().mockResolvedValue("{}"),
   restoreState: vi.fn().mockResolvedValue(undefined),
   resumeMultiplayerHostState: vi.fn().mockResolvedValue(undefined),
@@ -58,9 +71,202 @@ vi.mock("../engine-worker-client", () => ({
 describe("WasmAdapter", () => {
   let adapter: WasmAdapter;
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     adapter = new WasmAdapter();
+    mockWorkerClient.getState.mockResolvedValue(buildGameState({
+      turn_number: 1,
+      phase: "Untap",
+    }));
+    mockWorkerClient.buildAiCardSubset.mockResolvedValue(
+      JSON.stringify({ kind: "subset", json: "{}", count: 0 }),
+    );
+    mockWorkerClient.getAiScoredCandidates.mockResolvedValue([]);
+    mockWorkerClient.getAiActionProposal.mockResolvedValue(null);
+    mockWorkerClient.getAiActionProposalWithDiagnostics.mockResolvedValue(null);
+    mockWorkerClient.getAiTacticalActionProposal.mockResolvedValue(null);
+    mockWorkerClient.getAiTacticalActionProposalWithDiagnostics.mockResolvedValue(null);
+    mockWorkerClient.submitAiActionProposal.mockResolvedValue({
+      status: "stale",
+      reason: "test",
+    });
+  });
+
+  describe("AI decision diagnostics", () => {
+    const proposal: AiActionProposal = {
+      token: "diagnostic-token",
+      semanticOwner: 0,
+      actor: 0,
+      action: { type: "PassPriority" },
+    };
+    const receipt: AiDecisionDiagnosticReceipt = {
+      semanticOwner: 0,
+      authorizedActor: 0,
+      selectedAction: { type: "PassPriority" },
+      status: "direct",
+      selectionExplanation: "A direct AI policy selected this action; no scored distribution was used.",
+      samplingTemperature: null,
+      candidates: [{
+        action: { type: "PassPriority" },
+        objectName: null,
+        details: [],
+        rank: null,
+        isTopRanked: false,
+        isSelected: true,
+        score: null,
+        weight: null,
+        probability: null,
+      }],
+    };
+
+    it("uses the legacy proposal endpoint while capture is disabled", async () => {
+      mockWorkerClient.getAiActionProposal.mockResolvedValue(proposal);
+      await adapter.initialize();
+
+      await expect(adapter.getAiActionProposal("Medium", 0)).resolves.toEqual(proposal);
+
+      expect(mockWorkerClient.getAiActionProposal).toHaveBeenCalledWith("Medium", 0);
+      expect(mockWorkerClient.getAiActionProposalWithDiagnostics).not.toHaveBeenCalled();
+    });
+
+    it("publishes only after apply and retains a rejected proposal for retry", async () => {
+      mockWorkerClient.getAiActionProposalWithDiagnostics.mockResolvedValue({ proposal, receipt });
+      mockWorkerClient.submitAiActionProposal
+        .mockResolvedValueOnce({ status: "rejected", reason: "retry" })
+        .mockResolvedValueOnce({ status: "applied", result: { events: [], log_entries: [] } });
+      await adapter.initialize();
+      const listener = vi.fn();
+      adapter.setAiDecisionDiagnosticsEnabled(true);
+      adapter.subscribeAiDecisionDiagnostics(listener);
+
+      await expect(adapter.getAiActionProposal("Medium", 0)).resolves.toEqual(proposal);
+      await expect(adapter.submitAiActionProposal(proposal)).resolves.toMatchObject({ status: "rejected" });
+      expect(listener).not.toHaveBeenCalled();
+
+      await expect(adapter.submitAiActionProposal(proposal)).resolves.toMatchObject({ status: "applied" });
+      expect(listener).toHaveBeenCalledOnce();
+      expect(listener).toHaveBeenCalledWith(receipt);
+    });
+
+    it("suppresses stale proposal receipts", async () => {
+      mockWorkerClient.getAiActionProposalWithDiagnostics.mockResolvedValue({ proposal, receipt });
+      mockWorkerClient.submitAiActionProposal.mockResolvedValue({ status: "stale", reason: "old" });
+      await adapter.initialize();
+      const listener = vi.fn();
+      adapter.setAiDecisionDiagnosticsEnabled(true);
+      adapter.subscribeAiDecisionDiagnostics(listener);
+
+      await adapter.getAiActionProposal("Medium", 0);
+      await adapter.submitAiActionProposal(proposal);
+
+      expect(listener).not.toHaveBeenCalled();
+    });
+  });
+
+  it("retires a failed VeryHard pool before the next decision", async () => {
+    const proposal: AiActionProposal = {
+      token: "authoritative-token",
+      semanticOwner: 0,
+      actor: 0,
+      action: { type: "PassPriority" },
+    };
+    mockWorkerClient.getState.mockResolvedValue({ waiting_for: { type: "Priority" } });
+    mockWorkerClient.getAiScoredCandidates.mockRejectedValue(new Error("pool worker crashed"));
+    mockWorkerClient.getAiActionProposal.mockResolvedValue(proposal);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await adapter.initialize();
+      adapter.cardDbLoaded = true;
+
+      await expect(adapter.getAiActionProposal("VeryHard", 0)).resolves.toEqual(proposal);
+      const firstPoolScoreCallCount = mockWorkerClient.getAiScoredCandidates.mock.calls.length;
+      await expect(adapter.getAiActionProposal("VeryHard", 0)).resolves.toEqual(proposal);
+
+      expect(firstPoolScoreCallCount).toBeGreaterThan(0);
+      expect(mockWorkerClient.getAiScoredCandidates).toHaveBeenCalledTimes(firstPoolScoreCallCount);
+      expect(mockWorkerClient.getAiActionProposal).toHaveBeenCalledTimes(2);
+      expect(mockWorkerClient.getAiTacticalActionProposal).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledOnce();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("falls back after a stalled VeryHard pool score", async () => {
+    vi.useFakeTimers();
+    const proposal: AiActionProposal = {
+      token: "authoritative-token",
+      semanticOwner: 0,
+      actor: 0,
+      action: { type: "PassPriority" },
+    };
+    mockWorkerClient.getState.mockResolvedValue({ waiting_for: { type: "Priority" } });
+    mockWorkerClient.getAiScoredCandidates.mockReturnValue(new Promise(() => {}));
+    mockWorkerClient.getAiActionProposal.mockResolvedValue(proposal);
+    mockWorkerClient.getAiTacticalActionProposal.mockResolvedValue(proposal);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await adapter.initialize();
+      adapter.cardDbLoaded = true;
+
+      const decision = adapter.getAiActionProposal("VeryHard", 0);
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      await expect(decision).resolves.toEqual(proposal);
+      const firstPoolScoreCallCount = mockWorkerClient.getAiScoredCandidates.mock.calls.length;
+      await expect(adapter.getAiActionProposal("VeryHard", 0)).resolves.toEqual(proposal);
+
+      expect(mockWorkerClient.exportState).toHaveBeenCalledOnce();
+      expect(firstPoolScoreCallCount).toBeGreaterThan(0);
+      expect(mockWorkerClient.getAiScoredCandidates).toHaveBeenCalledTimes(firstPoolScoreCallCount);
+      expect(mockWorkerClient.getAiTacticalActionProposal).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.getAiActionProposal).toHaveBeenCalledOnce();
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("uses the tactical engine proposal when a diagnostic pool score times out", async () => {
+    vi.useFakeTimers();
+    const proposal: AiActionProposal = {
+      token: "tactical-token",
+      semanticOwner: 0,
+      actor: 0,
+      action: { type: "PassPriority" },
+    };
+    const receipt: AiDecisionDiagnosticReceipt = {
+      semanticOwner: 0,
+      authorizedActor: 0,
+      selectedAction: { type: "PassPriority" },
+      status: "direct",
+      selectionExplanation: "The tactical fallback selected an engine-issued action.",
+      samplingTemperature: null,
+      candidates: [],
+    };
+    mockWorkerClient.getState.mockResolvedValue({ waiting_for: { type: "Priority" } });
+    mockWorkerClient.getAiScoredCandidates.mockReturnValue(new Promise(() => {}));
+    mockWorkerClient.getAiTacticalActionProposalWithDiagnostics.mockResolvedValue({ proposal, receipt });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await adapter.initialize();
+      adapter.cardDbLoaded = true;
+      adapter.setAiDecisionDiagnosticsEnabled(true);
+
+      const decision = adapter.getAiActionProposal("VeryHard", 0);
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      await expect(decision).resolves.toEqual(proposal);
+      expect(mockWorkerClient.getAiTacticalActionProposalWithDiagnostics).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.getAiActionProposalWithDiagnostics).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("implements EngineAdapter interface", () => {
@@ -174,6 +380,21 @@ describe("WasmAdapter", () => {
   });
 
   describe("submitAction", () => {
+    const createCard = (count: number) => ({
+      type: "Debug" as const,
+      data: {
+        type: "CreateCard" as const,
+        data: {
+          card_name: "Lightning Bolt",
+          owner: 0,
+          zone: "Hand" as const,
+          run_etb: false,
+          nonlegendary: false,
+          count,
+        },
+      },
+    });
+
     it("throws AdapterError with NOT_INITIALIZED if not initialized", async () => {
       await expect(
         adapter.submitAction({ type: "PassPriority" }, 0),
@@ -196,6 +417,51 @@ describe("WasmAdapter", () => {
         0,
         { type: "PassPriority" },
       );
+    });
+
+    it("submits a zero-count debug create without loading the card database", async () => {
+      await adapter.initialize();
+
+      await expect(adapter.submitAction(createCard(0), 0)).resolves.toEqual({
+        events: [],
+        log_entries: [],
+      });
+
+      expect(mockWorkerClient.submitAction).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.loadCardDbFromUrl).not.toHaveBeenCalled();
+    });
+
+    it("does not load the card database when Rust rejects debug-create preflight", async () => {
+      mockWorkerClient.submitAction.mockRejectedValueOnce(
+        new Error("Engine error: DebugAction is only allowed in Sandbox mode"),
+      );
+      await adapter.initialize();
+
+      await expect(adapter.submitAction(createCard(1), 0)).rejects.toThrow(
+        "DebugAction is only allowed in Sandbox mode",
+      );
+
+      expect(mockWorkerClient.submitAction).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.loadCardDbFromUrl).not.toHaveBeenCalled();
+    });
+
+    it("loads the card database and retries only after Rust admits a nonzero create", async () => {
+      mockWorkerClient.submitAction
+        .mockRejectedValueOnce(new Error("Engine error: card database not loaded"))
+        .mockResolvedValueOnce({ events: [], log_entries: [] });
+      await adapter.initialize();
+
+      await expect(adapter.submitAction(createCard(1), 0)).resolves.toEqual({
+        events: [],
+        log_entries: [],
+      });
+
+      expect(mockWorkerClient.submitAction).toHaveBeenCalledTimes(2);
+      expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.submitAction.mock.invocationCallOrder[0])
+        .toBeLessThan(mockWorkerClient.loadCardDbFromUrl.mock.invocationCallOrder[0]);
+      expect(mockWorkerClient.loadCardDbFromUrl.mock.invocationCallOrder[0])
+        .toBeLessThan(mockWorkerClient.submitAction.mock.invocationCallOrder[1]);
     });
 
     // Regression: state-loss classification splits on whether the panic
@@ -393,45 +659,6 @@ describe("WasmAdapter", () => {
       await adapter.initialize();
       await adapter.initializeGame({ decks: [] });
       expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
-    });
-  });
-
-  describe("getAiAction", () => {
-    it("delegates to worker client", async () => {
-      await adapter.initialize();
-      await adapter.getAiAction("Medium", 1);
-      expect(mockWorkerClient.getAiAction).toHaveBeenCalledWith("Medium", 1);
-    });
-  });
-
-  describe("getAiFallbackAction", () => {
-    it("delegates to worker client", async () => {
-      await adapter.initialize();
-      await adapter.getAiFallbackAction();
-      expect(mockWorkerClient.getAiFallbackAction).toHaveBeenCalledOnce();
-    });
-  });
-
-  describe("getAiActionForSeats", () => {
-    it("delegates to getAiAction for the active seat", async () => {
-      await adapter.initialize();
-      await adapter.getAiActionForSeats(
-        [
-          { playerId: 0, difficulty: "Easy" },
-          { playerId: 1, difficulty: "Hard" },
-        ],
-        1,
-      );
-      expect(mockWorkerClient.getAiAction).toHaveBeenCalledWith("Hard", 1);
-    });
-
-    it("returns null if no matching seat", async () => {
-      await adapter.initialize();
-      const result = await adapter.getAiActionForSeats(
-        [{ playerId: 0, difficulty: "Easy" }],
-        1,
-      );
-      expect(result).toBeNull();
     });
   });
 

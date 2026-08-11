@@ -10,8 +10,8 @@ import type { DraftP2PMessage } from "../draftProtocol";
 
 describe("draftProtocol", () => {
   describe("DRAFT_PROTOCOL_VERSION", () => {
-    it("is version 4", () => {
-      expect(DRAFT_PROTOCOL_VERSION).toBe(4);
+    it("is version 9", () => {
+      expect(DRAFT_PROTOCOL_VERSION).toBe(9);
     });
   });
 
@@ -68,6 +68,8 @@ describe("draftProtocol", () => {
       "draft_kicked",
       "draft_pairing",
       "draft_match_result",
+      "draft_match_settlement",
+      "draft_match_settlement_ack",
       "draft_paused",
       "draft_resumed",
       "draft_lobby_update",
@@ -76,7 +78,11 @@ describe("draftProtocol", () => {
       "draft_request_advance",
       "draft_match_start",
       "draft_bo3_sideboard_prompt",
+      "draft_bo3_between_games",
       "draft_bo3_sideboard_submit",
+      "draft_bo3_intergame_command",
+      "draft_bo3_intergame_authorized",
+      "draft_bo3_intergame_receipt",
       "draft_bo3_play_draw_prompt",
       "draft_bo3_play_draw_choice",
       "draft_bo3_game_start",
@@ -102,8 +108,8 @@ describe("draftProtocol", () => {
     it("round-trips a large message (gzip path)", async () => {
       // Build a message large enough to trigger compression
       const longView = {
-        status: "Drafting",
-        kind: "Premier",
+        status: "Deckbuilding",
+        kind: "Sealed",
         current_pack_number: 1,
         pick_number: 3,
         pass_direction: "Left",
@@ -117,7 +123,119 @@ describe("draftProtocol", () => {
           cmc: i % 7,
           type_line: "Creature - Human Wizard",
         })),
-        pool: [],
+        pool: [
+          {
+            instance_id: "pack-1-card-1",
+            name: "First Pull",
+            set_code: "TST",
+            collector_number: "101",
+            rarity: "common",
+            colors: ["W"],
+            cmc: 1,
+            type_line: "Creature — Test",
+          },
+          {
+            instance_id: "pack-2-card-1",
+            name: "Second Pull",
+            set_code: "TST",
+            collector_number: "102",
+            rarity: "uncommon",
+            colors: ["U"],
+            cmc: 2,
+            type_line: "Instant",
+          },
+        ],
+        pool_groups: {
+          color_groups: [
+            { kind: "white", total: 1, cards: [{ card: {
+              instance_id: "pack-1-card-1",
+              name: "First Pull",
+              set_code: "TST",
+              collector_number: "101",
+              rarity: "common",
+              colors: ["W"],
+              cmc: 1,
+              type_line: "Creature — Test",
+            }, count: 1 }] },
+            { kind: "blue", total: 1, cards: [{ card: {
+              instance_id: "pack-2-card-1",
+              name: "Second Pull",
+              set_code: "TST",
+              collector_number: "102",
+              rarity: "uncommon",
+              colors: ["U"],
+              cmc: 2,
+              type_line: "Instant",
+            }, count: 1 }] },
+          ],
+          type_groups: [
+            { kind: "creature", total: 1, cards: [{ card: {
+              instance_id: "pack-1-card-1",
+              name: "First Pull",
+              set_code: "TST",
+              collector_number: "101",
+              rarity: "common",
+              colors: ["W"],
+              cmc: 1,
+              type_line: "Creature — Test",
+            }, count: 1 }] },
+            { kind: "instant", total: 1, cards: [{ card: {
+              instance_id: "pack-2-card-1",
+              name: "Second Pull",
+              set_code: "TST",
+              collector_number: "102",
+              rarity: "uncommon",
+              colors: ["U"],
+              cmc: 2,
+              type_line: "Instant",
+            }, count: 1 }] },
+          ],
+          cmc_groups: [
+            { kind: "mana_value1", total: 1, cards: [{ card: {
+              instance_id: "pack-1-card-1",
+              name: "First Pull",
+              set_code: "TST",
+              collector_number: "101",
+              rarity: "common",
+              colors: ["W"],
+              cmc: 1,
+              type_line: "Creature — Test",
+            }, count: 1 }] },
+            { kind: "mana_value2", total: 1, cards: [{ card: {
+              instance_id: "pack-2-card-1",
+              name: "Second Pull",
+              set_code: "TST",
+              collector_number: "102",
+              rarity: "uncommon",
+              colors: ["U"],
+              cmc: 2,
+              type_line: "Instant",
+            }, count: 1 }] },
+          ],
+          color_counts: { white: 1, blue: 1, black: 0, red: 0, green: 0 },
+        },
+        sealed_packs: [
+          [{
+            instance_id: "pack-1-card-1",
+            name: "First Pull",
+            set_code: "TST",
+            collector_number: "101",
+            rarity: "common",
+            colors: ["W"],
+            cmc: 1,
+            type_line: "Creature — Test",
+          }],
+          [{
+            instance_id: "pack-2-card-1",
+            name: "Second Pull",
+            set_code: "TST",
+            collector_number: "102",
+            rarity: "uncommon",
+            colors: ["U"],
+            cmc: 2,
+            type_line: "Instant",
+          }],
+        ],
         seats: [],
         cards_per_pack: 14,
         pack_count: 3,
@@ -135,6 +253,10 @@ describe("draftProtocol", () => {
 
       const decoded = await decodeDraftWireMessage(encoded);
       expect(decoded).toEqual(msg);
+      if (decoded.type === "draft_state_update") {
+        expect(decoded.view.sealed_packs).toEqual(longView.sealed_packs);
+        expect(decoded.view.pool_groups).toEqual(longView.pool_groups);
+      }
     });
 
     it("round-trips a deck-carrying draft match start message", async () => {
@@ -158,6 +280,16 @@ describe("draftProtocol", () => {
             ai_decks: [],
           },
           matchConfig: { match_type: "Bo1" },
+          binding: {
+            podId: "draft-1",
+            matchId: "round-1-table-1",
+            round: 1,
+            sessionKey: "session-1",
+            lease: "lease-1",
+            nonce: "nonce-1",
+            revision: 0,
+            matchAuthoritySeat: 0,
+          },
         },
       };
 

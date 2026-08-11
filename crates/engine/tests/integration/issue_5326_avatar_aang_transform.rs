@@ -81,6 +81,7 @@ fn attach_aang_back_face(runner: &mut engine::game::scenario::GameRunner, aang: 
         casting_restrictions: vec![],
         casting_options: vec![],
         layout_kind: None,
+        parse_warnings: vec![],
     });
 }
 

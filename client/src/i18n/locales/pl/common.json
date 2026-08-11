@@ -5,6 +5,11 @@
     "close": "Zamknij",
     "closeNamed": "Zamknij {{name}}"
   },
+  "scryOutcome": {
+    "title": "Wróżenie zakończone",
+    "you": "Ty",
+    "result": "{{player}} — {{top}} na górze · {{bottom}} na dole"
+  },
   "modal": {
     "defaultEyebrow": "Narzędzie warsztatu"
   },
@@ -48,7 +53,7 @@
     "updated": "zaktualizowano"
   },
   "comboDetector": {
-    "label": "Wykrywacz combosów",
+    "label": "Wykrywacz combosów (eksperymentalne)",
     "title": "Wykrywaj nieskończone pętle: automatycznie kończ obowiązkowe pętle i pokazuj zasoby ∞ (domyślnie wyłączone)",
     "on": "Wł.",
     "off": "Wył.",
@@ -78,6 +83,7 @@
     "showAiHand": "Pokaż rękę AI",
     "hideAiHand": "Ukryj rękę AI",
     "requestTakeback": "Poproś o wycofanie ruchu",
+    "undoLastAction": "Cofnij ostatnią akcję",
     "concede": "Poddaj się",
     "backToDraft": "Wróć do draftu",
     "mainMenu": "Menu główne",

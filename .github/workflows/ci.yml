@@ -118,13 +118,13 @@ jobs:
           ./scripts/check-test-card-data-load.sh "$BASE"
 
   rust-test:
-    name: Rust tests (shard ${{ matrix.shard }}/2)
+    name: Rust tests (shard ${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
 
@@ -174,7 +174,7 @@ jobs:
         # caught before it lands on the branch that feeds staging/preview.
         env:
           PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '32' || '256' }}
-        run: cargo nextest run --profile ci --partition count:${{ matrix.shard }}/2 --workspace --exclude phase-tauri --exclude mtgish-import --features engine/proptest --status-level fail --final-status-level fail
+        run: cargo nextest run --profile ci --partition count:${{ matrix.shard }}/4 --workspace --exclude phase-tauri --exclude mtgish-import --features engine/proptest --status-level fail --final-status-level fail
 
   card-data-gate:
     name: Card data (generate, validate, coverage)
@@ -351,6 +351,25 @@ jobs:
         # would hit the cache, skip the check, and report a false green. The
         # export is present either way (generated above or restored by cardgen).
         run: python3 scripts/draw_replacement_census.py --corpus --check
+
+      - name: Cost-walk carrier drift guard (CR 605.1a)
+        # `visit_ability_def_costs_scoped` does not descend the eight inline
+        # branch carriers that `visit_effect_scoped` does (documented KNOWN GAP).
+        # A cost on a carrier-nested `AbilityDefinition` therefore escapes
+        # CR 605.1a's cost criterion, and a `Mill` / `Exile { Library }` cost
+        # there would keep mana-ability status it should have lost. Zero such
+        # costs exist today; this fails the moment a parser production emits one.
+        #
+        # Lives here, not in the Rust test job, for the same reason as the draw
+        # census above: it reads the generated (gitignored) export. The
+        # equivalent `#[test]` would self-skip in `Rust tests` (see the header of
+        # scripts/check-test-card-data-load.sh), and the change that triggers
+        # this gap comes from a parser author whose PR is checked by CI — so a
+        # CI-invisible guard is green for exactly the person it exists to stop.
+        #
+        # Unconditional, like the draw census: gates-cache does not hash
+        # scripts/**, so a cache hit must not skip it.
+        run: python3 scripts/cost_walk_carrier_census.py --check
 
       - name: Card support coverage report
         # Skipped on a gates-cache hit — coverage-data.json and

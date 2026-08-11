@@ -70,6 +70,7 @@ fn kenzo_alternative_face() -> BackFaceData {
         casting_restrictions: vec![],
         casting_options: vec![],
         layout_kind: Some(LayoutKind::Flip),
+        parse_warnings: vec![],
     }
 }
 
@@ -129,6 +130,7 @@ fn tok_tok_alternative_face() -> BackFaceData {
         casting_restrictions: vec![],
         casting_options: vec![],
         layout_kind: Some(LayoutKind::Flip),
+        parse_warnings: vec![],
     }
 }
 
@@ -205,6 +207,7 @@ fn resolve_trigger_body(
                 source_name: source_name.to_string(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         },
         &mut vec![],

@@ -9,15 +9,8 @@
 export function apply_seat_mutation(state_json: string, mutation_json: string): any;
 
 /**
- * Build a game-scoped AI card-database subset from the loaded full database and
- * the live game state, serialized as the `AiCardSubsetResult` tagged union
- * (`{"kind":"full"}` or `{"kind":"subset","json":...,"count":N}`). The MAIN
- * worker (full CARD_DB + live GAME_STATE) calls this; the AI worker pool loads
- * the returned subset so its WASM instances don't each parse the full ~93MB
- * corpus. Returns `{"kind":"full"}` defensively when the database or game state
- * is absent (the engine is the single authority for this fallback — see
- * `card_subset::build_ai_card_subset_or_full`). The game state is taken out of
- * and restored to the thread-local on every path.
+ * Build the bounded card corpus for parallel AI scoring workers. The live
+ * main engine remains the only authority that owns the full card database.
  */
 export function build_ai_card_subset(): string;
 
@@ -109,28 +102,57 @@ export function export_replay_log(): string;
 export function getFormatRegistry(): any;
 
 /**
- * Engine-owned AI escape action for the current waiting state.
- * Same deadlock-safe fallback the search path uses when scoring cannot choose.
- * Returns null when no legal escape exists.
+ * Mint an opaque, authority-bound proposal for the AI's next action.
+ *
+ * Callers must submit it through [`submit_ai_action_proposal`]. The registry
+ * is local to this live WASM instance and is cleared
+ * on every successful state mutation, restore, resume, reset, and new game.
  */
-export function get_ai_fallback_action(): any;
+export function get_ai_action_proposal(difficulty: string, player_id: number): any;
 
 /**
- * Get the AI's chosen action for the current game state.
- * `difficulty` is one of: "VeryEasy", "Easy", "Medium", "Hard", "VeryHard",
- * "CEDH" (case-insensitive; see `AiDifficulty::from_label`).
- * `player_id` is the seat index of the AI player (0-based).
+ * Convert score-only worker output into an authority-bound proposal.
+ *
+ * The worker state may be old, from another game, or maliciously altered.
+ * Consequently this endpoint always derives a new decision contract from the
+ * main WASM state, discards every score whose action is not an exact member,
+ * and only then mints an opaque proposal. There is intentionally no public
+ * score-to-`GameAction` endpoint.
  */
-export function get_ai_action(difficulty: string, player_id: number): any;
+export function get_ai_action_proposal_from_scores(scores_json: string, difficulty: string, player_id: number, rng_seed: bigint): any;
 
 /**
- * Score all candidate actions and return `[GameAction, score]` tuples.
- * Used by AI workers for root parallelism — each worker scores independently,
- * then results are merged on the main thread.
- * `rng_seed` seeds the game state's RNG so each worker's beam search explores
- * different orderings, producing diverse score vectors.
+ * Diagnostic counterpart of score-worker proposal rebinding. It preserves the
+ * existing authority filter and selector; the returned receipt is local WASM
+ * observability data bound to the same opaque token.
+ */
+export function get_ai_action_proposal_from_scores_with_diagnostics(scores_json: string, difficulty: string, player_id: number, rng_seed: bigint): any;
+
+/**
+ * Mint an ordinary opaque proposal together with a local-only diagnostic
+ * receipt. The receipt is an observation of the minted capability, never an
+ * additional action-selection API.
+ */
+export function get_ai_action_proposal_with_diagnostics(difficulty: string, player_id: number): any;
+
+/**
+ * Score candidates inside an isolated AI worker. These are plain,
+ * serializable hints rather than capabilities: they cannot cross the action
+ * boundary until the live main engine reissues an exact proposal.
  */
 export function get_ai_scored_candidates(difficulty: string, player_id: number, rng_seed: bigint): any;
+
+/**
+ * Mint a proposal using the existing tactical floor without entering
+ * rollout search. This is the engine-owned escape for a timed-out optional
+ * scorer; it still issues and validates the current decision contract.
+ */
+export function get_ai_tactical_action_proposal(difficulty: string, player_id: number): any;
+
+/**
+ * Diagnostic counterpart of [`get_ai_tactical_action_proposal`].
+ */
+export function get_ai_tactical_action_proposal_with_diagnostics(difficulty: string, player_id: number): any;
 
 /**
  * Look up a card face by name from the loaded card database.
@@ -408,16 +430,6 @@ export function resume_multiplayer_host_state(json_str: string): void;
 export function search_cards_js(query: any): any;
 
 /**
- * Select an action from merged scores using softmax.
- * Called after collecting scored candidates from parallel workers and merging.
- * `scores_json` is a JSON array of `[GameAction, score]` tuples.
- * `difficulty` determines the softmax temperature (engine is the single
- * authority for AI tuning parameters — the frontend never specifies temperature).
- * `rng_seed` provides deterministic randomness.
- */
-export function select_action_from_scores(scores_json: string, difficulty: string, rng_seed: bigint): any;
-
-/**
  * Toggle the multiplayer enforcement flag. Called by multiplayer adapters
  * (P2P host/guest, WS) after the engine is initialized so subsequent
  * `restore_game_state` calls fail fast with a clear error instead of
@@ -456,6 +468,21 @@ export function signatureSpellSelectionPolicy(request: any): any;
  * applying the action as another player.
  */
 export function submit_action(actor: number, action: any): any;
+
+/**
+ * Submit an action selected from an engine-issued AI proposal.
+ *
+ * A stale or foreign proposal is a normal race outcome and is returned as a
+ * tagged value. Rejected actions leave the proposal live for diagnostics or a
+ * retry; only a successful apply invalidates the authority generation.
+ */
+export function submit_ai_action_proposal(token: string, actor: number, action: any): any;
+
+/**
+ * Submit one opaque, engine-authored interaction response. The browser never
+ * materializes a `GameAction`; only a successful engine reducer result exposes
+ * the exact action to the replay recorder.
+ */
 export function submit_interaction_js(actor: number, submission: any): any;
 
 /**
@@ -483,9 +510,13 @@ export interface InitOutput {
     readonly export_game_state_json: () => [number, number, number, number];
     readonly export_replay_log: () => [number, number, number, number];
     readonly getFormatRegistry: () => any;
-    readonly get_ai_action: (a: number, b: number, c: number) => [number, number, number];
-    readonly get_ai_fallback_action: () => [number, number, number];
+    readonly get_ai_action_proposal: (a: number, b: number, c: number) => [number, number, number];
+    readonly get_ai_action_proposal_from_scores: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];
+    readonly get_ai_action_proposal_from_scores_with_diagnostics: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];
+    readonly get_ai_action_proposal_with_diagnostics: (a: number, b: number, c: number) => [number, number, number];
     readonly get_ai_scored_candidates: (a: number, b: number, c: number, d: bigint) => [number, number, number];
+    readonly get_ai_tactical_action_proposal: (a: number, b: number, c: number) => [number, number, number];
+    readonly get_ai_tactical_action_proposal_with_diagnostics: (a: number, b: number, c: number) => [number, number, number];
     readonly get_card_face_data: (a: number, b: number) => any;
     readonly get_card_parse_details: (a: number, b: number) => any;
     readonly get_card_rulings: (a: number, b: number) => any;
@@ -511,11 +542,11 @@ export interface InitOutput {
     readonly restore_game_state: (a: number, b: number) => [number, number];
     readonly resume_multiplayer_host_state: (a: number, b: number) => [number, number];
     readonly search_cards_js: (a: any) => [number, number, number];
-    readonly select_action_from_scores: (a: number, b: number, c: number, d: number, e: bigint) => [number, number, number];
     readonly set_multiplayer_mode: (a: number) => void;
     readonly sideboardPolicyForFormat: (a: any) => [number, number, number];
     readonly signatureSpellSelectionPolicy: (a: any) => [number, number, number];
     readonly submit_action: (a: number, b: any) => any;
+    readonly submit_ai_action_proposal: (a: number, b: number, c: number, d: any) => any;
     readonly submit_interaction_js: (a: number, b: any) => any;
     readonly take_last_panic_message: () => [number, number];
     readonly get_game_state: () => any;

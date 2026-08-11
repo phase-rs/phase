@@ -27,7 +27,8 @@ import type {
 
 // ── Types ───────────────────────────────────────────────────────────────
 
-export type DraftPhase = "setup" | "drafting" | "deckbuilding" | "launching" | "playing" | "complete";
+export type DraftPhase = "setup" | "drafting" | "opening" | "deckbuilding" | "launching" | "playing" | "complete";
+export type LocalDraftKind = "Quick" | "Sealed";
 export type PoolSortMode = "color" | "type" | "cmc";
 
 interface DraftStoreState {
@@ -39,6 +40,7 @@ interface DraftStoreState {
   difficulty: number;
   selectedSet: string | null;
   selectedSetName: string | null;
+  kind: LocalDraftKind;
   mainDeck: string[];
   landCounts: Record<string, number>;
   poolSortMode: PoolSortMode;
@@ -49,7 +51,9 @@ interface DraftStoreState {
 
 interface DraftStoreActions {
   startDraft: (setPoolJson: string, setCode: string, setName: string, difficulty: number) => Promise<void>;
+  startSealedDraft: (setPoolJson: string, setCode: string, setName: string, difficulty: number) => Promise<void>;
   startCubeDraft: (cubeListText: string, cubeName: string, settings: CubeDraftSettings, difficulty: number) => Promise<void>;
+  completeSealedOpening: () => void;
   resumeDraft: () => Promise<void>;
   abandonDraft: () => Promise<void>;
   pickCard: (cardInstanceId: string) => Promise<void>;
@@ -85,6 +89,7 @@ const initialState: DraftStoreState = {
   difficulty: 2,
   selectedSet: null,
   selectedSetName: null,
+  kind: "Quick",
   mainDeck: [],
   landCounts: {},
   poolSortMode: "color",
@@ -142,9 +147,9 @@ function pickBotSeat(usedSeats: number[], view: DraftPlayerView | null): number 
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 function persistDraft(): void {
-  const { adapter, draftId, phase, view, mainDeck, landCounts, poolSortMode, poolPanelOpen, difficulty, selectedSet, selectedSetName } =
+  const { adapter, draftId, phase, view, mainDeck, landCounts, poolSortMode, poolPanelOpen, difficulty, selectedSet, selectedSetName, kind } =
     useDraftStore.getState();
-  if (!adapter || !draftId || !selectedSet || phase === "setup" || phase === "launching" || phase === "playing" || phase === "complete") return;
+  if (!adapter || !draftId || !selectedSet || phase === "setup" || phase === "playing" || phase === "complete") return;
   const persistPhase = phase;
 
   void (async () => {
@@ -162,6 +167,7 @@ function persistDraft(): void {
         setCode: selectedSet,
         setName: selectedSetName ?? undefined,
         difficulty,
+        kind,
         phase: persistPhase,
         pickCount: view?.pool.length ?? 0,
         updatedAt: Date.now(),
@@ -175,6 +181,15 @@ function persistDraft(): void {
 function persistDraftDebounced(): void {
   if (debounceTimer) clearTimeout(debounceTimer);
   debounceTimer = setTimeout(persistDraft, 500);
+}
+
+function phaseForView(view: DraftPlayerView, persistedPhase: DraftPhase): DraftPhase {
+  if (view.status === "Deckbuilding") {
+    return view.kind === "Sealed" && persistedPhase === "opening"
+      ? "opening"
+      : "deckbuilding";
+  }
+  return view.status === "Pairing" ? "launching" : persistedPhase;
 }
 
 /** Apply an updated draft view after a pick (manual or auto) and persist. */
@@ -217,12 +232,44 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
         difficulty,
         selectedSet: setCode,
         selectedSetName: setName,
+        kind: "Quick",
         selectedCard: null,
         mainDeck: [],
         landCounts: {},
         runState: null,
       });
 
+      persistDraft();
+    },
+
+    startSealedDraft: async (setPoolJson, setCode, setName, difficulty) => {
+      const oldMeta = loadActiveQuickDraft();
+      if (oldMeta) void clearDraftRun(oldMeta.id);
+
+      const adapter = new DraftAdapter();
+      const resp = await fetch(__CARD_DATA_URL__);
+      await adapter.loadCardDatabase(await resp.text());
+      const view = await adapter.initializeSealed(
+        setPoolJson,
+        difficulty,
+        Math.floor(Math.random() * 0xffffffff),
+      );
+      const draftId = crypto.randomUUID();
+      set({
+        draftId,
+        adapter,
+        view,
+        phase: "opening",
+        difficulty,
+        selectedSet: setCode,
+        selectedSetName: setName,
+        kind: "Sealed",
+        selectedCard: null,
+        mainDeck: [],
+        landCounts: {},
+        runFormat: "single",
+        runState: null,
+      });
       persistDraft();
     },
 
@@ -249,12 +296,18 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
         difficulty,
         selectedSet: "custom-cube",
         selectedSetName: cubeName,
+        kind: "Quick",
         selectedCard: null,
         mainDeck: [],
         landCounts: {},
         runState: null,
       });
 
+      persistDraft();
+    },
+
+    completeSealedOpening: () => {
+      set({ phase: "deckbuilding" });
       persistDraft();
     },
 
@@ -281,7 +334,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
 
         const adapter = new DraftAdapter();
 
-        if (meta.difficulty >= 3) {
+        if (meta.difficulty >= 3 || meta.kind === "Sealed") {
           const resp = await fetch(__CARD_DATA_URL__);
           const json = await resp.text();
           await adapter.loadCardDatabase(json);
@@ -293,16 +346,17 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
           draftId: meta.id,
           adapter,
           view,
-          phase: meta.phase,
+          phase: phaseForView(view, meta.phase),
           difficulty: meta.difficulty,
           selectedSet: meta.setCode,
           selectedSetName: meta.setName ?? null,
+          kind: meta.kind ?? "Quick",
           selectedCard: null,
           mainDeck: saved.mainDeck,
           landCounts: saved.landCounts,
           poolSortMode: saved.poolSortMode,
           poolPanelOpen: saved.poolPanelOpen,
-          runFormat: run.format,
+          runFormat: meta.kind === "Sealed" ? "single" : run.format,
           runState: run,
         });
         return;
@@ -317,7 +371,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
       try {
         const adapter = new DraftAdapter();
 
-        if (meta.difficulty >= 3) {
+        if (meta.difficulty >= 3 || meta.kind === "Sealed") {
           const resp = await fetch(__CARD_DATA_URL__);
           const json = await resp.text();
           await adapter.loadCardDatabase(json);
@@ -329,16 +383,17 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
           draftId: meta.id,
           adapter,
           view,
-          phase: meta.phase,
+          phase: phaseForView(view, meta.phase),
           difficulty: meta.difficulty,
           selectedSet: meta.setCode,
           selectedSetName: meta.setName ?? null,
+          kind: meta.kind ?? "Quick",
           selectedCard: null,
           mainDeck: saved.mainDeck,
           landCounts: saved.landCounts,
           poolSortMode: saved.poolSortMode,
           poolPanelOpen: saved.poolPanelOpen,
-          runFormat: run?.format ?? "run",
+          runFormat: meta.kind === "Sealed" ? "single" : run?.format ?? "run",
           runState: run,
         });
       } catch (err) {
@@ -436,7 +491,8 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
 
       const fullDeck = [...mainDeck, ...landCards];
       const view = await adapter.submitDeck(fullDeck);
-      set({ view, phase: "launching" });
+      set({ view, phase: view.status === "Deckbuilding" ? "deckbuilding" : "launching" });
+      persistDraft();
     },
 
     setPoolSortMode: (mode) => {
@@ -462,7 +518,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
     },
 
     launchMatch: async (navigate) => {
-      const { adapter, mainDeck, landCounts, difficulty, draftId, selectedSet, selectedSetName, runFormat, view } = get();
+      const { adapter, mainDeck, landCounts, difficulty, draftId, selectedSet, selectedSetName, runFormat, view, kind } = get();
       if (!adapter || !draftId || !selectedSet) return;
 
       const fullDeck = [...mainDeck, ...expandLands(landCounts)];
@@ -478,7 +534,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
       const gameId = crypto.randomUUID();
       storeDraftDeckData(gameId, fullDeck, botFullDeck);
 
-      const matchType = runFormat === "bo3" ? "bo3" : "bo1";
+      const matchType = view?.match_config.match_type === "Bo3" && runFormat === "bo3" ? "bo3" : "bo1";
 
       const newRunState: DraftRunState = {
         format: runFormat,
@@ -496,6 +552,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
         setCode: selectedSet,
         setName: selectedSetName ?? undefined,
         difficulty,
+        kind,
         phase: "playing",
         pickCount: get().view?.pool.length ?? 0,
         updatedAt: Date.now(),
@@ -548,7 +605,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
     },
 
     launchNextMatch: async (navigate) => {
-      const { adapter, draftId, selectedSet, selectedSetName, difficulty, runState, runFormat, view } = get();
+      const { adapter, draftId, selectedSet, selectedSetName, difficulty, runState, runFormat, view, kind } = get();
       if (!adapter || !draftId || !selectedSet || !runState) return;
 
       const botSeat = pickBotSeat(runState.usedBotSeats, view);
@@ -563,7 +620,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
       const gameId = crypto.randomUUID();
       storeDraftDeckData(gameId, runState.playerDeck, botFullDeck);
 
-      const matchType = runFormat === "bo3" ? "bo3" : "bo1";
+      const matchType = view?.match_config.match_type === "Bo3" && runFormat === "bo3" ? "bo3" : "bo1";
 
       const usedBotSeats = runState.usedBotSeats.length >= 7
         ? [botSeat]
@@ -582,6 +639,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
         setCode: selectedSet,
         setName: selectedSetName ?? undefined,
         difficulty,
+        kind,
         phase: "playing",
         pickCount: get().view?.pool.length ?? 0,
         updatedAt: Date.now(),

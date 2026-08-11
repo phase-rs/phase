@@ -63,27 +63,10 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
   const cards = useMemo(() => {
     if (!objects) return [];
     const resolved = zoneIds.map((id) => objects[id]).filter(Boolean) as GameObject[];
-    // CR 701.20: the library viewer shows only the cards the engine has revealed
-    // to this viewer (top-of-library reveals + private looks), top-first.
-    // Unrevealed cards are omitted entirely — visibility is gated on the engine's
-    // reveal sets, never inferred from name redaction (single-player renders the
-    // raw, unredacted state).
+    // The library viewer shows only the cards whose identities Rust projected
+    // for this viewer, top-first. Unrevealed cards are omitted entirely.
     if (zone === "library") {
-      // The "look at the top card of your library" capability (Future Sight,
-      // Bolas's Citadel, Oracle of Mul Daya) is a continuous static that exposes
-      // the OWNER's own top card without adding it to revealed_cards/private_look
-      // — mirror LibraryPile's `peek` clause so that top still shows (and stays
-      // castable) through the modal.
-      const ownTopId =
-        viewerId === playerId &&
-        (gameState?.players[playerId]?.can_look_at_top_of_library ?? false)
-          ? gameState?.players[playerId]?.library?.[0]
-          : undefined;
-      return resolved.filter(
-        (obj) =>
-          isLibraryCardRevealedToViewer(gameState, obj.id, viewerId) ||
-          obj.id === ownTopId,
-      );
+      return resolved.filter((obj) => isLibraryCardRevealedToViewer(gameState, obj.id, viewerId));
     }
     return resolved;
   }, [objects, zoneIds, zone, gameState, viewerId, playerId]);

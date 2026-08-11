@@ -733,6 +733,62 @@ pub(crate) fn available_mana_after_spell(ctx: &PolicyContext<'_>) -> u32 {
     sources.saturating_sub(spell_cost)
 }
 
+/// CR 104.3d: total poison counters `ward` would ACTUALLY give the payer,
+/// summed across every `GetPlayerCounters { Poison, .. }` sub-cost in the
+/// whole tree — a `Compound` cost's sub-costs are all paid together (CR
+/// 702.21a: "every conjoined sub-cost must be payable"), not independently,
+/// so two individually-nonlethal poison sub-costs can be jointly lethal and
+/// must be checked against their COMBINED total, not each against the same
+/// unchanged starting count.
+///
+/// Projects each sub-cost through `preview_player_counter_addition` — the
+/// real replacement pipeline, side-effect-free — rather than trusting the
+/// printed count: a doubler or +N effect on the payer can make the printed
+/// count understate what actually happens, letting a lethal payment look
+/// safe. Returns `None` when any sub-cost's replacement outcome can't be
+/// cleanly projected (`ChoiceRequired`/`Unsupported`) — callers must treat
+/// `None` as "can't prove this is safe", never as zero poison.
+fn total_poison_from_ward_cost(ctx: &PolicyContext<'_>, ward: &WardCost) -> Option<u32> {
+    match ward {
+        WardCost::GetPlayerCounters {
+            counter_kind: kind @ engine::types::player::PlayerCounterKind::Poison,
+            count,
+        } => {
+            match engine::game::effects::player_counter::preview_player_counter_addition(
+                ctx.state,
+                ctx.ai_player,
+                ctx.ai_player,
+                *kind,
+                *count,
+            ) {
+                engine::game::effects::player_counter::PlayerCounterAdditionPreview::Applied {
+                    count,
+                }
+                | engine::game::effects::player_counter::PlayerCounterAdditionPreview::Transformed {
+                    count,
+                } => Some(count),
+                // For poison-quantity projection only, prevention contributes zero counters.
+                // This does not mean the Ward cost is payable: `can_pay_ward_cost` separately
+                // rejects Prevented, ChoiceRequired, and Unsupported previews because the
+                // engine cannot successfully complete or safely project that payment.
+                engine::game::effects::player_counter::PlayerCounterAdditionPreview::Prevented => {
+                    Some(0)
+                }
+                engine::game::effects::player_counter::PlayerCounterAdditionPreview::ChoiceRequired {
+                    ..
+                }
+                | engine::game::effects::player_counter::PlayerCounterAdditionPreview::Unsupported => {
+                    None
+                }
+            }
+        }
+        WardCost::Compound(costs) => costs.iter().try_fold(0u32, |total, cost| {
+            Some(total.saturating_add(total_poison_from_ward_cost(ctx, cost)?))
+        }),
+        _ => Some(0),
+    }
+}
+
 /// CR 702.21a: Whether the AI can pay `ward` after committing to the spell it is
 /// casting. Mana / Waterbend costs use the post-spell mana estimate; non-mana
 /// costs check the corresponding resource (life, a spare card, sacrificeable
@@ -743,6 +799,25 @@ pub(crate) fn can_pay_ward_cost(
     ward: &WardCost,
     warded: &GameObject,
 ) -> bool {
+    // CR 104.3d: reject up front if the AGGREGATE poison this cost would
+    // ACTUALLY give (direct or across every Compound sub-cost, replacement-
+    // adjusted) reaches or crosses `LETHAL_POISON` — checked once, against
+    // the combined total, before any per-variant mechanical-affordability
+    // logic below. `None` means the replacement outcome couldn't be cleanly
+    // projected (a live choice or an unmodeled event rewrite) — conservatively
+    // decline rather than assume it's safe. The AI must never treat ending
+    // its own game as an ordinary payable cost, for direct or compound Ward
+    // alike.
+    match total_poison_from_ward_cost(ctx, ward) {
+        None => return false,
+        Some(total_poison) if total_poison > 0 => {
+            let current = ctx.state.players[ctx.ai_player.0 as usize].poison_counters;
+            if current.saturating_add(total_poison) >= crate::features::poison::LETHAL_POISON {
+                return false;
+            }
+        }
+        Some(_) => {}
+    }
     match ward {
         WardCost::Mana(cost) | WardCost::Waterbend(cost) => {
             available_mana_after_spell(ctx) >= cost.mana_value()
@@ -780,6 +855,28 @@ pub(crate) fn can_pay_ward_cost(
                 .count();
             matching as u32 >= *count
         }
+        // CR 702.21a + CR 122.1 + CR 104.3d: mechanically payable in the ordinary
+        // case — no resource limit on giving yourself more counters — UNLESS a
+        // replacement effect actually prevents the addition (Solemnity) or its
+        // outcome can't be cleanly projected (a live choice or an unmodeled event
+        // rewrite). `costs.rs`'s `AbilityCost::GetPlayerCounters` payment path
+        // treats `Prevented` as a genuinely FAILED payment, not a paused or
+        // zero-cost one — so the AI must decline here too, or it will target into
+        // Solemnity, believe the Ward is safely payable, and have its spell
+        // countered when payment actually fails. Lethal (but payable) poison is
+        // already rejected by the aggregate check above, for direct and compound
+        // costs alike.
+        WardCost::GetPlayerCounters { counter_kind, count } => matches!(
+            engine::game::effects::player_counter::preview_player_counter_addition(
+                ctx.state,
+                ctx.ai_player,
+                ctx.ai_player,
+                *counter_kind,
+                *count,
+            ),
+            engine::game::effects::player_counter::PlayerCounterAdditionPreview::Applied { .. }
+                | engine::game::effects::player_counter::PlayerCounterAdditionPreview::Transformed { .. }
+        ),
         // CR 702.21a: every conjoined sub-cost must be payable. Mana contention
         // between multiple mana sub-costs is approximated (each checked against
         // the full post-spell pool) — rare enough not to warrant exact tracking.

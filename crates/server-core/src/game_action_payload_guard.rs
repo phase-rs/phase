@@ -10,7 +10,7 @@
 //! The cap is deliberately generous — far above any realistic game state,
 //! including degenerate token-army boards — so it never rejects legitimate play;
 //! it only blocks payloads engineered to force large allocations/clones.
-use engine::types::actions::{DebugAction, DebugTokenRequest, GameAction};
+use engine::types::actions::{DebugAction, DebugTokenRequest, GameAction, MAX_DEBUG_CREATE_COUNT};
 use engine::types::counter::CounterType;
 use engine::types::game_state::{ManaChoice, ProductionOverride};
 use engine::types::mana::{ManaRestriction, ManaSourceSelection, SpellCostCriterion};
@@ -362,14 +362,36 @@ fn guard_debug_token_request_payload(request: &DebugTokenRequest) -> Result<(), 
 
 fn guard_debug_action_payload(action: &DebugAction) -> Result<(), String> {
     match action {
-        DebugAction::CreateCard { card_name, .. } => {
+        DebugAction::CreateCard {
+            card_name, count, ..
+        } => {
             bound_string("Debug.CreateCard.card_name", card_name)?;
+            bound_batch_count("Debug.CreateCard.count", *count)?;
+            if *count > MAX_DEBUG_CREATE_COUNT {
+                return Err(format!(
+                    "Debug.CreateCard.count {count} exceeds the maximum {MAX_DEBUG_CREATE_COUNT}"
+                ));
+            }
         }
         DebugAction::AddMana { mana, .. } => {
             bound_list("Debug.AddMana.mana", mana.len())?;
         }
-        DebugAction::CreateToken { request, .. } => {
+        DebugAction::CreateToken { request, count, .. } => {
+            bound_batch_count("Debug.CreateToken.count", *count)?;
+            if *count > MAX_DEBUG_CREATE_COUNT {
+                return Err(format!(
+                    "Debug.CreateToken.count {count} exceeds the maximum {MAX_DEBUG_CREATE_COUNT}"
+                ));
+            }
             guard_debug_token_request_payload(request)?;
+        }
+        DebugAction::CreateTokenCopy { count, .. } => {
+            bound_batch_count("Debug.CreateTokenCopy.count", *count)?;
+            if *count > MAX_DEBUG_CREATE_COUNT {
+                return Err(format!(
+                    "Debug.CreateTokenCopy.count {count} exceeds the maximum {MAX_DEBUG_CREATE_COUNT}"
+                ));
+            }
         }
         DebugAction::ModifyCounters { counter_type, .. } => {
             guard_counter_type_payload("Debug.ModifyCounters.counter_type", counter_type)?;
@@ -401,8 +423,7 @@ fn guard_debug_action_payload(action: &DebugAction) -> Result<(), String> {
         | DebugAction::ModifyEnergy { .. }
         | DebugAction::SetInfiniteMana { .. }
         | DebugAction::SetPhase { .. }
-        | DebugAction::RunStateBasedActions
-        | DebugAction::CreateTokenCopy { .. } => {}
+        | DebugAction::RunStateBasedActions => {}
     }
     Ok(())
 }
@@ -565,7 +586,7 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
             bound_list("SetPhaseStops.stops", stops.len())?;
         }
         GameAction::SetPriorityPassingMode { .. } => {}
-        GameAction::TapLandForMana { selection } => {
+        GameAction::TapLandForMana { selection } | GameAction::ActivateManaSource { selection } => {
             guard_mana_source_selection_payload(selection)?;
         }
         GameAction::DistributeAmong { distribution, .. } => {
@@ -618,6 +639,7 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::ChooseAssistPlayer { .. }
         | GameAction::CommitAssistPayment { .. }
         | GameAction::MulliganDecision { .. }
+        | GameAction::BackToManaPayment
         | GameAction::UntapLandForMana { .. }
         | GameAction::SpendPoolMana { .. }
         | GameAction::UnspendPoolMana { .. }

@@ -301,6 +301,7 @@ pub(super) fn try_parse_die_roll_table(
             ..AbilityShellIr::default()
         },
         die_results: branches,
+        modal: None,
         root_transforms: vec![],
     };
     Some((lower_ability_ir(&ir), next_line))

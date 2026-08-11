@@ -12,8 +12,10 @@
 
 import { createStore, del, get, set } from "idb-keyval";
 
-import type { PoolInput } from "../adapter/draft-adapter";
+import type { DraftKind, PoolInput } from "../adapter/draft-adapter";
+import type { DraftMatchBinding, DraftMatchLaunch, DraftMatchSettlement } from "../network/draftProtocol";
 import { ACTIVE_DRAFT_POD_KEY } from "../constants/storage";
+import type { DraftIntergameCommand } from "./intergameCommandLedger";
 
 export type { PoolInput } from "../adapter/draft-adapter";
 
@@ -28,7 +30,7 @@ export type { PoolInput } from "../adapter/draft-adapter";
 export interface PersistedDraftHostSession {
   persistenceId: string;
   roomCode: string;
-  kind: "Premier" | "Traditional";
+  kind: Exclude<DraftKind, "Quick">;
   podSize: number;
   hostDisplayName: string;
   tournamentFormat: "Swiss" | "SingleElimination";
@@ -47,6 +49,34 @@ export interface PersistedDraftHostSession {
   draftSessionJson: string | null;
   /** Pool source for re-initialization on resume (Set pool JSON or Cube list + settings). */
   poolInput: PoolInput;
+  /** Pod-issued match capabilities, retained across host recovery. */
+  matchBindings?: DraftMatchBinding[];
+  /** Result receipts are written before the draft reducer observes them. */
+  settlementOutbox?: DraftMatchSettlement[];
+  settlementReceipts?: Array<{ matchId: string; receiptId: string; revision: number }>;
+  /** Write-ahead Bo3 commands survive recovery without becoming replayable. */
+  intergameCommands?: DraftIntergameCommand[];
+  /** Host-owned intergame phase data; required to reject stale recovery writes. */
+  bo3State?: Array<{
+    matchId: string;
+    seatA: number;
+    seatB: number;
+    submittedA: boolean;
+    submittedB: boolean;
+    loserSeat: number | null;
+    gameNumber: number;
+    score: { p0_wins: number; p1_wins: number; draws: number };
+    /** Current deck partitions, used by the authoritative timeout default. */
+    decks?: Array<{
+      seat: number;
+      main: Array<{ name: string; count: number }>;
+      sideboard: Array<{ name: string; count: number }>;
+    }>;
+  }>;
+  launchDigests?: Array<{ matchId: string; seat: number; digest: string }>;
+  /** Full immutable launch records let a recovered host issue timeout commands
+   * through the same launch-bound intergame ledger. */
+  matchLaunches?: Array<{ matchId: string; seat: number; launch: DraftMatchLaunch }>;
 }
 
 /**
@@ -74,7 +104,7 @@ export type ActiveDraftPodPhase =
 export interface ActiveDraftPodMeta {
   id: string;
   roomCode: string;
-  kind: "Premier" | "Traditional";
+  kind: Exclude<DraftKind, "Quick">;
   podSize: number;
   hostDisplayName: string;
   tournamentFormat: "Swiss" | "SingleElimination";
@@ -88,6 +118,8 @@ export interface ActiveDraftPodMeta {
 
 const DRAFT_HOST_PREFIX = "phase-draft-host:";
 const DRAFT_GUEST_PREFIX = "phase-draft-guest:";
+const DRAFT_SETTLEMENT_PREFIX = "phase-draft-settlement:";
+const DRAFT_INTERGAME_PREFIX = "phase-draft-intergame:";
 const HOST_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 /** Guest token TTL — 4 hours matches the game session TTL. */
 const GUEST_SESSION_TTL_MS = 4 * 60 * 60 * 1000;
@@ -212,4 +244,76 @@ export async function clearDraftGuestSession(hostPeerId: string): Promise<void> 
   try {
     await del(DRAFT_GUEST_PREFIX + hostPeerId, getDraftStore());
   } catch { /* best-effort */ }
+}
+
+/** A participant-owned outbox survives a reload until the pod host acks it. */
+export async function saveDraftSettlementOutbox(settlement: DraftMatchSettlement): Promise<void> {
+  try {
+    await set(draftSettlementKey(settlement.binding), settlement, getDraftStore());
+  } catch (err) {
+    console.warn("[draftPersistence] settlement outbox write failed:", err);
+  }
+}
+
+export async function loadDraftSettlementOutbox(
+  binding: DraftMatchBinding,
+): Promise<DraftMatchSettlement | null> {
+  try {
+    const settlement = await get<DraftMatchSettlement>(draftSettlementKey(binding), getDraftStore());
+    return settlement && sameSettlementBinding(settlement.binding, binding) ? settlement : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function clearDraftSettlementOutbox(binding: DraftMatchBinding): Promise<void> {
+  try {
+    await del(draftSettlementKey(binding), getDraftStore());
+  } catch {
+    /* best-effort; retry remains safe */
+  }
+}
+
+/** Participant-owned journal retained until every command is receipted. */
+export async function saveDraftIntergameCommands(
+  matchId: string,
+  commands: DraftIntergameCommand[],
+): Promise<void> {
+  try {
+    await set(DRAFT_INTERGAME_PREFIX + matchId, commands, getDraftStore());
+  } catch (err) {
+    console.warn("[draftPersistence] intergame command write failed:", err);
+  }
+}
+
+export async function loadDraftIntergameCommands(matchId: string): Promise<DraftIntergameCommand[]> {
+  try {
+    return await get<DraftIntergameCommand[]>(DRAFT_INTERGAME_PREFIX + matchId, getDraftStore()) ?? [];
+  } catch {
+    return [];
+  }
+}
+
+export async function clearDraftIntergameCommands(matchId: string): Promise<void> {
+  try {
+    await del(DRAFT_INTERGAME_PREFIX + matchId, getDraftStore());
+  } catch {
+    /* best-effort */
+  }
+}
+
+function draftSettlementKey(binding: DraftMatchBinding): string {
+  return `${DRAFT_SETTLEMENT_PREFIX}${binding.podId}:${binding.matchId}`;
+}
+
+/** Legacy or cross-round outboxes are never eligible for settlement replay. */
+function sameSettlementBinding(left: DraftMatchBinding, right: DraftMatchBinding): boolean {
+  return left.podId === right.podId
+    && left.matchId === right.matchId
+    && left.round === right.round
+    && left.sessionKey === right.sessionKey
+    && left.lease === right.lease
+    && left.nonce === right.nonce
+    && left.revision === right.revision
+    && left.matchAuthoritySeat === right.matchAuthoritySeat;
 }

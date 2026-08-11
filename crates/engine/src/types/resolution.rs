@@ -9,18 +9,19 @@ use std::collections::HashSet;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
-use crate::types::ability::{AbilityDefinition, ResolvedAbility, TargetRef};
+use crate::types::ability::{AbilityDefinition, DiscardedCardResult, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    DrainStatus, DrawSequenceStack, GameState, PendingBatchDeliveries, PendingChangeZoneIteration,
-    PendingChooseOneOf, PendingConniveReentry, PendingContinuation, PendingCopyTokenResolution,
-    PendingCounterAdditionQueue, PendingCounterMoveQueue, PendingCounterRemovalQueue,
+    DrainStatus, DrawSequenceStack, GameState, GameStateDecode, GameStateDecodeMode,
+    PendingBatchDeliveries, PendingChangeZoneIteration, PendingChooseOneOf, PendingConniveReentry,
+    PendingContinuation, PendingCopyTokenResolution, PendingCounterAdditionQueue,
+    PendingCounterMoveQueue, PendingCounterRemovalQueue, PendingDebugCardEntries,
     PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingMultiDraw,
     PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice, PendingRepeatIteration,
     PendingRepeatUntil, PendingSpellResolution, PendingVoteBallotIteration, PostReplacementDrain,
     PostReplacementDrainStack, ResidentDrainPolicy, ResolvingTriggerContext, WaitingFor,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{DiscardFrameId, ObjectId};
 use crate::types::player::PlayerId;
 
 /// The complete shipped draw authority carried by one `MultiDraw` frame.
@@ -38,6 +39,18 @@ pub struct MultiDrawFrame {
     /// predecessor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connive_reentry: Option<PendingConniveReentry>,
+}
+
+/// CR 701.9a + CR 614.1: One discard operation's serializable authority.
+/// Replacement choices may suspend the operation, but only terminal delivery
+/// may append the captured hand-time result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscardFrame {
+    pub id: DiscardFrameId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<ObjectId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub results: Vec<DiscardedCardResult>,
 }
 
 /// CR 603.12a + CR 608.2c: A repeated optional-cost process parked at one
@@ -65,6 +78,13 @@ pub struct OptionalEffectFrame {
     pub ability: Box<ResolvedAbility>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_event: Option<GameEvent>,
+    /// CR 603.2c + CR 608.2: the plural batched-trigger event list mirroring
+    /// `GameState::current_trigger_events`, so an effect that reads the whole
+    /// event batch (e.g. `Effect::ReproduceEventCounters`) still sees every
+    /// occurrence when the "may" decision resumes resolution — the singular
+    /// `trigger_event` alone drops the batch's other occurrences.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trigger_events: Vec<GameEvent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_match_count: Option<u32>,
 }
@@ -136,7 +156,11 @@ pub struct PendingMutateMerge {
 pub struct ChangeZoneFrame {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending: Option<PendingChangeZoneIteration>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::deterministic_serde::option_hash_set"
+    )]
     pub devour_eligible_snapshot: Option<HashSet<ObjectId>>,
 }
 
@@ -175,6 +199,7 @@ pub enum ResolutionFrame {
     CounterRemovals(PendingCounterRemovalQueue),
     CounterAdditions(PendingCounterAdditionQueue),
     CopyToken(PendingCopyTokenResolution),
+    DebugCardEntries(Box<PendingDebugCardEntries>),
     EachPlayerCopyChosen(PendingEachPlayerCopyChosen),
     ChooseOneOf(PendingChooseOneOf),
     VoteBallot(PendingVoteBallotIteration),
@@ -184,6 +209,7 @@ pub enum ResolutionFrame {
     CoinFlip(PendingCoinFlip),
     Proliferate(PendingProliferateActions),
     MultiDraw(MultiDrawFrame),
+    Discard(Box<DiscardFrame>),
     ConniveReentry(PendingConniveReentry),
     LifeTotalAssignment(PendingLifeTotalAssignment),
     SpellResolution(PendingSpellResolution),
@@ -205,6 +231,7 @@ pub enum FrameKind {
     CounterRemovals,
     CounterAdditions,
     CopyToken,
+    DebugCardEntries,
     EachPlayerCopyChosen,
     ChooseOneOf,
     VoteBallot,
@@ -214,6 +241,7 @@ pub enum FrameKind {
     CoinFlip,
     Proliferate,
     MultiDraw,
+    Discard,
     ConniveReentry,
     LifeTotalAssignment,
     SpellResolution,
@@ -234,6 +262,7 @@ impl ResolutionFrame {
             Self::CounterRemovals(_) => FrameKind::CounterRemovals,
             Self::CounterAdditions(_) => FrameKind::CounterAdditions,
             Self::CopyToken(_) => FrameKind::CopyToken,
+            Self::DebugCardEntries(_) => FrameKind::DebugCardEntries,
             Self::EachPlayerCopyChosen(_) => FrameKind::EachPlayerCopyChosen,
             Self::ChooseOneOf(_) => FrameKind::ChooseOneOf,
             Self::VoteBallot(_) => FrameKind::VoteBallot,
@@ -243,6 +272,7 @@ impl ResolutionFrame {
             Self::CoinFlip(_) => FrameKind::CoinFlip,
             Self::Proliferate(_) => FrameKind::Proliferate,
             Self::MultiDraw(_) => FrameKind::MultiDraw,
+            Self::Discard(_) => FrameKind::Discard,
             Self::ConniveReentry(_) => FrameKind::ConniveReentry,
             Self::LifeTotalAssignment(_) => FrameKind::LifeTotalAssignment,
             Self::SpellResolution(_) => FrameKind::SpellResolution,
@@ -268,6 +298,7 @@ impl ResolutionFrame {
             | Self::CounterRemovals(_)
             | Self::CounterAdditions(_)
             | Self::CopyToken(_)
+            | Self::DebugCardEntries(_)
             | Self::EachPlayerCopyChosen(_)
             | Self::ChooseOneOf(_)
             | Self::VoteBallot(_)
@@ -278,6 +309,7 @@ impl ResolutionFrame {
             | Self::Proliferate(_)
             | Self::MutateMerge(_)
             | Self::MultiDraw(_)
+            | Self::Discard(_)
             | Self::ConniveReentry(_)
             | Self::LifeTotalAssignment(_)
             | Self::SpellResolution(_)
@@ -310,12 +342,14 @@ impl ResolutionFrame {
             | Self::CounterRemovals(_)
             | Self::CounterAdditions(_)
             | Self::CopyToken(_)
+            | Self::DebugCardEntries(_)
             | Self::EachPlayerCopyChosen(_)
             | Self::ChooseOneOf(_)
             | Self::VoteBallot(_)
             | Self::PerPlayerZoneChoice(_)
             | Self::PerCategoryZoneChoice(_)
             | Self::MultiDraw(_)
+            | Self::Discard(_)
             | Self::ConniveReentry(_)
             | Self::LifeTotalAssignment(_)
             | Self::SpellResolution(_)
@@ -410,6 +444,10 @@ pub struct ResolutionStack {
     /// frame, so a stale captured ID cannot alias a later instruction.
     #[serde(default)]
     next_draw_sequence_frame_id: u64,
+    /// Monotonic allocator for operation-owned discard frames. It never
+    /// rewinds, so a stale replacement event cannot bind to a later discard.
+    #[serde(default)]
+    next_discard_frame_id: u64,
 }
 
 impl ResolutionStack {
@@ -425,6 +463,13 @@ impl ResolutionStack {
         self.frames.last()
     }
 
+    pub(crate) fn ability_continuations(&self) -> impl Iterator<Item = &PendingContinuation> {
+        self.frames.iter().filter_map(|frame| match frame {
+            ResolutionFrame::AbilityContinuation(frame) => Some(&frame.pending),
+            _ => None,
+        })
+    }
+
     pub(crate) fn next_draw_sequence_frame_id(&self) -> u64 {
         self.next_draw_sequence_frame_id
     }
@@ -433,8 +478,32 @@ impl ResolutionStack {
         self.next_draw_sequence_frame_id = next_frame_id;
     }
 
+    pub(crate) fn next_discard_frame_id(&self) -> u64 {
+        self.next_discard_frame_id
+    }
+
+    pub(crate) fn restore_next_discard_frame_id(&mut self, next_frame_id: u64) {
+        self.next_discard_frame_id = next_frame_id;
+    }
+
+    /// Starts one discard operation and returns its unique provenance id.
+    pub fn begin_discard(&mut self, source_id: Option<ObjectId>) -> DiscardFrameId {
+        let id = DiscardFrameId(self.next_discard_frame_id);
+        self.next_discard_frame_id = self.next_discard_frame_id.saturating_add(1);
+        self.push_discard(DiscardFrame {
+            id,
+            source_id,
+            results: Vec::new(),
+        });
+        id
+    }
+
     pub(crate) fn observe_draw_sequence_frame_id(&mut self, next_frame_id: u64) {
         self.next_draw_sequence_frame_id = self.next_draw_sequence_frame_id.max(next_frame_id);
+    }
+
+    fn observe_discard_frame_id(&mut self, id: DiscardFrameId) {
+        self.next_discard_frame_id = self.next_discard_frame_id.max(id.0.saturating_add(1));
     }
 
     /// Restores a v2 payload written before the outer allocator was serialized.
@@ -450,6 +519,22 @@ impl ResolutionStack {
             .max();
         if let Some(next_frame_id) = next_frame_id {
             self.observe_draw_sequence_frame_id(next_frame_id);
+        }
+    }
+
+    /// Restores the monotonic discard allocator from persisted in-flight
+    /// operations when an older wire payload omits its outer allocator.
+    fn recover_discard_allocator(&mut self) {
+        let next_frame_id = self
+            .frames
+            .iter()
+            .filter_map(|frame| match frame {
+                ResolutionFrame::Discard(frame) => Some(frame.id.0.saturating_add(1)),
+                _ => None,
+            })
+            .max();
+        if let Some(next_frame_id) = next_frame_id {
+            self.next_discard_frame_id = self.next_discard_frame_id.max(next_frame_id);
         }
     }
 
@@ -514,6 +599,95 @@ impl ResolutionStack {
         match self.frames.last_mut() {
             Some(ResolutionFrame::AbilityContinuation(frame)) => Some(frame),
             Some(_) | None => None,
+        }
+    }
+
+    /// Returns the active continuation only when the exact discard operation
+    /// is its immediate parent. This fixed adjacency is the authority that
+    /// permits a Recruit result to cross a replacement pause; arbitrary stack
+    /// searches would risk binding a sibling discard to the wrong child.
+    pub fn active_ability_continuation_with_discard_parent_mut(
+        &mut self,
+        discard_id: DiscardFrameId,
+    ) -> Option<&mut AbilityContinuationFrame> {
+        let continuation_index = self.frames.len().checked_sub(1)?;
+        let discard_index = continuation_index.checked_sub(1)?;
+        match (
+            self.frames.get(discard_index),
+            self.frames.get(continuation_index),
+        ) {
+            (
+                Some(ResolutionFrame::Discard(discard)),
+                Some(ResolutionFrame::AbilityContinuation(_)),
+            ) if discard.id == discard_id => {}
+            _ => return None,
+        }
+        match self.frames.get_mut(continuation_index) {
+            Some(ResolutionFrame::AbilityContinuation(continuation)) => Some(continuation),
+            Some(_) | None => {
+                unreachable!("checked direct continuation must retain its frame kind")
+            }
+        }
+    }
+
+    /// Returns the exact active continuation's discard parent when that parent
+    /// immediately precedes it. This is deliberately positional rather than a
+    /// stack search: terminal zone delivery may record provenance only for the
+    /// discard operation that owns the active Recruit continuation.
+    pub fn active_discard_parent_of_active_ability_continuation_mut(
+        &mut self,
+        discard_id: DiscardFrameId,
+    ) -> Option<&mut DiscardFrame> {
+        let continuation_index = self.frames.len().checked_sub(1)?;
+        let discard_index = continuation_index.checked_sub(1)?;
+        match (
+            self.frames.get(discard_index),
+            self.frames.get(continuation_index),
+        ) {
+            (
+                Some(ResolutionFrame::Discard(discard)),
+                Some(ResolutionFrame::AbilityContinuation(_)),
+            ) if discard.id == discard_id => {}
+            _ => return None,
+        }
+        match self.frames.get_mut(discard_index) {
+            Some(ResolutionFrame::Discard(discard)) => Some(discard),
+            Some(_) | None => unreachable!("checked direct discard must retain its frame kind"),
+        }
+    }
+
+    /// Identifies the exact discard parent of the active continuation without
+    /// exposing any non-adjacent frame.
+    pub fn active_ability_continuation_discard_parent_id(&self) -> Option<DiscardFrameId> {
+        let continuation_index = self.frames.len().checked_sub(1)?;
+        let discard_index = continuation_index.checked_sub(1)?;
+        match (
+            self.frames.get(discard_index),
+            self.frames.get(continuation_index),
+        ) {
+            (
+                Some(ResolutionFrame::Discard(discard)),
+                Some(ResolutionFrame::AbilityContinuation(_)),
+            ) => Some(discard.id),
+            _ => None,
+        }
+    }
+
+    pub fn active_ability_continuation_discard_parent_result(
+        &self,
+        discard_id: DiscardFrameId,
+    ) -> Option<crate::types::ability::DiscardedCardResult> {
+        let continuation_index = self.frames.len().checked_sub(1)?;
+        let discard_index = continuation_index.checked_sub(1)?;
+        match (
+            self.frames.get(discard_index),
+            self.frames.get(continuation_index),
+        ) {
+            (
+                Some(ResolutionFrame::Discard(frame)),
+                Some(ResolutionFrame::AbilityContinuation(_)),
+            ) if frame.id == discard_id => frame.results.first().cloned(),
+            _ => None,
         }
     }
 
@@ -1143,6 +1317,53 @@ impl ResolutionStack {
         child_stack_start: usize,
     ) -> Result<(), ResolutionStackError> {
         self.insert_parent_at_child_boundary(ResolutionFrame::CopyToken(pending), child_stack_start)
+    }
+
+    /// Returns the debug-card batch owner only when it owns the stack top.
+    pub fn active_debug_card_entries(&self) -> Option<&PendingDebugCardEntries> {
+        match self.last() {
+            Some(ResolutionFrame::DebugCardEntries(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Consume the exact debug-card batch owner after its child entry settles.
+    pub fn take_active_debug_card_entries(
+        &mut self,
+    ) -> Result<Option<PendingDebugCardEntries>, ResolutionStackError> {
+        match self.last() {
+            None => Ok(None),
+            Some(ResolutionFrame::DebugCardEntries(_)) => {
+                let ResolutionFrame::DebugCardEntries(frame) =
+                    self.pop_expected(FrameKind::DebugCardEntries)?
+                else {
+                    unreachable!("checked debug-card frame kind must match")
+                };
+                Ok(Some(*frame))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::DebugCardEntries,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Park a debug-card batch as the active inner frame.
+    pub fn push_debug_card_entries(&mut self, pending: PendingDebugCardEntries) {
+        self.push_inner(ResolutionFrame::DebugCardEntries(Box::new(pending)));
+    }
+
+    /// Insert the debug-card batch below the exact child stack raised by one
+    /// card's entry attempt.
+    pub fn insert_debug_card_entries_parent_at_child_boundary(
+        &mut self,
+        pending: PendingDebugCardEntries,
+        child_stack_start: usize,
+    ) -> Result<(), ResolutionStackError> {
+        self.insert_parent_at_child_boundary(
+            ResolutionFrame::DebugCardEntries(Box::new(pending)),
+            child_stack_start,
+        )
     }
 
     /// Returns the EachPlayerCopyChosen owner only when its typed frame owns
@@ -1822,6 +2043,47 @@ impl ResolutionStack {
         self.push_inner(ResolutionFrame::ConniveReentry(pending));
     }
 
+    /// Returns the active discard operation only when it owns the stack top.
+    /// Callers cannot recover a buried operation through a nested replacement
+    /// choice, preserving LIFO provenance.
+    pub fn active_discard(&self) -> Option<&DiscardFrame> {
+        match self.last() {
+            Some(ResolutionFrame::Discard(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Mutably accesses only the active discard operation's terminal results.
+    pub fn active_discard_mut(&mut self) -> Option<&mut DiscardFrame> {
+        match self.frames.last_mut() {
+            Some(ResolutionFrame::Discard(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Consumes exactly the active discard frame.
+    pub fn take_active_discard(&mut self) -> Result<Option<DiscardFrame>, ResolutionStackError> {
+        match self.last() {
+            None => Ok(None),
+            Some(ResolutionFrame::Discard(_)) => {
+                let ResolutionFrame::Discard(frame) = self.pop_expected(FrameKind::Discard)? else {
+                    unreachable!("checked discard frame kind must match")
+                };
+                Ok(Some(*frame))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::Discard,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Parks a discard operation before it enters replacement processing.
+    pub fn push_discard(&mut self, frame: DiscardFrame) {
+        self.observe_discard_frame_id(frame.id);
+        self.push_inner(ResolutionFrame::Discard(Box::new(frame)));
+    }
+
     /// Returns a life-total assignment tail only when it owns the active stack
     /// top.
     pub fn active_life_total_assignment(&self) -> Option<&PendingLifeTotalAssignment> {
@@ -2316,6 +2578,7 @@ impl ResolutionStack {
             });
         }
         let has_multi_draw = multi_draw_count == 1;
+        let mut discard_ids = HashSet::new();
         let mut direct_choice_count = 0;
         let mut buried_direct_choice = None;
         for (index, frame) in self.frames.iter().enumerate() {
@@ -2337,6 +2600,22 @@ impl ResolutionStack {
                         frame: FrameKind::MultiDraw,
                         message: "the resolution-stack draw allocator is behind its active frame"
                             .to_string(),
+                    });
+                }
+            }
+            if let ResolutionFrame::Discard(discard) = frame {
+                if !discard_ids.insert(discard.id) {
+                    return Err(ResolutionStackError::InvalidPayload {
+                        frame: FrameKind::Discard,
+                        message: "duplicate discard frame id".to_string(),
+                    });
+                }
+                if discard.id.0 >= self.next_discard_frame_id {
+                    return Err(ResolutionStackError::InvalidPayload {
+                        frame: FrameKind::Discard,
+                        message:
+                            "the resolution-stack discard allocator is behind its active frame"
+                                .to_string(),
                     });
                 }
             }
@@ -2454,21 +2733,56 @@ impl ResolutionStateWire {
     ///
     /// Version 1 is read only through the legacy migration path below. Version
     /// 2 is the only shape this adapter writes for protocol-19 clients.
-    fn from_value(value: Value) -> Result<Self, String> {
-        let object = value
-            .as_object()
-            .ok_or_else(|| "resolution state wire must be a JSON object".to_string())?;
-        let version = object
-            .get("resolution_state_version")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| {
-                "resolution state wire is missing a numeric resolution_state_version".to_string()
-            })?;
+    fn from_value(mut value: Value) -> Result<Self, String> {
+        let version = {
+            let object = value
+                .as_object()
+                .ok_or_else(|| "resolution state wire must be a JSON object".to_string())?;
+            object
+                .get("resolution_state_version")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| {
+                    "resolution state wire is missing a numeric resolution_state_version"
+                        .to_string()
+                })?
+        };
+
+        let decode_mode = match version {
+            LEGACY_RESOLUTION_STATE_WIRE_VERSION => GameStateDecodeMode::ResolutionWireV1,
+            RESOLUTION_STATE_WIRE_VERSION => GameStateDecodeMode::ResolutionWireV2,
+            _ => {
+                return Err(format!(
+                    "unsupported resolution_state_version {version}; expected 1 or {RESOLUTION_STATE_WIRE_VERSION}"
+                ));
+            }
+        };
+        // `ResolutionStateWire` is a public persistence boundary in its own
+        // right. Its historic-shape preparation and raw-state materialization
+        // both belong to `GameStateDecode`; no wire branch gets a private
+        // `GameState` serde shortcut.
+        GameStateDecode::prepare_resolution_wire(&mut value, decode_mode)?;
 
         match version {
             // V1 reader compatibility path: historical keys are consumed here
             // and projected into typed frames before runtime state is restored.
             LEGACY_RESOLUTION_STATE_WIRE_VERSION => {
+                crate::types::game_state::reconcile_persisted_zone_change_occurrences(
+                    &mut value,
+                    &[
+                        "pending_continuation",
+                        "pending_choose_zone_trigger_context",
+                        "pending_optional_trigger_event",
+                        // These v1 frame payloads retain ZoneChanged events in
+                        // their logical-owner, delivery, or trigger context.
+                        "pending_change_zone_iteration",
+                        "pending_batch_deliveries",
+                        "pending_mill_deliveries",
+                        "pending_each_player_copy_chosen",
+                    ],
+                )?;
+                let object = value
+                    .as_object()
+                    .expect("the checked resolution state wire remains an object");
                 if object.contains_key("resolution_frames") {
                     return Err("v1 resolution state must not contain resolution_frames".to_string());
                 }
@@ -2542,8 +2856,7 @@ impl ResolutionStateWire {
                 legacy_object.remove("post_replacement_applied");
                 legacy_object.remove("post_replacement_event_source");
                 legacy_object.remove("post_replacement_event_target");
-                let mut legacy: GameState =
-                    serde_json::from_value(legacy_value).map_err(|error| error.to_string())?;
+                let mut legacy = GameStateDecode::materialize_prepared(legacy_value)?;
                 if let Some(frame) = legacy_ability.into_frame()? {
                     legacy.push_ability_continuation(frame);
                 }
@@ -2622,15 +2935,24 @@ impl ResolutionStateWire {
                         legacy.resolution_stack.push_inner(frame);
                     }
                 }
+                normalize_legacy_completed_resolution_carrier(&mut legacy);
                 let frames = canonicalize_legacy_resolution_state(&legacy)?;
                 frames
                     .validate(&legacy.waiting_for)
                     .map_err(|error| error.to_string())?;
+                crate::types::game_state::validate_trigger_firing_coherence(&legacy)?;
                 #[cfg(debug_assertions)]
                 debug_assert_runtime_resolution_invariants(&legacy);
                 Ok(Self { state: legacy })
             }
             RESOLUTION_STATE_WIRE_VERSION => {
+                crate::types::game_state::reconcile_persisted_zone_change_occurrences(
+                    &mut value,
+                    &[],
+                )?;
+                let object = value
+                    .as_object()
+                    .expect("the checked resolution state wire remains an object");
                 if legacy_resolution_wire_field(object).is_some() {
                     return Err("v2 resolution state must not contain a legacy resolution field".to_string());
                 }
@@ -2646,6 +2968,7 @@ impl ResolutionStateWire {
                 let mut frames: ResolutionStack = serde_json::from_value(frames_value.clone())
                     .map_err(|error| error.to_string())?;
                 frames.recover_draw_sequence_allocator();
+                frames.recover_discard_allocator();
 
                 let mut state_value = value;
                 let state_object = state_value.as_object_mut().expect("checked JSON object");
@@ -2655,8 +2978,7 @@ impl ResolutionStateWire {
                     return Err("v2 resolution state must not contain runtime resolution_stack"
                         .to_string());
                 }
-                let state: GameState =
-                    serde_json::from_value(state_value).map_err(|error| error.to_string())?;
+                let state = GameStateDecode::materialize_prepared(state_value)?;
                 frames
                     .validate(&state.waiting_for)
                     .map_err(|error| error.to_string())?;
@@ -2666,6 +2988,7 @@ impl ResolutionStateWire {
                     return Err("v2 resolution frames cannot be represented by the legacy runtime slots"
                         .to_string());
                 }
+                crate::types::game_state::validate_trigger_firing_coherence(&projected)?;
                 #[cfg(debug_assertions)]
                 debug_assert_runtime_resolution_invariants(&projected);
                 Ok(Self { state: projected })
@@ -2674,6 +2997,27 @@ impl ResolutionStateWire {
                 "unsupported resolution_state_version {other}; expected 1 or {RESOLUTION_STATE_WIRE_VERSION}"
             )),
         }
+    }
+}
+
+/// CR 608.2c: Historical v1 snapshots could retain a completed stack entry as
+/// incidental last-known information until the next resolution. A priority
+/// boundary with no typed resolution frame has no remaining resolution owner,
+/// so restore it as the canonical settled state. A newly announced stack
+/// object belongs to the next priority window; it cannot keep the prior
+/// resolution carrier alive.
+///
+/// This is intentionally limited to the v1 projection above. Current v2
+/// snapshots must preserve their exact active carrier and are validated rather
+/// than normalized during decode.
+fn normalize_legacy_completed_resolution_carrier(state: &mut GameState) {
+    if matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && state.resolution_stack.is_empty()
+        && state.pending_resolution_completion.is_none()
+    {
+        state.resolving_stack_entry = None;
+        state.resolving_trigger_firing = None;
+        state.resolution_source_relatch = None;
     }
 }
 
@@ -3092,6 +3436,9 @@ impl LegacyOptionalEffectWire {
         Ok(Some(OptionalEffectFrame {
             ability,
             trigger_event: self.pending_optional_trigger_event,
+            // Legacy wire predates the plural batch; empty is the correct default
+            // (no in-flight reproduction on a legacy-serialized optional frame).
+            trigger_events: Vec::new(),
             trigger_match_count: self.pending_optional_trigger_match_count,
         }))
     }
@@ -3294,6 +3641,7 @@ pub(crate) fn canonicalize_legacy_resolution_state(
     let mut frames = ResolutionStack::default();
     frames
         .restore_next_draw_sequence_frame_id(state.resolution_stack.next_draw_sequence_frame_id());
+    frames.restore_next_discard_frame_id(state.resolution_stack.next_discard_frame_id());
 
     for frame in state.resolution_stack.iter() {
         if !frame.is_runtime_stack_resident() {
@@ -3316,6 +3664,9 @@ fn project_frames_into_legacy_state(
     projected
         .resolution_stack
         .restore_next_draw_sequence_frame_id(frames.next_draw_sequence_frame_id());
+    projected
+        .resolution_stack
+        .restore_next_discard_frame_id(frames.next_discard_frame_id());
     for frame in frames.iter() {
         match frame {
             ResolutionFrame::AbilityContinuation(frame) => {
@@ -3354,6 +3705,11 @@ fn project_frames_into_legacy_state(
             ResolutionFrame::CopyToken(pending) => {
                 projected.resolution_stack.push_copy_token(pending.clone());
             }
+            ResolutionFrame::DebugCardEntries(pending) => {
+                projected
+                    .resolution_stack
+                    .push_debug_card_entries((**pending).clone());
+            }
             ResolutionFrame::EachPlayerCopyChosen(pending) => {
                 projected
                     .resolution_stack
@@ -3380,6 +3736,9 @@ fn project_frames_into_legacy_state(
             ResolutionFrame::MultiDraw(frame) => {
                 projected.resolution_stack.push_multi_draw(frame.clone())
             }
+            ResolutionFrame::Discard(frame) => {
+                projected.resolution_stack.push_discard((**frame).clone())
+            }
             ResolutionFrame::ConniveReentry(pending) => projected
                 .resolution_stack
                 .push_connive_reentry(pending.clone()),
@@ -3400,7 +3759,7 @@ fn project_frames_into_legacy_state(
 }
 
 fn clear_legacy_resolution_slots(state: &mut GameState) {
-    state.resolution_stack = ResolutionStack::default();
+    *state.resolution_stack = Default::default();
 }
 
 fn legacy_resolution_wire_field(object: &Map<String, Value>) -> Option<&str> {
@@ -3514,7 +3873,7 @@ mod tests {
         PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingPerCategoryZoneChoice,
         PendingPerPlayerZoneChoice, PendingRepeatIteration, PendingRepeatUntil,
         PendingSpellResolution, PendingVoteBallotIteration, PostReplacementDrain,
-        ResidentDrainPolicy, ZoneDeliveryExileTracking,
+        ResidentDrainPolicy, StackEntry, StackEntryKind, ZoneDeliveryExileTracking,
     };
 
     use crate::types::identifiers::{CardId, LogicalZoneChangeGroupId, ObjectId};
@@ -3540,6 +3899,41 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn v1_restore_clears_completed_carrier_before_a_new_stack_object() {
+        let mut state = GameState::new_two_player(81);
+        let completed = StackEntry {
+            id: ObjectId(81),
+            source_id: ObjectId(81),
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(81),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        };
+        let next = StackEntry {
+            id: ObjectId(82),
+            source_id: ObjectId(82),
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(82),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        };
+        state.resolving_stack_entry = Some(completed);
+        state.stack.push_back(next);
+
+        normalize_legacy_completed_resolution_carrier(&mut state);
+
+        assert!(state.resolving_stack_entry.is_none());
+        assert!(state.resolving_trigger_firing.is_none());
+        assert_eq!(state.stack.len(), 1);
+    }
+
     fn resolved_draw(source_id: u64) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::Draw {
@@ -3562,6 +3956,53 @@ mod tests {
             pending: PendingContinuation::new(Box::new(resolved_draw(source_id)), &state),
             choose_zone_trigger_context: None,
         })
+    }
+
+    #[test]
+    fn active_discard_parent_of_active_ability_continuation_is_direct_and_id_bound() {
+        let mut direct = ResolutionStack::default();
+        let direct_id = direct.begin_discard(None);
+        direct.push_inner(continuation_frame(1));
+        direct
+            .active_discard_parent_of_active_ability_continuation_mut(direct_id)
+            .expect("the direct discard parent is mutable")
+            .source_id = Some(ObjectId(1));
+        assert_eq!(
+            match &direct.frames[0] {
+                ResolutionFrame::Discard(frame) => frame.source_id,
+                other => panic!("expected discard parent, got {other:?}"),
+            },
+            Some(ObjectId(1)),
+            "the helper mutates the direct discard parent"
+        );
+
+        let mut mismatched = ResolutionStack::default();
+        let wrong_id = mismatched.begin_discard(None);
+        let matching_id = mismatched.begin_discard(None);
+        mismatched.push_inner(continuation_frame(2));
+        assert!(
+            mismatched
+                .active_discard_parent_of_active_ability_continuation_mut(wrong_id)
+                .is_none(),
+            "a sibling discard ID must not bind to the active continuation"
+        );
+        assert!(
+            mismatched
+                .active_discard_parent_of_active_ability_continuation_mut(matching_id)
+                .is_some(),
+            "the immediate discard parent remains available by its exact ID"
+        );
+
+        let mut buried = ResolutionStack::default();
+        let buried_id = buried.begin_discard(None);
+        buried.push_inner(continuation_frame(3));
+        buried.push_inner(change_zone_frame(3));
+        assert!(
+            buried
+                .active_discard_parent_of_active_ability_continuation_mut(buried_id)
+                .is_none(),
+            "a discard below an active child must not be recovered by a stack search"
+        );
     }
 
     fn change_zone_frame(group_seed: u64) -> ResolutionFrame {
@@ -4163,6 +4604,7 @@ mod tests {
         optional_effect.push_inner(ResolutionFrame::OptionalEffect(OptionalEffectFrame {
             ability: Box::new(resolved_draw(6)),
             trigger_event: None,
+            trigger_events: Vec::new(),
             trigger_match_count: None,
         }));
         optional_effect
@@ -4581,6 +5023,7 @@ mod tests {
             OptionalEffectFrame {
                 ability: Box::new(resolved_draw(102)),
                 trigger_event: None,
+                trigger_events: Vec::new(),
                 trigger_match_count: None,
             },
         );
@@ -5137,6 +5580,48 @@ mod tests {
     }
 
     #[test]
+    fn v2_reader_recovers_discard_allocator_and_rejects_duplicate_frame_ids() {
+        let mut state = GameState::new_two_player(140);
+        let captured = state.resolution_stack.begin_discard(None);
+        let v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+            .expect("v2 active discard fixture serializes");
+
+        let mut stale_outer_allocator = v2.clone();
+        stale_outer_allocator["resolution_frames"]["next_discard_frame_id"] = Value::from(0);
+        let mut restored = serde_json::from_value::<ResolutionStateWire>(stale_outer_allocator)
+            .expect("stale discard allocator is repaired from the active frame")
+            .into_game_state();
+        assert!(
+            restored.resolution_stack.next_discard_frame_id() > captured.0,
+            "a restored discard allocator must remain above every live frame id"
+        );
+        let retired = restored
+            .resolution_stack
+            .take_active_discard()
+            .expect("restored discard frame must be active")
+            .expect("restored discard frame remains addressable");
+        assert_eq!(retired.id, captured);
+        assert!(
+            restored.resolution_stack.begin_discard(None) > captured,
+            "the recovered allocator must not reuse an abandoned discard frame id"
+        );
+
+        let mut duplicate_frames = ResolutionStack::default();
+        let _duplicate_id = duplicate_frames.begin_discard(None);
+        let duplicate = duplicate_frames
+            .active_discard()
+            .expect("new discard frame exists")
+            .clone();
+        duplicate_frames.push_discard(duplicate);
+        let duplicate_wire =
+            v2_fixture_with_frames(GameState::new_two_player(141), duplicate_frames);
+        assert!(
+            serde_json::from_value::<ResolutionStateWire>(duplicate_wire).is_err(),
+            "a wire payload with duplicate discard frame ids must be rejected"
+        );
+    }
+
+    #[test]
     fn v1_remaining_resolution_frames_resume_via_shipped_authorities() {
         let mut draw_sequences = DrawSequenceStack::default();
         let outer = draw_sequences.push(PlayerId(0), 0);
@@ -5407,6 +5892,7 @@ mod tests {
         buried_optional_frames.push_inner(ResolutionFrame::OptionalEffect(OptionalEffectFrame {
             ability: Box::new(resolved_draw(151)),
             trigger_event: None,
+            trigger_events: Vec::new(),
             trigger_match_count: None,
         }));
         buried_optional_frames.push_inner(continuation_frame(151));

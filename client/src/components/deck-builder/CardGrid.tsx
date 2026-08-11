@@ -4,12 +4,12 @@ import { scryfallLegalityKey, type ScryfallCard } from "../../services/scryfall"
 import { useLongPress } from "../../hooks/useLongPress";
 import type { BrowserLegalityFilter } from "./CardSearch";
 import { LegalityBadge } from "./LegalityBadge";
-import { mouseHoverPreview } from "./hoverPreview";
+import { mouseHoverPreview, type CardHoverHandler } from "./hoverPreview";
 
 interface CardGridProps {
   cards: ScryfallCard[];
   onAddCard: (card: ScryfallCard) => void;
-  onCardHover?: (cardName: string | null) => void;
+  onCardHover?: CardHoverHandler;
   cardCounts?: Map<string, number>;
   legalityFormat?: BrowserLegalityFilter;
 }
@@ -61,7 +61,7 @@ interface CardGridTileProps {
   count: number | undefined;
   legalityFormat: BrowserLegalityFilter;
   onAddCard: (card: ScryfallCard) => void;
-  onCardHover?: (cardName: string | null) => void;
+  onCardHover?: CardHoverHandler;
 }
 
 function CardGridTile({
@@ -77,12 +77,13 @@ function CardGridTile({
   const formatLabel = legalityFormat === "all"
     ? t("grid.allFormats")
     : legalityFormat.charAt(0).toUpperCase() + legalityFormat.slice(1);
+  const hoverInfo = { name: card.name, scryfallId: card.id };
 
   // Touch model (mirrors MobileHandDrawer's DrawerCard): tap adds the card,
   // long-press opens the preview. firedRef suppresses the click that follows a
   // long-press so a long-press never also adds the card. Desktop is unaffected
   // (handlers are touch-only; hover still drives the preview).
-  const { handlers, firedRef } = useLongPress(() => onCardHover?.(card.name));
+  const { handlers, firedRef } = useLongPress(() => onCardHover?.(hoverInfo));
 
   const handleClick = () => {
     if (firedRef.current) {
@@ -101,7 +102,7 @@ function CardGridTile({
       exit={{ opacity: 0, scale: 0.9 }}
       transition={{ duration: 0.15 }}
       onClick={handleClick}
-      {...mouseHoverPreview(onCardHover, card.name)}
+      {...mouseHoverPreview(onCardHover, hoverInfo)}
       {...handlers}
       disabled={!legal}
       title={legal ? t("grid.addCard", { name: card.name }) : t("grid.notLegal", { name: card.name, format: formatLabel })}

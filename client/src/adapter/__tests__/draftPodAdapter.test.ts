@@ -112,6 +112,12 @@ function mockView(status: string): DraftPlayerView {
     pass_direction: "Left",
     current_pack: null,
     pool: [],
+    pool_groups: {
+      color_groups: [],
+      type_groups: [],
+      cmc_groups: [],
+      color_counts: { white: 0, blue: 0, black: 0, red: 0, green: 0 },
+    },
     seats: [],
     cards_per_pack: 14,
     pack_count: 3,
@@ -123,6 +129,7 @@ function mockView(status: string): DraftPlayerView {
     tournament_format: "Swiss",
     pod_policy: "Competitive",
     pairings: [],
+    match_config: { match_type: "Bo1" },
   };
 }
 

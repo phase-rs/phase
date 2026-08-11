@@ -9,21 +9,22 @@ use crate::types::ability::{
     StaticCondition, StaticDefinition, SubAbilityLink, TapCreaturesRequirement, TargetFilter,
     TargetRef,
 };
-use crate::types::actions::AlternativeCastDecision;
+use crate::types::actions::{AlternativeCastDecision, GameAction};
 use crate::types::card::LayoutKind;
 use crate::types::events::{ActivatedAbilityKind, GameEvent};
 use crate::types::game_state::{
     ActivationResidual, ActivationTargetSelection, CastOfferKind, CastPaymentMode,
     CastingPermissionIndex, CastingVariant, CastingVariantChoiceOption, ConvokeMode, CostResume,
-    GameState, ManaAbilityCostParent, ManaAbilityResume, NextSpellModifier, PayCostKind,
-    PendingCast, PendingCostMoveResume, SneakPlacement, SpellCostSource, StackEntry,
-    StackEntryKind, TargetEffectDetail, TargetSelectionSlot, WaitingFor,
+    GameState, ManaAbilityCostParent, ManaAbilityResume, ManaChoice, ManaChoiceContext,
+    ManaChoicePrompt, NextSpellModifier, PayCostKind, PendingCast, PendingCostMoveResume,
+    SneakPlacement, SpellCostSource, StackEntry, StackEntryKind, TargetEffectDetail,
+    TargetSelectionSlot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::{
-    ActivationManaColorConstraint, ManaColor, ManaCost, ManaCostShard, ManaSpellGrant,
-    PaymentContext, SpecialAction, SpellMeta,
+    ActivationManaColorConstraint, ManaColor, ManaCost, ManaCostShard, ManaSourceOutput,
+    ManaSourceSelection, ManaSpellGrant, ManaType, PaymentContext, SpecialAction, SpellMeta,
 };
 use crate::types::player::PlayerId;
 use crate::types::resolved_commands::ManaPaymentRecipient;
@@ -47,7 +48,7 @@ use super::ability_utils::{
     unresolved_x_target_construction_error, TargetSlotBuildOutcome,
 };
 use super::casting_costs::{self, check_additional_cost_or_pay};
-use super::engine::EngineError;
+use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use super::functioning_abilities::{active_static_definitions, static_kind_present};
 use super::game_object::{GameObject, PreparedState, PrototypeFormState};
 use super::mana_payment;
@@ -61,6 +62,262 @@ use super::targeting;
 use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
 const FORETELL_SPECIAL_ACTION_COST: u32 = 2;
+
+/// An engine-authored Foretell announcement for the Priority preflight. The
+/// hand object and card identity remain private to Casting until the Priority
+/// facade reconstructs the ordinary special-action primer.
+pub(in crate::game) struct PriorityForetellAnnouncement {
+    object_id: ObjectId,
+    card_id: CardId,
+}
+
+/// An engine-authored normal-spell announcement for the Priority preflight.
+/// The zone-aware casting authority captures the object and printed card
+/// identity; target, mode, and payment choices remain with the normal reducer.
+pub(in crate::game) struct PriorityCastSpellAnnouncement {
+    object_id: ObjectId,
+    card_id: CardId,
+    payment_mode: CastPaymentMode,
+}
+
+/// An engine-authored land-play announcement for the Priority preflight. The
+/// zone-specific land permissions remain owned by Casting until the Priority
+/// facade reconstructs the ordinary special-action primer.
+pub(in crate::game) struct PriorityPlayLandAnnouncement {
+    object_id: ObjectId,
+    card_id: CardId,
+}
+
+/// An engine-authored once-per-turn free-cast announcement for the Priority
+/// preflight. The production permission authority retains the source provenance
+/// while target, mode, and payment choices remain with the normal reducer.
+pub(in crate::game) struct PriorityCastFreeAnnouncement {
+    object_id: ObjectId,
+    card_id: CardId,
+    source_id: ObjectId,
+}
+
+/// An engine-authored activated-ability announcement for Priority preflight.
+/// The source identity and resolved ability index remain private to Casting
+/// until the facade reconstructs the ordinary reducer primer.
+pub(in crate::game) struct PriorityActivateAbilityAnnouncement {
+    source_id: ObjectId,
+    ability_index: usize,
+}
+
+/// An engine-authored Sneak cast announcement for Priority preflight. The hand
+/// card and unblocked attacker remain private to Casting until facade conversion.
+pub(in crate::game) struct PrioritySneakAnnouncement {
+    hand_object: ObjectId,
+    card_id: CardId,
+    creature_to_return: ObjectId,
+    payment_mode: CastPaymentMode,
+}
+
+/// An engine-authored Web Slinging cast announcement for Priority preflight.
+/// The hand card and tapped creature remain private to Casting until facade
+/// conversion reconstructs the ordinary reducer primer.
+pub(in crate::game) struct PriorityWebSlingingAnnouncement {
+    hand_object: ObjectId,
+    card_id: CardId,
+    creature_to_return: ObjectId,
+    payment_mode: CastPaymentMode,
+}
+
+impl PriorityWebSlingingAnnouncement {
+    fn new(
+        hand_object: ObjectId,
+        card_id: CardId,
+        creature_to_return: ObjectId,
+        payment_mode: CastPaymentMode,
+    ) -> Self {
+        Self {
+            hand_object,
+            card_id,
+            creature_to_return,
+            payment_mode,
+        }
+    }
+
+    pub(in crate::game) fn hand_object(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.hand_object
+    }
+
+    pub(in crate::game) fn card_id(&self, _access: &PriorityAnnouncementFacadeAccess) -> CardId {
+        self.card_id
+    }
+
+    pub(in crate::game) fn creature_to_return(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.creature_to_return
+    }
+
+    pub(in crate::game) fn payment_mode(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> CastPaymentMode {
+        self.payment_mode
+    }
+}
+
+impl PrioritySneakAnnouncement {
+    fn new(
+        hand_object: ObjectId,
+        card_id: CardId,
+        creature_to_return: ObjectId,
+        payment_mode: CastPaymentMode,
+    ) -> Self {
+        Self {
+            hand_object,
+            card_id,
+            creature_to_return,
+            payment_mode,
+        }
+    }
+
+    pub(in crate::game) fn hand_object(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.hand_object
+    }
+
+    pub(in crate::game) fn card_id(&self, _access: &PriorityAnnouncementFacadeAccess) -> CardId {
+        self.card_id
+    }
+
+    pub(in crate::game) fn creature_to_return(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.creature_to_return
+    }
+
+    pub(in crate::game) fn payment_mode(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> CastPaymentMode {
+        self.payment_mode
+    }
+}
+
+impl PriorityActivateAbilityAnnouncement {
+    fn new(source_id: ObjectId, ability_index: usize) -> Self {
+        Self {
+            source_id,
+            ability_index,
+        }
+    }
+
+    pub(in crate::game) fn source_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.source_id
+    }
+
+    pub(in crate::game) fn ability_index(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> usize {
+        self.ability_index
+    }
+}
+
+impl PriorityCastFreeAnnouncement {
+    fn new(object_id: ObjectId, card_id: CardId, source_id: ObjectId) -> Self {
+        Self {
+            object_id,
+            card_id,
+            source_id,
+        }
+    }
+
+    pub(in crate::game) fn object_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.object_id
+    }
+
+    pub(in crate::game) fn card_id(&self, _access: &PriorityAnnouncementFacadeAccess) -> CardId {
+        self.card_id
+    }
+
+    pub(in crate::game) fn source_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.source_id
+    }
+}
+
+impl PriorityPlayLandAnnouncement {
+    fn new(object_id: ObjectId, card_id: CardId) -> Self {
+        Self { object_id, card_id }
+    }
+
+    pub(in crate::game) fn object_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.object_id
+    }
+
+    pub(in crate::game) fn card_id(&self, _access: &PriorityAnnouncementFacadeAccess) -> CardId {
+        self.card_id
+    }
+}
+
+impl PriorityCastSpellAnnouncement {
+    fn new(object_id: ObjectId, card_id: CardId, payment_mode: CastPaymentMode) -> Self {
+        Self {
+            object_id,
+            card_id,
+            payment_mode,
+        }
+    }
+
+    pub(in crate::game) fn object_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.object_id
+    }
+
+    pub(in crate::game) fn card_id(&self, _access: &PriorityAnnouncementFacadeAccess) -> CardId {
+        self.card_id
+    }
+
+    pub(in crate::game) fn payment_mode(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> CastPaymentMode {
+        self.payment_mode
+    }
+}
+
+impl PriorityForetellAnnouncement {
+    fn new(object_id: ObjectId, card_id: CardId) -> Self {
+        Self { object_id, card_id }
+    }
+
+    pub(in crate::game) fn object_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.object_id
+    }
+
+    pub(in crate::game) fn card_id(&self, _access: &PriorityAnnouncementFacadeAccess) -> CardId {
+        self.card_id
+    }
+}
 
 fn runtime_granted_cycling_abilities(
     state: &GameState,
@@ -387,48 +644,85 @@ pub(crate) fn sacrifice_cost_bounds_with_chosen_x(
     sacrifice_cost_bounds(count, eligible_len)
 }
 
-/// Emit `BecomesTarget` and `CrimeCommitted` events for each target.
+/// Emit `BecomesTarget` events for each target at target declaration.
 ///
-/// Called whenever targets are locked in for a spell or ability. CR 700.13:
-/// Targeting an opponent, their permanent, or a card in their graveyard is a crime.
+/// Crime commitment is deliberately separate: CR 700.13's targeting
+/// classification is retained through the in-flight action and recorded only
+/// after the spell or ability has successfully reached the stack.
 pub(crate) fn emit_targeting_events(
-    state: &GameState,
+    _state: &GameState,
     targets: &[TargetRef],
     source_id: ObjectId,
     controller: PlayerId,
     events: &mut Vec<GameEvent>,
 ) {
-    let mut crime_committed = false;
     for target in targets {
         match target {
             TargetRef::Object(obj_id) => {
                 events.push(GameEvent::BecomesTarget {
                     target: TargetRef::Object(*obj_id),
                     source_id,
+                    source_controller: controller,
                 });
-                if !crime_committed {
-                    if let Some(obj) = state.objects.get(obj_id) {
-                        if obj.controller != controller && obj.owner != controller {
-                            crime_committed = true;
-                        }
-                    }
-                }
             }
             TargetRef::Player(pid) => {
                 events.push(GameEvent::BecomesTarget {
                     target: TargetRef::Player(*pid),
                     source_id,
+                    source_controller: controller,
                 });
-                if !crime_committed && *pid != controller {
-                    crime_committed = true;
-                }
             }
         }
     }
-    if crime_committed {
-        events.push(GameEvent::CrimeCommitted {
-            player_id: controller,
-        });
+}
+
+/// CR 700.13: Whether this announced target set commits a crime for `controller`.
+///
+/// This follows the rule's exact target classes: an opponent; a permanent,
+/// spell, or ability controlled by an opponent; or a card owned by an opponent
+/// in their graveyard. `players::is_opponent` keeps team formats authoritative.
+pub(crate) fn targets_commit_crime(
+    state: &GameState,
+    targets: &[TargetRef],
+    controller: PlayerId,
+) -> bool {
+    targets.iter().any(|target| match target {
+        TargetRef::Player(player) => super::players::is_opponent(state, controller, *player),
+        TargetRef::Object(object_id) => {
+            let stack_target_is_opponent_controlled = state.stack.iter().any(|entry| {
+                entry.id == *object_id
+                    && super::players::is_opponent(state, controller, entry.controller)
+            });
+            stack_target_is_opponent_controlled
+                || state
+                    .objects
+                    .get(object_id)
+                    .is_some_and(|object| match object.zone {
+                        Zone::Battlefield | Zone::Stack => {
+                            super::players::is_opponent(state, controller, object.controller)
+                        }
+                        Zone::Graveyard => {
+                            super::players::is_opponent(state, controller, object.owner)
+                        }
+                        Zone::Library | Zone::Hand | Zone::Exile | Zone::Command => false,
+                    })
+        }
+    })
+}
+
+/// CR 700.13: Commit and publish one crime only after the action's stack
+/// placement succeeds. The ledger edit supplies replayable, prefix-checked
+/// durable state before `CommitCrime` triggers inspect the event.
+pub(crate) fn commit_crime_after_stack_placement(
+    state: &mut GameState,
+    crime_candidate: bool,
+    player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) {
+    if crime_candidate {
+        crate::game::ledger::record_crime_committed(state, player)
+            .expect("crime ledger prefix must match the live player state");
+        events.push(GameEvent::CrimeCommitted { player_id: player });
     }
 }
 
@@ -477,6 +771,7 @@ pub struct PriorityCastProbe {
 
 impl PriorityCastProbe {
     pub fn new(state: &GameState, player: PlayerId) -> Self {
+        crate::game::perf_counters::record_priority_cast_probe_state_clone();
         let mut flushed = state.clone();
         super::layers::flush_layers(&mut flushed);
         Self::from_flushed_state(flushed, player)
@@ -615,6 +910,25 @@ fn restriction_scope_matches_player(
         }
         RestrictionPlayerScope::OpponentsOfSourceController => {
             source_controller.is_some_and(|controller| controller != caster)
+        }
+        // CR 109.5 + CR 611.2a: the affected "you" ("you can't cast additional
+        // spells this turn" — Conduit of Worlds) is the player who activated the
+        // ability (CR 109.5: an activated ability's "you" is the activator), fixed
+        // at resolution, and the resulting continuous effect lasts until end of
+        // turn independent of its source (CR 611.2a). `add_restriction` lowers
+        // `SourceController` to `SpecificPlayer` at creation so the ban stays with
+        // the activator even after the source leaves play or changes controller —
+        // reading it live here would silently drop the ban when the source is
+        // gone (`source_controller == None`). An unresolved scope here is a bug:
+        // a corrupt/forged snapshot is scrubbed of it on restore by
+        // `GameState::drop_unresolved_source_controller_restrictions`, so a raw
+        // scope reaching this arm means the invariant was violated in a live state.
+        RestrictionPlayerScope::SourceController => {
+            debug_assert!(
+                false,
+                "SourceController should be resolved by add_restriction"
+            );
+            false
         }
     }
 }
@@ -799,6 +1113,17 @@ pub(crate) fn is_blocked_by_cant_play_lands(
                 None => true,
             }
     })
+}
+
+/// CR 305.1 + CR 116.2a: Per-object land-play restrictions apply regardless
+/// of the zone from which a permission lets the player play the land.
+pub(crate) fn land_play_is_permitted_by_restrictions(
+    state: &GameState,
+    player: PlayerId,
+    land_obj: &GameObject,
+) -> bool {
+    !is_blocked_by_cant_play_lands(state, player, land_obj)
+        && !is_blocked_by_prohibit_play_from_zone(state, land_obj, player)
 }
 
 /// CR 602.5 + CR 605.1a: Temporary game restrictions can prohibit activating
@@ -1315,6 +1640,326 @@ pub fn can_foretell_card(state: &GameState, player: PlayerId, object_id: ObjectI
     can_pay_special_action_cost_after_auto_tap(state, player, &cost)
 }
 
+/// Enumerates the current holder's finite Foretell special-action primers from
+/// the existing legality and payment authority.
+pub(in crate::game) fn priority_foretell_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityForetellAnnouncement> {
+    let player = principal.semantic_holder();
+    state
+        .players
+        .iter()
+        .find(|candidate| candidate.id == player)
+        .into_iter()
+        .flat_map(|candidate| candidate.hand.iter().copied())
+        .filter_map(|object_id| {
+            let object = state.objects.get(&object_id)?;
+            can_foretell_card(state, player, object_id)
+                .then(|| PriorityForetellAnnouncement::new(object_id, object.card_id))
+        })
+        .collect()
+}
+
+/// Enumerates normal spell casts from every zone exposed by the existing
+/// casting-permission authority for the current Priority holder.
+pub(in crate::game) fn priority_cast_spell_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityCastSpellAnnouncement> {
+    let player = principal.semantic_holder();
+    let mana_source_selections =
+        super::mana_sources::activatable_mana_source_selections(state, player);
+    spell_objects_available_to_cast(state, player)
+        .into_iter()
+        .filter_map(|object_id| {
+            let object = state.objects.get(&object_id)?;
+            let payment_mode = castable_spell_payment_mode_with_probe(
+                state,
+                player,
+                object_id,
+                &mana_source_selections,
+                None,
+            )?;
+            Some(PriorityCastSpellAnnouncement::new(
+                object_id,
+                object.card_id,
+                payment_mode,
+            ))
+        })
+        .collect()
+}
+
+/// Enumerates land plays from the current holder's hand and every existing
+/// permission-granted zone, retaining the normal play-land eligibility gates.
+pub(in crate::game) fn priority_play_land_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityPlayLandAnnouncement> {
+    let semantic_holder = principal.semantic_holder();
+    let land_resource_owner = principal.land_resource_owner();
+    let is_main_phase = matches!(
+        state.phase,
+        crate::types::phase::Phase::PreCombatMain | crate::types::phase::Phase::PostCombatMain
+    );
+    let land_limit =
+        state
+            .max_lands_per_turn
+            .saturating_add(super::static_abilities::additional_land_drops(
+                state,
+                land_resource_owner,
+            ));
+    let lands_played = if state.format_config.topology().has_shared_team_turns() {
+        state
+            .players
+            .iter()
+            .find(|player| player.id == land_resource_owner)
+            .map(|player| player.lands_played_this_turn)
+            .unwrap_or(0)
+    } else {
+        state.lands_played_this_turn
+    };
+    if !is_main_phase
+        || !state.stack.is_empty()
+        || state.active_player != semantic_holder
+        || lands_played >= land_limit
+        || super::static_abilities::player_has_static_other(
+            state,
+            land_resource_owner,
+            "CantPlayLand",
+        )
+    {
+        return Vec::new();
+    }
+
+    let mut announcements = Vec::new();
+    if let Some(player) = state
+        .players
+        .iter()
+        .find(|player| player.id == land_resource_owner)
+    {
+        for &object_id in &player.hand {
+            let Some(object) = state.objects.get(&object_id) else {
+                continue;
+            };
+            let is_playable_land = object
+                .card_types
+                .core_types
+                .contains(&crate::types::card_type::CoreType::Land)
+                || object.back_face.as_ref().is_some_and(|back_face| {
+                    back_face.layout_kind == Some(LayoutKind::Modal)
+                        && back_face
+                            .card_types
+                            .core_types
+                            .contains(&crate::types::card_type::CoreType::Land)
+                });
+            if is_playable_land
+                && land_play_is_permitted_by_restrictions(state, land_resource_owner, object)
+            {
+                announcements.push(PriorityPlayLandAnnouncement::new(object_id, object.card_id));
+            }
+        }
+    }
+    for (object_id, _) in graveyard_lands_playable_by_permission(state, land_resource_owner) {
+        if let Some(object) = state.objects.get(&object_id) {
+            if land_play_is_permitted_by_restrictions(state, land_resource_owner, object) {
+                announcements.push(PriorityPlayLandAnnouncement::new(object_id, object.card_id));
+            }
+        }
+    }
+    if let Some((object_id, _)) =
+        top_of_library_land_playable_by_permission(state, land_resource_owner)
+    {
+        if let Some(object) = state.objects.get(&object_id) {
+            if land_play_is_permitted_by_restrictions(state, land_resource_owner, object) {
+                announcements.push(PriorityPlayLandAnnouncement::new(object_id, object.card_id));
+            }
+        }
+    }
+    for (object_id, _) in exile_lands_playable_by_permission(state, land_resource_owner) {
+        if let Some(object) = state.objects.get(&object_id) {
+            if land_play_is_permitted_by_restrictions(state, land_resource_owner, object) {
+                announcements.push(PriorityPlayLandAnnouncement::new(object_id, object.card_id));
+            }
+        }
+    }
+    announcements
+}
+
+/// Enumerates only the production OncePerTurn free-cast permission tuples for
+/// the current Priority holder. Unlimited permissions remain normal casts.
+pub(in crate::game) fn priority_cast_free_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityCastFreeAnnouncement> {
+    hand_cast_free_candidates(state, principal.semantic_holder())
+        .into_iter()
+        .filter_map(|(object_id, source_id, _)| {
+            state.objects.get(&object_id).map(|object| {
+                PriorityCastFreeAnnouncement::new(object_id, object.card_id, source_id)
+            })
+        })
+        .collect()
+}
+
+/// Enumerates the current holder's finite activated-ability primers through the
+/// existing activation-definition and legality authorities.
+pub(in crate::game) fn priority_activate_ability_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityActivateAbilityAnnouncement> {
+    let player = principal.semantic_holder();
+    state
+        .objects
+        .iter()
+        .flat_map(|(&source_id, _)| {
+            activated_ability_definitions(state, source_id)
+                .into_iter()
+                .filter_map(move |(ability_index, ability)| {
+                    (ability.kind == AbilityKind::Activated
+                        && can_activate_ability_now(state, player, source_id, ability_index))
+                    .then(|| PriorityActivateAbilityAnnouncement::new(source_id, ability_index))
+                })
+        })
+        .collect()
+}
+
+/// Enumerates Sneak casts through the existing keyword-cost, affordability,
+/// and combat authorities for the active player in declare blockers.
+pub(in crate::game) fn priority_sneak_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PrioritySneakAnnouncement> {
+    let player = principal.semantic_holder();
+    if state.active_player != player || state.phase != crate::types::phase::Phase::DeclareBlockers {
+        return Vec::new();
+    }
+    let unblocked_attackers: Vec<_> = crate::game::combat::unblocked_attackers(state)
+        .into_iter()
+        .filter(|object_id| {
+            state
+                .objects
+                .get(object_id)
+                .is_some_and(|object| object.controller == player)
+        })
+        .collect();
+    let mana_source_selections =
+        super::mana_sources::activatable_mana_source_selections(state, player);
+    state
+        .players
+        .iter()
+        .find(|candidate| candidate.id == player)
+        .into_iter()
+        .flat_map(|candidate| candidate.hand.iter().copied())
+        .filter_map(|hand_object| {
+            crate::game::keywords::effective_sneak_cost(state, hand_object)?;
+            state
+                .objects
+                .get(&hand_object)
+                .map(|object| (hand_object, object.card_id, &mana_source_selections))
+        })
+        .flat_map(|(hand_object, card_id, mana_source_selections)| {
+            unblocked_attackers
+                .iter()
+                .copied()
+                .filter_map(move |creature_to_return| {
+                    let cost = effective_spell_cost_for_variant(
+                        state,
+                        player,
+                        hand_object,
+                        CastingVariant::Sneak {
+                            returned_creature: creature_to_return,
+                            placement: None,
+                        },
+                    )?;
+                    let payment_mode = prepared_spell_payment_verdict_with_probe(
+                        state,
+                        player,
+                        hand_object,
+                        &cost,
+                        mana_source_selections,
+                        None,
+                    )?;
+                    Some(PrioritySneakAnnouncement::new(
+                        hand_object,
+                        card_id,
+                        creature_to_return,
+                        payment_mode,
+                    ))
+                })
+        })
+        .collect()
+}
+
+/// Enumerates Web Slinging casts through the existing keyword and casting
+/// authorities, retaining its exact tapped-creature return domain.
+pub(in crate::game) fn priority_web_slinging_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityWebSlingingAnnouncement> {
+    let player = principal.semantic_holder();
+    let tapped_creatures: Vec<_> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|object_id| {
+            state.objects.get(object_id).is_some_and(|object| {
+                object.controller == player
+                    && object.tapped
+                    && object
+                        .card_types
+                        .core_types
+                        .contains(&crate::types::card_type::CoreType::Creature)
+            })
+        })
+        .collect();
+    let mana_source_selections =
+        super::mana_sources::activatable_mana_source_selections(state, player);
+    state
+        .players
+        .iter()
+        .find(|candidate| candidate.id == player)
+        .into_iter()
+        .flat_map(|candidate| candidate.hand.iter().copied())
+        .filter_map(|hand_object| {
+            crate::game::keywords::effective_web_slinging_cost(state, player, hand_object)?;
+            state
+                .objects
+                .get(&hand_object)
+                .map(|object| (hand_object, object.card_id, &mana_source_selections))
+        })
+        .flat_map(|(hand_object, card_id, mana_source_selections)| {
+            tapped_creatures
+                .iter()
+                .copied()
+                .filter_map(move |creature_to_return| {
+                    let cost = effective_spell_cost_for_variant(
+                        state,
+                        player,
+                        hand_object,
+                        CastingVariant::WebSlinging {
+                            returned_creature: creature_to_return,
+                        },
+                    )?;
+                    let payment_mode = prepared_spell_payment_verdict_with_probe(
+                        state,
+                        player,
+                        hand_object,
+                        &cost,
+                        mana_source_selections,
+                        None,
+                    )?;
+                    Some(PriorityWebSlingingAnnouncement::new(
+                        hand_object,
+                        card_id,
+                        creature_to_return,
+                        payment_mode,
+                    ))
+                })
+        })
+        .collect()
+}
+
 /// CR 702.143a-b: Pay {2}, then begin the foretell special-action move through
 /// the replacement-aware zone pipeline.
 pub fn handle_foretell(
@@ -1742,17 +2387,13 @@ fn transient_granted_spell_keywords_for(
         if id != caster {
             continue;
         }
-        // CR 603.4 + CR 608.2h: mirror `transient_grants_static_mode_to_player`'s
-        // dual-condition gating exactly.
-        if let Duration::ForAsLongAs { ref condition } = tce.duration {
-            if !super::layers::evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
-        }
-        if let Some(ref condition) = tce.condition {
-            if !super::layers::evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
+        // CR 611.2b + CR 611.3a: every gate of a resolution-created effect must
+        // hold for it to apply; `transient_gate_conditions` is the authority over
+        // which those are.
+        if !super::layers::transient_gate_conditions(tce).all(|condition| {
+            super::layers::evaluate_condition(state, condition, tce.controller, tce.source_id)
+        }) {
+            continue;
         }
         for modification in &tce.modifications {
             let ContinuousModification::GrantStaticAbility { definition } = modification else {
@@ -4205,6 +4846,29 @@ pub fn graveyard_lands_playable_by_permission(
     results
 }
 
+/// The elected authority for a land play from exile. The object-attached and
+/// static forms use different once-per-turn ledgers, so callers must retain
+/// this distinction through the zone move and completion seam.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ExileLandPlayAuthorization {
+    ObjectAttached {
+        source: ObjectId,
+        frequency: CastFrequency,
+    },
+    Static {
+        source: ObjectId,
+        frequency: CastFrequency,
+    },
+}
+
+impl ExileLandPlayAuthorization {
+    pub(super) fn source(self) -> ObjectId {
+        match self {
+            Self::ObjectAttached { source, .. } | Self::Static { source, .. } => source,
+        }
+    }
+}
+
 /// CR 305.1 + CR 113.6b + CR 406.6: Find the `StaticMode::ExileCastPermission`
 /// source (if any) authorizing `player` to play the exiled land `land_id`. Only
 /// `play_mode: Play` sources admit lands (CR 305.1: lands are played, not cast);
@@ -4214,7 +4878,7 @@ fn exile_land_playable_by_static_permission(
     state: &GameState,
     player: PlayerId,
     land_id: ObjectId,
-) -> Option<ObjectId> {
+) -> Option<(ObjectId, CastFrequency)> {
     if state.cards_exiled_with_source_this_turn.is_empty() && state.exile_links.is_empty() {
         return None;
     }
@@ -4241,8 +4905,33 @@ fn exile_land_playable_by_static_permission(
         if !super::filter::matches_target_filter(state, land_id, source.filter, &ctx) {
             return None;
         }
-        Some(source.source_id)
+        Some((source.source_id, source.frequency))
     })
+}
+
+/// CR 305.1 + CR 601.2a + CR 113.6b: Elect the exact exile-play authority for
+/// `land_id` before the land changes zones. Object-attached permissions take
+/// precedence over a static fallback, matching the public legal-actions surface.
+pub(super) fn exile_land_play_authorization(
+    state: &GameState,
+    player: PlayerId,
+    land_id: ObjectId,
+) -> Option<ExileLandPlayAuthorization> {
+    let obj = state.objects.get(&land_id)?;
+    if !obj
+        .card_types
+        .core_types
+        .contains(&crate::types::card_type::CoreType::Land)
+    {
+        return None;
+    }
+    if let Some((source, frequency)) =
+        play_from_exile_permission_source(state, obj, player, state.turn_number)
+    {
+        return Some(ExileLandPlayAuthorization::ObjectAttached { source, frequency });
+    }
+    let (source, frequency) = exile_land_playable_by_static_permission(state, player, land_id)?;
+    Some(ExileLandPlayAuthorization::Static { source, frequency })
 }
 
 /// CR 305.1 + CR 601.2a + CR 113.6b: Find exiled lands `player` may play, via
@@ -4258,23 +4947,8 @@ pub fn exile_lands_playable_by_permission(
         .exile
         .iter()
         .filter_map(|&obj_id| {
-            let obj = state.objects.get(&obj_id)?;
-            if !obj
-                .card_types
-                .core_types
-                .contains(&crate::types::card_type::CoreType::Land)
-            {
-                return None;
-            }
-            // Object-tagged impulse permission first; fall back to the
-            // battlefield-static exile-play permission.
-            if let Some((source, _)) =
-                play_from_exile_permission_source(state, obj, player, state.turn_number)
-            {
-                return Some((obj_id, source));
-            }
-            let source = exile_land_playable_by_static_permission(state, player, obj_id)?;
-            Some((obj_id, source))
+            exile_land_play_authorization(state, player, obj_id)
+                .map(|authorization| (obj_id, authorization.source()))
         })
         .collect()
 }
@@ -4544,6 +5218,17 @@ pub fn effective_spell_cost(
         .map(|p| p.mana_cost)
 }
 
+pub(crate) fn effective_spell_cost_for_variant(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    variant: CastingVariant,
+) -> Option<crate::types::mana::ManaCost> {
+    prepare_spell_cast_with_variant_override(state, player, object_id, Some(variant))
+        .ok()
+        .map(|prepared| prepared.mana_cost)
+}
+
 /// Returns the engine-effective mana cost for `object_id` **as if** all
 /// situational restrictions (timing, "can't cast" statics, color identity,
 /// per-turn limits, mana affordability) were already satisfied. Always applies
@@ -4630,6 +5315,11 @@ struct PreparedCastingVariant {
     prepared: PreparedSpellCast,
 }
 
+struct CastableSpellVerdict {
+    payment_state: Option<GameState>,
+    prepared_cost: Option<ManaCost>,
+}
+
 /// Apply every cast-method characteristic transform to a detached state and
 /// prepare against that exact transformed object. Offer projection and commit
 /// both use this seam, so the displayed cost is the cost that is later paid.
@@ -4638,6 +5328,7 @@ fn prepare_casting_variant(
     player: PlayerId,
     object_id: ObjectId,
     variant: CastingVariant,
+    mode: CastingMode,
 ) -> Result<PreparedCastingVariant, EngineError> {
     let mut transformed_state = state.clone();
     match variant {
@@ -4714,11 +5405,14 @@ fn prepare_casting_variant(
         | CastingVariant::Fuse
         | CastingVariant::Surge => {}
     }
-    let prepared = prepare_spell_cast_with_variant_override(
+    let prepared = prepare_spell_cast_with_variant_override_inner(
         &transformed_state,
         player,
         object_id,
         Some(variant),
+        None,
+        None,
+        mode,
     )?;
     Ok(PreparedCastingVariant {
         transformed_state,
@@ -4738,7 +5432,9 @@ fn casting_variant_choice_set(
     let mut options = Vec::new();
 
     for variant in candidates {
-        let Ok(candidate) = prepare_casting_variant(state, player, object_id, variant) else {
+        let Ok(candidate) =
+            prepare_casting_variant(state, player, object_id, variant, CastingMode::Actual)
+        else {
             continue;
         };
         if !can_cast_prepared_now_with_probe(
@@ -4759,6 +5455,71 @@ fn casting_variant_choice_set(
         options,
         had_multiple_candidates,
     }
+}
+
+/// Return the current legal cast-variant options for an object.
+///
+/// This is the same freshly prepared option set that the cast-choice handler
+/// validates before it commits a selected variant (CR 601.2b). Read-only AI
+/// consumers use it to reject stale displayed prompts rather than recreating
+/// casting-variant legality.
+pub fn current_casting_variant_choice_options(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Vec<CastingVariantChoiceOption> {
+    casting_variant_choice_set(state, player, object_id, None).options
+}
+
+/// Project an Evoke cast through the engine's cast-variant and zone-move
+/// authorities through its attempted battlefield entry.
+///
+/// This is a read-only preview for consumers that need ETB target legality.
+/// It deliberately uses the same `prepare_casting_variant` seam as the
+/// casting-variant prompt and the normal casting-to-stack / spell-resolution
+/// zone pipeline, rather than reconstructing a source object by hand.
+///
+/// CR 601.2a + CR 608.3: a permanent spell moves from its origin to the stack
+/// as part of casting and then enters the battlefield as it resolves. CR
+/// 702.74a: this projection applies the Evoke alternative cast variant.
+pub fn project_evoke_entry_state(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<GameState> {
+    let PreparedCastingVariant {
+        mut transformed_state,
+        prepared,
+    } = prepare_casting_variant(
+        state,
+        player,
+        object_id,
+        CastingVariant::Evoke,
+        CastingMode::Display,
+    )
+    .ok()?;
+    let mut events = Vec::new();
+
+    if !matches!(
+        zone_pipeline::move_object(
+            &mut transformed_state,
+            ZoneMoveRequest::casting_to_stack(object_id, prepared.object_id),
+            &mut events,
+        ),
+        ZoneMoveResult::Done
+    ) {
+        return None;
+    }
+    // A replacement effect may prevent the entry or park it for a choice. The
+    // resulting state is still the exact source context in which that
+    // replacement's own immediate effect chooses targets, so preserve it for
+    // the preview rather than treating the prompt as stale.
+    let _ = zone_pipeline::move_object(
+        &mut transformed_state,
+        ZoneMoveRequest::spell_resolution_default(object_id, Zone::Battlefield),
+        &mut events,
+    );
+    Some(transformed_state)
 }
 
 fn casting_variant_candidates(
@@ -6852,16 +7613,13 @@ fn collect_self_spell_cost_modifiers(
     // pipeline: layers pre-compute battlefield characteristics, not cast-time
     // cost deltas on cards in hand.
     for def in spell_obj.static_definitions.iter_all() {
-        if def.active_zones.is_empty() {
-            continue;
-        }
-        if !def.active_zones.contains(&spell_obj.zone) {
-            continue;
-        }
-        // CR 601.2f: Only self-referential cost statics apply here. Any other
-        // `affected` scoping would indicate a battlefield-style static that
-        // should be handled by the battlefield scanner.
-        if !matches!(def.affected, Some(TargetFilter::SelfRef)) {
+        if !self_spell_cost_modifier_applies_before_targets(
+            state,
+            caster,
+            spell_id,
+            def,
+            casting_variant,
+        ) {
             continue;
         }
 
@@ -6881,13 +7639,18 @@ fn collect_self_spell_cost_modifiers(
             _ => continue,
         };
 
-        let has_target_filter = spell_filter
-            .as_ref()
-            .is_some_and(cost_filter_has_target_ref);
-        if target_sensitive_only && !has_target_filter {
+        let filter_analysis = spell_filter.as_ref().map_or(
+            PreTargetCostFilterAnalysis::TargetIndependentRelevant,
+            |filter| {
+                analyze_cost_filter_before_targets_for(
+                    state, caster, spell_id, filter, spell_id, fused,
+                )
+            },
+        );
+        if target_sensitive_only && !filter_analysis.is_target_dependent() {
             continue;
         }
-        if selected_ability.is_none() && has_target_filter {
+        if selected_ability.is_none() && filter_analysis.is_target_dependent() {
             continue;
         }
 
@@ -6932,21 +7695,162 @@ fn collect_self_spell_cost_modifiers(
     collected
 }
 
-fn cost_filter_has_target_ref(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Typed(tf) => tf.properties.iter().any(|prop| {
-            matches!(
-                prop,
-                crate::types::ability::FilterProp::Targets { .. }
-                    | crate::types::ability::FilterProp::TargetsOnly { .. }
-            )
-        }),
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().any(cost_filter_has_target_ref)
-        }
-        TargetFilter::Not { filter } => cost_filter_has_target_ref(filter),
-        _ => false,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PreTargetCostFilterAnalysis {
+    Irrelevant,
+    TargetIndependentRelevant,
+    TargetDependent,
+}
+
+impl PreTargetCostFilterAnalysis {
+    fn is_relevant(self) -> bool {
+        self != Self::Irrelevant
     }
+
+    fn is_target_dependent(self) -> bool {
+        self == Self::TargetDependent
+    }
+
+    fn negate(self) -> Self {
+        match self {
+            Self::Irrelevant => Self::TargetIndependentRelevant,
+            Self::TargetIndependentRelevant => Self::Irrelevant,
+            Self::TargetDependent => Self::TargetDependent,
+        }
+    }
+}
+
+/// CR 601.2f: Classify a cost filter before targets are chosen. Fixed `Or` and
+/// `Not` outcomes remain fixed even when an unreachable branch mentions a
+/// target; only a result that chosen targets can still change is target-dependent.
+fn analyze_cost_filter_before_targets_for(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+    fused: bool,
+) -> PreTargetCostFilterAnalysis {
+    match filter {
+        TargetFilter::Typed(typed) => {
+            let has_target_property = typed.properties.iter().any(|property| {
+                matches!(
+                    property,
+                    FilterProp::Targets { .. } | FilterProp::TargetsOnly { .. }
+                )
+            });
+            let non_target_properties = typed
+                .properties
+                .iter()
+                .filter(|property| {
+                    !matches!(
+                        property,
+                        FilterProp::Targets { .. } | FilterProp::TargetsOnly { .. }
+                    )
+                })
+                .cloned()
+                .collect();
+            let base = TargetFilter::Typed(crate::types::ability::TypedFilter {
+                type_filters: typed.type_filters.clone(),
+                controller: typed.controller.clone(),
+                properties: non_target_properties,
+            });
+            if !spell_matches_cost_filter_for(state, caster, spell_id, &base, source_id, fused) {
+                PreTargetCostFilterAnalysis::Irrelevant
+            } else if has_target_property {
+                PreTargetCostFilterAnalysis::TargetDependent
+            } else {
+                PreTargetCostFilterAnalysis::TargetIndependentRelevant
+            }
+        }
+        TargetFilter::Or { filters } => filters.iter().fold(
+            PreTargetCostFilterAnalysis::Irrelevant,
+            |combined, inner| {
+                let next = analyze_cost_filter_before_targets_for(
+                    state, caster, spell_id, inner, source_id, fused,
+                );
+                match (combined, next) {
+                    (PreTargetCostFilterAnalysis::TargetIndependentRelevant, _)
+                    | (_, PreTargetCostFilterAnalysis::TargetIndependentRelevant) => {
+                        PreTargetCostFilterAnalysis::TargetIndependentRelevant
+                    }
+                    (PreTargetCostFilterAnalysis::TargetDependent, _)
+                    | (_, PreTargetCostFilterAnalysis::TargetDependent) => {
+                        PreTargetCostFilterAnalysis::TargetDependent
+                    }
+                    _ => PreTargetCostFilterAnalysis::Irrelevant,
+                }
+            },
+        ),
+        TargetFilter::And { filters } => filters.iter().fold(
+            PreTargetCostFilterAnalysis::TargetIndependentRelevant,
+            |combined, inner| {
+                let next = analyze_cost_filter_before_targets_for(
+                    state, caster, spell_id, inner, source_id, fused,
+                );
+                match (combined, next) {
+                    (PreTargetCostFilterAnalysis::Irrelevant, _)
+                    | (_, PreTargetCostFilterAnalysis::Irrelevant) => {
+                        PreTargetCostFilterAnalysis::Irrelevant
+                    }
+                    (PreTargetCostFilterAnalysis::TargetDependent, _)
+                    | (_, PreTargetCostFilterAnalysis::TargetDependent) => {
+                        PreTargetCostFilterAnalysis::TargetDependent
+                    }
+                    _ => PreTargetCostFilterAnalysis::TargetIndependentRelevant,
+                }
+            },
+        ),
+        TargetFilter::Not { filter } => analyze_cost_filter_before_targets_for(
+            state, caster, spell_id, filter, source_id, fused,
+        )
+        .negate(),
+        _ => {
+            if spell_matches_cost_filter_for(state, caster, spell_id, filter, source_id, fused) {
+                PreTargetCostFilterAnalysis::TargetIndependentRelevant
+            } else {
+                PreTargetCostFilterAnalysis::Irrelevant
+            }
+        }
+    }
+}
+
+/// CR 113.6 + CR 604.1 + CR 601.2f: A self cost modifier can affect the pending
+/// spell only from its declared zone and while its non-target gates hold.
+fn self_spell_cost_modifier_applies_before_targets(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+    definition: &StaticDefinition,
+    casting_variant: Option<CastingVariant>,
+) -> bool {
+    let Some(spell) = state.objects.get(&spell_id) else {
+        return false;
+    };
+    if definition.active_zones.is_empty() || !definition.active_zones.contains(&spell.zone) {
+        return false;
+    }
+    if !matches!(definition.affected, Some(TargetFilter::SelfRef)) {
+        return false;
+    }
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce | CostModifyMode::Raise,
+        spell_filter,
+        ..
+    } = &definition.mode
+    else {
+        return false;
+    };
+    let fused = casting_variant == Some(CastingVariant::Fuse);
+    if spell_filter.as_ref().is_some_and(|filter| {
+        !analyze_cost_filter_before_targets_for(state, caster, spell_id, filter, spell_id, fused)
+            .is_relevant()
+    }) {
+        return false;
+    }
+    definition.condition.as_ref().is_none_or(|condition| {
+        self_spell_cost_condition_matches(state, condition, caster, spell_id, casting_variant)
+    })
 }
 
 fn target_ref_matches_cost_filter(
@@ -7166,7 +8070,7 @@ fn evaluate_cost_mod_static_condition(
     use crate::types::ability::StaticCondition;
 
     match condition {
-        StaticCondition::DuringYourTurn => {
+        StaticCondition::DuringYourTurn | StaticCondition::DuringOpponentsTurn => {
             super::layers::evaluate_condition(state, condition, source_controller, source_id)
         }
         StaticCondition::And { conditions } => conditions.iter().all(|c| {
@@ -7184,6 +8088,41 @@ fn evaluate_cost_mod_static_condition(
         ),
         _ => super::layers::evaluate_condition(state, condition, caster, source_id),
     }
+}
+
+/// CR 113.6b + CR 604.1 + CR 601.2f: Apply the production zone, caster,
+/// condition, and non-target spell gates before treating a battlefield cost
+/// modifier as relevant to target selection.
+fn battlefield_cost_modifier_applies_before_targets(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+    source: &GameObject,
+    definition: &StaticDefinition,
+    fused: bool,
+) -> bool {
+    let Some(modifier) = definition.board_wide_cost_modifier() else {
+        return false;
+    };
+    if definition.active_zones.is_empty() {
+        if source.zone != Zone::Battlefield {
+            return false;
+        }
+    } else if !definition.active_zones.contains(&source.zone) {
+        return false;
+    }
+    if !modifier.caster_scope.admits(caster, source.controller) {
+        return false;
+    }
+    if definition.condition.as_ref().is_some_and(|condition| {
+        !evaluate_cost_mod_static_condition(state, condition, caster, source.controller, source.id)
+    }) {
+        return false;
+    }
+    modifier.spell_filter.is_none_or(|filter| {
+        analyze_cost_filter_before_targets_for(state, caster, spell_id, filter, source.id, fused)
+            .is_relevant()
+    })
 }
 
 fn collect_battlefield_cost_modifiers(
@@ -7227,6 +8166,11 @@ fn collect_battlefield_cost_modifiers(
         let source_controller = src_obj.controller;
 
         {
+            if !battlefield_cost_modifier_applies_before_targets(
+                state, caster, spell_id, src_obj, def, fused,
+            ) {
+                continue;
+            }
             // CR 601.2f + CR 113.6: single structural authority for "is this a
             // board-wide cost modifier, and what are its terms" — shared with
             // deck-time analysis (`phase-ai`'s `features::cost_reduction`) so the
@@ -7242,50 +8186,24 @@ fn collect_battlefield_cost_modifiers(
                 amount,
                 spell_filter,
                 dynamic_count,
-                caster_scope,
+                caster_scope: _,
                 condition: _,
             } = modifier;
             let is_raise = matches!(mode, CostModifyMode::Raise);
 
-            let has_target_filter = spell_filter.is_some_and(cost_filter_has_target_ref);
-            if target_sensitive_only && !has_target_filter {
+            let filter_analysis = spell_filter.map_or(
+                PreTargetCostFilterAnalysis::TargetIndependentRelevant,
+                |filter| {
+                    analyze_cost_filter_before_targets_for(
+                        state, caster, spell_id, filter, bf_id, fused,
+                    )
+                },
+            );
+            if target_sensitive_only && !filter_analysis.is_target_dependent() {
                 continue;
             }
-            if selected_ability.is_none() && has_target_filter {
+            if selected_ability.is_none() && filter_analysis.is_target_dependent() {
                 continue;
-            }
-
-            // CR 113.6 + CR 113.6b: A static functions only in its declared
-            // zones. Empty `active_zones` means battlefield default; non-empty
-            // means restrict to the listed zones. Eminence statics list both
-            // Battlefield and Command and pass for either source zone.
-            if def.active_zones.is_empty() {
-                if src_obj.zone != Zone::Battlefield {
-                    continue;
-                }
-            } else if !def.active_zones.contains(&src_obj.zone) {
-                continue;
-            }
-
-            // CR 601.2f: Check player scope — does this modifier apply to spells the caster casts?
-            // Must run before condition check so QuantityComparison resolves against the caster.
-            if !caster_scope.admits(caster, source_controller) {
-                continue;
-            }
-
-            // CR 601.2f: Check static condition — "as long as" / "during your turn"
-            // clauses gate cost modification. `DuringYourTurn` uses the source
-            // controller; spell-history quantity gates use the caster.
-            if let Some(ref cond) = def.condition {
-                if !evaluate_cost_mod_static_condition(
-                    state,
-                    cond,
-                    caster,
-                    source_controller,
-                    bf_id,
-                ) {
-                    continue;
-                }
             }
 
             // CR 601.2f: Check spell type filter — does the spell match?
@@ -7326,6 +8244,54 @@ fn collect_battlefield_cost_modifiers(
     collected
 }
 
+/// CR 118.8 + CR 601.2f: An imposed additional cost is relevant before target
+/// selection only when its production source, caster, condition, and spell gates
+/// already hold.
+fn imposed_additional_cost_applies_before_targets(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+    source: &GameObject,
+    definition: &StaticDefinition,
+) -> bool {
+    use crate::types::ability::ControllerRef;
+
+    let StaticMode::ImposeAdditionalCost {
+        spell_filter,
+        action: AdditionalCostTaxAction::Cast,
+        ..
+    } = &definition.mode
+    else {
+        return false;
+    };
+    if matches!(definition.affected, Some(TargetFilter::SelfRef)) {
+        return false;
+    }
+    if definition.active_zones.is_empty() {
+        if source.zone != Zone::Battlefield {
+            return false;
+        }
+    } else if !definition.active_zones.contains(&source.zone) {
+        return false;
+    }
+    if let Some(TargetFilter::Typed(typed)) = &definition.affected {
+        match typed.controller {
+            Some(ControllerRef::You) if caster != source.controller => return false,
+            Some(ControllerRef::Opponent) if caster == source.controller => return false,
+            _ => {}
+        }
+    }
+    if definition.condition.as_ref().is_some_and(|condition| {
+        !super::layers::evaluate_condition(state, condition, caster, source.id)
+    }) {
+        return false;
+    }
+    spell_filter.as_ref().is_none_or(|filter| {
+        analyze_cost_filter_before_targets_for(state, caster, spell_id, filter, source.id, false)
+            .is_relevant()
+    })
+}
+
 /// CR 601.2f + CR 118.8: Collect additional non-mana costs imposed by battlefield
 /// statics once targets are chosen. Terror of the Peaks class.
 pub(super) fn collect_imposed_additional_cast_costs(
@@ -7334,8 +8300,6 @@ pub(super) fn collect_imposed_additional_cast_costs(
     spell_id: ObjectId,
     ability: &ResolvedAbility,
 ) -> Vec<AbilityCost> {
-    use crate::types::ability::ControllerRef;
-
     let mut costs = Vec::new();
     // CR 604.1: O(1) presence gate — no ImposeAdditionalCost static means no imposed costs.
     if !static_kind_present(state, StaticModeKind::ImposeAdditionalCost) {
@@ -7344,7 +8308,9 @@ pub(super) fn collect_imposed_additional_cast_costs(
     crate::game::perf_counters::record_static_full_scan();
     for (src_obj, def) in super::functioning_abilities::game_functioning_statics(state) {
         let bf_id = src_obj.id;
-        let source_controller = src_obj.controller;
+        if !imposed_additional_cost_applies_before_targets(state, caster, spell_id, src_obj, def) {
+            continue;
+        }
 
         let StaticMode::ImposeAdditionalCost {
             cost,
@@ -7354,39 +8320,6 @@ pub(super) fn collect_imposed_additional_cast_costs(
         else {
             continue;
         };
-
-        let has_target_filter = spell_filter
-            .as_ref()
-            .is_some_and(cost_filter_has_target_ref);
-        if !has_target_filter {
-            continue;
-        }
-
-        if matches!(def.affected, Some(TargetFilter::SelfRef)) {
-            continue;
-        }
-
-        if def.active_zones.is_empty() {
-            if src_obj.zone != Zone::Battlefield {
-                continue;
-            }
-        } else if !def.active_zones.contains(&src_obj.zone) {
-            continue;
-        }
-
-        if let Some(TargetFilter::Typed(ref tf)) = def.affected {
-            match tf.controller {
-                Some(ControllerRef::You) if caster != source_controller => continue,
-                Some(ControllerRef::Opponent) if caster == source_controller => continue,
-                _ => {}
-            }
-        }
-
-        if let Some(ref cond) = def.condition {
-            if !super::layers::evaluate_condition(state, cond, caster, bf_id) {
-                continue;
-            }
-        }
 
         if let Some(ref filter) = spell_filter {
             if !spell_matches_cost_filter_with_selected_targets(
@@ -7482,6 +8415,50 @@ pub(super) fn apply_cost_floor_with_selected_targets(
     );
 }
 
+/// CR 601.2f: A cost floor is relevant before target selection only after its
+/// production source, caster, condition, and non-target spell gates hold.
+fn battlefield_cost_floor_applies_before_targets(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+    source: &GameObject,
+    definition: &StaticDefinition,
+    fused: bool,
+) -> bool {
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Minimum,
+        spell_filter,
+        ..
+    } = &definition.mode
+    else {
+        return false;
+    };
+    if source.zone != Zone::Battlefield {
+        return false;
+    }
+    if !definition.active_zones.is_empty() && !definition.active_zones.contains(&Zone::Battlefield)
+    {
+        return false;
+    }
+    if let Some(TargetFilter::Typed(typed)) = &definition.affected {
+        use crate::types::ability::ControllerRef;
+        match typed.controller {
+            Some(ControllerRef::You) if caster != source.controller => return false,
+            Some(ControllerRef::Opponent) if caster == source.controller => return false,
+            _ => {}
+        }
+    }
+    if definition.condition.as_ref().is_some_and(|condition| {
+        !super::layers::evaluate_condition(state, condition, caster, source.id)
+    }) {
+        return false;
+    }
+    spell_filter.as_ref().is_none_or(|filter| {
+        analyze_cost_filter_before_targets_for(state, caster, spell_id, filter, source.id, fused)
+            .is_relevant()
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn apply_cost_floor_inner(
     state: &GameState,
@@ -7501,6 +8478,12 @@ fn apply_cost_floor_inner(
     for (bf_obj, def) in super::functioning_abilities::battlefield_functioning_statics(state) {
         let bf_id = bf_obj.id;
 
+        if !battlefield_cost_floor_applies_before_targets(
+            state, caster, spell_id, bf_obj, def, fused,
+        ) {
+            continue;
+        }
+
         let StaticMode::ModifyCost {
             mode: CostModifyMode::Minimum,
             ref amount,
@@ -7511,44 +8494,19 @@ fn apply_cost_floor_inner(
             continue;
         };
 
-        let has_target_filter = spell_filter
-            .as_ref()
-            .is_some_and(cost_filter_has_target_ref);
-        if target_sensitive_only && !has_target_filter {
+        let filter_analysis = spell_filter.as_ref().map_or(
+            PreTargetCostFilterAnalysis::TargetIndependentRelevant,
+            |filter| {
+                analyze_cost_filter_before_targets_for(
+                    state, caster, spell_id, filter, bf_id, fused,
+                )
+            },
+        );
+        if target_sensitive_only && !filter_analysis.is_target_dependent() {
             continue;
         }
-        if selected_ability.is_none() && has_target_filter {
+        if selected_ability.is_none() && filter_analysis.is_target_dependent() {
             continue;
-        }
-
-        // CR 113.6: Statics that declare non-battlefield active_zones must not
-        // fire from the battlefield. Empty active_zones = battlefield default.
-        if !def.active_zones.is_empty() && !def.active_zones.contains(&Zone::Battlefield) {
-            continue;
-        }
-
-        // CR 601.2f: Optional caster-scope check via `def.affected`. Trinisphere
-        // emits `affected: None` (the floor applies to every spell), but a
-        // future filtered floor variant ("each spell your opponents cast that
-        // would cost less than ... ") could carry a `ControllerRef`-scoped
-        // affected filter; honor it here for forward-compatibility.
-        if let Some(crate::types::ability::TargetFilter::Typed(ref tf)) = def.affected {
-            use crate::types::ability::ControllerRef;
-            let source_controller = bf_obj.controller;
-            match tf.controller {
-                Some(ControllerRef::You) if caster != source_controller => continue,
-                Some(ControllerRef::Opponent) if caster == source_controller => continue,
-                _ => {}
-            }
-        }
-
-        // CR 601.2f: Evaluate the static's `condition` ("as long as this artifact
-        // is untapped") against the source permanent. Trinisphere's effect
-        // turns off entirely when the artifact is tapped.
-        if let Some(ref cond) = def.condition {
-            if !super::layers::evaluate_condition(state, cond, caster, bf_id) {
-                continue;
-            }
         }
 
         // CR 601.2f: Spell-type filter narrows which spells are floored.
@@ -9300,7 +10258,10 @@ fn face_down_cast_profile(
 /// CR 702.37c / CR 702.37b (megamorph) / CR 702.168b: true when `object_id` carries
 /// an effective morph, megamorph, or disguise keyword (printed or granted, CR 604.1) —
 /// the class of cards castable face down for the {3} alternative cost.
-fn object_has_effective_face_down_keyword(state: &GameState, object_id: ObjectId) -> bool {
+pub(crate) fn object_has_effective_face_down_keyword(
+    state: &GameState,
+    object_id: ObjectId,
+) -> bool {
     [
         KeywordKind::Morph,
         KeywordKind::Megamorph,
@@ -9344,7 +10305,11 @@ fn can_afford_face_down_cast(
 /// object (same `face_down_cast_profile` + `apply_face_down_entry_profile` +
 /// `Some(CastingVariant::FaceDown)` prepare), so `.is_ok()` here predicts the real
 /// face-down cast's prepare step precisely.
-fn face_down_cast_is_permitted(state: &GameState, player: PlayerId, object_id: ObjectId) -> bool {
+pub(crate) fn face_down_cast_is_permitted(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
     let mut simulated = state.clone();
     let profile = face_down_cast_profile(state, object_id);
     super::zone_pipeline::apply_face_down_entry_profile(&mut simulated, object_id, &profile);
@@ -9408,7 +10373,8 @@ fn continue_cast_with_variant(
     payment_mode: CastPaymentMode,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let candidate = prepare_casting_variant(state, player, object_id, variant)?;
+    let candidate =
+        prepare_casting_variant(state, player, object_id, variant, CastingMode::Actual)?;
     continue_with_prepared_casting_variant(state, player, candidate, payment_mode, events)
 }
 
@@ -9505,7 +10471,13 @@ pub fn handle_casting_variant_choice_with_payment_mode(
             "Chosen cast variant is no longer legal".to_string(),
         ));
     }
-    let candidate = prepare_casting_variant(state, player, object_id, option.variant)?;
+    let candidate = prepare_casting_variant(
+        state,
+        player,
+        object_id,
+        option.variant,
+        CastingMode::Actual,
+    )?;
     let fresh = CastingVariantChoiceOption {
         variant: candidate.prepared.casting_variant,
         mana_cost: candidate.prepared.mana_cost.clone(),
@@ -9763,6 +10735,24 @@ pub fn can_cast_spell_as_web_slinging_now(
     let Some(card_id) = state.objects.get(&hand_object).map(|obj| obj.card_id) else {
         return false;
     };
+    let variant = CastingVariant::WebSlinging {
+        returned_creature: creature_to_return,
+    };
+    let Some(cost) = effective_spell_cost_for_variant(state, player, hand_object, variant) else {
+        return false;
+    };
+    let mana_source_selections =
+        super::mana_sources::activatable_mana_source_selections(state, player);
+    let Some(payment_mode) = prepared_spell_payment_verdict_with_probe(
+        state,
+        player,
+        hand_object,
+        &cost,
+        &mana_source_selections,
+        None,
+    ) else {
+        return false;
+    };
     let mut simulated = state.clone();
     let mut events = Vec::new();
     handle_cast_spell_as_web_slinging_with_payment_mode(
@@ -9771,7 +10761,7 @@ pub fn can_cast_spell_as_web_slinging_now(
         hand_object,
         card_id,
         creature_to_return,
-        CastPaymentMode::Auto,
+        payment_mode,
         &mut events,
     )
     .is_ok()
@@ -10210,6 +11200,81 @@ fn normal_cast_choice_cost_and_affordability(
     (normal_cost, normal_affordable)
 }
 
+/// The fully authenticated, payable two-way Evoke offer shown to a player.
+///
+/// This is the single read-only authority for the ordinary
+/// `AlternativeCastChoice(Evoke)` payload. It deliberately does not model the
+/// N-way casting-variant menu: callers that have such a menu must authenticate
+/// its complete option payload with `current_casting_variant_choice_options`.
+///
+/// CR 702.74a + CR 118.9: Evoke is an alternative cost. Both its mana and
+/// non-mana components must be payable, and the displayed costs include all
+/// applicable cost modifications (CR 601.2f-h).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvokeCastChoiceOffer {
+    pub normal_cost: ManaCost,
+    pub alternative_cost: Option<ManaCost>,
+    pub alternative_additional_cost: Option<AbilityCost>,
+}
+
+struct EvokeCastChoiceEligibility {
+    offer: EvokeCastChoiceOffer,
+    normal_affordable: bool,
+    evoke_affordable: bool,
+}
+
+pub fn current_evoke_cast_choice_offer(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+) -> Option<EvokeCastChoiceOffer> {
+    let eligibility = evoke_cast_choice_eligibility(state, player, object_id, card_id)?;
+    (eligibility.normal_affordable && eligibility.evoke_affordable).then_some(eligibility.offer)
+}
+
+fn evoke_cast_choice_eligibility(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+) -> Option<EvokeCastChoiceEligibility> {
+    let object = state.objects.get(&object_id)?;
+    if object.card_id != card_id || object.owner != player || object.zone != Zone::Hand {
+        return None;
+    }
+
+    let evoke_cost = effective_spell_keywords(state, player, object_id)
+        .into_iter()
+        .find_map(|keyword| match keyword {
+            crate::types::keywords::Keyword::Evoke(cost) => Some(cost),
+            _ => None,
+        })?;
+    let (evoke_mana_part, evoke_non_mana_part) = split_evoke_cost_components(&evoke_cost);
+    let (normal_cost, normal_affordable) =
+        normal_cast_choice_cost_and_affordability(state, player, object_id, object);
+    let alternative_cost = evoke_mana_part.as_ref().map(|mana_cost| {
+        apply_cost_modifiers_to_base(state, player, object_id, mana_cost.clone())
+            .unwrap_or_else(|| mana_cost.clone())
+    });
+    let evoke_mana_affordable = alternative_cost
+        .as_ref()
+        .is_none_or(|mana_cost| can_pay_cost_after_auto_tap(state, player, object_id, mana_cost));
+    let evoke_non_mana_affordable = evoke_non_mana_part
+        .as_ref()
+        .is_none_or(|cost| cost.is_payable(state, player, object_id));
+
+    Some(EvokeCastChoiceEligibility {
+        offer: EvokeCastChoiceOffer {
+            normal_cost,
+            alternative_cost,
+            alternative_additional_cost: evoke_non_mana_part,
+        },
+        normal_affordable,
+        evoke_affordable: evoke_mana_affordable && evoke_non_mana_affordable,
+    })
+}
+
 pub fn handle_cast_spell_with_payment_mode(
     state: &mut GameState,
     player: PlayerId,
@@ -10287,12 +11352,10 @@ pub fn handle_cast_spell_with_payment_mode(
         }
     }
 
-    // CR 707.10: `resolving_stack_entry` may intentionally persist after a
-    // resolution for deferred self-copy choices, but a fresh normal cast starts
-    // a new stack-object announcement outside that old resolution context.
-    state.resolving_stack_entry = None;
-    // CR 400.7j: clear the resolution-scoped self-move re-latch with the entry.
-    state.resolution_source_relatch = None;
+    // CR 608.2g: An effect may instruct a player to cast a spell while its
+    // parent stack object remains parked in the active resolution carrier.
+    // The parent, not casting, owns that carrier and settles it only after the
+    // instructed cast window and every continuation have completed.
 
     // CR 715.3 / CR 720.3: Adventure-family cards from hand (or a commander cast
     // from the command zone) require choosing the normal creature face or
@@ -10451,68 +11514,30 @@ pub fn handle_cast_spell_with_payment_mode(
     // sub-cost (if any) flows through the normal mana-payment phase
     // (CR 601.2g) and the non-mana residual is paid via `pay_additional_cost`
     // (CR 601.2h). Affordability requires BOTH halves to be payable.
-    if let Some(obj) = state.objects.get(&object_id) {
-        if obj.zone == Zone::Hand {
-            // CR 702.74a + CR 604.1: effective keywords so granted evoke
-            // routes/affords.
-            if let Some(evoke_cost) = effective_spell_keywords(state, player, object_id)
-                .into_iter()
-                .find_map(|k| match k {
-                    crate::types::keywords::Keyword::Evoke(cost) => Some(cost),
-                    _ => None,
-                })
-            {
-                let (evoke_mana_part, evoke_non_mana_part) =
-                    split_evoke_cost_components(&evoke_cost);
-                // CR 601.2f + CR 118.9d: affordability and the displayed costs
-                // must reflect active cost modifiers — applied to BOTH the printed
-                // cost and the evoke mana sub-cost (CR 118.9d).
-                let (normal_cost, normal_affordable) =
-                    normal_cast_choice_cost_and_affordability(state, player, object_id, obj);
-                let evoke_mana_eff = evoke_mana_part.as_ref().map(|m| {
-                    apply_cost_modifiers_to_base(state, player, object_id, m.clone())
-                        .unwrap_or_else(|| m.clone())
-                });
-                let evoke_mana_affordable = match &evoke_mana_eff {
-                    Some(m) => can_pay_cost_after_auto_tap(state, player, object_id, m),
-                    // CR 118.3: a zero mana cost is always payable.
-                    None => true,
-                };
-                // CR 118.3 + CR 601.2h: non-mana sub-costs must be independently
-                // payable for the evoke option to surface. `AbilityCost::is_payable`
-                // walks the cost tree (Composite/Exile/Sacrifice/Discard/PayLife/...)
-                // and validates each leaf against current game state.
-                let evoke_non_mana_affordable = match &evoke_non_mana_part {
-                    Some(ab_cost) => ab_cost.is_payable(state, player, object_id),
-                    None => true,
-                };
-                let evoke_affordable = evoke_mana_affordable && evoke_non_mana_affordable;
-                if normal_affordable && evoke_affordable {
-                    return Ok(WaitingFor::AlternativeCastChoice {
-                        player,
-                        object_id,
-                        card_id,
-                        payment_mode,
-                        keyword: crate::types::game_state::AlternativeCastKeyword::Evoke,
-                        normal_cost,
-                        alternative_cost: evoke_mana_eff,
-                        alternative_additional_cost: evoke_non_mana_part,
-                    });
-                }
-                if !normal_affordable && evoke_affordable {
-                    // Only evoke is payable — proceed via the evoke path.
-                    return handle_evoke_cost_choice_with_payment_mode(
-                        state,
-                        player,
-                        object_id,
-                        card_id,
-                        crate::types::actions::AlternativeCastDecision::Alternative,
-                        payment_mode,
-                        events,
-                    );
-                }
-                // Otherwise (normal-only or neither): fall through to normal cast.
-            }
+    if let Some(eligibility) = evoke_cast_choice_eligibility(state, player, object_id, card_id) {
+        if eligibility.normal_affordable && eligibility.evoke_affordable {
+            let offer = eligibility.offer;
+            return Ok(WaitingFor::AlternativeCastChoice {
+                player,
+                object_id,
+                card_id,
+                payment_mode,
+                keyword: crate::types::game_state::AlternativeCastKeyword::Evoke,
+                normal_cost: offer.normal_cost,
+                alternative_cost: offer.alternative_cost,
+                alternative_additional_cost: offer.alternative_additional_cost,
+            });
+        }
+        if !eligibility.normal_affordable && eligibility.evoke_affordable {
+            return handle_evoke_cost_choice_with_payment_mode(
+                state,
+                player,
+                object_id,
+                card_id,
+                crate::types::actions::AlternativeCastDecision::Alternative,
+                payment_mode,
+                events,
+            );
         }
     }
 
@@ -11647,6 +12672,13 @@ fn continue_with_prepared(
             if let Some(targets) = auto_select_targets(&target_slots, &[])? {
                 let mut resolved = resolved;
                 assign_targets_in_chain(state, &mut resolved, &targets)?;
+                emit_targeting_events(
+                    state,
+                    &flatten_targets_in_chain(&resolved),
+                    prepared.object_id,
+                    player,
+                    events,
+                );
                 return check_additional_cost_or_pay(
                     state,
                     player,
@@ -11726,6 +12758,13 @@ fn continue_with_prepared(
         if let Some(targets) = auto_select_targets(&target_slots, &[])? {
             let mut resolved = resolved;
             assign_targets_in_chain(state, &mut resolved, &targets)?;
+            emit_targeting_events(
+                state,
+                &flatten_targets_in_chain(&resolved),
+                prepared.object_id,
+                player,
+                events,
+            );
             return check_additional_cost_or_pay(
                 state,
                 player,
@@ -11969,7 +13008,9 @@ fn continue_with_prepared(
         // is decided independently — `begin_deferred_target_selection` re-prompts
         // for every remaining group after this first one is recorded.
         if let Some(choice) = casting_costs::next_announcing_opponent_choice(&resolved) {
-            let candidates = crate::game::players::opponents(state, player);
+            // CR 601.2c + CR 115.10a: the announcer is CHOSEN, not targeted, so the
+            // candidate list is the CHOOSABLE opponents.
+            let candidates = crate::game::players::choosable_opponents(state, player);
             if candidates.len() >= 2 {
                 let mut pending = PendingCast::new(
                     prepared.object_id,
@@ -12124,6 +13165,13 @@ fn continue_with_prepared(
         {
             let mut resolved = resolved;
             assign_targets_in_chain(state, &mut resolved, &targets)?;
+            emit_targeting_events(
+                state,
+                &flatten_targets_in_chain(&resolved),
+                prepared.object_id,
+                player,
+                events,
+            );
             return check_additional_cost_or_pay(
                 state,
                 player,
@@ -12849,40 +13897,65 @@ pub fn can_cast_object_now_with_probe(
     object_id: ObjectId,
     probe: Option<&PriorityCastProbe>,
 ) -> bool {
+    castable_spell_verdict_with_probe(state, player, object_id, probe).is_some()
+}
+
+fn castable_alternative_spell_face_verdict(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<CastableSpellVerdict> {
+    let obj = state.objects.get(&object_id)?;
+
+    // CR 715.3a / CR 720.3a: An Adventure instant/sorcery face may be
+    // castable even when `prepare_spell_cast` fails on the creature face —
+    // most commonly the sorcery-speed timing gate outside main phases.
+    if alternative_spell_layout(obj).is_some() && cast_face_choice_offered_from_zone(state, obj) {
+        let mut transformed_state = state.clone();
+        swap_to_alternative_spell_face(transformed_state.objects.get_mut(&object_id)?);
+        if let Ok(prepared) = prepare_spell_cast(&transformed_state, player, object_id) {
+            if can_cast_prepared_now_with_probe(&transformed_state, player, &prepared, None) {
+                return Some(CastableSpellVerdict {
+                    payment_state: Some(transformed_state),
+                    prepared_cost: Some(prepared.mana_cost),
+                });
+            }
+        }
+    }
+
+    // CR 709.3 + CR 712.11b: Spell//spell split cards and spell//spell
+    // MDFCs may be castable via the other face even when preparation fails
+    // on the current face — e.g. a graveyard permission cast of Life //
+    // Death when only Death is affordable (#3987).
+    if cast_spell_face_choice_available(obj) && cast_spell_face_choice_offered_from_zone(state, obj)
+    {
+        let mut transformed_state = state.clone();
+        simulate_chosen_split_spell_back_face(transformed_state.objects.get_mut(&object_id)?);
+        let mut verdict =
+            castable_spell_verdict_with_probe(&transformed_state, player, object_id, None)?;
+        if verdict.payment_state.is_none() {
+            verdict.payment_state = Some(transformed_state);
+        }
+        return Some(verdict);
+    }
+
+    None
+}
+
+fn castable_spell_verdict_with_probe(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    probe: Option<&PriorityCastProbe>,
+) -> Option<CastableSpellVerdict> {
     // CR 702.61a: While a spell with split second is on the stack, players can't
     // cast spells (mana abilities are exempt per CR 702.61b, but spells are not).
     if super::keywords::stack_has_split_second(state) {
-        return false;
+        return None;
     }
     let Ok(prepared) = prepare_spell_cast(state, player, object_id) else {
-        // CR 715.3a / CR 720.3a: An Adventure instant/sorcery face may be
-        // castable even when `prepare_spell_cast` fails on the creature face —
-        // most commonly the sorcery-speed timing gate outside main phases.
-        if let Some(obj) = state.objects.get(&object_id) {
-            if alternative_spell_layout(obj).is_some()
-                && cast_face_choice_offered_from_zone(state, obj)
-            {
-                let mut sim = state.clone();
-                if let Some(sim_obj) = sim.objects.get_mut(&object_id) {
-                    swap_to_alternative_spell_face(sim_obj);
-                }
-                if let Ok(prepared) = prepare_spell_cast(&sim, player, object_id) {
-                    return can_cast_prepared_now_with_probe(&sim, player, &prepared, None);
-                }
-            }
-            // CR 709.3 + CR 712.11b: Spell//spell split cards and spell//spell
-            // MDFCs may be castable via the other face even when prepare fails
-            // on the current face — e.g. a graveyard permission cast of Life //
-            // Death when only Death is affordable (#3987).
-            if cast_spell_face_choice_available(obj)
-                && cast_spell_face_choice_offered_from_zone(state, obj)
-            {
-                let mut sim = state.clone();
-                if let Some(sim_obj) = sim.objects.get_mut(&object_id) {
-                    simulate_chosen_split_spell_back_face(sim_obj);
-                }
-                return can_cast_object_now_with_probe(&sim, player, object_id, None);
-            }
+        if let Some(verdict) = castable_alternative_spell_face_verdict(state, player, object_id) {
+            return Some(verdict);
         }
         // CR 708.4 + CR 702.37c / CR 702.168b: a morph/megamorph/disguise card whose
         // FACE-UP cast is prohibited (Meddling Mage / Nevermore naming it) fails
@@ -12902,15 +13975,25 @@ pub fn can_cast_object_now_with_probe(
             )
             && face_down_cast_is_permitted(state, player, object_id)
         {
-            return true;
+            return Some(CastableSpellVerdict {
+                payment_state: None,
+                prepared_cost: None,
+            });
         }
         let choices = casting_variant_choice_set(state, player, object_id, probe);
-        return !choices.options.is_empty();
+        return (!choices.options.is_empty()).then_some(CastableSpellVerdict {
+            payment_state: None,
+            prepared_cost: None,
+        });
     };
-    can_cast_prepared_now_with_probe(state, player, &prepared, probe)
+    let is_castable = can_cast_prepared_now_with_probe(state, player, &prepared, probe)
         || !casting_variant_choice_set(state, player, object_id, probe)
             .options
-            .is_empty()
+            .is_empty();
+    is_castable.then_some(CastableSpellVerdict {
+        payment_state: None,
+        prepared_cost: Some(prepared.mana_cost),
+    })
 }
 
 /// CR 702.180a (issue #1550): Harmonize may tap up to one untapped creature
@@ -12943,6 +14026,16 @@ fn can_feasibly_pay_harmonize_mana_cost_with_probe(
     probe: Option<&PriorityCastProbe>,
 ) -> bool {
     if can_feasibly_pay_mana_cost_with_probe(state, player, Some(source_id), cost, probe) {
+        return true;
+    }
+    if can_feasibly_pay_mana_cost_with_assist(
+        state,
+        player,
+        source_id,
+        variant == CastingVariant::Fuse,
+        cost,
+        probe,
+    ) {
         return true;
     }
     let ManaCost::Cost { generic, .. } = cost else {
@@ -12985,6 +14078,56 @@ fn can_feasibly_pay_harmonize_mana_cost_with_probe(
                 None,
             )
         })
+}
+
+/// CR 702.132a + CR 601.2h: Assist may split only the generic portion of a
+/// spell's total cost between its caster and one chosen other player. Candidate
+/// feasibility must therefore preserve a cast that neither player can pay alone
+/// when some concrete helper contribution leaves both shares payable.
+fn can_feasibly_pay_mana_cost_with_assist(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    fused: bool,
+    cost: &ManaCost,
+    probe: Option<&PriorityCastProbe>,
+) -> bool {
+    let Some((generic, candidates)) =
+        casting_costs::assist_offer_params(state, player, source_id, cost, fused)
+    else {
+        return false;
+    };
+    let ManaCost::Cost { shards, .. } = cost else {
+        return false;
+    };
+
+    candidates.iter().any(|helper| {
+        // CR 702.132a: A helper's generic contribution is monotone: if they
+        // can pay {N}, they can pay every smaller generic amount. Probe their
+        // largest contribution once, then test the caster's remaining cost.
+        // This reuses the bounded monotone search used for X affordability
+        // rather than simulating every split during legal-action generation.
+        let contribution = casting_costs::largest_x_satisfying_at_most(generic, |amount| {
+            can_feasibly_pay_mana_cost_with_probe(
+                state,
+                *helper,
+                None,
+                &ManaCost::generic(amount),
+                None,
+            )
+        });
+        contribution > 0
+            && can_feasibly_pay_mana_cost_with_probe(
+                state,
+                player,
+                Some(source_id),
+                &ManaCost::Cost {
+                    shards: shards.clone(),
+                    generic: generic - contribution,
+                },
+                probe,
+            )
+    })
 }
 
 fn can_cast_prepared_now_with_probe(
@@ -13161,11 +14304,18 @@ fn can_cast_prepared_now_with_probe(
         }
     }
 
-    // CR 118.9 + CR 601.2f + CR 119.8: Graveyard/exile cast-permission statics
-    // that carry a pay-life extra-cost rider (Valgavoth alternative; Festival of
-    // Embers additional) must afford the life payment for the cast to be legal.
-    // The remove-counters extra-cost (Dawnhand) carries no life payment, so
-    // `find_pay_life_cost` returns `None` and this gate is a no-op for it.
+    // CR 118.3 + CR 118.9 + CR 601.2f + CR 601.2h + CR 119.8: Graveyard/exile
+    // cast-permission statics that carry a non-mana extra-cost rider (Valgavoth
+    // alternative pay-life; Festival of Embers additional pay-life; Dragon Man,
+    // Reformed Robot additional discard) must be able to pay that cost in full for
+    // the cast to be legal. Use the general affordability authority
+    // (`AbilityCost::is_payable`, mirroring the Flashback gate above) rather than a
+    // pay-life special case: `is_payable`'s PayLife arm calls the same
+    // `can_pay_life_cast_or_activation_cost`, so pay-life legality is unchanged,
+    // while discard/sacrifice/remove-counter riders are now correctly gated so
+    // legal actions never offer an unpayable cast (e.g. Dragon Man from an empty
+    // hand). Mode-agnostic: an unpayable Alternative or Additional cost both make
+    // the cast illegal.
     {
         // CR 601.2a: Bind the exile extra-cost rider to the source this cast
         // commits to — the recorded `ExilePermission` source if elected, else the
@@ -13189,11 +14339,8 @@ fn can_cast_prepared_now_with_probe(
             _ => None,
         };
         if let Some(extra) = static_extra {
-            if let Some(amount) = find_pay_life_cost(&extra.cost, state, player, prepared.object_id)
-            {
-                if !super::life_costs::can_pay_life_cast_or_activation_cost(state, player, amount) {
-                    return false;
-                }
+            if !extra.cost.is_payable(state, player, prepared.object_id) {
+                return false;
             }
         }
     }
@@ -13277,16 +14424,32 @@ fn can_cast_prepared_now_with_probe(
     // CR 117.1d + CR 601.2g: Feasibility, not just auto-tap, gates castability —
     // a player may activate sacrifice-/discard-/life-cost mana abilities during
     // payment (issue #562: KCI must expose Ichor Wellspring as castable).
-    let creature_face_ok = (prepared.modal.is_some()
-        || spell_has_legal_targets_with_probe(state, obj.id, player, probe))
-        && can_feasibly_pay_harmonize_mana_cost_with_probe(
+    let targets_ok = prepared.modal.is_some()
+        || spell_has_legal_targets_with_probe(state, obj.id, player, probe);
+    let mana_payable = can_feasibly_pay_harmonize_mana_cost_with_probe(
+        state,
+        player,
+        prepared.object_id,
+        prepared.casting_variant,
+        &prepared.mana_cost,
+        probe,
+    ) || casting_costs::defiler_reduced_cost(
+        state,
+        player,
+        prepared.object_id,
+        &prepared.mana_cost,
+    )
+    .is_some_and(|reduced| {
+        can_feasibly_pay_harmonize_mana_cost_with_probe(
             state,
             player,
             prepared.object_id,
             prepared.casting_variant,
-            &prepared.mana_cost,
+            &reduced,
             probe,
-        );
+        )
+    });
+    let creature_face_ok = targets_ok && mana_payable;
 
     if creature_face_ok {
         return true;
@@ -13338,7 +14501,7 @@ fn can_cast_prepared_now_with_probe(
 /// Used by legal action generation so the frontend and engine agree on whether
 /// a spell is castable from the current board state.
 fn can_pay_mana_cost_after_auto_tap_with_context(
-    simulated: GameState,
+    mut simulated: GameState,
     player: PlayerId,
     source_id: Option<ObjectId>,
     cost: &crate::types::mana::ManaCost,
@@ -13346,7 +14509,7 @@ fn can_pay_mana_cost_after_auto_tap_with_context(
     excluded_sources: &HashSet<ObjectId>,
 ) -> bool {
     can_pay_mana_cost_after_auto_tap_with_context_and_cache(
-        simulated,
+        &mut simulated,
         player,
         source_id,
         cost,
@@ -13363,7 +14526,7 @@ struct AutoTapProbeOptions<'a> {
 }
 
 fn can_pay_mana_cost_after_auto_tap_with_context_and_cache(
-    mut simulated: GameState,
+    simulated: &mut GameState,
     player: PlayerId,
     source_id: Option<ObjectId>,
     cost: &crate::types::mana::ManaCost,
@@ -13373,7 +14536,7 @@ fn can_pay_mana_cost_after_auto_tap_with_context_and_cache(
 ) -> bool {
     let mut tap_events: Vec<crate::types::events::GameEvent> = Vec::new();
     super::casting_costs::auto_tap_mana_sources_with_context_excluding_cached(
-        &mut simulated,
+        simulated,
         player,
         cost,
         &mut tap_events,
@@ -13387,7 +14550,7 @@ fn can_pay_mana_cost_after_auto_tap_with_context_and_cache(
     // preview at a replacement choice. That is an in-progress, payable mana
     // payment, not evidence that the source is unavailable. The live flow
     // serializes the cursor and resumes it after the choice.
-    if mana_ability_cost_payment_is_paused(&simulated) {
+    if mana_ability_cost_payment_is_paused(simulated) {
         return true;
     }
 
@@ -13399,14 +14562,14 @@ fn can_pay_mana_cost_after_auto_tap_with_context_and_cache(
     // `resolve_tap_mana_triggers_inline` as the single authority so they cannot
     // diverge (a divergence was the original bug — the preview said a spell was
     // castable while the real cast failed "Cannot pay mana cost").
-    super::triggers::resolve_tap_mana_triggers_inline(&mut simulated, &mut tap_events, 0);
+    super::triggers::resolve_tap_mana_triggers_inline(simulated, &mut tap_events, 0);
 
-    let any_color = player_can_spend_as_any_color_for_payment(&simulated, player, source_id, ctx);
+    let any_color = player_can_spend_as_any_color_for_payment(simulated, player, source_id, ctx);
     // CR 107.4f + CR 118.1 + CR 118.3 + CR 119.8: Bundle the payer's
     // payment-time permissions (`any_color`, `max_life`, `life_colors`) so
     // K'rrik-style life-for-{B} grants are visible to the affordability check.
     let permissions =
-        super::static_abilities::build_cost_permission_context(&simulated, player, any_color);
+        super::static_abilities::build_cost_permission_context(simulated, player, any_color);
     simulated
         .players
         .iter()
@@ -13417,7 +14580,7 @@ fn can_pay_mana_cost_after_auto_tap_with_context_and_cache(
                     matches!(ctx, PaymentContext::Spell(_))
                         && source_id.is_some_and(|source_id| {
                             can_pay_with_spell_tap_payments(
-                                &simulated,
+                                simulated,
                                 player,
                                 source_id,
                                 cost,
@@ -13481,6 +14644,146 @@ pub(super) fn spell_tap_payment_mode_for(
     } else {
         None
     }
+}
+
+/// CR 601.2c + CR 601.2f: Target selection may precede locking the final
+/// mana obligation. Return true only when none of the production cost axes can
+/// still change the amount or the sources available before payment.
+pub(crate) fn pending_mana_obligation_is_stable_before_targets(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+) -> bool {
+    if pending.activation_ability_index.is_some() {
+        return true;
+    }
+
+    if casting_costs::cost_has_x(&pending.cost)
+        || pending.additional_cost_flow.is_some()
+        || pending.deferred_required_additional_cost.is_some()
+        || !pending.additional_cost_queue.is_empty()
+        || pending.additional_cost_payment_mode.is_some()
+        || pending.deferred_target_selection
+    {
+        return false;
+    }
+
+    let fused = pending.casting_variant == CastingVariant::Fuse;
+    let effective_keywords = effective_spell_keywords_for(state, player, pending.object_id, fused);
+    if effective_keywords
+        .iter()
+        .any(|keyword| matches!(keyword, Keyword::Harmonize(_)))
+        || casting_costs::assist_offer_params(
+            state,
+            player,
+            pending.object_id,
+            &pending.cost,
+            fused,
+        )
+        .is_some()
+        || spell_tap_payment_mode_for(state, player, pending.object_id, fused).is_some()
+    {
+        return false;
+    }
+
+    let Some(spell) = state.objects.get(&pending.object_id) else {
+        return false;
+    };
+    if spell.strive_cost.is_some()
+        || spell.static_definitions.iter_all().any(|definition| {
+            let StaticMode::ModifyCost {
+                spell_filter: Some(filter),
+                ..
+            } = &definition.mode
+            else {
+                return false;
+            };
+            analyze_cost_filter_before_targets_for(
+                state,
+                player,
+                pending.object_id,
+                filter,
+                pending.object_id,
+                fused,
+            )
+            .is_target_dependent()
+                && self_spell_cost_modifier_applies_before_targets(
+                    state,
+                    player,
+                    pending.object_id,
+                    definition,
+                    Some(pending.casting_variant),
+                )
+        })
+    {
+        return false;
+    }
+
+    // `static_mode_presence` is a post-flush superset of the two static
+    // families that can affect a spell's cost. Its absence proves the exact
+    // scan below cannot find a target-dependent axis, avoiding an O(board)
+    // scan at every ordinary target-selection prompt.
+    if !state.layers_dirty.is_dirty()
+        && !static_kind_present(state, StaticModeKind::ModifyCost)
+        && !static_kind_present(state, StaticModeKind::ImposeAdditionalCost)
+    {
+        return true;
+    }
+
+    !super::functioning_abilities::game_functioning_statics(state).any(|(source, definition)| {
+        let payment_axis_unstable = match &definition.mode {
+            StaticMode::ModifyCost {
+                spell_filter: Some(filter),
+                ..
+            } => analyze_cost_filter_before_targets_for(
+                state,
+                player,
+                pending.object_id,
+                filter,
+                source.id,
+                fused,
+            )
+            .is_target_dependent(),
+            StaticMode::ImposeAdditionalCost {
+                spell_filter: Some(filter),
+                ..
+            } => analyze_cost_filter_before_targets_for(
+                state,
+                player,
+                pending.object_id,
+                filter,
+                source.id,
+                false,
+            )
+            .is_relevant(),
+            StaticMode::ImposeAdditionalCost {
+                spell_filter: None, ..
+            } => true,
+            _ => false,
+        };
+        payment_axis_unstable
+            && (battlefield_cost_modifier_applies_before_targets(
+                state,
+                player,
+                pending.object_id,
+                source,
+                definition,
+                fused,
+            ) || battlefield_cost_floor_applies_before_targets(
+                state,
+                player,
+                pending.object_id,
+                source,
+                definition,
+                fused,
+            ) || imposed_additional_cost_applies_before_targets(
+                state,
+                player,
+                pending.object_id,
+                source,
+                definition,
+            ))
+    })
 }
 
 fn can_pay_with_spell_tap_payments(
@@ -13728,6 +15031,7 @@ pub fn can_pay_cost_after_auto_tap_with_probe(
     cost: &crate::types::mana::ManaCost,
     probe: Option<&PriorityCastProbe>,
 ) -> bool {
+    crate::game::perf_counters::record_auto_payment_borrowed_wrapper();
     let mut simulated = state.clone();
     let probe_matches =
         probe.is_some_and(|probe| probe.player() == player && probe.is_for_state(state));
@@ -13740,7 +15044,7 @@ pub fn can_pay_cost_after_auto_tap_with_probe(
 
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
     can_pay_mana_cost_after_auto_tap_with_context_and_cache(
-        simulated,
+        &mut simulated,
         player,
         Some(source_id),
         cost,
@@ -13748,6 +15052,37 @@ pub fn can_pay_cost_after_auto_tap_with_probe(
         &HashSet::new(),
         AutoTapProbeOptions {
             source_cache,
+            explicit_tap_payment_mode: None,
+        },
+    )
+}
+
+/// CR 601.2g-h: Reuse an already-disposable post-reducer state to test the
+/// exact pending spell with the production Auto payer. This entry owns no
+/// `GameState` clone and never reuses the pre-action source cache.
+pub(crate) fn can_pay_pending_cast_after_auto_tap_in_scratch(
+    state: &mut GameState,
+    pending: &PendingCast,
+) -> bool {
+    let _phase = crate::game::perf_counters::LegalityClonePhaseGuard::enter(
+        crate::game::perf_counters::LegalityClonePhase::PostApplyCore,
+    );
+    crate::game::perf_counters::record_post_apply_auto_payment_core_call();
+    if state.layers_dirty.is_dirty() {
+        super::layers::flush_layers(state);
+    }
+    let player = pending.ability.controller;
+    let spell_meta = build_spell_meta(state, player, pending.object_id);
+    let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
+    can_pay_mana_cost_after_auto_tap_with_context_and_cache(
+        state,
+        player,
+        Some(pending.object_id),
+        &pending.cost,
+        spell_ctx.as_ref(),
+        &HashSet::new(),
+        AutoTapProbeOptions {
+            source_cache: None,
             explicit_tap_payment_mode: None,
         },
     )
@@ -13856,8 +15191,9 @@ fn feasibly_payable_with_tap_payment_mode_in_context(
     tap_payment_mode: ConvokeMode,
     ctx: Option<&PaymentContext>,
 ) -> bool {
+    let mut auto_tap_scratch = simulated.clone();
     if can_pay_mana_cost_after_auto_tap_with_context_and_cache(
-        simulated.clone(),
+        &mut auto_tap_scratch,
         player,
         Some(source_id),
         cost,
@@ -13926,6 +15262,169 @@ pub(crate) fn has_manual_mana_ability_for_spell_payment(
     )
 }
 
+/// Returns whether a cast that cannot be fully auto-paid has an engine-proven
+/// route into the normal mana-payment interaction.
+///
+/// CR 117.1d + CR 601.2g: In addition to the legacy manual non-tap ability
+/// path, a producer can fund a distinct costed-tap mana ability before the
+/// spell's remaining payment. The latter is admitted only when the bounded
+/// reducer witness proves the final cost is payable.
+pub(crate) fn has_manual_mana_payment_path_for_spell(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &ManaCost,
+) -> bool {
+    has_manual_mana_ability_for_spell_payment(state, player, source_id)
+        || has_exact_filter_land_payment_witness(state, player, source_id, cost)
+}
+
+/// CR 601.2g-h: Choose the payment mode for an already-prepared spell cost.
+/// Pool-payable costs may finish automatically; a cost whose only currently
+/// activatable mana sources are sacrificial must preserve the explicit source
+/// choice instead of consuming an irreversible resource during offer probing.
+pub(crate) fn payment_mode_for_prepared_spell_cost(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &ManaCost,
+    mana_source_selections: &[ManaSourceSelection],
+) -> CastPaymentMode {
+    if super::casting_costs::spell_cost_is_payable_from_pool(state, player, source_id, cost) {
+        return CastPaymentMode::Auto;
+    }
+    let Some(spell_meta) = build_spell_meta(state, player, source_id) else {
+        return CastPaymentMode::Auto;
+    };
+    let spell_ctx = PaymentContext::Spell(&spell_meta);
+    let any_color =
+        player_can_spend_as_any_color_for_payment(state, player, Some(source_id), Some(&spell_ctx));
+    let residual = state
+        .players
+        .iter()
+        .find(|player_data| player_data.id == player)
+        .map(|player_data| {
+            mana_payment::reduce_cost_by_pool(
+                &player_data.mana_pool,
+                cost,
+                Some(&spell_ctx),
+                any_color,
+                None,
+            )
+        })
+        .unwrap_or_else(|| cost.clone());
+    let has_relevant_sacrificial_source = mana_source_selections.iter().any(|selection| {
+        selection
+            .restrictions
+            .iter()
+            .all(|restriction| restriction.allows(&spell_ctx))
+            && mana_source_selection_can_contribute_to_cost(selection, &residual, any_color)
+            && selection.penalty == super::mana_sources::ManaSourcePenalty::Sacrifices
+    });
+    if has_relevant_sacrificial_source
+        && !super::casting_costs::spell_cost_is_payable_after_non_sacrificial_auto_tap(
+            state, player, source_id, cost,
+        )
+    {
+        CastPaymentMode::AutoExceptSacrificialMana
+    } else {
+        CastPaymentMode::Auto
+    }
+}
+
+/// CR 601.2g-h + CR 106.6: Classify a mana-source row by whether its output
+/// can pay any unpaid part of a prepared spell's exact residual cost.
+fn mana_source_selection_can_contribute_to_cost(
+    selection: &ManaSourceSelection,
+    cost: &ManaCost,
+    any_color: bool,
+) -> bool {
+    let ManaCost::Cost { shards, generic } = cost else {
+        return false;
+    };
+    if *generic > 0 {
+        return true;
+    }
+    let produces = |required| match selection.output {
+        ManaSourceOutput::Concrete(output) => {
+            output == required
+                || selection
+                    .atomic_combination
+                    .as_ref()
+                    .is_some_and(|outputs| outputs.contains(&required))
+        }
+        ManaSourceOutput::DeferredColorChoice => required != ManaType::Colorless,
+    };
+    let pays = |required| (any_color && required != ManaType::Colorless) || produces(required);
+    shards.iter().any(|shard| {
+        use mana_payment::ShardRequirement;
+
+        match mana_payment::shard_to_mana_type(*shard) {
+            ShardRequirement::Single(mana_type) | ShardRequirement::Phyrexian(mana_type) => {
+                pays(mana_type)
+            }
+            ShardRequirement::Hybrid(first, second)
+            | ShardRequirement::HybridPhyrexian(first, second) => pays(first) || pays(second),
+            ShardRequirement::TwoGenericHybrid(_)
+            | ShardRequirement::TwoGenericHybridPhyrexian(_) => true,
+            ShardRequirement::ColorlessHybrid(mana_type) => {
+                pays(ManaType::Colorless) || pays(mana_type)
+            }
+            ShardRequirement::TwoOrMoreColorSource => selection
+                .atomic_combination
+                .as_ref()
+                .is_some_and(|outputs| outputs.len() >= 2),
+            // Snow and X need information outside the selected source row.
+            // Treat them as non-contributing here, preserving manual selection
+            // whenever a sacrificial source is otherwise the only payer.
+            ShardRequirement::Snow | ShardRequirement::X => false,
+        }
+    })
+}
+
+/// CR 601.2g-h: Admit an ordinary cast and derive its payment mode from the
+/// exact face whose prepared characteristics made the cast legal. This is the
+/// shared authority for normal priority preflight and tactical candidates, so
+/// neither consumer can accept an alternative-face cast and then ask the
+/// uncastable front face for its cost.
+pub(crate) fn castable_spell_payment_mode_with_probe(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    mana_source_selections: &[ManaSourceSelection],
+    probe: Option<&PriorityCastProbe>,
+) -> Option<CastPaymentMode> {
+    let verdict = castable_spell_verdict_with_probe(state, player, source_id, probe)?;
+    let Some(cost) = verdict.prepared_cost.as_ref() else {
+        return Some(CastPaymentMode::Auto);
+    };
+    let payment_state = verdict.payment_state.as_ref().unwrap_or(state);
+    Some(payment_mode_for_prepared_spell_cost(
+        payment_state,
+        player,
+        source_id,
+        cost,
+        mana_source_selections,
+    ))
+}
+
+/// CR 601.2g-h: Shared offer verdict for a spell whose exact alternative or
+/// normal mana cost has already been prepared. A legal offer must be feasibly
+/// payable, and its payment mode must preserve any required sacrificial-source
+/// choice through the real reducer path.
+pub(crate) fn prepared_spell_payment_verdict_with_probe(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &ManaCost,
+    mana_source_selections: &[ManaSourceSelection],
+    probe: Option<&PriorityCastProbe>,
+) -> Option<CastPaymentMode> {
+    can_feasibly_pay_mana_cost_with_probe(state, player, Some(source_id), cost, probe).then(|| {
+        payment_mode_for_prepared_spell_cost(state, player, source_id, cost, mana_source_selections)
+    })
+}
+
 pub(super) fn can_feasibly_pay_mana_cost_with_probe(
     state: &GameState,
     player: PlayerId,
@@ -13961,6 +15460,170 @@ fn can_feasibly_pay_mana_cost_without_x(
     cost: &crate::types::mana::ManaCost,
 ) -> bool {
     can_feasibly_pay_mana_cost_without_x_with_probe(state, player, source_id, cost, None)
+}
+
+/// Returns whether an activation is the filter-land shape that needs mana in
+/// addition to tapping its own source. The source selection is first resolved
+/// back to its live ability, so synthetic land fallback rows cannot be mistaken
+/// for an activated filter ability.
+fn is_costed_tap_mana_selection(state: &GameState, selection: &ManaSourceSelection) -> bool {
+    selection
+        .ability_index
+        .and_then(|ability_index| {
+            state
+                .objects
+                .get(&selection.source.object_id)
+                .and_then(|object| object.abilities.get(ability_index))
+        })
+        .is_some_and(|ability| {
+            super::mana_sources::has_tap_component(&ability.cost)
+                && super::mana_abilities::mana_sub_cost_of(&ability.cost).is_some()
+        })
+}
+
+/// Applies one exact Priority mana action on a clone, then follows only the
+/// mana-ability prompts that have a finite engine-authored answer set.
+///
+/// CR 605.3a + CR 605.3b: Mana abilities resolve inline. The witness therefore uses the
+/// ordinary reducer for both activation and every required mana choice rather
+/// than estimating a filter land's output from its source profile.
+fn exact_mana_ability_successors(
+    mut state: GameState,
+    player: PlayerId,
+    selection: &ManaSourceSelection,
+) -> Vec<GameState> {
+    let action = match super::mana_sources::priority_mana_route(&state, selection) {
+        Some(super::mana_sources::PriorityManaRoute::LandTap) => GameAction::TapLandForMana {
+            selection: selection.clone(),
+        },
+        Some(super::mana_sources::PriorityManaRoute::NonlandActivation) => {
+            GameAction::ActivateManaSource {
+                selection: selection.clone(),
+            }
+        }
+        None => return Vec::new(),
+    };
+    if super::engine::apply_for_simulation(&mut state, player, action).is_err() {
+        return Vec::new();
+    }
+    settle_exact_mana_ability_prompts(state, player, 3)
+}
+
+/// Continue a bounded mana-ability reducer walk. Any prompt outside this exact
+/// payment/color-choice subset fails closed: its choice could affect resources
+/// or legality in a way this castability witness does not model.
+fn settle_exact_mana_ability_prompts(
+    state: GameState,
+    player: PlayerId,
+    remaining_steps: u8,
+) -> Vec<GameState> {
+    if remaining_steps == 0 {
+        return Vec::new();
+    }
+
+    let actions = match &state.waiting_for {
+        WaitingFor::Priority {
+            player: waiting_player,
+        } if *waiting_player == player => return vec![state],
+        WaitingFor::PayManaAbilityMana {
+            player: waiting_player,
+            options,
+            ..
+        } if *waiting_player == player => options
+            .iter()
+            .cloned()
+            .map(|payment| GameAction::PayManaAbilityMana { payment })
+            .collect(),
+        WaitingFor::ChooseManaColor {
+            player: waiting_player,
+            choice,
+            context: ManaChoiceContext::ManaAbility(_),
+        } if *waiting_player == player => match choice {
+            ManaChoicePrompt::SingleColor { options } => options
+                .iter()
+                .copied()
+                .map(|color| GameAction::ChooseManaColor {
+                    choice: ManaChoice::SingleColor(color),
+                    count: 1,
+                })
+                .collect(),
+            ManaChoicePrompt::Combination { options } => options
+                .iter()
+                .cloned()
+                .map(|colors| GameAction::ChooseManaColor {
+                    choice: ManaChoice::Combination(colors),
+                    count: 1,
+                })
+                .collect(),
+            ManaChoicePrompt::AnyCombination { .. } => Vec::new(),
+        },
+        _ => Vec::new(),
+    };
+
+    actions
+        .into_iter()
+        .filter_map(|action| {
+            let mut next = state.clone();
+            super::engine::apply_for_simulation(&mut next, player, action)
+                .ok()
+                .map(|_| settle_exact_mana_ability_prompts(next, player, remaining_steps - 1))
+        })
+        .flatten()
+        .collect()
+}
+
+/// Visits each concrete two-step mana route where one ordinary producer funds a
+/// distinct filter-land activation. The caller decides what must hold after the
+/// exact reducer walk, allowing payment-mode entry and spell-cost feasibility to
+/// share the same bounded route authority.
+///
+/// CR 117.1d + CR 601.2g: A player may activate mana abilities while paying a
+/// spell's cost. This witness exposes that legal forward path without treating
+/// a filter-land profile as independently spendable mana.
+fn has_exact_filter_land_payment_successor(
+    state: &GameState,
+    player: PlayerId,
+    mut accepts: impl FnMut(&GameState) -> bool,
+) -> bool {
+    for producer in super::mana_sources::activatable_mana_source_selections(state, player) {
+        if is_costed_tap_mana_selection(state, &producer) {
+            continue;
+        }
+
+        for after_producer in exact_mana_ability_successors(state.clone(), player, &producer) {
+            for filter in
+                super::mana_sources::activatable_mana_source_selections(&after_producer, player)
+            {
+                if filter.source == producer.source
+                    || !is_costed_tap_mana_selection(&after_producer, &filter)
+                {
+                    continue;
+                }
+
+                for after_filter in
+                    exact_mana_ability_successors(after_producer.clone(), player, &filter)
+                {
+                    if accepts(&after_filter) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Finds a two-step producer -> filter-land route that leaves the spell
+/// payable under the ordinary exact auto-tap authority.
+fn has_exact_filter_land_payment_witness(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &ManaCost,
+) -> bool {
+    has_exact_filter_land_payment_successor(state, player, |after_filter| {
+        can_pay_cost_after_auto_tap_with_probe(after_filter, player, source_id, cost, None)
+    })
 }
 
 fn can_feasibly_pay_mana_cost_without_x_with_probe(
@@ -14014,6 +15677,29 @@ fn can_feasibly_pay_mana_cost_without_x_with_probe(
         | crate::types::mana::ManaCost::SelfManaCostReduced { .. } => return true,
         crate::types::mana::ManaCost::Cost { shards, generic } => (shards, *generic),
     };
+
+    // CR 117.1d + CR 601.2g + CR 605.3a + CR 605.3b: Before the residual approximation
+    // rejects the cast for lacking a manually activated non-tap source, prove
+    // the narrow producer -> filter-land route by executing both abilities on
+    // a clone through their normal reducer actions and exact choice prompts.
+    if let Some(sid) = source_id {
+        if has_exact_filter_land_payment_witness(state, player, sid, cost) {
+            return true;
+        }
+    }
+
+    // CR 601.2g: Once the exact auto-tap payment probe has failed, only a
+    // mana ability that requires a manual choice can make the cast reachable.
+    // Do not re-estimate tap-cost or unambiguous self-sacrifice sources here:
+    // their resource dependencies belong exclusively to the exact probe.
+    if !super::mana_sources::has_activatable_non_tap_mana_ability_for_payment(
+        state,
+        player,
+        source_id,
+        spell_ctx.as_ref(),
+    ) {
+        return false;
+    }
 
     // CR 117.1d + CR 601.2g: Residual shard feasibility under non-tap mana
     // sources (issue #583: Vivi Ornitier {0} combination mana; extends #1234).
@@ -14722,6 +16408,24 @@ fn pay_ability_mana_cost_with_choices_excluding_and_parent(
         parent,
     )?;
 
+    // CR 106.1b + CR 602.2b (issue #6504): stamp the mana type(s) just spent
+    // onto this ability's own source, mirroring `colors_spent_to_cast`'s
+    // cast-side stamp-then-read idiom. This is the single authority where an
+    // activated ability's mana sub-cost is paid (both the direct-activation
+    // and interactive/PendingCast routes funnel through here). PURELY A
+    // BRIDGE: `push_ability_entry` drains this field synchronously into
+    // THIS activation's own `ResolvedAbility::noted_mana_payment` snapshot
+    // moments later, before any later activation of the same permanent
+    // could occur — see `GameObject::mana_spent_to_activate` for why a
+    // companion "note the type of mana spent to pay this activation cost"
+    // effect (Jeweled Amulet) never reads this field directly.
+    let spent_units = match &payment {
+        ManaCostPayment::Paid(units) | ManaCostPayment::Paused { value: units, .. } => units,
+    };
+    if let Some(obj) = state.objects.get_mut(&source_id) {
+        obj.mana_spent_to_activate = spent_units.iter().map(|unit| unit.color).collect();
+    }
+
     Ok(match payment {
         ManaCostPayment::Paid(_) => ManaCostPayment::Paid(()),
         ManaCostPayment::Paused {
@@ -15060,6 +16764,7 @@ fn auto_tap_and_pay_cost_excluding(
         Some(source_id),
         ctx,
         excluded_sources,
+        None,
         resume,
         parent,
     );
@@ -15374,6 +17079,7 @@ fn apply_mana_spell_grants(
                     may_trigger_origin: None,
                     subject_match_count: None,
                     die_result: None,
+                    provenance: None,
                 },
             );
         }
@@ -17838,6 +19544,8 @@ pub fn handle_activate_ability(
     // Push to stack
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
+    let announced_targets = flatten_targets_in_chain(&resolved);
+    let crime_candidate = targets_commit_crime(state, &announced_targets, player);
 
     stack::push_to_stack(
         state,
@@ -17852,6 +19560,7 @@ pub fn handle_activate_ability(
         },
         events,
     );
+    commit_crime_after_stack_placement(state, crime_candidate, player, events);
 
     restrictions::record_ability_activation(state, source_id, ability_index);
     // CR 117.1b: Priority permits unbounded activation. `pending_activations`
@@ -17998,8 +19707,12 @@ pub fn handle_cancel_cast(
             .iter()
             .rposition(|entry| entry.id == pending.object_id)
         {
-            super::stack::remove_stack_entry_at(state, pos)
-                .expect("rposition yielded a live stack index");
+            super::stack::remove_nonresolving_stack_entry_at(
+                state,
+                pos,
+                super::lifecycle::DelayedTerminalDisposition::Removed,
+            )
+            .expect("rposition yielded a live stack index");
         }
     }
 

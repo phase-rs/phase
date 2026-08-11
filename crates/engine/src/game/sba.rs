@@ -7,7 +7,7 @@ use crate::game::zone_pipeline::{
     self, ApprovedZoneChange, DeliveryCtx, ExileLinkSpec, ZoneDeliveryResult, ZoneMoveRequest,
     ZoneMoveResult,
 };
-use crate::types::ability::{ControllerRef, TargetFilter, TypedFilter};
+use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypedFilter};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -18,6 +18,7 @@ use crate::types::proposed_event::ProposedEvent;
 use crate::types::statics::{StaticMode, StaticModeKind};
 use crate::types::zones::Zone;
 
+use super::filter::{matches_target_filter, FilterContext};
 use super::speed::{controls_start_your_engines_in, set_speed};
 use super::zones;
 
@@ -225,7 +226,7 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
                 &battlefield_snapshot,
             );
 
-            // CR 704.5w + CR 704.5x + CR 310.10: Battle with no (or illegal) protector —
+            // CR 704.5w + CR 704.5x + CR 310.11: Battle with no (or illegal) protector —
             // controller chooses an appropriate protector; graveyard if none can be chosen.
             check_battle_protector(state, events, &mut any_performed, &battlefield_snapshot);
             if pending_replacement_pauses_sba(state) {
@@ -265,6 +266,9 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             // CR 702.131b: A player controlling an Ascend permanent with ten or more
             // permanents gets the city's blessing for the rest of the game.
             check_city_blessing(state, events, &mut any_performed, &battlefield_snapshot);
+            // CR 702.195a: A player with a Storied permanent and three historic
+            // permanents gets an enduring story for the rest of the game.
+            check_enduring_story(state, events, &mut any_performed, &battlefield_snapshot);
         }
 
         // CR 704.5t: If a player's venture marker is on the bottommost room
@@ -363,6 +367,51 @@ fn check_city_blessing(
     }
 }
 
+/// CR 702.195a: Storied grants an enduring story when its controller also controls
+/// three or more artifacts, Sagas, and/or legendary permanents.
+fn check_enduring_story(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    any_performed: &mut bool,
+    battlefield_snapshot: &[ObjectId],
+) {
+    let historic_filter =
+        TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::Historic]));
+    let players_to_designate: Vec<PlayerId> = state
+        .players
+        .iter()
+        .map(|player| player.id)
+        .filter(|player| !state.enduring_story.contains(player))
+        .filter(|player| {
+            let permanents: Vec<ObjectId> = battlefield_snapshot
+                .iter()
+                .copied()
+                .filter(|id| {
+                    live_battlefield_object(state, id).is_some_and(|obj| obj.controller == *player)
+                })
+                .collect();
+            let context = FilterContext::neutral();
+            permanents.iter().any(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| obj.has_keyword(&crate::types::keywords::Keyword::Storied))
+            }) && permanents
+                .iter()
+                .filter(|id| matches_target_filter(state, **id, &historic_filter, &context))
+                .count()
+                >= 3
+        })
+        .collect();
+
+    for player_id in players_to_designate {
+        state.enduring_story.insert(player_id);
+        crate::game::layers::mark_layers_full(state);
+        events.push(GameEvent::EnduringStoryGained { player_id });
+        *any_performed = true;
+    }
+}
+
 /// CR 702.131b + CR 702.131d: Eagerly re-evaluate the city's blessing for all
 /// players outside the normal SBA loop. Called from `resolve_chain_body` after
 /// a parent effect resolves and before a `HasCityBlessing`-gated sub-ability
@@ -372,6 +421,18 @@ fn check_city_blessing(
 pub(crate) fn apply_city_blessing_if_triggered(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let mut any_performed = false;
     check_city_blessing_eager(state, events, &mut any_performed);
+    if any_performed {
+        crate::game::layers::flush_layers(state);
+    }
+}
+
+pub(crate) fn apply_enduring_story_if_triggered(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) {
+    let mut any_performed = false;
+    let battlefield = state.battlefield_phased_in_ids();
+    check_enduring_story(state, events, &mut any_performed, &battlefield);
     if any_performed {
         crate::game::layers::flush_layers(state);
     }
@@ -1729,7 +1790,7 @@ fn check_zero_defense(
     zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &performed_ids));
 }
 
-/// CR 704.5p (+ CR 310.9 for the battle half): the full "this permanent may not
+/// CR 704.5p (+ CR 310.10 for the battle half): the full "this permanent may not
 /// be attached to anything" state-based action, expressed as its two printed
 /// sentences.
 ///
@@ -1850,7 +1911,7 @@ fn check_illegal_attachment_unattach(
     }
 }
 
-/// CR 704.5w + CR 704.5x + CR 310.10 + CR 310.11a: If a battle that isn't being
+/// CR 704.5w + CR 704.5x + CR 310.11 + CR 310.12a: If a battle that isn't being
 /// attacked has no protector, an illegal protector, or (for Sieges) a protector
 /// that equals its controller, its controller chooses a legal protector. If no
 /// legal player exists, the battle is put into its owner's graveyard.
@@ -1899,8 +1960,8 @@ fn check_battle_protector(
         let is_siege = battle.card_types.subtypes.iter().any(|s| s == "Siege");
         let protector = battle.protector();
 
-        // Legal protectors for a Siege are opponents of the controller (CR 310.11a).
-        // For non-Siege battles with no battle type, CR 310.8a says the controller
+        // Legal protectors for a Siege are opponents of the controller (CR 310.12a).
+        // For non-Siege battles with no battle type, CR 310.9a says the controller
         // becomes the protector; we treat the controller as legal in that case.
         let protector_legal = match protector {
             Some(p) if is_siege => crate::game::players::opponents(state, controller).contains(&p),
@@ -1912,18 +1973,27 @@ fn check_battle_protector(
             continue;
         }
         if being_attacked.contains(&battle_id) {
-            // CR 310.10: Only applies to battles that aren't being attacked.
+            // CR 310.11: Only applies to battles that aren't being attacked.
             continue;
         }
 
         // Compute legal choices.
+        // CR 310.12a: a Siege's controller "must choose its protector from among their
+        // opponents", and CR 704.5w's SBA phrasing — "no player IN THE GAME designated as
+        // its protector ... chooses an appropriate player" — seats CR 102.1 directly on
+        // this seam. A CHOICE, not a target (CR 115.10a), so the candidate list is the
+        // CHOOSABLE opponents. The pre-existing `eliminated_players` filter is LEFT IN
+        // PLACE: `is_alive` reads `Player::is_eliminated` while this reads
+        // `GameState::eliminated_players` — two different stores whose equivalence is not
+        // measured here, so deleting the redundant filter would smuggle an unmeasured
+        // behaviour change into a one-token routing.
         let legal_choices: Vec<PlayerId> = if is_siege {
-            crate::game::players::opponents(state, controller)
+            crate::game::players::choosable_opponents(state, controller)
                 .into_iter()
                 .filter(|p| !state.eliminated_players.contains(p))
                 .collect()
         } else {
-            // CR 310.8a: With no battle types, controller is the protector.
+            // CR 310.9a: With no battle types, controller is the protector.
             vec![controller]
         };
 
@@ -1932,7 +2002,7 @@ fn check_battle_protector(
                 if live_battlefield_object(state, &battle_id).is_none() {
                     continue;
                 }
-                // CR 310.10 / CR 704.5w + CR 614.6: No legal protector exists —
+                // CR 310.11 / CR 704.5w + CR 614.6: No legal protector exists —
                 // the battle is put into the graveyard, a "leaves the
                 // battlefield" event that must consult Moved redirects. Bail on a
                 // CR 616.1 pause (the SBA fixpoint re-runs and finds the rest).
@@ -1961,7 +2031,7 @@ fn check_battle_protector(
                 if live_battlefield_object(state, &battle_id).is_none() {
                     continue;
                 }
-                // CR 310.10 + CR 704.5w + CR 704.5x: multiple legal protectors —
+                // CR 310.11 + CR 704.5w + CR 704.5x: multiple legal protectors —
                 // the controller must choose. Pause the SBA fixpoint and yield
                 // a WaitingFor (mirrors `check_legend_rule`). The SBA re-runs
                 // on the next apply and finds any remaining battles.
@@ -2115,8 +2185,8 @@ fn check_token_cease_to_exist(state: &mut GameState, any_performed: &mut bool) {
         .objects
         .iter()
         .filter(|(_, obj)| {
-            zones::token_is_outside_battlefield_and_stack(obj)
-                || zones::copy_of_card_outside_battlefield_and_stack(obj)
+            zones::token_is_outside_battlefield_and_stack(state, obj)
+                || zones::copy_of_card_outside_battlefield_and_stack(state, obj)
         })
         .map(|(id, obj)| (*id, obj.zone, obj.owner))
         .collect();
@@ -2297,6 +2367,7 @@ mod tests {
     };
     use crate::types::actions::GameAction;
     use crate::types::format::FormatConfig;
+    use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::replacements::ReplacementEvent;
 
@@ -4276,15 +4347,17 @@ mod tests {
         obj.card_types.core_types.push(CoreType::Enchantment);
         obj.card_types.subtypes.push("Saga".to_string());
         obj.entered_battlefield_turn = Some(state.turn_number);
-        // Add chapter triggers so final_chapter_number() works
+        // CR 714.2: add chapter triggers so final_chapter_number() works. The
+        // `saga_chapter` provenance is what marks these as chapter abilities —
+        // a bare lore threshold is not one (see `saga_chapter_numbers`).
         for ch in 1..=final_chapter {
             obj.trigger_definitions.push(
-                TriggerDefinition::new(TriggerMode::CounterAdded).counter_filter(
-                    CounterTriggerFilter {
+                TriggerDefinition::new(TriggerMode::CounterAdded)
+                    .counter_filter(CounterTriggerFilter {
                         counter_type: CounterType::Lore,
                         threshold: Some(ch),
-                    },
-                ),
+                    })
+                    .saga_chapter(ch),
             );
         }
         id
@@ -4364,6 +4437,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
 
@@ -4390,6 +4464,7 @@ mod tests {
             object_id: id,
             counter_type: CounterType::Lore,
             count: 1,
+            actor: PlayerId(0),
         }];
 
         check_state_based_actions(&mut state, &mut events);
@@ -4900,6 +4975,66 @@ mod tests {
         );
     }
 
+    #[test]
+    fn bare_same_id_spell_entry_does_not_prevent_off_zone_noncard_cleanup() {
+        fn add_off_zone_noncard(
+            state: &mut GameState,
+            card_id: u64,
+            name: &str,
+            is_token: bool,
+            is_copy: bool,
+        ) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card_id),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Exile,
+            );
+            let object = state.objects.get_mut(&id).unwrap();
+            object.is_token = is_token;
+            object.is_copy = is_copy;
+            id
+        }
+
+        fn push_spell_placeholder(state: &mut GameState, id: ObjectId, card_id: u64) {
+            state.stack.push_back(StackEntry {
+                id,
+                source_id: id,
+                controller: PlayerId(0),
+                kind: StackEntryKind::Spell {
+                    card_id: CardId(card_id),
+                    ability: None,
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            });
+        }
+
+        let mut state = setup();
+        let token = add_off_zone_noncard(&mut state, 1, "Orphan Token", true, false);
+        let copy = add_off_zone_noncard(&mut state, 2, "Orphan Copy", false, true);
+        push_spell_placeholder(&mut state, token, 1);
+        push_spell_placeholder(&mut state, copy, 2);
+
+        for id in [token, copy] {
+            assert!(state.objects.contains_key(&id));
+            assert_eq!(state.objects[&id].zone, Zone::Exile);
+        }
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        // CR 704.5d + CR 704.5e: Bare same-id spell entries do not establish a
+        // live casting lifecycle, so both synthetic off-zone objects cease.
+        for id in [token, copy] {
+            assert!(
+                !state.objects.contains_key(&id),
+                "off-zone noncard object {id:?} must cease without its own PendingCast"
+            );
+        }
+    }
+
     // --- CR 704.5e + CR 707.10a: Copy-of-a-card cease-to-exist tests ---
 
     /// A copy of a card (is_copy = true, is_token = false) resolving to the
@@ -5321,6 +5456,119 @@ mod tests {
 
     fn add_filler_permanent(state: &mut GameState, owner: PlayerId, name: &str) -> ObjectId {
         create_creature(state, CardId(9002), owner, name, 1, 1)
+    }
+
+    fn add_storied_permanent(state: &mut GameState, owner: PlayerId) -> ObjectId {
+        let id = create_creature(state, CardId(9003), owner, "Storied", 1, 1);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .keywords
+            .push(crate::types::keywords::Keyword::Storied);
+        id
+    }
+
+    #[test]
+    fn storied_grants_enduring_story_for_each_historic_leg_and_latches() {
+        let mut state = setup();
+        add_storied_permanent(&mut state, PlayerId(0));
+
+        let legendary = add_filler_permanent(&mut state, PlayerId(0), "Legendary");
+        state
+            .objects
+            .get_mut(&legendary)
+            .unwrap()
+            .card_types
+            .supertypes
+            .push(Supertype::Legendary);
+        let artifact = add_filler_permanent(&mut state, PlayerId(0), "Artifact");
+        state
+            .objects
+            .get_mut(&artifact)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        let saga = add_filler_permanent(&mut state, PlayerId(0), "Saga");
+        state
+            .objects
+            .get_mut(&saga)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Saga".into());
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+        assert!(state.enduring_story.contains(&PlayerId(0)));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::EnduringStoryGained {
+                player_id: PlayerId(0)
+            }
+        )));
+
+        state
+            .battlefield
+            .retain(|id| *id != legendary && *id != artifact && *id != saga);
+        let mut later_events = Vec::new();
+        check_state_based_actions(&mut state, &mut later_events);
+        assert!(state.enduring_story.contains(&PlayerId(0)));
+    }
+
+    #[test]
+    fn storied_requires_live_storied_and_three_live_historic_permanents() {
+        let mut state = setup();
+        let storied = add_storied_permanent(&mut state, PlayerId(0));
+        for index in 0..3 {
+            let historic =
+                add_filler_permanent(&mut state, PlayerId(0), &format!("Historic{index}"));
+            state
+                .objects
+                .get_mut(&historic)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Artifact);
+        }
+        state.objects.get_mut(&storied).unwrap().phase_status =
+            crate::game::game_object::PhaseStatus::PhasedOut {
+                cause: crate::game::game_object::PhaseOutCause::Directly,
+            };
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+        assert!(!state.enduring_story.contains(&PlayerId(0)));
+
+        state.objects.get_mut(&storied).unwrap().phase_status =
+            crate::game::game_object::PhaseStatus::PhasedIn;
+        state.battlefield.pop_back();
+        check_state_based_actions(&mut state, &mut events);
+        assert!(!state.enduring_story.contains(&PlayerId(0)));
+    }
+
+    #[test]
+    fn storied_requires_a_storied_permanent() {
+        let mut state = setup();
+        for index in 0..3 {
+            let historic =
+                add_filler_permanent(&mut state, PlayerId(0), &format!("Historic{index}"));
+            state
+                .objects
+                .get_mut(&historic)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Artifact);
+        }
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+        assert!(!state.enduring_story.contains(&PlayerId(0)));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::EnduringStoryGained { .. })));
     }
 
     #[test]

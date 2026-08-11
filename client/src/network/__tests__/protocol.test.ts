@@ -36,8 +36,8 @@ const viewerInteractionWithProducedMana = {
 } as never;
 
 describe("encodeWireMessage / decodeWireMessage", () => {
-  it("pins the P2P wire protocol to v16", () => {
-    expect(WIRE_PROTOCOL_VERSION).toBe(16);
+  it("pins the P2P wire protocol to v18", () => {
+    expect(WIRE_PROTOCOL_VERSION).toBe(19);
   });
 
   it("defaults shortcut actions for a legacy payload created before the additive field", () => {
@@ -75,6 +75,7 @@ describe("encodeWireMessage / decodeWireMessage", () => {
     { type: "ping", timestamp: 12345 },
     { type: "pong", timestamp: 12345 },
     { type: "concede" },
+    { type: "match_concede" },
     { type: "disconnect", reason: "Page closed" },
     { type: "kick", reason: "Removed" },
     { type: "host_left", reason: "Host left" },
@@ -89,6 +90,7 @@ describe("encodeWireMessage / decodeWireMessage", () => {
     { type: "reconnect", playerToken: "token-123" },
     { type: "reconnect_rejected", reason: "Unknown token" },
     { type: "action_rejected", reason: "Player kicked" },
+    { type: "action_noop" },
     { type: "mana_payment_preview", requestId: 4, sourceIds: [12] },
     { type: "mana_payment_preview_rejected", requestId: 4, reason: "Not your turn" },
     {
@@ -250,5 +252,9 @@ describe("validateMessage", () => {
   });
   it("rejects unknown type", () => {
     expect(() => validateMessage({ type: "nope" })).toThrow(/Invalid message type/);
+  });
+
+  it("rejects raw unbound match concessions", () => {
+    expect(() => validateMessage({ type: "concede_match" })).toThrow(/Invalid message type/);
   });
 });

@@ -30,7 +30,7 @@
 //!
 //! ```text
 //! CARGO_TARGET_DIR=/tmp/gs-size RUSTFLAGS="-Zprint-type-sizes" \
-//!   cargo build -p engine --lib \
+//!   cargo build -p phase-engine --lib \
 //!   | grep 'print-type-size type: `types::game_state::GameState`:'
 //! ```
 //!

@@ -5,10 +5,16 @@
 //! AI until the game ends (or an action budget is hit). Reports per-turn
 //! life totals and the final outcome.
 //!
-//! Usage:
-//!   cargo run --release --bin ai-commander -- client/public
-//!   cargo run --release --bin ai-commander -- client/public --seed 7 --difficulty Easy
-//!   cargo run --release --bin ai-commander -- client/public --difficulty Easy \
+//! Usage (pod-lab loop-3 Q5): `--profile server-release`, not plain
+//! `--release` -- `[profile.release]` (workspace `Cargo.toml`) sets `panic =
+//! 'abort'` (it exists to keep the WASM build small), which silently defeats
+//! `run_batch_isolated`'s `catch_unwind`-based per-game panic isolation
+//! below: under `abort`, one game's panic takes the whole batch process down
+//! instead of being caught and reported. `server-release` inherits `release`
+//! but overrides `panic = 'unwind'` for exactly this reason.
+//!   cargo run --profile server-release --bin ai-commander -- client/public
+//!   cargo run --profile server-release --bin ai-commander -- client/public --seed 7 --difficulty Easy
+//!   cargo run --profile server-release --bin ai-commander -- client/public --difficulty Easy \
 //!       --difficulty-p2 VeryHard --action-cap 50000
 //!
 //! Batch mode (pod-lab simulation-acceleration plan, Tier 1 item 1): play many
@@ -20,8 +26,15 @@
 //! panic-isolated (`run_batch_isolated`) and its result is flushed to stdout
 //! immediately, so a batch survives an individual game panicking or the whole
 //! process being killed mid-batch (pod-lab enforces an external wall-clock
-//! timeout on the process).
-//!   cargo run --release --bin ai-commander -- client/public --games-file games.txt
+//! timeout on the process) -- but only under a `panic = 'unwind'` profile;
+//! see the note above.
+//!   cargo run --profile server-release --bin ai-commander -- client/public --games-file games.txt
+
+// pod-lab loop-3 Q5: native-binary throughput lever, gated in Cargo.toml so
+// wasm32 builds of this crate's lib (pulled in by engine-wasm/draft-wasm)
+// never see it.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
@@ -34,6 +47,7 @@ use engine::database::CardDatabase;
 use engine::game::deck_loading::{
     load_deck_into_state, resolve_deck_list, DeckList, DeckPayload, PlayerDeckList,
 };
+use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
@@ -59,109 +73,28 @@ const GAME_THREAD_STACK_SIZE: usize = 32 << 20;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // Harness escape hatch (pod-lab): forces the run into measurement mode
+    // even on the single-game route. Read exactly once, here, and threaded
+    // through as a plain `bool` — this repo's "no `set_var`" rule.
+    // `parse_cli` decides what to do with it.
+    // Contract: presence-based, matching PHASE_DUMP_*'s convention -- var
+    // set to any value (including "") counts as true, not `== "1"`. Presence
+    // only, so `var_os` (no Unicode validation needed for a bool check).
+    let measurement_env = std::env::var_os("PHASE_AI_MEASUREMENT").is_some();
 
-    let cards_path = args
-        .iter()
-        .skip(1)
-        .find(|a| !a.starts_with("--"))
-        .cloned()
-        .unwrap_or_else(|| "client/public".to_string());
-
-    let mut seed: u64 = 42;
-    let mut difficulty = AiDifficulty::Easy;
-    // Per-seat override of `difficulty` (pod-lab gauntlet mixed-skill tables).
-    // `None` means "use the table-wide --difficulty for this seat".
-    let mut seat_difficulty: [Option<AiDifficulty>; 4] = [None; 4];
-    let mut action_cap: usize = DEFAULT_ACTION_CAP;
-    let mut feed: String = "feeds/mtggoldfish-commander.json".to_string();
-    let mut games_file: Option<String> = None;
-    let mut args_iter = args.iter().skip(1).peekable();
-    while let Some(arg) = args_iter.next() {
-        match arg.as_str() {
-            "--seed" => {
-                if let Some(v) = args_iter.next() {
-                    if let Ok(n) = v.parse::<u64>() {
-                        seed = n;
-                    }
-                }
-            }
-            "--difficulty" => {
-                if let Some(v) = args_iter.next() {
-                    difficulty = parse_difficulty(v);
-                }
-            }
-            "--action-cap" => {
-                if let Some(v) = args_iter.next() {
-                    action_cap = parse_action_cap(v);
-                }
-            }
-            "--feed" => {
-                if let Some(v) = args_iter.next() {
-                    feed = v.clone();
-                }
-            }
-            "--games-file" => match args_iter.next() {
-                Some(v) => games_file = Some(v.clone()),
-                None => {
-                    eprintln!("error: --games-file requires a path");
-                    std::process::exit(1);
-                }
-            },
-            other => {
-                // `--difficulty-p0` .. `--difficulty-p3`: single-seat override,
-                // parameterized on seat index rather than four bespoke flags.
-                // The value arg is consumed unconditionally so a bad index can't
-                // leak its label into the catch-all; `parse_seat_override`
-                // hard-fails (like the sibling parsers) instead of silently
-                // dropping a mistyped flag and running a mislabeled seat.
-                if let Some(suffix) = other.strip_prefix("--difficulty-p") {
-                    let value = args_iter.next().map(String::as_str);
-                    match parse_seat_override(suffix, value) {
-                        Ok((idx, label)) => seat_difficulty[idx] = Some(parse_difficulty(label)),
-                        Err(e) => {
-                            eprintln!("{e}");
-                            std::process::exit(1);
-                        }
-                    }
-                }
-            }
+    let cli = match parse_cli(&args, measurement_env) {
+        Ok(cli) => cli,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
         }
-    }
-
-    // `--games-file` batch entries are validated up front — same hard-fail-at-
-    // startup discipline as `parse_difficulty`/`parse_action_cap`/
-    // `parse_seat_override` above: a garbled batch file should fail before the
-    // ~1.8s database load, not silently skip or misinterpret one line mid-batch.
-    let batch_games: Option<Vec<(u64, AiDifficulty)>> =
-        games_file
-            .as_deref()
-            .map(|path| match parse_games_file(path) {
-                Ok(games) if games.is_empty() => {
-                    eprintln!("error: --games-file {path:?} contains no games");
-                    std::process::exit(1);
-                }
-                Ok(games) => games,
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                }
-            });
+    };
 
     // Argument parsing and validation above needs no special stack; the actual
     // game-driving work (both the single-game path and `--games-file` batch
     // mode) does — see `GAME_THREAD_STACK_SIZE`. Spawning unconditionally
     // (rather than only under `--games-file`) fixes the pre-existing
     // single-game overflow too, not just the batch case.
-    let cli = CliArgs {
-        cards_path,
-        feed,
-        seed,
-        difficulty,
-        seat_difficulty,
-        action_cap,
-        games_file,
-        batch_games,
-    };
     let handle = std::thread::Builder::new()
         .name("ai-commander-driver".to_string())
         .stack_size(GAME_THREAD_STACK_SIZE)
@@ -191,6 +124,168 @@ struct CliArgs {
     action_cap: usize,
     games_file: Option<String>,
     batch_games: Option<Vec<(u64, AiDifficulty)>>,
+    watch_cards: HashSet<String>,
+    run_context: RunContext,
+}
+
+/// Which execution mode every seat's `AiConfig` should run under for a given
+/// process (see `build_seat_config`). `Measurement` disables the wall-clock
+/// search deadline so every decision is a pure function of the game's inputs
+/// (see `build_seat_config`'s doc for why that matters); `Interactive` leaves
+/// the deadline in place.
+///
+/// Route table (`parse_cli`): `--games-file` (batch) always resolves to
+/// `Measurement` (the cross-game wall-clock-deadline leak fix, see
+/// `build_seat_config`'s doc, applies regardless of the env override). A
+/// solo invocation resolves to `Interactive` by default, unless the
+/// `PHASE_AI_MEASUREMENT` harness escape hatch forces it to `Measurement`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunContext {
+    Interactive,
+    Measurement,
+}
+
+/// Pure argument parser: consumes the raw process args plus the one
+/// env-derived flag `main` reads once (`measurement_env`, from
+/// `PHASE_AI_MEASUREMENT` -- presence-based, matching `PHASE_DUMP_*`
+/// convention, not `== "1"`) and returns either a fully resolved `CliArgs`
+/// or an error message ready for the caller to print verbatim before exiting
+/// with status 1. Contains the entire pre-`run` pre-pass (positional
+/// `cards_path` resolution, the flag loop, and `--games-file` validation)
+/// that used to live directly in `main`, so `main` itself does nothing but
+/// read the env var, call this, and report success/failure. Never calls
+/// `std::process::exit` itself -- every error path here becomes an `Err`
+/// instead, exactly mirroring the direct-exit message each replaces.
+fn parse_cli(args: &[String], measurement_env: bool) -> Result<CliArgs, String> {
+    let mut cards_path: Option<String> = None;
+
+    let mut seed: u64 = 42;
+    let mut difficulty = AiDifficulty::Easy;
+    // Per-seat override of `difficulty` (pod-lab gauntlet mixed-skill tables).
+    // `None` means "use the table-wide --difficulty for this seat".
+    let mut seat_difficulty: [Option<AiDifficulty>; 4] = [None; 4];
+    let mut action_cap: usize = DEFAULT_ACTION_CAP;
+    let mut feed: String = "feeds/mtggoldfish-commander.json".to_string();
+    let mut games_file: Option<String> = None;
+    // pod-lab swap-liveness telemetry (loop-3 Q3(b)): empty means the
+    // per-event scan in `play_one_game` is skipped entirely, not merely a
+    // no-op HashSet lookup — a run that doesn't pass this flag pays nothing.
+    let mut watch_cards: HashSet<String> = HashSet::new();
+    let mut args_iter = args.iter().skip(1).peekable();
+    while let Some(arg) = args_iter.next() {
+        match arg.as_str() {
+            "--seed" => {
+                if let Some(v) = args_iter.next() {
+                    if let Ok(n) = v.parse::<u64>() {
+                        seed = n;
+                    }
+                }
+            }
+            "--difficulty" => {
+                if let Some(v) = args_iter.next() {
+                    difficulty = parse_difficulty(v);
+                }
+            }
+            "--action-cap" => {
+                if let Some(v) = args_iter.next() {
+                    action_cap = parse_action_cap(v);
+                }
+            }
+            "--feed" => {
+                if let Some(v) = args_iter.next() {
+                    feed = v.clone();
+                }
+            }
+            "--games-file" => match args_iter.next() {
+                Some(v) => games_file = Some(v.clone()),
+                None => return Err("error: --games-file requires a path".to_string()),
+            },
+            "--watch-cards" => match args_iter.next() {
+                Some(v) => {
+                    watch_cards = v
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect();
+                }
+                None => {
+                    return Err(
+                        "error: --watch-cards requires a comma-separated card name list"
+                            .to_string(),
+                    );
+                }
+            },
+            other => {
+                // `--difficulty-p0` .. `--difficulty-p3`: single-seat override,
+                // parameterized on seat index rather than four bespoke flags.
+                // The value arg is consumed unconditionally so a bad index can't
+                // leak its label into the catch-all; `parse_seat_override`
+                // hard-fails (like the sibling parsers) instead of silently
+                // dropping a mistyped flag and running a mislabeled seat.
+                if let Some(suffix) = other.strip_prefix("--difficulty-p") {
+                    let value = args_iter.next().map(String::as_str);
+                    match parse_seat_override(suffix, value) {
+                        Ok((idx, label)) => seat_difficulty[idx] = Some(parse_difficulty(label)),
+                        Err(e) => return Err(e),
+                    }
+                } else if !other.starts_with("--") {
+                    // F4: first non-`--`-prefixed token is the positional
+                    // `cards_path`. This arm only sees tokens that were NOT
+                    // consumed as a value by one of the flag arms above, so a
+                    // preceding `--flag value` pair's value can never land
+                    // here mistaken for the positional path. A bare unknown
+                    // `--flag` (still starts with `--`) falls through this
+                    // `else if` and is silently ignored without consuming the
+                    // next token, so it can't eat the real positional either.
+                    if cards_path.is_none() {
+                        cards_path = Some(other.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    let cards_path = cards_path.unwrap_or_else(|| "client/public".to_string());
+
+    // `--games-file` batch entries are validated up front — same hard-fail-at-
+    // startup discipline as `parse_difficulty`/`parse_action_cap`/
+    // `parse_seat_override` above: a garbled batch file should fail before the
+    // ~1.8s database load, not silently skip or misinterpret one line mid-batch.
+    let batch_games: Option<Vec<(u64, AiDifficulty)>> = match games_file.as_deref() {
+        None => None,
+        Some(path) => match parse_games_file(path) {
+            Ok(games) if games.is_empty() => {
+                return Err(format!("error: --games-file {path:?} contains no games"));
+            }
+            Ok(games) => Some(games),
+            Err(e) => return Err(format!("error: {e}")),
+        },
+    };
+
+    // F3 route table: `--games-file` (batch) always runs every seat in
+    // Measurement mode (cross-game wall-clock-deadline leak fix, see
+    // `build_seat_config`'s doc). A solo invocation defaults to Interactive
+    // (real wall-clock deadline preserved) unless the `PHASE_AI_MEASUREMENT`
+    // harness escape hatch forces it to Measurement too.
+    let run_context = if batch_games.is_some() || measurement_env {
+        RunContext::Measurement
+    } else {
+        RunContext::Interactive
+    };
+
+    Ok(CliArgs {
+        cards_path,
+        feed,
+        seed,
+        difficulty,
+        seat_difficulty,
+        action_cap,
+        games_file,
+        batch_games,
+        watch_cards,
+        run_context,
+    })
 }
 
 /// Shared immutable inputs for one or more AI-commander game runs.
@@ -202,6 +297,8 @@ struct GameRunContext<'a> {
     action_cap: usize,
     dump_log_path: Option<&'a str>,
     dump_actions_path: Option<&'a str>,
+    watch_cards: &'a HashSet<String>,
+    run_context: RunContext,
 }
 
 /// Everything that isn't argument parsing: loads the card database and feed
@@ -220,6 +317,8 @@ fn run(cli: CliArgs) -> i32 {
         action_cap,
         games_file,
         batch_games,
+        watch_cards,
+        run_context,
     } = cli;
 
     let export_path = PathBuf::from(&cards_path).join("card-data.json");
@@ -259,6 +358,16 @@ fn run(cli: CliArgs) -> i32 {
         None => println!("Seed: {seed}   Difficulty: {difficulty:?}"),
     }
     println!();
+    // D1 must-pass gate for B3: pod-lab's harness greps for this exact
+    // lowercase literal (not `{run_context:?}`) to distinguish a solo
+    // Interactive-route game from a Measurement-route one. Appended after
+    // the blank line that closes the pre-existing pinned preamble (see
+    // `single_game_stdout_is_deterministic_and_preamble_is_pinned`'s
+    // `starts_with` assertion), so it never conflicts with that pin.
+    match run_context {
+        RunContext::Interactive => println!("ExecutionMode: interactive"),
+        RunContext::Measurement => println!("ExecutionMode: measurement"),
+    }
 
     let mut deck_lists: Vec<PlayerDeckList> = Vec::new();
     // Commander names are populated in PlayerDeckList.commander and resolved
@@ -355,6 +464,8 @@ fn run(cli: CliArgs) -> i32 {
         action_cap,
         dump_log_path: dump_log_path.as_deref(),
         dump_actions_path: dump_actions_path.as_deref(),
+        watch_cards: &watch_cards,
+        run_context,
     };
 
     match batch_games {
@@ -408,6 +519,8 @@ fn play_one_game(context: &GameRunContext<'_>, seed: u64, difficulty: AiDifficul
         action_cap,
         dump_log_path,
         dump_actions_path,
+        watch_cards,
+        run_context,
     } = *context;
     let mut state = build_game_state(db, payload, seed);
 
@@ -428,7 +541,7 @@ fn play_one_game(context: &GameRunContext<'_>, seed: u64, difficulty: AiDifficul
         println!("  P{i}  difficulty={seat_diff:?}");
         ai_configs.insert(
             PlayerId(i as u8),
-            create_config_for_players(seat_diff, Platform::Native, 4),
+            build_seat_config(seat_diff, seed, run_context),
         );
     }
     println!();
@@ -436,6 +549,13 @@ fn play_one_game(context: &GameRunContext<'_>, seed: u64, difficulty: AiDifficul
     let start = Instant::now();
     let mut game_log: Vec<engine::types::log::GameLogEntry> = Vec::new();
     let mut actions_log: Vec<String> = Vec::new();
+    // pod-lab swap-liveness telemetry (loop-3 Q3(b)): which of `watch_cards`'
+    // names were ever drawn to hand or cast this game. Names, not `CardId`s —
+    // `CardId` is assigned per physical-card-object at deck load
+    // (`deck_loading.rs`), not a stable per-name identity, and every
+    // `GameObject` already carries its own resolved `name`, so matching on
+    // name needs no extra database lookup.
+    let mut cards_seen: HashSet<String> = HashSet::new();
     let mut last_turn_reported: u32 = 0;
     let mut ai_rng = StdRng::seed_from_u64(seed);
     let ai_session = phase_ai::session::AiSession::arc_from_game(&state);
@@ -468,6 +588,10 @@ fn play_one_game(context: &GameRunContext<'_>, seed: u64, difficulty: AiDifficul
                 for r in &*results {
                     actions_log.push(format!("{:?}", r.action));
                 }
+            }
+
+            if !watch_cards.is_empty() {
+                record_watched_cards(results, watch_cards, &mut cards_seen);
             }
 
             if state.turn_number != last_turn_reported {
@@ -532,6 +656,19 @@ fn play_one_game(context: &GameRunContext<'_>, seed: u64, difficulty: AiDifficul
     println!("Elapsed: {:.1}s", elapsed.as_secs_f64());
     println!("Total actions: {total_actions}");
     println!("Turns played: {}", state.turn_number);
+    // pod-lab swap-liveness telemetry (loop-3 Q3(b)): one line, only when
+    // `--watch-cards` was given, so a harness that doesn't ask for this pays
+    // nothing and every existing consumer's line-by-line parse is untouched.
+    // `PODLAB-TELEM ` is a prefix no other line in this binary's stdout uses,
+    // and this line does not begin with "Turn ", match `^--- GAME`, or
+    // contain "Winner: " / "Difficulty: " / "ABORT: hit " / "did NOT reach
+    // GameOver" (pod-lab's `runner.py`/`mechanisms.py` scan for exactly those
+    // literals). Cards are sorted for a deterministic, diff-friendly line.
+    if !watch_cards.is_empty() {
+        let mut seen: Vec<&str> = cards_seen.iter().map(String::as_str).collect();
+        seen.sort_unstable();
+        println!("PODLAB-TELEM {}", serde_json::json!({ "cards_seen": seen }));
+    }
     println!();
 
     let outcome = classify_run_outcome(aborted, &state.waiting_for);
@@ -634,6 +771,38 @@ fn play_one_game(context: &GameRunContext<'_>, seed: u64, difficulty: AiDifficul
     }
 
     outcome
+}
+
+/// pod-lab swap-liveness telemetry (loop-3 Q3(b)): scans one driver-loop
+/// batch's `AiActionResult`s for `SpellCast`/`CardDrawn` events naming an
+/// object whose CURRENT name (resolved via that action's own `r.state`, not
+/// a stale/outer snapshot) is in `watch`, inserting the resolved name into
+/// `seen`. Matches on name, not `CardId`: `CardId` is assigned per
+/// physical-card-object at deck load (`deck_loading.rs`), not a stable
+/// per-name identity, while every `GameObject` already carries its own
+/// resolved `name` — no extra database lookup needed. Pure and unit-tested
+/// separately from `play_one_game`'s full game-driving loop; the caller
+/// skips calling this entirely when `watch` is empty, so a run that doesn't
+/// pass `--watch-cards` pays nothing beyond the `is_empty()` check.
+fn record_watched_cards(
+    results: &[phase_ai::auto_play::AiActionResult],
+    watch: &HashSet<String>,
+    seen: &mut HashSet<String>,
+) {
+    for r in results {
+        for event in &r.events {
+            let object_id = match event {
+                GameEvent::SpellCast { object_id, .. } => *object_id,
+                GameEvent::CardDrawn { object_id, .. } => *object_id,
+                _ => continue,
+            };
+            if let Some(obj) = r.state.objects.get(&object_id) {
+                if watch.contains(&obj.name) {
+                    seen.insert(obj.name.clone());
+                }
+            }
+        }
+    }
 }
 
 /// Runs `play` once per entry in `games`, isolating panics per game (Tier 1
@@ -874,11 +1043,56 @@ fn build_game_state(db: &CardDatabase, payload: &DeckPayload, seed: u64) -> Game
     state
 }
 
+/// Builds one seat's `AiConfig` for a single game. Single authority for this
+/// bin's per-seat AI configuration — `play_one_game` calls it once per seat and
+/// the regression test below asserts its one load-bearing invariant.
+///
+/// EVERY seat runs in MEASUREMENT mode (`AiConfig::into_measurement`), which
+/// disables the wall-clock search deadline (`AI_SEARCH_TIME_BUDGET_MS`, default
+/// 1500ms) so search is bounded SOLELY by `max_nodes`/`max_depth`. This is
+/// required for reproducibility, not a benchmarking nicety: an interactive
+/// (wall-clock-bounded) search truncates to a degraded best-so-far result the
+/// moment `Deadline::expired()` fires, and whether it fires on a given decision
+/// depends on how fast the process happens to be running at that instant — NOT
+/// on `(seed, difficulty, feed)`. A `--games-file` batch process is measurably
+/// slower on its Nth game (warmer allocator, more resident state) than a fresh
+/// single-game process, so the SAME game played 3rd in a batch could expire the
+/// deadline on a mid-game decision that the solo run completed in full, pick a
+/// different move, and diverge — the exact cross-game non-determinism the
+/// pod-lab equivalence gate caught (a game that wins solo stalling at turn 60 in
+/// batch). Measurement mode makes every decision a pure function of the game's
+/// inputs, so batch game N is bit-identical to the same game run solo. This
+/// mirrors the established `duel_suite::run` batch harness, which builds its
+/// config with `.into_measurement(seed)` for the same "eliminate wall-clock
+/// flake" reason. `seed` is the per-game seed, itself fully determined by the
+/// game's inputs; the value inside `ExecutionMode::Measurement { seed }` only
+/// tags the mode — the search's determinization entropy is derived from game
+/// state (`search.rs`), not from this seed.
+///
+/// `run_context` (see its doc) is a required parameter, not an implicit
+/// always-on: `RunContext::Measurement` calls `.into_measurement(seed)` as
+/// before; `RunContext::Interactive` leaves the wall-clock deadline in
+/// place. `parse_cli` constructs `RunContext::Interactive` for a solo
+/// invocation with no measurement override, and `RunContext::Measurement`
+/// for `--games-file` batches or the `PHASE_AI_MEASUREMENT` override.
+fn build_seat_config(difficulty: AiDifficulty, seed: u64, run_context: RunContext) -> AiConfig {
+    let config = create_config_for_players(difficulty, Platform::Native, 4);
+    match run_context {
+        RunContext::Measurement => config.into_measurement(seed),
+        RunContext::Interactive => config,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use engine::ai_support::candidate_actions;
+    use engine::game::game_object::GameObject;
     use engine::types::ability::ChoiceType;
+    use engine::types::actions::GameAction;
+    use engine::types::identifiers::{CardId, ObjectId};
+    use engine::types::zones::Zone;
+    use phase_ai::auto_play::AiActionResult;
     use std::sync::{Arc, Mutex};
 
     struct TempFileGuard(PathBuf);
@@ -988,6 +1202,166 @@ mod tests {
             !actions.is_empty(),
             "NamedChoice{{CardName}} must yield candidates once all_card_names is populated"
         );
+    }
+
+    /// Regression for the cross-game state-leakage defect (pod-lab equivalence
+    /// gate; PR phase-rs/phase#6252): a game that won solo stalled at turn 60
+    /// when played 3rd in a `--games-file` batch. Root cause was NOT a leaked
+    /// counter/cache but the interactive wall-clock search deadline
+    /// (`AI_SEARCH_TIME_BUDGET_MS`): a slower Nth-in-batch process expired it on
+    /// a mid-game decision the fresh solo process completed, diverging the game.
+    /// `build_seat_config` fixes this by running every seat in MEASUREMENT mode,
+    /// which disables the wall-clock deadline (search bounded solely by
+    /// node/depth — see `search.rs` / `planner::PlannerServices::with_deadline`,
+    /// both gated on `execution_mode.is_measurement()`), making each decision a
+    /// pure function of the game's inputs. This asserts the invariant
+    /// deterministically (no card-data / no real game needed): against the
+    /// unfixed code (`ExecutionMode::Interactive`) it fails, catching any future
+    /// regression that drops measurement mode and reintroduces wall-clock flake.
+    #[test]
+    fn seat_config_runs_in_measurement_mode_for_batch_reproducibility() {
+        for difficulty in [
+            AiDifficulty::Easy,
+            AiDifficulty::Medium,
+            AiDifficulty::Hard,
+            AiDifficulty::VeryHard,
+        ] {
+            let config = build_seat_config(difficulty, 95_000_004, RunContext::Measurement);
+            assert!(
+                config.execution_mode.is_measurement(),
+                "{difficulty:?} seat must run in measurement mode so a batched \
+                 game is bit-identical to the same game run solo; interactive \
+                 mode makes search wall-clock-dependent and non-reproducible \
+                 under batch load"
+            );
+        }
+    }
+
+    /// Companion to the assertion above: `Interactive` must leave the
+    /// wall-clock deadline in place (i.e. NOT call `into_measurement`).
+    /// `parse_cli` constructs `RunContext::Interactive` for the default solo
+    /// route; pinning both directions here means routing can't silently
+    /// collapse `Interactive` into `Measurement` (or vice versa) without a
+    /// red test.
+    #[test]
+    fn seat_config_leaves_interactive_mode_wall_clock_bounded() {
+        for difficulty in [
+            AiDifficulty::Easy,
+            AiDifficulty::Medium,
+            AiDifficulty::Hard,
+            AiDifficulty::VeryHard,
+        ] {
+            let config = build_seat_config(difficulty, 95_000_004, RunContext::Interactive);
+            assert!(
+                !config.execution_mode.is_measurement(),
+                "{difficulty:?} seat under RunContext::Interactive must NOT run in \
+                 measurement mode; collapsing it into Measurement would defeat the \
+                 whole point of having the two variants"
+            );
+        }
+    }
+
+    /// Building-block test for `record_watched_cards` (loop-3 Q3(b)): proves
+    /// the matcher (a) recognizes both `SpellCast` and `CardDrawn` events,
+    /// (b) resolves the watched name via the object's *current* `r.state`
+    /// rather than any fixed name table, and (c) is selective — an event
+    /// naming an object outside `watch`, and an event of an unrelated
+    /// variant entirely, must both be no-ops rather than getting recorded.
+    #[test]
+    fn record_watched_cards_matches_spell_cast_and_card_drawn_by_name() {
+        let mut state = GameState::new(FormatConfig::commander(), 4, 1);
+        let cast_obj = ObjectId(100);
+        let drawn_obj = ObjectId(101);
+        let unwatched_obj = ObjectId(102);
+        state.objects.insert(
+            cast_obj,
+            GameObject::new(
+                cast_obj,
+                CardId(100),
+                PlayerId(0),
+                "Lightning Bolt".to_string(),
+                Zone::Stack,
+            ),
+        );
+        state.objects.insert(
+            drawn_obj,
+            GameObject::new(
+                drawn_obj,
+                CardId(101),
+                PlayerId(0),
+                "Sol Ring".to_string(),
+                Zone::Hand,
+            ),
+        );
+        state.objects.insert(
+            unwatched_obj,
+            GameObject::new(
+                unwatched_obj,
+                CardId(102),
+                PlayerId(0),
+                "Forest".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+
+        let watch: HashSet<String> = ["Lightning Bolt".to_string(), "Sol Ring".to_string()]
+            .into_iter()
+            .collect();
+        let mut seen: HashSet<String> = HashSet::new();
+
+        let results = vec![
+            AiActionResult {
+                action: GameAction::PassPriority,
+                state: state.clone(),
+                events: vec![GameEvent::SpellCast {
+                    card_id: CardId(100),
+                    controller: PlayerId(0),
+                    object_id: cast_obj,
+                }],
+                log_entries: Vec::new(),
+            },
+            AiActionResult {
+                action: GameAction::PassPriority,
+                state: state.clone(),
+                events: vec![
+                    GameEvent::CardDrawn {
+                        player_id: PlayerId(0),
+                        object_id: drawn_obj,
+                        nth_in_turn: 1,
+                        nth_in_step: 1,
+                    },
+                    // Drawn but not watched, and an unrelated event variant —
+                    // both must be ignored, not just the watched ones matched.
+                    GameEvent::CardDrawn {
+                        player_id: PlayerId(0),
+                        object_id: unwatched_obj,
+                        nth_in_turn: 2,
+                        nth_in_step: 2,
+                    },
+                    GameEvent::PriorityPassed {
+                        player_id: PlayerId(0),
+                    },
+                ],
+                log_entries: Vec::new(),
+            },
+        ];
+
+        record_watched_cards(&results, &watch, &mut seen);
+
+        assert_eq!(
+            seen,
+            ["Lightning Bolt".to_string(), "Sol Ring".to_string()]
+                .into_iter()
+                .collect::<HashSet<_>>()
+        );
+    }
+
+    #[test]
+    fn record_watched_cards_is_a_noop_on_empty_results() {
+        let watch: HashSet<String> = ["Lightning Bolt".to_string()].into_iter().collect();
+        let mut seen: HashSet<String> = HashSet::new();
+        record_watched_cards(&[], &watch, &mut seen);
+        assert!(seen.is_empty());
     }
 
     #[test]
@@ -1145,6 +1519,156 @@ mod tests {
         // stop game 3 (or anything) from running. This is the direct proof
         // that one bad game can't take down the rest of the batch.
         assert_eq!(*seen.lock().unwrap(), games);
+    }
+
+    /// D1 route table: a bare solo invocation with no `--games-file` and no
+    /// measurement env override resolves to `RunContext::Interactive`.
+    #[test]
+    fn parse_cli_solo_invocation_routes_to_interactive() {
+        let args = vec!["ai-commander".to_string(), "client/public".to_string()];
+        let cli = parse_cli(&args, false).expect("solo invocation must parse");
+        assert_eq!(
+            cli.run_context,
+            RunContext::Interactive,
+            "a solo (non-games-file) invocation with no measurement env override must route to RunContext::Interactive"
+        );
+    }
+
+    /// D1 route table: `--games-file` invocations must resolve to
+    /// `RunContext::Measurement`.
+    #[test]
+    fn parse_cli_games_file_invocation_routes_to_measurement() {
+        let path = temp_games_file_path("parse_cli_route_games_file");
+        let _guard = TempFileGuard(path.clone());
+        std::fs::write(
+            &path,
+            "1009,Easy
+",
+        )
+        .unwrap();
+        let args = vec![
+            "ai-commander".to_string(),
+            "--games-file".to_string(),
+            path.to_str().unwrap().to_string(),
+        ];
+        let cli = parse_cli(&args, false).expect("games-file invocation must parse");
+        assert_eq!(cli.run_context, RunContext::Measurement);
+    }
+
+    /// D1 route table: the `PHASE_AI_MEASUREMENT` harness escape hatch forces
+    /// a solo (non-games-file) invocation to `RunContext::Measurement`.
+    #[test]
+    fn parse_cli_measurement_env_forces_measurement_on_solo() {
+        let args = vec!["ai-commander".to_string(), "client/public".to_string()];
+        let cli = parse_cli(&args, true).expect("solo invocation must parse");
+        assert_eq!(cli.run_context, RunContext::Measurement);
+    }
+
+    /// F4: the positional `cards_path` scan must not be poisoned by the
+    /// *value* of any preceding `--flag value` pair (e.g. `--seed 42
+    /// some/path` must resolve `cards_path` to `"some/path"`, not `"42"`).
+    /// Table-driven over every flag that takes a value — including
+    /// `--games-file` (whose value is a real temp file, since `parse_cli`
+    /// validates the batch up front), `--watch-cards`, and the seat-override
+    /// form `--difficulty-p<N>`.
+    #[test]
+    fn parse_cli_positional_cards_path_survives_preceding_flag_value() {
+        let games_path = temp_games_file_path("positional_survival_games");
+        let _guard = TempFileGuard(games_path.clone());
+        std::fs::write(&games_path, "1009,Easy\n").unwrap();
+        let games_path = games_path.to_str().unwrap();
+
+        let rows: &[&[&str]] = &[
+            &["--seed", "42", "some/path"],
+            &["--feed", "x.json", "some/path"],
+            &["--action-cap", "5", "some/path"],
+            &["--difficulty", "Easy", "some/path"],
+            &["--games-file", games_path, "some/path"],
+            &["--watch-cards", "Sol Ring,Arcane Signet", "some/path"],
+            &["--difficulty-p0", "Easy", "some/path"],
+        ];
+        for row in rows {
+            let mut args = vec!["ai-commander".to_string()];
+            args.extend(row.iter().map(|s| s.to_string()));
+            let cli = parse_cli(&args, false).expect("row must parse");
+            assert_eq!(
+                cli.cards_path, "some/path",
+                "row {row:?}: positional cards_path must survive a preceding --flag value pair (F4)"
+            );
+        }
+    }
+
+    /// F4 value-consumption pin: the `--watch-cards` value must reach the
+    /// consuming set — split on commas, trimmed — and must not disturb the
+    /// positional `cards_path`. Guards the arm at the consuming loop directly
+    /// (a row in the positional table alone can't catch the value being
+    /// dropped or mis-split).
+    #[test]
+    fn parse_cli_watch_cards_value_reaches_the_consuming_set() {
+        let args: Vec<String> = [
+            "ai-commander",
+            "--watch-cards",
+            "Sol Ring, Arcane Signet",
+            "some/path",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let cli = parse_cli(&args, false).expect("watch-cards invocation must parse");
+        let expected: HashSet<String> = ["Sol Ring", "Arcane Signet"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(cli.watch_cards, expected);
+        assert_eq!(cli.cards_path, "some/path");
+    }
+
+    /// F4 value-consumption pin: the `--games-file` value must reach
+    /// `CliArgs.games_file` and its parsed batch (validated up front), and
+    /// must not disturb the positional `cards_path`.
+    #[test]
+    fn parse_cli_games_file_value_reaches_the_consuming_option() {
+        let path = temp_games_file_path("games_file_value_consumption");
+        let _guard = TempFileGuard(path.clone());
+        std::fs::write(&path, "1009,Easy\n").unwrap();
+        let path = path.to_str().unwrap();
+
+        let args: Vec<String> = ["ai-commander", "--games-file", path, "some/path"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let cli = parse_cli(&args, false).expect("games-file invocation must parse");
+        assert_eq!(cli.games_file.as_deref(), Some(path));
+        assert_eq!(
+            cli.batch_games,
+            Some(vec![(1009, AiDifficulty::Easy)]),
+            "the games-file value must reach the up-front-validated batch"
+        );
+        assert_eq!(cli.cards_path, "some/path");
+    }
+
+    /// F4 companion (green today, and a real pin): an *unknown* bare flag
+    /// (no recognized value-consuming arm) must not eat the following
+    /// positional arg. Guards against a naive single-loop F4 fix that
+    /// assumes every `--flag` consumes the next token.
+    #[test]
+    fn parse_cli_bare_unknown_flag_does_not_consume_positional_path() {
+        let args = vec![
+            "ai-commander".to_string(),
+            "--foo".to_string(),
+            "some/path".to_string(),
+        ];
+        let cli = parse_cli(&args, false).expect("row must parse");
+        assert_eq!(cli.cards_path, "some/path");
+    }
+
+    /// F4 companion (green today): with no positional arg at all,
+    /// `cards_path` must default to `client/public`.
+    #[test]
+    fn parse_cli_defaults_cards_path_to_client_public_when_no_positional() {
+        let args = vec!["ai-commander".to_string()];
+        let cli = parse_cli(&args, false).expect("bare invocation must parse");
+        assert_eq!(cli.cards_path, "client/public");
     }
 
     #[test]

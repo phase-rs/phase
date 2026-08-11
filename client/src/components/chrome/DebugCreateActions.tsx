@@ -147,13 +147,16 @@ interface CardFaceShape {
 }
 
 function CreateCardForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [cardName, setCardName] = useState("");
   const [owner, setOwner] = useState<PlayerId>(0);
   const [zone, setZone] = useState<Zone>("Hand");
+  const [count, setCount] = useState(1);
   // Gate the ETB pipeline for battlefield spawns. Checked = run replacements +
   // ETB triggers + SBAs (engine default); unchecked = raw placement. Only sent
   // meaningfully for Battlefield — the engine ignores it for other zones.
   const [runEtb, setRunEtb] = useState(true);
+  const [nonlegendary, setNonlegendary] = useState(false);
   const [face, setFace] = useState<CardFaceShape | null>(null);
   const [targetKind, setTargetKind] = useState<"Object" | "Player">("Object");
   const [targetObjectId, setTargetObjectId] = useState<ObjectId | null>(null);
@@ -230,6 +233,9 @@ function CreateCardForm({ onDispatch }: Props) {
       <FieldRow label="Zone">
         <SelectInput value={zone} onChange={setZone} options={ZONES} />
       </FieldRow>
+      <FieldRow label={t("debugCreate.copies")}>
+        <NumberInput value={count} onChange={setCount} min={0} />
+      </FieldRow>
       {showAttachPicker && (
         <>
           {info.canTargetPlayer && info.canTargetObject && (
@@ -262,11 +268,26 @@ function CreateCardForm({ onDispatch }: Props) {
           <CheckboxInput checked={runEtb} onChange={setRunEtb} label="Run ETB effects" />
         </FieldRow>
       )}
+      <FieldRow label="">
+        <CheckboxInput
+          checked={nonlegendary}
+          onChange={setNonlegendary}
+          label="Make nonlegendary"
+        />
+      </FieldRow>
       <SubmitButton
         onClick={() =>
           onDispatch({
             type: "CreateCard",
-            data: { card_name: cardName, owner, zone, attach_to: buildAttachTo(), run_etb: runEtb },
+            data: {
+              card_name: cardName,
+              owner,
+              zone,
+              attach_to: buildAttachTo(),
+              run_etb: runEtb,
+              nonlegendary,
+              count,
+            },
           })
         }
         disabled={!cardName.trim() || !hasHost}
@@ -378,6 +399,7 @@ export function buildCatalogTokenDebugAction({
   counterType,
   counterCount,
   runEtb,
+  count,
   powerOverride,
   toughnessOverride,
 }: {
@@ -386,6 +408,7 @@ export function buildCatalogTokenDebugAction({
   counterType: CounterType;
   counterCount: number;
   runEtb: boolean;
+  count: number;
   powerOverride?: number | null;
   toughnessOverride?: number | null;
 }): CreateTokenDebugAction | null {
@@ -409,6 +432,7 @@ export function buildCatalogTokenDebugAction({
         },
       },
       run_etb: runEtb,
+      count,
     },
   };
 }
@@ -425,6 +449,7 @@ function CatalogTokenForm({ onDispatch }: Props) {
   const [counterType, setCounterType] = useState<CounterType>("P1P1");
   const [counterCount, setCounterCount] = useState(0);
   const [runEtb, setRunEtb] = useState(true);
+  const [count, setCount] = useState(1);
 
   useEffect(() => {
     listTokenPresets()
@@ -512,6 +537,7 @@ function CatalogTokenForm({ onDispatch }: Props) {
       counterType,
       counterCount,
       runEtb,
+      count,
       powerOverride,
       toughnessOverride,
     });
@@ -536,6 +562,9 @@ function CatalogTokenForm({ onDispatch }: Props) {
       </FieldRow>
       <FieldRow label="Search">
         <TextInput value={search} onChange={setSearch} placeholder="Token, source card, set" />
+      </FieldRow>
+      <FieldRow label={t("debugCreate.copies")}>
+        <NumberInput value={count} onChange={setCount} min={0} />
       </FieldRow>
       <div className="mb-2 max-h-64 overflow-y-auto rounded border border-gray-800 bg-gray-950/40 p-1">
         {orderedGroups.length === 0 && (
@@ -623,6 +652,7 @@ function CatalogTokenForm({ onDispatch }: Props) {
 }
 
 function CustomTokenForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [name, setName] = useState("");
   const [owner, setOwner] = useState<PlayerId>(0);
   const [power, setPower] = useState(1);
@@ -634,6 +664,7 @@ function CustomTokenForm({ onDispatch }: Props) {
   const [counterType, setCounterType] = useState<CounterType>("P1P1");
   const [counterCount, setCounterCount] = useState(0);
   const [runEtb, setRunEtb] = useState(true);
+  const [count, setCount] = useState(1);
 
   const toggleCoreType = (ct: CoreType) => {
     setCoreTypes((prev) =>
@@ -678,6 +709,7 @@ function CustomTokenForm({ onDispatch }: Props) {
           },
         },
         run_etb: runEtb,
+        count,
       },
     });
   };
@@ -697,6 +729,9 @@ function CustomTokenForm({ onDispatch }: Props) {
       </FieldRow>
       <FieldRow label="Owner">
         <PlayerSelect value={owner} onChange={setOwner} />
+      </FieldRow>
+      <FieldRow label={t("debugCreate.copies")}>
+        <NumberInput value={count} onChange={setCount} min={0} />
       </FieldRow>
       <FieldRow label="Power">
         <NumberInput value={power} onChange={setPower} />
@@ -761,8 +796,11 @@ function CustomTokenForm({ onDispatch }: Props) {
 // copiable-value snapshotting, legendary-rule SBAs, ETB triggers — so this
 // form is a thin source+owner picker over the `CreateTokenCopy` debug action.
 function CopyPermanentForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [sourceId, setSourceId] = useState<ObjectId | null>(null);
   const [owner, setOwner] = useState<PlayerId>(0);
+  const [nonlegendary, setNonlegendary] = useState(false);
+  const [count, setCount] = useState(1);
 
   return (
     <>
@@ -778,10 +816,23 @@ function CopyPermanentForm({ onDispatch }: Props) {
       <FieldRow label="Owner">
         <PlayerSelect value={owner} onChange={setOwner} />
       </FieldRow>
+      <FieldRow label={t("debugCreate.copies")}>
+        <NumberInput value={count} onChange={setCount} min={0} />
+      </FieldRow>
+      <FieldRow label="">
+        <CheckboxInput
+          checked={nonlegendary}
+          onChange={setNonlegendary}
+          label="Make nonlegendary"
+        />
+      </FieldRow>
       <SubmitButton
         onClick={() => {
           if (sourceId == null) return;
-          onDispatch({ type: "CreateTokenCopy", data: { source_id: sourceId, owner } });
+          onDispatch({
+            type: "CreateTokenCopy",
+            data: { source_id: sourceId, owner, nonlegendary, count },
+          });
         }}
         disabled={sourceId == null}
       >

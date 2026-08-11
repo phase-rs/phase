@@ -10,6 +10,7 @@ const STEP_KEYS = ["chooseSet", "draft", "buildDeck", "play"] as const;
 const PHASE_STEP: Record<DraftPhase, number> = {
   setup: 0,
   drafting: 1,
+  opening: 1,
   deckbuilding: 2,
   launching: 3,
   playing: 3,

@@ -21,7 +21,7 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef};
 use crate::types::keywords::{Keyword, KeywordKind};
-use crate::types::mana::{ColoredManaCount, ManaColor, ManaCost, ManaPip};
+use crate::types::mana::{ColoredManaCount, ManaColor, ManaCost, ManaPip, ManaType};
 use crate::types::player::PlayerId;
 use crate::types::stickers::AppliedSticker;
 use crate::types::zones::Zone;
@@ -81,6 +81,38 @@ pub struct BestowFormState;
 /// permanent — the merge identity lives in `GameObject::merged_components`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct MutateFormState;
+
+/// Serde adapter for presence-only unit markers stored in optional fields.
+///
+/// The owning fields retain `#[serde(default)]` so an absent field restores as
+/// `None`, while a present legacy `null` reaches this adapter and restores the
+/// marker. Canonical serialization omits `None` through the fields'
+/// `skip_serializing_if` attributes and represents `Some(_)` as `true`.
+///
+/// This adapter must not be used for markers that carry payload. Adding payload
+/// requires a deliberately versioned wire representation rather than silently
+/// discarding it behind this presence bit.
+mod unit_marker_option_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<T, S>(value: &Option<T>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bool(value.is_some())
+    }
+
+    pub(super) fn deserialize<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+    where
+        T: Default,
+        D: Deserializer<'de>,
+    {
+        match Option::<bool>::deserialize(deserializer)? {
+            Some(true) | None => Ok(Some(T::default())),
+            Some(false) => Ok(None),
+        }
+    }
+}
 
 /// CR 712.4c / CR 730.2: Which merge keyword built a merged permanent.
 /// Disambiguates Meld (cannot transform — CR 712.4c) from Mutate, which
@@ -179,7 +211,7 @@ pub enum PhaseOutCause {
 
 /// Stored back-face data for double-faced cards (DFCs).
 /// Populated when a Transform-layout card enters the game.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BackFaceData {
     pub name: String,
     pub power: Option<i32>,
@@ -207,6 +239,25 @@ pub struct BackFaceData {
     pub strive_cost: Option<ManaCost>,
     pub casting_restrictions: Vec<CastingRestriction>,
     pub casting_options: Vec<SpellCastingOption>,
+    /// Parser diagnostics for THIS face — the `BackFaceData` half of
+    /// [`GameObject::parse_warnings`], and per-face for the same reason `abilities`
+    /// is: the two faces are parsed independently, so a card whose front reads
+    /// cleanly and whose back does not is the normal case rather than a corner one.
+    ///
+    /// Without this field the diagnostic was not a per-face fact at all. Face
+    /// application copies field by field, so a transform kept the FRONT face's
+    /// diagnostics on the object while displaying the back face's rules text: a
+    /// front-clean card looked clean after transforming into a back face the parser
+    /// could not fully read, and a front-dirty one kept a diagnostic that no longer
+    /// described anything. `ai_support::shortcut_efficacy` reads the object field as
+    /// evidence that the printed rules text is fully modelled, so the stale answer
+    /// was load-bearing in both directions.
+    ///
+    /// `serde(default)` keeps every persisted dump loadable — an older
+    /// `BackFaceData` simply carries no diagnostics — and `skip_serializing_if`
+    /// keeps a clean parse byte-identical on the way out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parse_warnings: Vec<crate::parser::oracle_ir::diagnostic::OracleDiagnostic>,
     /// Source layout kind — distinguishes Modal DFCs from Transform DFCs
     /// so the engine can offer face-choice for MDFCs (CR 712.12).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -368,6 +419,12 @@ pub struct GameObject {
     pub base_controller: Option<PlayerId>,
     pub controller: PlayerId,
     pub zone: Zone,
+    /// Viewer-specific identity-display projection. This is false on
+    /// authoritative game state and populated only at client-view boundaries;
+    /// presentation consumers must use it instead of reconstructing hidden
+    /// information permissions from reveal bookkeeping.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub display_visible_to_viewer: bool,
 
     // Battlefield state
     pub tapped: bool,
@@ -511,11 +568,47 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub spellbook: Vec<String>,
 
+    /// Parser diagnostics for the DISPLAYED face, copied verbatim from
+    /// `CardFace::parse_warnings` by `game::printed_cards`. A transform swaps this
+    /// along with the rest of the face, through [`BackFaceData::parse_warnings`] —
+    /// the two faces parse independently, so a card can be clean on one and not the
+    /// other, and reporting the wrong face's diagnostics is worse than reporting
+    /// none.
+    ///
+    /// NOT a rules field, and it does not change how anything resolves. It is
+    /// carried onto the object because a diagnostic is EVIDENCE ABOUT the rules
+    /// content: it records that the parser saw printed text it could not turn
+    /// into an `AbilityDefinition`. `game::coverage` already reads the same list
+    /// off the face to decide whether a card is supported. Any consumer that
+    /// wants to prove an object's printed rules text is fully modelled has to be
+    /// able to see that the parse was lossy, and before this field existed that
+    /// evidence stopped at the card database.
+    ///
+    /// `skip_serializing_if` keeps every existing dump byte-identical: the field
+    /// is empty for a clean parse, which is the overwhelming majority of objects.
+    ///
+    /// DELIBERATELY ABSENT FROM `CopiableValues`. CR 707.2 gives a copy the
+    /// copiable values of the original's CHARACTERISTICS, and CR 707.2a says why
+    /// the abilities come along: "those values are derived from its rules text".
+    /// A parse diagnostic is not derived from the rules text — it is a statement
+    /// about this engine's READING of it — so it is not a characteristic and a
+    /// copy does not acquire it. The consequence, stated rather than left to be
+    /// discovered: a token copy carries the source's `abilities` but its own
+    /// (empty) diagnostics. That is exactly the coverage a copy had before this
+    /// field existed; the field narrows the gap for printed objects and leaves
+    /// the copy case where it already was.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parse_warnings: Vec<crate::parser::oracle_ir::diagnostic::OracleDiagnostic>,
+
     // Back face data for double-faced cards (DFCs)
     pub back_face: Option<BackFaceData>,
 
     /// Digital-only Specialize: specialized faces keyed by added color pip.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::deterministic_serde::option_hash_map"
+    )]
     pub specialize_faces: Option<super::specialize::SpecializeFaceMap>,
 
     /// Digital-only Specialize: set after specializing; prevents re-specializing.
@@ -726,7 +819,11 @@ pub struct GameObject {
     /// CR 702.103b + CR 702.103f: `Some(_)` while this object is in the
     /// "bestowed Aura" form. Set by `apply_bestow_aura_form`; cleared per
     /// CR 702.103e–g (illegal target, unattach, zone exit).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "unit_marker_option_serde",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub bestow_form: Option<BestowFormState>,
 
     /// CR 702.160a: `Some(_)` while this object was cast prototyped. The
@@ -739,7 +836,11 @@ pub struct GameObject {
     /// the stack (cast for its mutate cost). Set by `apply_mutate_form`; cleared
     /// by `revert_mutate_form` when the target is illegal at resolution
     /// (CR 702.140b). Does not persist onto the merged permanent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "unit_marker_option_serde",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub mutate_form: Option<MutateFormState>,
 
     /// CR 730.2 + CR 702.140c: The ordered list of card/token `ObjectId`s that
@@ -932,13 +1033,21 @@ pub struct GameObject {
     /// CR 701.15c: Which players have goaded this creature. A goaded creature must attack
     /// each combat if able and must attack a player other than the goading player(s) if able.
     /// Multiple players can goad the same creature, creating additional combat requirements.
-    #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::collections::HashSet::is_empty",
+        serialize_with = "crate::types::deterministic_serde::hash_set"
+    )]
     pub goaded_by: std::collections::HashSet<PlayerId>,
 
     /// CR 701.35a: Which players have detained this permanent. A detained permanent
     /// can't attack or block and its activated abilities can't be activated until the
     /// detaining player's next turn. Cleared during layer evaluation like goaded_by.
-    #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::collections::HashSet::is_empty",
+        serialize_with = "crate::types::deterministic_serde::hash_set"
+    )]
     pub detained_by: std::collections::HashSet<PlayerId>,
 
     /// CR 701.60a: Whether this creature is currently suspected.
@@ -970,7 +1079,11 @@ pub struct GameObject {
     /// memory of its previous existence). `Option<PreparedState>` over a bool
     /// per project idiom (no bool flags). Assign when WotC publishes SOS CR
     /// update.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "unit_marker_option_serde",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub prepared: Option<PreparedState>,
 
     /// CR 702.171b: Saddled designation. A permanent stays saddled until the end
@@ -1130,6 +1243,25 @@ pub struct GameObject {
     /// all rules queries. Defaults to `PhasedIn` for replay compatibility.
     #[serde(default)]
     pub phase_status: PhaseStatus,
+
+    /// CR 106.1b + CR 602.2b (issue #6504): Mana type(s) spent to pay this
+    /// object's own activated-ability mana cost, stamped by
+    /// `pay_ability_mana_cost_with_choices_excluding_and_parent` at
+    /// activation-time payment. PURELY A BRIDGE: `push_ability_entry` (the
+    /// single authority where an activated ability reaches the stack)
+    /// synchronously drains this field — via `std::mem::take` — into that
+    /// specific activation's own `ResolvedAbility::noted_mana_payment`
+    /// (paired with the source's live incarnation at that same moment)
+    /// immediately after cost payment completes, before any later activation
+    /// of this permanent could occur. Nothing reads this field at resolution
+    /// time; `Effect::NoteManaSpent` reads the per-activation snapshot
+    /// instead, so a permanent untapped and reactivated with a different
+    /// payment while an earlier activation still sits unresolved on the
+    /// stack cannot corrupt what that earlier instance observed. Always
+    /// empty except transiently between the payment stamp and the very next
+    /// `push_ability_entry` call for the same source.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mana_spent_to_activate: Vec<ManaType>,
 }
 
 /// CR 104.4b compile-time totality guard for `objects_content_eq`/`object_content_eq`
@@ -1148,6 +1280,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         base_controller: _,
         controller: _,
         zone: _,
+        display_visible_to_viewer: _,
         tapped: _,
         face_down: _,
         flipped: _,
@@ -1188,6 +1321,17 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         token_image_ref: _,
         source_related_token_ids: _,
         spellbook: _,
+        // OMITTED, SAFE BY WRITE SITE. Every write is a FACE INSTALL:
+        // `printed_cards::apply_card_face_to_object` (front) and
+        // `apply_back_face_to_object` (the face a transform swaps in), each a verbatim
+        // clone of that face's own diagnostics, plus the two `game::visibility`
+        // redactions which act on a projected copy and never on stored state. So the
+        // field is a function of WHICH FACE IS DISPLAYED, and `transformed` — compared
+        // above — is that same function's discriminator: two states this comparator
+        // calls equal are showing the same face of the same card, and therefore agree
+        // here. Nothing accumulates in it, so it cannot become the per-iteration drift
+        // the §5.2c ADD set exists to catch.
+        parse_warnings: _,
         back_face: _,
         specialize_faces: _,
         specialized_color: _,
@@ -1289,6 +1433,11 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         mana_spent_source_snapshots: _,
         phase_status: _,
         protection_start_exempt_attachments: _,
+        // Activation-cost-payment latch — same omission class as
+        // `mana_spent_to_cast`/`colors_spent_to_cast` above: drained
+        // synchronously by `push_ability_entry` into the resolving
+        // `ResolvedAbility`'s own `noted_mana_payment` snapshot (§5.2c).
+        mana_spent_to_activate: _,
     } = o;
 }
 
@@ -1925,6 +2074,7 @@ impl GameObject {
             // battlefield-entry incarnation bump; `None` here (pre-entry snapshot).
             entered_incarnation: None,
             turn_zone_change_index: 0,
+            recorded_turn_number: 0,
             // CR 701.60b: Snapshot suspected status at the moment of the move,
             // before `move_to_zone` resets the live flag — so an LTB / cost-paid
             // look-back ("the sacrificed creature was suspected") reads it.
@@ -2014,6 +2164,7 @@ impl GameObject {
             base_controller: Some(owner),
             controller: owner,
             zone,
+            display_visible_to_viewer: false,
             tapped: false,
             face_down: false,
             flipped: false,
@@ -2055,6 +2206,7 @@ impl GameObject {
             token_image_ref: None,
             source_related_token_ids: Vec::new(),
             spellbook: Vec::new(),
+            parse_warnings: Vec::new(),
             back_face: None,
             specialize_faces: None,
             specialized_color: None,
@@ -2155,6 +2307,7 @@ impl GameObject {
             phyrexian_life_paid: 0,
             mana_spent_source_snapshots: Vec::new(),
             phase_status: PhaseStatus::PhasedIn,
+            mana_spent_to_activate: Vec::new(),
         }
     }
 
@@ -2602,6 +2755,16 @@ impl GameObject {
         })
     }
 
+    /// CR 106.1b: Look up the mana type(s) noted by a past `Effect::NoteManaSpent`
+    /// resolution on this permanent's own ability ("this artifact's last noted
+    /// type" — Jeweled Amulet). Read by `ManaProduction::NotedType`.
+    pub fn noted_mana_spent(&self) -> Option<&[ManaType]> {
+        self.chosen_attributes.iter().find_map(|a| match a {
+            ChosenAttribute::NotedManaSpent(types) => Some(types.as_slice()),
+            _ => None,
+        })
+    }
+
     /// CR 205.2: Look up a stored card-type choice (e.g. the card
     /// type chosen as this permanent entered the battlefield).
     ///
@@ -2712,7 +2875,7 @@ impl GameObject {
         })
     }
 
-    /// CR 310.8a + CR 310.8e: Return this battle's protector, if any. Derived
+    /// CR 310.9 + CR 310.9a: Return this battle's protector, if any. Derived
     /// from `ChosenAttribute::Player` stored when the Siege's "As ~ enters"
     /// replacement resolved. Non-battle permanents return `None`.
     pub fn protector(&self) -> Option<PlayerId> {
@@ -2748,24 +2911,66 @@ impl GameObject {
         self.owner == player && self.zone == Zone::Graveyard && self.is_represented_by_a_card()
     }
 
-    /// CR 714.1: Returns the final chapter number for a Saga, or None if not a Saga.
-    /// Derived at runtime from the maximum threshold in the trigger definitions' counter filters.
+    /// CR 714.2: Every chapter number this Saga's chapter abilities are keyed
+    /// to, read from the chapter-symbol provenance the Saga parser records
+    /// (`TriggerDefinition::saga_chapter`).
+    ///
+    /// Deliberately NOT inferred from lore-counter thresholds. CR 714.2b gives a
+    /// chapter symbol the shape of a lore threshold trigger, but the converse
+    /// does not hold: a lore threshold trigger a Saga acquired some other way is
+    /// not a chapter ability, and counting it would corrupt the final chapter
+    /// number that CR 714.2d defines and CR 714.4's sacrifice depends on.
+    ///
+    /// Empty for a non-Saga. Structural scan of the Saga's own triggers —
+    /// intrinsic to the card, not subject to functioning gates. `iter_all` is
+    /// pub(crate).
+    pub fn saga_chapter_numbers(&self) -> impl Iterator<Item = u32> + '_ {
+        self.card_types
+            .subtypes
+            .iter()
+            .any(|subtype| subtype == "Saga")
+            .then(|| self.trigger_definitions.iter_all())
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.definition.saga_chapter)
+    }
+
+    /// CR 714.2d: "A Saga's final chapter number is the greatest value among
+    /// chapter abilities it has." Returns `None` for a non-Saga.
+    ///
+    /// CR 714.2d also assigns a final chapter number of 0 to a Saga with no
+    /// chapter abilities; this returns `None` there too, because every caller
+    /// uses `None` to mean "not a Saga to begin with" and CR 714.3c / CR 714.4
+    /// both exempt a Saga with no chapter abilities from the lore turn-based
+    /// action and the sacrifice.
     pub fn final_chapter_number(&self) -> Option<u32> {
-        if !self.card_types.subtypes.iter().any(|s| s == "Saga") {
-            return None;
-        }
-        // Structural scan of this Saga's own triggers — intrinsic to the
-        // card, not subject to functioning gates. `iter_all` is pub(crate).
-        self.trigger_definitions
+        self.saga_chapter_numbers().max()
+    }
+
+    /// CR 714.2 + CR 714.2d: Identify one of this Saga's own chapter abilities
+    /// by the exact trigger occurrence that produced it, returning
+    /// `(chapter_number, final_chapter_number)`.
+    ///
+    /// Keyed on the occurrence, so CR 714.2c's two chapter abilities printed on
+    /// one line stay distinguishable even though they share that line. The
+    /// chapter number comes from the recorded chapter symbol, never re-derived
+    /// from the lore count (wrong under Read Ahead, and wrong for a
+    /// multi-counter addition, which per CR 714.2b crosses several thresholds at
+    /// once) nor from the `"Chapter {n}"` description string.
+    ///
+    /// Returns `None` for a non-Saga, or for an occurrence that is not one of
+    /// this permanent's chapter abilities.
+    pub fn saga_chapter_for_occurrence(
+        &self,
+        occurrence: &TriggerDefinitionOccurrenceRef,
+    ) -> Option<(u32, u32)> {
+        let final_chapter = self.final_chapter_number()?;
+        let chapter = self
+            .trigger_definitions
             .iter_all()
-            .filter_map(|entry| {
-                entry
-                    .definition
-                    .counter_filter
-                    .as_ref()
-                    .and_then(|f| f.threshold)
-            })
-            .max()
+            .find(|entry| &entry.occurrence == occurrence)
+            .and_then(|entry| entry.definition.saga_chapter)?;
+        Some((chapter, final_chapter))
     }
 
     /// CR 702.51a: Whether this object can be tapped for convoke mana.
@@ -2811,6 +3016,10 @@ impl GameObject {
 /// Serde helper: skip serialization when a `u32` field is zero.
 fn is_zero_u32_field(n: &u32) -> bool {
     *n == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// CR 607.2d + CR 608.2c: Resolve "the chosen player" from the source's
@@ -3480,24 +3689,24 @@ mod tests {
         );
         obj.card_types.subtypes.push("Saga".to_string());
         obj.trigger_definitions = vec![
-            TriggerDefinition::new(TriggerMode::CounterAdded).counter_filter(
-                CounterTriggerFilter {
+            TriggerDefinition::new(TriggerMode::CounterAdded)
+                .counter_filter(CounterTriggerFilter {
                     counter_type: CounterType::Lore,
                     threshold: Some(1),
-                },
-            ),
-            TriggerDefinition::new(TriggerMode::CounterAdded).counter_filter(
-                CounterTriggerFilter {
+                })
+                .saga_chapter(1),
+            TriggerDefinition::new(TriggerMode::CounterAdded)
+                .counter_filter(CounterTriggerFilter {
                     counter_type: CounterType::Lore,
                     threshold: Some(2),
-                },
-            ),
-            TriggerDefinition::new(TriggerMode::CounterAdded).counter_filter(
-                CounterTriggerFilter {
+                })
+                .saga_chapter(2),
+            TriggerDefinition::new(TriggerMode::CounterAdded)
+                .counter_filter(CounterTriggerFilter {
                     counter_type: CounterType::Lore,
                     threshold: Some(3),
-                },
-            ),
+                })
+                .saga_chapter(3),
         ]
         .into();
         assert_eq!(obj.final_chapter_number(), Some(3));

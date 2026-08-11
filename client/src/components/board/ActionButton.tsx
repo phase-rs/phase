@@ -229,9 +229,22 @@ export function ActionButton() {
       setShowTargetPicker(true);
       return;
     }
+    const attacks = buildAttacks(
+      selectedAttackers,
+      validAttackTargetsByAttacker,
+      validAttackTargets,
+    );
+    if (attacks == null) {
+      // A present support map can authoritatively give a selected candidate no
+      // selectable targets. Keep the complete selection in the picker rather
+      // than silently sending a shortened declaration; only the engine decides
+      // whether an eventual full declaration is accepted.
+      setShowTargetPicker(true);
+      return;
+    }
     dispatchAction({
       type: "DeclareAttackers",
-      data: { attacks: buildAttacks(selectedAttackers, validAttackTargetsByAttacker, validAttackTargets) },
+      data: { attacks },
     });
   }
 
@@ -409,9 +422,11 @@ export function ActionButton() {
                 // starts Resolve All; stack pressure never opts the player in.
                 // Draft matches: only a Bot pairing has an AI seat, and it uses
                 // the same binding installMatchRuntime gives the live controller.
-                // Everything else — "local" hotseat above all (#4978) — gets an
-                // empty list so dispatchResolveAll falls back to the per-seat
-                // engine auto-yield instead of handing human seats to the AI.
+                // Native AI likewise gets an empty list: its authenticated server
+                // advertises the Resolve All capability and owns AI-seat selection.
+                // Everything else — "local" hotseat above all (#4978) — falls
+                // back to per-seat engine auto-yield instead of handing human
+                // seats to the AI.
                 let seats: { playerId: number; difficulty: string }[] = [];
                 if (gameMode === "ai") {
                   const playerCount = gs?.players?.length ?? 2;

@@ -6,13 +6,13 @@ use engine::types::ability::{
 };
 use engine::types::game_state::{
     DrawSequenceStack, GameState, PendingContinuation, PostReplacementDrain,
-    PostReplacementDrainStack, ResidentDrainPolicy,
+    PostReplacementDrainStack, ResidentDrainPolicy, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
 use engine::types::resolution::{
-    FrameKind, MultiDrawFrame, PendingCoinFlip, PendingCoinFlipKind, ResolutionFrame,
-    ResolutionStackError, ResolutionStateWire,
+    FrameKind, MultiDrawFrame, OptionalEffectFrame, PendingCoinFlip, PendingCoinFlipKind,
+    ResolutionFrame, ResolutionStackError, ResolutionStateWire,
 };
 use engine::types::resolved_commands::{
     ResolvedCommandOrdinal, ResolvedFrameTransition, ResolvedFrameTransitionCommand,
@@ -136,6 +136,45 @@ fn malformed_prompt_coherence_errors_atomically() {
                 waiting_for: "Priority",
             }
         ))
+    );
+    assert_eq!(state.resolution_stack, before);
+}
+
+/// Regression for #6805: an optional-effect prompt owner must be removed before
+/// an accepted optional search installs `SearchChoice`. Parent insertion is the
+/// first boundary that validates this stale-owner state, and must reject it
+/// atomically rather than burying the direct-choice frame.
+#[test]
+fn optional_effect_frame_cannot_survive_into_search_choice_parent_insertion() {
+    let mut state = GameState::new_two_player(97);
+    let optional_ability = pending_continuation(&state).chain;
+    state
+        .resolution_stack
+        .push_inner(ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+            ability: optional_ability,
+            trigger_event: None,
+            trigger_events: Vec::new(),
+            trigger_match_count: None,
+        }));
+    state.waiting_for = WaitingFor::SearchChoice {
+        player: PlayerId(0),
+        library_owner: Some(PlayerId(0)),
+        cards: Vec::new(),
+        count: 0,
+        reveal: false,
+        up_to: false,
+        allows_partial_find: false,
+        constraint: Default::default(),
+        split: None,
+    };
+    let before = state.resolution_stack.clone();
+
+    assert_eq!(
+        state.insert_ability_continuation_parent_of_active(pending_continuation(&state)),
+        Err(ResolutionStackError::PromptMismatch {
+            frame: FrameKind::OptionalEffect,
+            waiting_for: "SearchChoice",
+        })
     );
     assert_eq!(state.resolution_stack, before);
 }

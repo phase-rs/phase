@@ -1,8 +1,15 @@
 {
   "concedeDialog": {
     "title": "Conceder Jogo?",
-    "message": "Seu oponente será declarado o vencedor.",
-    "concede": "Conceder"
+    "game": {
+      "label": "Conceder este jogo",
+      "ordinaryMessage": "Seu oponente vence este jogo.",
+      "matchMessage": "Você concede apenas o jogo atual. Se a partida não estiver decidida, seguirá o sideboard ou o próximo jogo."
+    },
+    "match": {
+      "label": "Conceder toda a partida",
+      "message": "Você concede a partida. Seu oponente vence a partida e não haverá mais jogos."
+    }
   },
   "takebackDialog": {
     "requestedTitle": "{{name}} solicita um retrocesso",

@@ -1,13 +1,26 @@
 import { motion, AnimatePresence } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
+interface GameConcessionAction {
+  readonly kind: "game";
+  readonly consequence: "ordinary-game" | "best-of-three-game";
+  readonly onConfirm: () => void;
+}
+
+interface MatchConcessionAction {
+  readonly kind: "match";
+  readonly onConfirm: () => void;
+}
+
 interface ConcedeDialogProps {
   isOpen: boolean;
-  onConfirm: () => void;
+  gameAction: GameConcessionAction;
+  /** Present only when the active transport supports authenticated match concession. */
+  matchAction?: MatchConcessionAction;
   onCancel: () => void;
 }
 
-export function ConcedeDialog({ isOpen, onConfirm, onCancel }: ConcedeDialogProps) {
+export function ConcedeDialog({ isOpen, gameAction, matchAction, onCancel }: ConcedeDialogProps) {
   const { t } = useTranslation("multiplayer");
   return (
     <AnimatePresence>
@@ -28,8 +41,12 @@ export function ConcedeDialog({ isOpen, onConfirm, onCancel }: ConcedeDialogProp
             transition={{ type: "spring", stiffness: 300, damping: 25 }}
           >
             <h2 className="mb-2 text-xl font-bold text-white">{t("concedeDialog.title")}</h2>
-            <p className="mb-6 text-sm text-gray-400">
-              {t("concedeDialog.message")}
+            <p className="mb-4 text-sm text-gray-400">
+              {t(
+                gameAction.consequence === "best-of-three-game"
+                  ? "concedeDialog.game.matchMessage"
+                  : "concedeDialog.game.ordinaryMessage",
+              )}
             </p>
             <div className="flex justify-center gap-3">
               <button
@@ -39,11 +56,24 @@ export function ConcedeDialog({ isOpen, onConfirm, onCancel }: ConcedeDialogProp
                 {t("common:actions.cancel")}
               </button>
               <button
-                onClick={onConfirm}
+                onClick={gameAction.onConfirm}
                 className="rounded-lg bg-red-600 px-5 py-2 text-sm font-semibold text-white transition hover:bg-red-500"
               >
-                {t("concedeDialog.concede")}
+                {t("concedeDialog.game.label")}
               </button>
+              {matchAction && (
+                <div className="flex flex-col items-center gap-1">
+                  <p className="max-w-36 text-center text-xs text-gray-400">
+                    {t("concedeDialog.match.message")}
+                  </p>
+                  <button
+                    onClick={matchAction.onConfirm}
+                    className="rounded-lg bg-red-800 px-5 py-2 text-sm font-semibold text-white transition hover:bg-red-700"
+                  >
+                    {t("concedeDialog.match.label")}
+                  </button>
+                </div>
+              )}
             </div>
           </motion.div>
         </div>

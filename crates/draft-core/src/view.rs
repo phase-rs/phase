@@ -2,6 +2,7 @@ use engine::types::player::PlayerId;
 use serde::{Deserialize, Serialize};
 
 use crate::types::*;
+use engine::types::match_config::MatchConfig;
 
 /// A single entry in the standings table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,13 +44,90 @@ pub struct SeatPublicView {
     pub pick_status: PickStatus,
 }
 
+/// A stable, engine-defined category for a limited pool display group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DraftPoolGroupKind {
+    White,
+    Blue,
+    Black,
+    Red,
+    Green,
+    Multicolor,
+    Colorless,
+    Creature,
+    Instant,
+    Sorcery,
+    Enchantment,
+    Artifact,
+    Planeswalker,
+    Land,
+    Other,
+    ManaValue0,
+    ManaValue1,
+    ManaValue2,
+    ManaValue3,
+    ManaValue4,
+    ManaValue5,
+    ManaValue6Plus,
+}
+
+/// One distinct card and the number of copies in a pool group.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DraftPoolEntry {
+    pub card: DraftCardInstance,
+    pub count: usize,
+}
+
+/// One ordered display group in a limited pool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DraftPoolGroup {
+    pub kind: DraftPoolGroupKind,
+    /// Number of physical cards before duplicate entries are collapsed.
+    pub total: usize,
+    pub cards: Vec<DraftPoolEntry>,
+}
+
+/// WUBRG card totals for the pool header. Multicolor cards count toward every
+/// color they contain.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DraftPoolColorCounts {
+    pub white: usize,
+    pub blue: usize,
+    pub black: usize,
+    pub red: usize,
+    pub green: usize,
+}
+
+/// Pre-grouped, ordered presentation data for a player's limited pool.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DraftPoolGroups {
+    pub color_groups: Vec<DraftPoolGroup>,
+    pub type_groups: Vec<DraftPoolGroup>,
+    pub cmc_groups: Vec<DraftPoolGroup>,
+    pub color_counts: DraftPoolColorCounts,
+}
+
+impl DraftPoolGroups {
+    /// Builds the engine-owned ordering, grouping, and duplicate counts for a
+    /// limited pool display.
+    pub fn from_pool(pool: &[DraftCardInstance]) -> Self {
+        Self {
+            color_groups: groups_for(pool, &COLOR_GROUP_ORDER, color_group, true),
+            type_groups: groups_for(pool, &TYPE_GROUP_ORDER, type_group, true),
+            cmc_groups: groups_for(pool, &CMC_GROUP_ORDER, mana_value_group, false),
+            color_counts: color_counts(pool),
+        }
+    }
+}
+
 /// Filtered draft state for a specific player. Built from scratch (not a reference
 /// into DraftSession) to prevent accidental hidden state leakage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DraftPlayerView {
     /// Current draft status
     pub status: DraftStatus,
-    /// Draft kind (Quick/Premier/Traditional)
+    /// Draft kind (Quick/Premier/Traditional/Sealed)
     pub kind: DraftKind,
     /// Which pack round (0, 1, 2)
     pub current_pack_number: u8,
@@ -61,6 +139,13 @@ pub struct DraftPlayerView {
     pub current_pack: Option<Vec<DraftCardInstance>>,
     /// The viewer's drafted pool
     pub pool: Vec<DraftCardInstance>,
+    /// Engine-defined groups for displaying the viewer's pool without client-side
+    /// card classification, ordering, or deduplication.
+    pub pool_groups: DraftPoolGroups,
+    /// Each of the viewer's sealed packs, in opening order. Present only for
+    /// sealed events so clients can present the engine-generated pulls without
+    /// reconstructing packs from a flattened pool.
+    pub sealed_packs: Option<Vec<Vec<DraftCardInstance>>>,
     /// Public info for all seats
     pub seats: Vec<SeatPublicView>,
     /// Total cards per pack (for UI progress display)
@@ -84,6 +169,8 @@ pub struct DraftPlayerView {
     pub pod_policy: PodPolicy,
     /// Pairings for the current round.
     pub pairings: Vec<PairingView>,
+    /// Resolved match configuration owned by the draft engine.
+    pub match_config: MatchConfig,
 }
 
 /// Re-export SpectatorVisibility from types for convenience.
@@ -110,6 +197,8 @@ pub struct SpectatorDraftView {
     pub tournament_format: TournamentFormat,
     pub pod_policy: PodPolicy,
     pub pairings: Vec<PairingView>,
+    /// Resolved match configuration owned by the draft engine.
+    pub match_config: MatchConfig,
     /// Populated only in `Omniscient` mode. Each inner Vec is a seat's pool.
     pub pools: Option<Vec<Vec<DraftCardInstance>>>,
     /// Populated only in `Omniscient` mode. Each entry is a seat's current pack.
@@ -204,6 +293,7 @@ pub fn filter_for_spectator(
         tournament_format: session.config.tournament_format,
         pod_policy: session.config.pod_policy,
         pairings,
+        match_config: session.kind.match_config(),
         pools,
         current_packs,
     }
@@ -232,6 +322,12 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
         .map(|p| p.0.clone());
 
     let pool = session.pools.get(idx).cloned().unwrap_or_default();
+    let sealed_packs = (session.kind == DraftKind::Sealed).then(|| {
+        pool.chunks(usize::from(session.config.cards_per_pack))
+            .map(ToOwned::to_owned)
+            .collect()
+    });
+    let pool_groups = DraftPoolGroups::from_pool(&pool);
 
     let is_drafting = session.status == DraftStatus::Drafting;
 
@@ -292,6 +388,8 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
         pass_direction: session.pass_direction,
         current_pack,
         pool,
+        pool_groups,
+        sealed_packs,
         seats,
         cards_per_pack: session.config.cards_per_pack,
         pack_count: session.config.pack_count,
@@ -303,7 +401,153 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
         tournament_format: session.config.tournament_format,
         pod_policy: session.config.pod_policy,
         pairings,
+        match_config: session.kind.match_config(),
     }
+}
+
+const COLOR_GROUP_ORDER: [DraftPoolGroupKind; 7] = [
+    DraftPoolGroupKind::White,
+    DraftPoolGroupKind::Blue,
+    DraftPoolGroupKind::Black,
+    DraftPoolGroupKind::Red,
+    DraftPoolGroupKind::Green,
+    DraftPoolGroupKind::Multicolor,
+    DraftPoolGroupKind::Colorless,
+];
+
+const TYPE_GROUP_ORDER: [DraftPoolGroupKind; 8] = [
+    DraftPoolGroupKind::Creature,
+    DraftPoolGroupKind::Instant,
+    DraftPoolGroupKind::Sorcery,
+    DraftPoolGroupKind::Enchantment,
+    DraftPoolGroupKind::Artifact,
+    DraftPoolGroupKind::Planeswalker,
+    DraftPoolGroupKind::Land,
+    DraftPoolGroupKind::Other,
+];
+
+const CMC_GROUP_ORDER: [DraftPoolGroupKind; 7] = [
+    DraftPoolGroupKind::ManaValue0,
+    DraftPoolGroupKind::ManaValue1,
+    DraftPoolGroupKind::ManaValue2,
+    DraftPoolGroupKind::ManaValue3,
+    DraftPoolGroupKind::ManaValue4,
+    DraftPoolGroupKind::ManaValue5,
+    DraftPoolGroupKind::ManaValue6Plus,
+];
+
+fn groups_for(
+    pool: &[DraftCardInstance],
+    order: &[DraftPoolGroupKind],
+    classify: fn(&DraftCardInstance) -> DraftPoolGroupKind,
+    sort_by_cmc: bool,
+) -> Vec<DraftPoolGroup> {
+    order
+        .iter()
+        .filter_map(|kind| {
+            let cards: Vec<_> = pool
+                .iter()
+                .filter(|card| classify(card) == *kind)
+                .cloned()
+                .collect();
+            let total = cards.len();
+            (!cards.is_empty()).then(|| DraftPoolGroup {
+                kind: *kind,
+                total,
+                cards: sorted_entries(cards, sort_by_cmc),
+            })
+        })
+        .collect()
+}
+
+fn sorted_entries(mut cards: Vec<DraftCardInstance>, sort_by_cmc: bool) -> Vec<DraftPoolEntry> {
+    cards.sort_by(|left, right| {
+        if sort_by_cmc {
+            left.cmc
+                .cmp(&right.cmc)
+                .then_with(|| left.name.cmp(&right.name))
+        } else {
+            left.name.cmp(&right.name)
+        }
+    });
+
+    let mut entries: Vec<DraftPoolEntry> = Vec::new();
+    for card in cards {
+        if let Some(entry) = entries
+            .last_mut()
+            .filter(|entry| entry.card.name == card.name)
+        {
+            entry.count += 1;
+        } else {
+            entries.push(DraftPoolEntry { card, count: 1 });
+        }
+    }
+    entries
+}
+
+fn color_group(card: &DraftCardInstance) -> DraftPoolGroupKind {
+    match card.colors.as_slice() {
+        [] => DraftPoolGroupKind::Colorless,
+        [_color, _second, ..] => DraftPoolGroupKind::Multicolor,
+        [color] => match color.as_str() {
+            "W" => DraftPoolGroupKind::White,
+            "U" => DraftPoolGroupKind::Blue,
+            "B" => DraftPoolGroupKind::Black,
+            "R" => DraftPoolGroupKind::Red,
+            "G" => DraftPoolGroupKind::Green,
+            _ => DraftPoolGroupKind::Colorless,
+        },
+    }
+}
+
+fn type_group(card: &DraftCardInstance) -> DraftPoolGroupKind {
+    let type_line = card.type_line.to_ascii_lowercase();
+    if type_line.contains("creature") {
+        DraftPoolGroupKind::Creature
+    } else if type_line.contains("instant") {
+        DraftPoolGroupKind::Instant
+    } else if type_line.contains("sorcery") {
+        DraftPoolGroupKind::Sorcery
+    } else if type_line.contains("enchantment") {
+        DraftPoolGroupKind::Enchantment
+    } else if type_line.contains("artifact") {
+        DraftPoolGroupKind::Artifact
+    } else if type_line.contains("planeswalker") {
+        DraftPoolGroupKind::Planeswalker
+    } else if type_line.contains("land") {
+        DraftPoolGroupKind::Land
+    } else {
+        DraftPoolGroupKind::Other
+    }
+}
+
+fn mana_value_group(card: &DraftCardInstance) -> DraftPoolGroupKind {
+    match card.cmc {
+        0 => DraftPoolGroupKind::ManaValue0,
+        1 => DraftPoolGroupKind::ManaValue1,
+        2 => DraftPoolGroupKind::ManaValue2,
+        3 => DraftPoolGroupKind::ManaValue3,
+        4 => DraftPoolGroupKind::ManaValue4,
+        5 => DraftPoolGroupKind::ManaValue5,
+        _ => DraftPoolGroupKind::ManaValue6Plus,
+    }
+}
+
+fn color_counts(pool: &[DraftCardInstance]) -> DraftPoolColorCounts {
+    let mut counts = DraftPoolColorCounts::default();
+    for card in pool {
+        for color in &card.colors {
+            match color.as_str() {
+                "W" => counts.white += 1,
+                "U" => counts.blue += 1,
+                "B" => counts.black += 1,
+                "R" => counts.red += 1,
+                "G" => counts.green += 1,
+                _ => {}
+            }
+        }
+    }
+    counts
 }
 
 fn compute_standings(session: &DraftSession) -> Vec<StandingEntry> {
@@ -460,6 +704,19 @@ mod tests {
         .unwrap();
     }
 
+    fn draft_card(name: &str, colors: &[&str], cmc: u8, type_line: &str) -> DraftCardInstance {
+        DraftCardInstance {
+            instance_id: name.to_string(),
+            name: name.to_string(),
+            set_code: "TST".to_string(),
+            collector_number: "1".to_string(),
+            rarity: "common".to_string(),
+            colors: colors.iter().map(ToString::to_string).collect(),
+            cmc,
+            type_line: type_line.to_string(),
+        }
+    }
+
     #[test]
     fn view_contains_viewers_current_pack() {
         let (mut session, source) = test_session(8);
@@ -484,6 +741,87 @@ mod tests {
         let view = filter_for_player(&session, 0);
         assert_eq!(view.pool.len(), 1);
         assert_eq!(view.pool[0].instance_id, session.pools[0][0].instance_id);
+    }
+
+    #[test]
+    fn sealed_view_preserves_the_viewers_pack_boundaries() {
+        let (mut session, source) = test_session(2);
+        session.kind = DraftKind::Sealed;
+        session.config.kind = DraftKind::Sealed;
+        session.config.pack_count = 6;
+        session::apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
+
+        let view = filter_for_player(&session, 0);
+        let sealed_packs = view
+            .sealed_packs
+            .expect("sealed view includes opening packs");
+
+        assert_eq!(sealed_packs.len(), 6);
+        assert!(sealed_packs.iter().all(|pack| pack.len() == 14));
+        assert_eq!(sealed_packs.concat(), view.pool);
+    }
+
+    #[test]
+    fn pool_groups_are_engine_ordered_and_deduplicated() {
+        let pool = vec![
+            draft_card("Adept", &["W"], 2, "Artifact Creature — Wizard"),
+            draft_card("Adept", &["W"], 2, "Artifact Creature — Wizard"),
+            draft_card("Bolt", &["R"], 1, "Instant"),
+            draft_card("Charm", &["U", "R"], 3, "Sorcery"),
+            draft_card("Field", &[], 0, "Land"),
+        ];
+
+        let groups = DraftPoolGroups::from_pool(&pool);
+
+        assert_eq!(
+            groups
+                .color_groups
+                .iter()
+                .map(|group| group.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                DraftPoolGroupKind::White,
+                DraftPoolGroupKind::Red,
+                DraftPoolGroupKind::Multicolor,
+                DraftPoolGroupKind::Colorless,
+            ]
+        );
+        assert_eq!(groups.color_groups[0].cards[0].count, 2);
+        assert_eq!(groups.color_groups[0].total, 2);
+        assert_eq!(
+            groups
+                .type_groups
+                .iter()
+                .map(|group| group.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                DraftPoolGroupKind::Creature,
+                DraftPoolGroupKind::Instant,
+                DraftPoolGroupKind::Sorcery,
+                DraftPoolGroupKind::Land,
+            ]
+        );
+        assert_eq!(groups.type_groups[0].cards[0].card.name, "Adept");
+        assert_eq!(groups.type_groups[0].cards[0].count, 2);
+        assert_eq!(groups.color_counts.white, 2);
+        assert_eq!(groups.color_counts.red, 2);
+    }
+
+    #[test]
+    fn mana_value_group_kinds_match_the_wire_contract() {
+        let values = [
+            (DraftPoolGroupKind::ManaValue0, "mana_value0"),
+            (DraftPoolGroupKind::ManaValue1, "mana_value1"),
+            (DraftPoolGroupKind::ManaValue2, "mana_value2"),
+            (DraftPoolGroupKind::ManaValue3, "mana_value3"),
+            (DraftPoolGroupKind::ManaValue4, "mana_value4"),
+            (DraftPoolGroupKind::ManaValue5, "mana_value5"),
+            (DraftPoolGroupKind::ManaValue6Plus, "mana_value6_plus"),
+        ];
+
+        for (kind, expected) in values {
+            assert_eq!(serde_json::to_value(kind).unwrap(), expected);
+        }
     }
 
     #[test]

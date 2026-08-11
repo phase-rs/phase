@@ -19,9 +19,10 @@ import { DeckBuilderToolbar } from "./DeckBuilderToolbar";
 import { DeckBuilderTabBar } from "./DeckBuilderTabBar";
 import { panelId, tabId } from "./deckBuilderTabs";
 import { useDeckBuilder } from "./useDeckBuilder";
+import type { CardHoverInfo } from "../card/CardPreview";
 
 interface DeckBuilderProps {
-  onCardHover?: (cardName: string | null, scryfallId?: string) => void;
+  onCardHover?: (card: CardHoverInfo | null) => void;
   format: GameFormat;
   onFormatChange: (format: GameFormat) => void;
   initialDeckName?: string | null;

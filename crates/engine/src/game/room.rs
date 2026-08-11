@@ -6,6 +6,67 @@ use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
+use super::engine::{PriorityAnnouncementFacadeAccess, PriorityPrincipal};
+
+/// An engine-authored Room-door unlock announcement for Priority preflight.
+/// The Room identity and locked door stay private to the Room authority until
+/// the facade reconstructs the ordinary special-action primer.
+pub(in crate::game) struct PriorityUnlockRoomDoorAnnouncement {
+    object_id: ObjectId,
+    door: RoomDoor,
+}
+
+impl PriorityUnlockRoomDoorAnnouncement {
+    fn new(object_id: ObjectId, door: RoomDoor) -> Self {
+        Self { object_id, door }
+    }
+
+    pub(in crate::game) fn object_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.object_id
+    }
+
+    pub(in crate::game) fn door(&self, _access: &PriorityAnnouncementFacadeAccess) -> RoomDoor {
+        self.door
+    }
+}
+
+/// Enumerates the active holder's locked Room doors during the normal
+/// main-phase, empty-stack special-action window.
+pub(in crate::game) fn priority_unlock_room_door_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityUnlockRoomDoorAnnouncement> {
+    let player = principal.semantic_holder();
+    if state.active_player != player
+        || !state.stack.is_empty()
+        || !matches!(
+            state.phase,
+            crate::types::phase::Phase::PreCombatMain | crate::types::phase::Phase::PostCombatMain
+        )
+    {
+        return Vec::new();
+    }
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|object_id| {
+            state
+                .objects
+                .get(object_id)
+                .is_some_and(|object| object.controller == player)
+        })
+        .flat_map(|object_id| {
+            eligible_doors(state, object_id, DoorLockOp::Unlock)
+                .into_iter()
+                .map(move |(_, door)| PriorityUnlockRoomDoorAnnouncement::new(object_id, door))
+        })
+        .collect()
+}
+
 /// CR 709.5j: A "door" is a half of a Room permanent. A Room has a left door
 /// always and a right door only if it has a back face (the second half of the
 /// split card). Returns the doors that actually exist for `object_id`.

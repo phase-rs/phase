@@ -67,15 +67,15 @@ fn install_mechtitan_return_trigger(state: &mut GameState, core: ObjectId, token
         core,
         P0,
     );
-    state.delayed_triggers.push(DelayedTrigger {
-        condition: DelayedTriggerCondition::WhenLeavesPlayFiltered {
+    state.delayed_triggers.push(DelayedTrigger::new(
+        DelayedTriggerCondition::WhenLeavesPlayFiltered {
             filter: TargetFilter::SpecificObject { id: token },
         },
-        ability: Box::new(ability),
-        controller: P0,
-        source_id: core,
-        one_shot: true,
-    });
+        Box::new(ability),
+        P0,
+        core,
+        true,
+    ));
 }
 
 /// Drive priority passes until the stack drains so the fired delayed trigger's

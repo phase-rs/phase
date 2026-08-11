@@ -15,6 +15,10 @@ use engine::types::zones::Zone;
 
 use super::context::PolicyContext;
 
+/// Player-impact magnitude above which target selection has a directional
+/// preference rather than falling back to the spell's broader polarity.
+pub(crate) const PLAYER_IMPACT_PREFERENCE_BAND: f64 = 0.25;
+
 /// Three-valued polarity: whether an effect benefits or harms its target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EffectPolarity {
@@ -72,6 +76,16 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         Effect::PutCounter { counter_type, .. } | Effect::PutCounterAll { counter_type, .. } => {
             counter_sign_polarity(counter_type)
         }
+        // CR 122.1: the reproduced counter KIND is event-derived at resolution —
+        // there is no static `counter_type` to sign, and the triggering event can
+        // carry a harmful kind (e.g. -1/-1). The `target` is also not necessarily
+        // self: Aragorn, Company Leader reproduces onto "up to one OTHER target
+        // creature", so the effect can land on a creature the controller does not
+        // want buffed/debuffed. Neither the sign nor the recipient is knowable
+        // until the policy holds the selected target and the triggering multiset,
+        // so classify as Contextual and let the call site (e.g. anti_self_harm)
+        // inspect both rather than assuming a self-buff.
+        Effect::ReproduceEventCounters { .. } => EffectPolarity::Contextual,
         // CR 122.1 + CR 121: Removing counters inverts the placement polarity —
         // removing a +1/+1 counter harms the bearer, removing a -1/-1 counter
         // helps it (Hexcaster's Mark, Solemnity-style interactions, Vampire
@@ -317,6 +331,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::Monstrosity { .. }
         | Effect::Myriad
         | Effect::NoOp
+        | Effect::NoteManaSpent
         | Effect::OpenAttractions { .. }
         | Effect::OpponentGuess { .. }
         | Effect::PairWith { .. }
@@ -590,10 +605,10 @@ pub(crate) fn is_spell_beneficial(ctx: &PolicyContext<'_>) -> bool {
     }
 
     let player_impact = aggregate_player_impact(ctx);
-    if player_impact > 0.25 {
+    if player_impact > PLAYER_IMPACT_PREFERENCE_BAND {
         return true;
     }
-    if player_impact < -0.25 {
+    if player_impact < -PLAYER_IMPACT_PREFERENCE_BAND {
         return false;
     }
 
@@ -630,23 +645,33 @@ pub(crate) fn is_spell_beneficial(ctx: &PolicyContext<'_>) -> bool {
 }
 
 pub(crate) fn aggregate_player_impact(ctx: &PolicyContext<'_>) -> f64 {
-    ctx.effects()
-        .iter()
-        .map(|effect| player_impact(effect))
-        .sum()
+    aggregate_player_impact_in(&ctx.effects())
+}
+
+pub(crate) fn aggregate_player_impact_in(effects: &[&Effect]) -> f64 {
+    effects.iter().map(|effect| player_impact(effect)).sum()
 }
 
 pub(crate) fn targeted_player_impact(ctx: &PolicyContext<'_>, player: PlayerId) -> Option<f64> {
     let source_controller = ctx.source_object().map(|object| object.controller);
+    targeted_player_impact_in(ctx.state, source_controller, &ctx.effects(), player)
+}
+
+pub(crate) fn targeted_player_impact_in(
+    state: &GameState,
+    source_controller: Option<PlayerId>,
+    effects: &[&Effect],
+    player: PlayerId,
+) -> Option<f64> {
     let mut found_targeted_effect = false;
     let mut impact = 0.0;
 
-    for effect in ctx.effects() {
+    for effect in effects {
         let Some(filter) = extract_target_filter(effect) else {
             continue;
         };
         if engine::game::filter::player_matches_target_filter_in_state(
-            ctx.state,
+            state,
             filter,
             player,
             source_controller,

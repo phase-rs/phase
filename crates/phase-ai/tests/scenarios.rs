@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::io::Read;
 
 use engine::game::combat::{AttackTarget, AttackerInfo, CombatState};
 use engine::game::engine::apply_as_current;
@@ -12,18 +13,122 @@ use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::{
-    StackEntry, StackEntryKind, TargetEffectDetail, TargetSelectionProgress, TargetSelectionSlot,
-    WaitingFor,
+    ManaChoiceContext, ManaChoicePrompt, StackEntry, StackEntryKind, TargetEffectDetail,
+    TargetSelectionProgress, TargetSelectionSlot, WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::log::{LogCategory, LogSegment};
+use engine::types::mana::ManaType;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use phase_ai::auto_play::{run_ai_actions, run_ai_actions_bounded, run_driver_loop, DriverExit};
 use phase_ai::choose_action;
 use phase_ai::config::{create_config, AiConfig, AiDifficulty, Platform};
+use phase_ai::saved_state::load_saved_game_state;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
+
+fn gunzip_fixture(gz: &[u8]) -> String {
+    let mut json = String::new();
+    flate2::read::GzDecoder::new(gz)
+        .read_to_string(&mut json)
+        .expect("fixture .json.gz must inflate to UTF-8 JSON");
+    json
+}
+
+#[test]
+fn saved_cosmic_crucible_mana_prompt_uses_an_issued_action_and_advances() {
+    let raw = gunzip_fixture(include_bytes!(
+        "../fixtures/scenarios/invisible-woman-cosmic-crucible-mana.json.gz"
+    ));
+    let mut state = load_saved_game_state(&raw).expect("saved Cosmic Crucible state deserializes");
+
+    let WaitingFor::ChooseManaColor {
+        player,
+        choice: ManaChoicePrompt::AnyCombination { count, options },
+        context: ManaChoiceContext::ResolvingEffect(resume),
+    } = &state.waiting_for
+    else {
+        panic!("capture must restore at Cosmic Crucible's resolving mana prompt");
+    };
+    let player = *player;
+    assert_eq!(
+        player,
+        PlayerId(2),
+        "Cosmic Crucible's controller owns the prompt"
+    );
+    assert_eq!(
+        resume.source_id,
+        ObjectId(200),
+        "the prompt must come from Cosmic Crucible"
+    );
+    assert_eq!(
+        options,
+        &[
+            ManaType::White,
+            ManaType::Blue,
+            ManaType::Black,
+            ManaType::Red,
+            ManaType::Green
+        ],
+        "the capture must retain all five color options"
+    );
+    assert_eq!(*count, 4, "Cosmic Crucible must produce exactly four mana");
+
+    let contract = engine::ai_support::AiDecisionContract::issue(&state, player);
+    assert_eq!(
+        contract.candidates.len(),
+        64,
+        "the engine must cap this 5^4 mana prompt to its finite issued domain"
+    );
+    let state_before = state.clone();
+    let ai_players = HashSet::from([player]);
+    let ai_configs = HashMap::from([(
+        player,
+        create_config(AiDifficulty::VeryHard, Platform::Native),
+    )]);
+    let mut ai_rng = SmallRng::seed_from_u64(25);
+    let ai_session = phase_ai::session::AiSession::arc_from_game(&state);
+    let run = run_ai_actions_bounded(
+        &mut state,
+        &ai_players,
+        &ai_configs,
+        &mut ai_rng,
+        &ai_session,
+        1,
+    );
+
+    assert_eq!(
+        run.len(),
+        1,
+        "the bounded controller must submit the mana choice"
+    );
+    assert!(
+        run.break_reason.is_none(),
+        "the issued mana action must apply without a controller break"
+    );
+    assert!(
+        contract.contains_action(&state_before, &run[0].action),
+        "the controller must submit the exact action from player two's contract"
+    );
+    assert_eq!(
+        run[0].action,
+        GameAction::ChooseManaColor {
+            choice: engine::types::game_state::ManaChoice::Combination(vec![
+                ManaType::White,
+                ManaType::White,
+                ManaType::Red,
+                ManaType::Green,
+            ]),
+            count: 1,
+        },
+        "the capped domain still maximizes the captured hand and deck color demand"
+    );
+    assert!(
+        !matches!(state.waiting_for, WaitingFor::ChooseManaColor { .. }),
+        "applying the choice must advance beyond Cosmic Crucible's mana prompt"
+    );
+}
 
 #[test]
 fn scenario_prefers_opponent_target_over_self() {
@@ -1002,9 +1107,24 @@ fn claws_of_gix_def() -> engine::types::ability::AbilityDefinition {
 }
 
 /// V3 (∃-success): board with 4 artifacts (Mox + 3 others) so sacrificing one
-/// leaves 3 → Metalcraft holds → a witness exists. Driving the AI loop must
-/// COMPLETE without reaching the `fallback_action` panic. The original dead-end
-/// would panic here.
+/// leaves 3 → Metalcraft holds → a witness exists.
+///
+/// **What this test actually pins, measured — the doc it replaces was wrong.** The
+/// activation is legal here (the `activation_legal_for` precondition below), and
+/// the AI then *declines* it: driving the loop on this board yields exactly
+/// `[PassPriority]`. So the load-bearing assertion is the precondition — it fails
+/// the moment a Metalcraft/cost regression stops `legal_actions` surfacing the
+/// activation. The `assert_no_fallback_cancel` that follows is a guard, not the
+/// subject: a board the AI passes on cannot dead-end. The sibling mana-first test
+/// is the one that exercises the completion path end to end (measured:
+/// `[ActivateAbility, SelectCards, PassPriority]`), and it carries the positive
+/// assertion.
+///
+/// That the AI declines a legal, witnessed Claws activation is a real observation
+/// and is out of scope here; it is disclosed in the commit that added this doc
+/// rather than silently papered over. Before the profile-independence fix, this
+/// branch also carried a `debug_assert!(false, …)`, which is why the old doc spoke
+/// of a panic; no profile panics now.
 #[test]
 fn scenario_claws_of_gix_witness_board_does_not_dead_end() {
     let mut scenario = GameScenario::new();
@@ -1018,11 +1138,12 @@ fn scenario_claws_of_gix_witness_board_does_not_dead_end() {
         let mut a = scenario.add_creature(P0, &format!("Artifact {i}"), 0, 1);
         a.as_artifact();
     }
-    {
+    let claws = {
         let mut claws = scenario.add_creature(P0, "Claws of Gix", 0, 1);
         claws.as_artifact();
         claws.with_ability_definition(claws_of_gix_def());
-    }
+        claws.id()
+    };
 
     let mut runner = scenario.build();
     {
@@ -1033,12 +1154,20 @@ fn scenario_claws_of_gix_witness_board_does_not_dead_end() {
         state.waiting_for = WaitingFor::Priority { player: P0 };
     }
 
+    // Precondition, not decoration: `assert_no_fallback_cancel` is a purely
+    // negative assertion, so without this an unrelated break in the activation's
+    // legality (Metalcraft comparator, cost payability) would stop the AI ever
+    // entering a pending cast and leave the test GREEN while the scenario it
+    // names had stopped happening. The mana-first sibling has the same guard.
+    assert!(
+        activation_legal_for(runner.state(), claws),
+        "witness board must surface the Claws activation before the loop runs"
+    );
+
     let ai_players = HashSet::from([P0]);
     let ai_configs = HashMap::from([(P0, create_config(AiDifficulty::VeryHard, Platform::Native))]);
     let mut ai_rng = SmallRng::seed_from_u64(19024);
     let ai_session = phase_ai::session::AiSession::arc_from_game(runner.state());
-    // The assertion is non-panic: a recurrence of the dead-end aborts via the
-    // `fallback_action` debug_assert before this returns.
     let results = run_ai_actions(
         runner.state_mut(),
         &ai_players,
@@ -1046,9 +1175,59 @@ fn scenario_claws_of_gix_witness_board_does_not_dead_end() {
         &mut ai_rng,
         &ai_session,
     );
+    assert_no_fallback_cancel(
+        &results,
+        "witness board must not escape the Claws activation through the fallback",
+    );
+}
+
+/// Dead-end detector for the Claws scenarios, working in BOTH profiles.
+///
+/// These tests used to detect a recurrence via the `debug_assert!(false, …)` that
+/// lived in `search::fallback_action`'s pending-cast branch (their own comments
+/// said so), backed by `assert!(results.len() <= 200)`. That length assertion is
+/// **structurally vacuous**: `run_ai_actions` is hard-capped at
+/// `MAX_AI_ACTIONS_PER_SEQUENCE = 200` (`crates/phase-ai/src/auto_play.rs:20`), so
+/// `<= 200` holds for every possible run and cannot fail on its subject.
+///
+/// `CancelCast` is rejected from the strategic pool (`tactical_gate.rs:205`,
+/// `GameAction::CancelCast => GateDecision::Reject`), so any `CancelCast` the AI
+/// emits comes from `search::fallback_action`. That function has several
+/// `CancelCast` exits — `TargetSelection`, the pending-cast dead-end,
+/// `EquipTarget`, and `Crew/Saddle/StationTarget` — but on these two boards (no
+/// Equipment, no Vehicle, and the only targeting effect is a
+/// `GainLife { player: Controller }` that takes no target) the pending-cast
+/// dead-end is the only reachable one, so a `CancelCast` here IS that dead-end.
+/// Unlike the removed `debug_assert`, this holds in release builds too.
+///
+/// Both outcomes are checked. `run_ai_actions` only pushes an `AiActionResult`
+/// once `apply_interaction` succeeded (`auto_play.rs:214-250`), and the
+/// pending-cast `CancelCast` is offered to the AI only by
+/// `semantic_candidate_actions_with_probe`'s guarded push
+/// (`engine/src/ai_support/candidates.rs`, which requires `has_pending_cast` AND
+/// `allows_cancel_cast`; `candidate_actions_broad_with_probe`, which it calls,
+/// emits `CancelCast` only for Equipment/Vehicle/modal shapes absent from these
+/// boards). A dead-end satisfying only `allows_cancel_cast` therefore never
+/// becomes an applied action — it lands in `break_reason`, and a results-only
+/// assertion would miss it.
+fn assert_no_fallback_cancel(run: &phase_ai::auto_play::AiActionsRun, what: &str) {
+    use phase_ai::auto_play::AiActionsBreakReason;
+
     assert!(
-        results.len() <= 200,
-        "AI loop must stay within its safety cap and never dead-end"
+        !run.results
+            .iter()
+            .any(|r| matches!(r.action, GameAction::CancelCast)),
+        "{what}: AI escaped via fallback CancelCast (actions: {:?})",
+        run.results.iter().map(|r| &r.action).collect::<Vec<_>>(),
+    );
+    assert!(
+        !matches!(
+            &run.break_reason,
+            Some(AiActionsBreakReason::ApplyFailed { action, .. })
+                if matches!(**action, GameAction::CancelCast)
+        ),
+        "{what}: AI dead-ended on an unapplied fallback CancelCast ({:?})",
+        run.break_reason,
     );
 }
 
@@ -1059,9 +1238,13 @@ fn scenario_claws_of_gix_witness_board_does_not_dead_end() {
 /// sacrifice, so the Claws activation is LEGAL and the AI loop completes it
 /// without dead-ending. REVERT-FAILING: reverting the mana-first detour restores
 /// the sacrifice-first ordering, where `can_pay` is rejected (or the activation
-/// dead-ends), so `legal_actions` no longer surfaces the Claws activation and the
-/// pending-cost loop panics at `search.rs` "AI fallback reached during pending
-/// cast (variant PayCost, spell Claws of Gix)" — the baseline seed-19057 abort.
+/// dead-ends), so `legal_actions` no longer surfaces the Claws activation — the
+/// `activation_legal_for` precondition below is what fails, and the pending-cost
+/// loop then escapes through `fallback_action`'s `CancelCast`, which
+/// [`assert_no_fallback_cancel`] catches. (That branch used to `debug_assert!`
+/// with the message "AI fallback reached during pending cast …"; that string no
+/// longer exists — the surviving `tracing::error!` reads "AI fallback cancelled
+/// an uncompletable cast".)
 #[test]
 fn scenario_claws_of_gix_mana_first_board_proposes_and_completes() {
     let mut scenario = GameScenario::new();
@@ -1100,8 +1283,8 @@ fn scenario_claws_of_gix_mana_first_board_proposes_and_completes() {
         "mana-first pays {{1}} on the intact 3-artifact board → Claws activation must be legal"
     );
 
-    // Driving the full loop must COMPLETE without reaching the `fallback_action`
-    // dead-end panic.
+    // Driving the full loop must COMPLETE without escaping through
+    // `fallback_action` — see `assert_no_fallback_cancel`.
     let ai_players = HashSet::from([P0]);
     let ai_configs = HashMap::from([(P0, create_config(AiDifficulty::VeryHard, Platform::Native))]);
     let mut ai_rng = SmallRng::seed_from_u64(19057);
@@ -1113,9 +1296,21 @@ fn scenario_claws_of_gix_mana_first_board_proposes_and_completes() {
         &mut ai_rng,
         &ai_session,
     );
+    assert_no_fallback_cancel(&results, "mana-first board must not dead-end the AI loop");
+    // Positive half: "completes" must mean the activation actually happened, not
+    // merely that nothing cancelled. Without it the test would also pass on a board
+    // the AI simply passes priority on — which is what the witness sibling does.
     assert!(
-        results.len() <= 200,
-        "mana-first board must not dead-end the AI loop"
+        results
+            .results
+            .iter()
+            .any(|r| matches!(r.action, GameAction::ActivateAbility { .. })),
+        "mana-first board must ACTIVATE the Claws (actions: {:?})",
+        results
+            .results
+            .iter()
+            .map(|r| &r.action)
+            .collect::<Vec<_>>(),
     );
 }
 
@@ -1432,7 +1627,7 @@ fn ai_declare_attackers_completion_returns_apply_accepted_legal_action() {
         let attacker = {
             let mut b = scenario.add_creature(P0, "Lured Bear", 2, 2);
             b.with_static_definition(StaticDefinition::new(StaticMode::MustAttackPlayer {
-                player: P1,
+                player: P1.into(),
             }));
             b.id()
         };

@@ -1,4 +1,5 @@
 import type * as DraftWasm from "@wasm/draft";
+import type { MatchConfig } from "./types";
 
 // ── Types (mirror Rust serde output from draft-core) ────────────────────
 
@@ -12,6 +13,64 @@ export interface DraftCardInstance {
   cmc: number;
   type_line: string;
 }
+
+export type DraftPoolGroupKind =
+  | "white"
+  | "blue"
+  | "black"
+  | "red"
+  | "green"
+  | "multicolor"
+  | "colorless"
+  | "creature"
+  | "instant"
+  | "sorcery"
+  | "enchantment"
+  | "artifact"
+  | "planeswalker"
+  | "land"
+  | "other"
+  | "mana_value0"
+  | "mana_value1"
+  | "mana_value2"
+  | "mana_value3"
+  | "mana_value4"
+  | "mana_value5"
+  | "mana_value6_plus";
+
+export interface DraftPoolEntry {
+  card: DraftCardInstance;
+  count: number;
+}
+
+export interface DraftPoolGroup {
+  kind: DraftPoolGroupKind;
+  total: number;
+  cards: DraftPoolEntry[];
+}
+
+export interface DraftPoolColorCounts {
+  white: number;
+  blue: number;
+  black: number;
+  red: number;
+  green: number;
+}
+
+export interface DraftPoolGroups {
+  color_groups: DraftPoolGroup[];
+  type_groups: DraftPoolGroup[];
+  cmc_groups: DraftPoolGroup[];
+  color_counts: DraftPoolColorCounts;
+}
+
+/** Empty engine-shaped pool data for a lobby before a draft session exists. */
+export const EMPTY_DRAFT_POOL_GROUPS: DraftPoolGroups = {
+  color_groups: [],
+  type_groups: [],
+  cmc_groups: [],
+  color_counts: { white: 0, blue: 0, black: 0, red: 0, green: 0 },
+};
 
 // @sync-with: crates/draft-core/src/view.rs
 export interface SeatPublicView {
@@ -33,6 +92,8 @@ export type DraftStatus =
   | "RoundComplete"
   | "Complete"
   | "Abandoned";
+
+export type DraftKind = "Quick" | "Premier" | "Traditional" | "Sealed";
 
 export type TournamentFormat = "Swiss" | "SingleElimination";
 
@@ -79,7 +140,7 @@ export interface PairingView {
 // @sync-with: crates/draft-core/src/view.rs
 export interface SpectatorDraftView {
   status: DraftStatus;
-  kind: "Quick" | "Premier" | "Traditional";
+  kind: DraftKind;
   current_pack_number: number;
   pick_number: number;
   pass_direction: "Left" | "Right";
@@ -93,6 +154,7 @@ export interface SpectatorDraftView {
   tournament_format: TournamentFormat;
   pod_policy: PodPolicy;
   pairings: PairingView[];
+  match_config: MatchConfig;
   /** Present only when the host enabled omniscient spectator visibility. */
   pools?: DraftCardInstance[][];
   current_packs?: (DraftCardInstance[] | null)[];
@@ -101,12 +163,16 @@ export interface SpectatorDraftView {
 // @sync-with: crates/draft-core/src/view.rs
 export interface DraftPlayerView {
   status: DraftStatus;
-  kind: "Quick" | "Premier" | "Traditional";
+  kind: DraftKind;
   current_pack_number: number;
   pick_number: number;
   pass_direction: "Left" | "Right";
   current_pack: DraftCardInstance[] | null;
   pool: DraftCardInstance[];
+  /** Engine-owned grouping, ordering, and duplicate counts for the pool. */
+  pool_groups: DraftPoolGroups;
+  /** Engine-provided sealed packs in opening order. Absent for draft events. */
+  sealed_packs?: DraftCardInstance[][] | null;
   seats: SeatPublicView[];
   cards_per_pack: number;
   pack_count: number;
@@ -118,6 +184,7 @@ export interface DraftPlayerView {
   tournament_format: TournamentFormat;
   pod_policy: PodPolicy;
   pairings: PairingView[];
+  match_config: MatchConfig;
 }
 
 export type MultiplayerSeatDescriptor =
@@ -193,6 +260,15 @@ export class DraftAdapter {
     return wasm.start_quick_draft(setPoolJson, difficulty, seed) as DraftPlayerView;
   }
 
+  async initializeSealed(
+    setPoolJson: string,
+    difficulty: number,
+    seed: number,
+  ): Promise<DraftPlayerView> {
+    const wasm = await ensureDraftWasm();
+    return wasm.start_sealed_draft(setPoolJson, difficulty, seed) as DraftPlayerView;
+  }
+
   async initializeCube(
     cubeListText: string,
     cubeName: string,
@@ -253,36 +329,25 @@ export class DraftAdapter {
 
   // ── Multi-seat API (P2P Tournament Host) ─────────────────────────────
 
-  async startMultiplayerDraft(
-    setPoolJson: string,
-    kind: "Premier" | "Traditional",
-    seatNames: string[],
-    seed: number,
-  ): Promise<DraftPlayerView> {
-    const wasm = await ensureDraftWasm();
-    return wasm.start_multiplayer_draft(
-      setPoolJson,
-      kind,
-      JSON.stringify(seatNames),
-      seed,
-    ) as DraftPlayerView;
-  }
-
   async createMultiplayerDraft(
     poolInput: PoolInput,
     seats: MultiplayerSeatDescriptor[],
-    kind: "Premier" | "Traditional",
+    kind: Exclude<DraftKind, "Quick">,
     seed: number,
     draftCode: string,
     tournamentFormat: TournamentFormat,
     podPolicy: PodPolicy,
   ): Promise<DraftPlayerView> {
     const wasm = await ensureDraftWasm();
-    const kindId = kind === "Premier" ? 1 : 2;
+    const kindId: Record<Exclude<DraftKind, "Quick">, number> = {
+      Premier: 1,
+      Traditional: 2,
+      Sealed: 3,
+    };
     return wasm.create_multiplayer_draft(
       JSON.stringify(poolInput),
       JSON.stringify(seats),
-      kindId,
+      kindId[kind],
       seed,
       draftCode,
       tournamentFormat,

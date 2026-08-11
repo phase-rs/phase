@@ -2545,7 +2545,7 @@ pub fn convert_available_action(
                 produced_mana: None,
             }),
         }),
-        GameAction::TapLandForMana { selection } => {
+        GameAction::TapLandForMana { selection } | GameAction::ActivateManaSource { selection } => {
             AvailableActionConversion::Available(AvailableAction {
                 id,
                 kind: AvailableActionKind::ActivateAbility(ActivatableAbilityInfo {
@@ -2567,9 +2567,10 @@ pub fn convert_available_action(
                 },
             })
         }
-        GameAction::PassPriority | GameAction::CancelCast | GameAction::Concede { .. } => {
-            AvailableActionConversion::Skip
-        }
+        GameAction::PassPriority
+        | GameAction::CancelCast
+        | GameAction::BackToManaPayment
+        | GameAction::Concede { .. } => AvailableActionConversion::Skip,
         GameAction::DeclareAttackers { .. } => AvailableActionConversion::Skip,
         GameAction::DeclareBlockers { .. } => AvailableActionConversion::Skip,
         GameAction::ChooseUntap { .. } => {
@@ -6733,17 +6734,30 @@ mod tests {
         state.objects.get_mut(&class_id).unwrap().class_level = Some(2);
         let saga = state.objects.get_mut(&saga_id).unwrap();
         saga.card_types.subtypes.push("Saga".to_string());
+        // CR 714.2: `saga_chapter` is the chapter-symbol provenance that marks a
+        // trigger as a chapter ability; a bare lore threshold is not one, so
+        // `final_chapter_number` would report `None` without it.
         saga.trigger_definitions = vec![
-            TriggerDefinition::new(TriggerMode::CounterAdded).counter_filter(
-                CounterTriggerFilter {
+            TriggerDefinition::new(TriggerMode::CounterAdded)
+                .counter_filter(CounterTriggerFilter {
                     counter_type: CounterType::Lore,
                     threshold: Some(1),
-                },
-            ),
+                })
+                .saga_chapter(1),
+            TriggerDefinition::new(TriggerMode::CounterAdded)
+                .counter_filter(CounterTriggerFilter {
+                    counter_type: CounterType::Lore,
+                    threshold: Some(3),
+                })
+                .saga_chapter(3),
+            // CR 714.2: a lore threshold WITHOUT chapter-symbol provenance is not
+            // a chapter ability. Its threshold is deliberately higher than the
+            // real final chapter, so this fixture fails if `final_chapter_number`
+            // ever regresses to inferring chapters from thresholds.
             TriggerDefinition::new(TriggerMode::CounterAdded).counter_filter(
                 CounterTriggerFilter {
                     counter_type: CounterType::Lore,
-                    threshold: Some(3),
+                    threshold: Some(99),
                 },
             ),
         ]

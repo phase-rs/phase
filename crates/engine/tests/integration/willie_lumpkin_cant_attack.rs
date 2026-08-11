@@ -22,7 +22,9 @@
 
 use engine::game::combat::{declare_attackers, AttackTarget};
 use engine::game::effects::add_restriction;
-use engine::game::zones::create_object;
+use engine::game::scenario::{GameRunner, GameScenario};
+use engine::game::triggers::process_triggers;
+use engine::game::zones::{create_object, move_to_zone};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     AbilityDefinition, Duration, Effect, GameRestriction, PlayerScope, ProhibitedActivity,
@@ -37,6 +39,7 @@ use engine::types::triggers::AttackTargetFilter;
 use engine::types::zones::Zone;
 
 const WILLIE_ORACLE: &str = "Willie Lumpkin can't be blocked.\nWhenever Willie Lumpkin deals combat damage to an opponent, you draw a card and that player may draw a card. If they do, that player can't attack you or permanents you control during their next turn.";
+const PLANESWALKER_ONLY_WILLIE_ORACLE: &str = "Whenever this creature deals combat damage to an opponent, you draw a card and that player may draw a card. If they do, that player can't attack planeswalkers you control during their next turn.";
 
 const PROTECTED: PlayerId = PlayerId(0); // Willie's controller ("you")
 const RESTRICTED: PlayerId = PlayerId(1); // the opponent dealt damage
@@ -292,6 +295,129 @@ fn willie_expiry_anchors_on_restricted_player_not_controller() {
         }
         _ => unreachable!(),
     }
+}
+
+/// CR 603.3 + CR 608.2c: the legacy anaphor route resolves through the normal
+/// trigger/action pipeline and snapshots the damaged player, protected player,
+/// and that player's next-turn expiry. Unlike the real Willie card's broader
+/// permanent scope, this focused grammar fixture makes its planeswalker-only
+/// target shape observable at runtime.
+#[test]
+fn legacy_willie_planeswalker_only_restriction_snapshots_selected_player() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    let source = scenario
+        .add_creature_from_oracle(
+            PROTECTED,
+            "Legacy Willie Fixture",
+            1,
+            1,
+            PLANESWALKER_ONLY_WILLIE_ORACLE,
+        )
+        .id();
+    let restricted_attacker = scenario
+        .add_creature(RESTRICTED, "Restricted Bear", 2, 2)
+        .id();
+    let protected_walker = scenario
+        .add_creature(PROTECTED, "Protected Jace", 0, 0)
+        .as_planeswalker_with_loyalty("Jace", 4)
+        .id();
+    let other_walker = scenario
+        .add_creature(THIRD, "Other Chandra", 0, 0)
+        .as_planeswalker_with_loyalty("Chandra", 4)
+        .id();
+    scenario.add_card_to_library_top(PROTECTED, "P0 draw fixture");
+    scenario.add_card_to_library_top(RESTRICTED, "P1 draw fixture");
+    let mut runner = scenario.build();
+    process_triggers(
+        runner.state_mut(),
+        &[engine::types::events::GameEvent::DamageDealt {
+            source_id: source,
+            target: TargetRef::Player(RESTRICTED),
+            amount: 1,
+            is_combat: true,
+            excess: 0,
+        }],
+    );
+    for _ in 0..24 {
+        match runner.state().waiting_for.clone() {
+            engine::types::game_state::WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(engine::types::actions::GameAction::DecideOptionalEffect { accept: true })
+                    .expect("the damaged player accepts the legacy draw offer");
+            }
+            engine::types::game_state::WaitingFor::Priority { .. }
+                if runner.state().stack.is_empty() =>
+            {
+                break
+            }
+            engine::types::game_state::WaitingFor::Priority { .. } => {
+                runner
+                    .act(engine::types::actions::GameAction::PassPriority)
+                    .expect("priority resolves the trigger");
+            }
+            other => panic!("unexpected legacy Willie prompt: {other:?}"),
+        }
+    }
+
+    assert!(matches!(
+        runner.state().restrictions.as_slice(),
+        [GameRestriction::ProhibitActivity {
+            source: stored_source,
+            affected_players: RestrictionPlayerScope::SpecificPlayer(RESTRICTED),
+            expiry: RestrictionExpiry::UntilEndOfNextTurnOf { player: RESTRICTED },
+            activity: ProhibitedActivity::Attack {
+                defended: AttackTargetFilter::Planeswalker,
+                protected_player: Some(PROTECTED),
+            },
+        }] if *stored_source == source
+    ));
+    assert!(!attack_legal_from_runner(
+        &runner,
+        RESTRICTED,
+        restricted_attacker,
+        AttackTarget::Planeswalker(protected_walker)
+    ));
+    assert!(attack_legal_from_runner(
+        &runner,
+        RESTRICTED,
+        restricted_attacker,
+        AttackTarget::Player(PROTECTED)
+    ));
+    assert!(attack_legal_from_runner(
+        &runner,
+        RESTRICTED,
+        restricted_attacker,
+        AttackTarget::Planeswalker(other_walker)
+    ));
+
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&source)
+        .unwrap()
+        .controller = THIRD;
+    move_to_zone(runner.state_mut(), source, Zone::Graveyard, &mut Vec::new());
+    assert!(
+        !attack_legal_from_runner(
+            &runner,
+            RESTRICTED,
+            restricted_attacker,
+            AttackTarget::Planeswalker(protected_walker)
+        ),
+        "source change/removal cannot mutate the resolved legacy snapshot"
+    );
+}
+
+fn attack_legal_from_runner(
+    runner: &GameRunner,
+    player: PlayerId,
+    attacker: ObjectId,
+    target: AttackTarget,
+) -> bool {
+    let mut state = runner.state().clone();
+    state.active_player = player;
+    let mut events = Vec::new();
+    declare_attackers(&mut state, &[(attacker, target)], &mut events).is_ok()
 }
 
 /// MANDATORY no-over-application regression: an UNSCOPED `CantAttack` static

@@ -186,9 +186,7 @@ pub fn resolve(
                     }
                 }
 
-                // Record battlefield entry for restriction tracking.
                 if destination == Zone::Battlefield {
-                    crate::game::restrictions::record_battlefield_entry(state, obj_id);
                     // Battlefield entry: incremental re-derive candidate for this
                     // conjured object (escalates to Full if it sources effects/etc.).
                     crate::game::layers::mark_layers_entered(state, obj_id);
@@ -202,20 +200,22 @@ pub fn resolve(
                     // (e.g. Verdant Dread's "another Verdant Dread enters" manifest-dread
                     // trigger, Soul Warden, Panharmonicon). Without this the conjured
                     // permanent enters silently and no ETB ability ever triggers.
-                    let zone_change_record = state
-                        .objects
-                        .get(&obj_id)
-                        .expect("conjured object was just created")
-                        .snapshot_for_zone_change(obj_id, None, Zone::Battlefield);
-                    state
-                        .zone_changes_this_turn
-                        .push_back(zone_change_record.clone());
-                    events.push(GameEvent::ZoneChanged {
-                        object_id: obj_id,
-                        from: None,
-                        to: Zone::Battlefield,
-                        record: Box::new(zone_change_record),
-                    });
+                    //
+                    // Conjuring is an Alchemy/Arena digital-only mechanic with NO
+                    // Comprehensive Rules entry — the string "conjure" does not occur in the
+                    // CR. The rules cited here are the ones the operation borrows: CR 400.7
+                    // (the zone change), CR 608.2i (the battlefield-entry bookkeeping),
+                    // CR 603.2c + CR 603.6a (why the index is load-bearing for batched ETB
+                    // triggers).
+                    //
+                    // CR 400.7 + CR 608.2i + CR 603.2c: route the record and the emit through
+                    // the single `from: None → Battlefield` authority so the emitted record
+                    // carries this turn's real zone-change index instead of the `0`
+                    // placeholder, and so the CR 608.2i battlefield-entry row is written
+                    // exactly once (the authority calls `record_battlefield_entry` itself —
+                    // a co-located second call here would double-count it).
+                    crate::game::zones::record_and_emit_entry_from_no_zone(state, obj_id, events)
+                        .expect("conjured object was just created");
                 }
 
                 events.push(GameEvent::ObjectConjured {

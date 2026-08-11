@@ -45,7 +45,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{DelayedTrigger, GameState};
 use crate::types::keywords::Keyword;
 use crate::types::phase::Phase;
-use crate::types::statics::StaticMode;
+use crate::types::statics::{RequiredDefender, StaticMode};
 
 /// CR 702.141a: Resolve a card's Encore ability — for each opponent of the
 /// activating player, create a haste-bearing token copy of the exiled source
@@ -94,7 +94,10 @@ pub fn resolve(
                 Duration::UntilEndOfTurn,
                 TargetFilter::SpecificObject { id: token_id },
                 vec![ContinuousModification::AddStaticMode {
-                    mode: StaticMode::MustAttackPlayer { player: opponent },
+                    // CR 611.2: snapshot the specific opponent at resolution.
+                    mode: StaticMode::MustAttackPlayer {
+                        player: RequiredDefender::Fixed { player: opponent },
+                    },
                 }],
                 None,
             );
@@ -128,7 +131,9 @@ pub fn resolve(
                 controller: ability.controller,
                 source_id: ability.source_id,
                 one_shot: true,
+                provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
             },
+            events,
         );
     }
 

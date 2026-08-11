@@ -358,6 +358,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             }
             GameEvent::MonarchChanged { player_id }
             | GameEvent::CityBlessingGained { player_id }
+            | GameEvent::EnduringStoryGained { player_id }
             | GameEvent::InitiativeTaken { player_id }
             | GameEvent::AttractionOpened { player_id, .. }
             | GameEvent::ContraptionAssembled { player_id, .. }
@@ -414,6 +415,9 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::LandPlayed { .. }
             | GameEvent::StackPushed { .. }
             | GameEvent::StackResolved { .. }
+            // CR 714.2: a notification consumed by triggers only; the chapter
+            // ability's own effects dirty whatever display state they touched.
+            | GameEvent::SagaChapterAbilityResolved { .. }
             | GameEvent::GameOver { .. }
             // CR 732.2: a halted-resolution notification dirties no display state.
             | GameEvent::ResolutionHalted { .. }

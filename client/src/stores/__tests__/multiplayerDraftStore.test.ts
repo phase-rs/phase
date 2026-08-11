@@ -30,6 +30,8 @@ const mockHostAdapter = {
   requestPause: vi.fn(),
   requestResume: vi.fn(),
   overrideMatchResult: vi.fn(async () => {}),
+  submitMatchSettlement: vi.fn(async () => {}),
+  submitAuthorized: vi.fn(),
   dispose: vi.fn(async () => {}),
   status: "idle" as const,
   roomCode: null,
@@ -46,6 +48,8 @@ const mockGuestAdapter = {
   initialize: vi.fn(async () => {}),
   submitPick: vi.fn(async () => {}),
   submitDeck: vi.fn(async () => {}),
+  submitAuthorized: vi.fn(),
+  acknowledgeAuthorized: vi.fn(),
   dispose: vi.fn(async () => {}),
   status: "idle" as const,
   seatIndex: null,
@@ -76,6 +80,12 @@ function mockView(status: string): DraftPlayerView {
     pass_direction: "Left",
     current_pack: null,
     pool: [],
+    pool_groups: {
+      color_groups: [],
+      type_groups: [],
+      cmc_groups: [],
+      color_counts: { white: 0, blue: 0, black: 0, red: 0, green: 0 },
+    },
     seats: [],
     cards_per_pack: 14,
     pack_count: 3,
@@ -87,6 +97,7 @@ function mockView(status: string): DraftPlayerView {
     tournament_format: "Swiss",
     pod_policy: "Competitive",
     pairings: [],
+    match_config: { match_type: "Bo1" },
   };
 }
 
@@ -269,12 +280,19 @@ describe("multiplayerDraftStore", () => {
             ai_decks: [],
           },
           matchConfig: { match_type: "Bo1" },
+          binding: {
+            podId: "draft-1", matchId: "match-1", round: 1,
+            sessionKey: "session-1", lease: "lease-1", nonce: "nonce-1",
+            revision: 0, matchAuthoritySeat: 0,
+          },
         },
       });
 
       await useMultiplayerDraftStore.getState().reportActiveMatchGameResult(1);
 
-      expect(mockHostAdapter.overrideMatchResult).toHaveBeenCalledWith("match-1", 4);
+      expect(mockHostAdapter.submitMatchSettlement).toHaveBeenCalledWith(expect.objectContaining({
+        winnerSeat: 4,
+      }));
     });
 
     it("reports active match concessions as opponent wins", async () => {
@@ -301,12 +319,19 @@ describe("multiplayerDraftStore", () => {
             ai_decks: [],
           },
           matchConfig: { match_type: "Bo1" },
+          binding: {
+            podId: "draft-1", matchId: "match-2", round: 1,
+            sessionKey: "session-2", lease: "lease-2", nonce: "nonce-2",
+            revision: 0, matchAuthoritySeat: 0,
+          },
         },
       });
 
       await useMultiplayerDraftStore.getState().reportActiveMatchConcession();
 
-      expect(mockHostAdapter.overrideMatchResult).toHaveBeenCalledWith("match-2", 5);
+      expect(mockHostAdapter.submitMatchSettlement).toHaveBeenCalledWith(expect.objectContaining({
+        winnerSeat: 5,
+      }));
     });
   });
 

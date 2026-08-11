@@ -7,15 +7,17 @@ import type {
 } from "../../services/cloudSync";
 
 // Hoisted mock fns so the vi.mock factories below can reference them.
-const { buildBackupMock, applyBackupMock, getProvider } = vi.hoisted(() => ({
+const { buildBackupMock, applyBackupMock, mergeDeckCollectionsMock, getProvider } = vi.hoisted(() => ({
   buildBackupMock: vi.fn(),
   applyBackupMock: vi.fn(),
+  mergeDeckCollectionsMock: vi.fn(),
   getProvider: vi.fn(),
 }));
 
 vi.mock("../../services/backup", () => ({
   buildBackup: buildBackupMock,
   applyBackup: applyBackupMock,
+  mergeDeckCollections: mergeDeckCollectionsMock,
 }));
 vi.mock("../../services/cloudSync", () => ({
   getCloudSyncProvider: getProvider,
@@ -247,5 +249,28 @@ describe("cloudSyncStore.syncNow reconciliation", () => {
     expect(s.status).toBe("synced");
     expect(s.lastSyncedRevision).toBe(1);
     expect(provider.push).toHaveBeenLastCalledWith(expect.anything(), null);
+  });
+});
+
+describe("cloudSyncStore.resolveConflict", () => {
+  it("publishes a merged deck collection before applying it locally", async () => {
+    const local = fakeBackup({ decks: { Local: "local" } });
+    const remoteSnapshot = remote(5);
+    const merged = fakeBackup({ decks: { Local: "local", "Cloud Deck": "cloud" } });
+    useCloudSyncStore.setState({
+      conflict: remoteSnapshot,
+      conflictDiff: null,
+      status: "conflict",
+    });
+    buildBackupMock.mockReturnValue(local);
+    mergeDeckCollectionsMock.mockReturnValue(merged);
+    provider.push.mockResolvedValue({ revision: 6, updatedAt: "t" });
+
+    await useCloudSyncStore.getState().resolveConflict("merge");
+
+    expect(mergeDeckCollectionsMock).toHaveBeenCalledWith(local, remoteSnapshot.backup);
+    expect(provider.push).toHaveBeenCalledWith(merged, 5);
+    expect(applyBackupMock).toHaveBeenCalledWith(merged, "overwrite");
+    expect(useCloudSyncStore.getState().lastSyncedRevision).toBe(6);
   });
 });

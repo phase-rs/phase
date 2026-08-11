@@ -153,9 +153,7 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
             let GameAction::ChooseExert { exert: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");
             };
-            {
-                cmp_val(a0, b0)
-            }
+            cmp_val(a0, b0)
         }
         GameAction::ChooseEnlist { target: a0 } => {
             let GameAction::ChooseEnlist { target: b0 } = b else {
@@ -169,7 +167,9 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
             let GameAction::ChooseClashOpponent { opponent: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");
             };
-            cmp_val(a0, b0)
+            {
+                cmp_val(a0, b0)
+            }
         }
         GameAction::ChooseZoneOpponentChooser { opponent: a0 } => {
             let GameAction::ChooseZoneOpponentChooser { opponent: b0 } = b else {
@@ -217,9 +217,7 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
             let GameAction::ReorderHand { order: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");
             };
-            {
-                cmp_val(a0, b0)
-            }
+            cmp_val(a0, b0)
         }
         GameAction::TapLandForMana { selection: a0 } => {
             let GameAction::TapLandForMana { selection: b0 } = b else {
@@ -227,39 +225,53 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
             };
             a0.cmp_stable(b0)
         }
+        GameAction::ActivateManaSource { selection: a0 } => {
+            let GameAction::ActivateManaSource { selection: b0 } = b else {
+                unreachable!("cmp_payload: same-variant invariant");
+            };
+            a0.cmp_stable(b0)
+        }
+        GameAction::BackToManaPayment => {
+            let GameAction::BackToManaPayment = b else {
+                unreachable!("cmp_payload: same-variant invariant");
+            };
+            Ordering::Equal
+        }
         GameAction::UntapLandForMana { object_id: a0 } => {
             let GameAction::UntapLandForMana { object_id: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");
             };
-            cmp_val(a0, b0)
+            {
+                cmp_val(a0, b0)
+            }
         }
         GameAction::SpendPoolMana { pip_id: a0 } => {
             let GameAction::SpendPoolMana { pip_id: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");
             };
-            {
-                cmp_val(a0, b0)
-            }
+            cmp_val(a0, b0)
         }
         GameAction::UnspendPoolMana { pip_id: a0 } => {
             let GameAction::UnspendPoolMana { pip_id: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");
             };
-            cmp_val(a0, b0)
+            {
+                cmp_val(a0, b0)
+            }
         }
         GameAction::SelectCards { cards: a0 } => {
             let GameAction::SelectCards { cards: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");
             };
-            {
-                cmp_val(a0, b0)
-            }
+            cmp_val(a0, b0)
         }
         GameAction::ChooseRemoveCounterCostDistribution { distribution: a0 } => {
             let GameAction::ChooseRemoveCounterCostDistribution { distribution: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");
             };
-            cmp_val(a0, b0)
+            {
+                cmp_val(a0, b0)
+            }
         }
         GameAction::SelectCoinFlips { keep_indices: a0 } => {
             let GameAction::SelectCoinFlips { keep_indices: b0 } = b else {
@@ -895,9 +907,7 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
             let GameAction::SetPriorityYield { op: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");
             };
-            {
-                cmp_val(a0, b0)
-            }
+            cmp_val(a0, b0)
         }
         GameAction::SetMayTriggerAutoChoice { op: a0 } => {
             let GameAction::SetMayTriggerAutoChoice { op: b0 } = b else {
@@ -971,9 +981,7 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
             let GameAction::LearnDecision { choice: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");
             };
-            {
-                cmp_val(a0, b0)
-            }
+            cmp_val(a0, b0)
         }
         GameAction::SelectCategoryPermanents { choices: a0 } => {
             let GameAction::SelectCategoryPermanents { choices: b0 } = b else {
@@ -1070,9 +1078,7 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
             let GameAction::Concede { player_id: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");
             };
-            {
-                cmp_val(a0, b0)
-            }
+            cmp_val(a0, b0)
         }
         GameAction::DeclareShortcut {
             count: a0,
@@ -1191,15 +1197,19 @@ fn cmp_debug_action_payload(a: &DebugAction, b: &DebugAction) -> Ordering {
             card_name: a0,
             owner: a1,
             zone: a2,
-            attach_to: a3,
-            run_etb: a4,
+            count: a3,
+            attach_to: a4,
+            run_etb: a5,
+            nonlegendary: a6,
         } => {
             let DebugAction::CreateCard {
                 card_name: b0,
                 owner: b1,
                 zone: b2,
-                attach_to: b3,
-                run_etb: b4,
+                count: b3,
+                attach_to: b4,
+                run_etb: b5,
+                nonlegendary: b6,
             } = b
             else {
                 unreachable!("cmp_debug_action_payload: same-variant invariant");
@@ -1209,6 +1219,8 @@ fn cmp_debug_action_payload(a: &DebugAction, b: &DebugAction) -> Ordering {
                 .then_with(|| cmp_val(a2, b2))
                 .then_with(|| cmp_val(a3, b3))
                 .then_with(|| cmp_val(a4, b4))
+                .then_with(|| cmp_val(a5, b5))
+                .then_with(|| cmp_val(a6, b6))
         }
         DebugAction::RemoveObject { object_id: a0 } => {
             let DebugAction::RemoveObject { object_id: b0 } = b else {
@@ -1220,9 +1232,7 @@ fn cmp_debug_action_payload(a: &DebugAction, b: &DebugAction) -> Ordering {
             let DebugAction::Sacrifice { object_id: b0 } = b else {
                 unreachable!("cmp_debug_action_payload: same-variant invariant");
             };
-            {
-                cmp_val(a0, b0)
-            }
+            cmp_val(a0, b0)
         }
         DebugAction::DrawCards {
             player_id: a0,
@@ -1398,9 +1408,7 @@ fn cmp_debug_action_payload(a: &DebugAction, b: &DebugAction) -> Ordering {
             let DebugAction::Detach { object_id: b0 } = b else {
                 unreachable!("cmp_debug_action_payload: same-variant invariant");
             };
-            {
-                cmp_val(a0, b0)
-            }
+            cmp_val(a0, b0)
         }
         DebugAction::GrantKeyword {
             object_id: a0,
@@ -1518,29 +1526,40 @@ fn cmp_debug_action_payload(a: &DebugAction, b: &DebugAction) -> Ordering {
         }
         DebugAction::CreateToken {
             request: a0,
-            run_etb: a1,
+            count: a1,
+            run_etb: a2,
         } => {
             let DebugAction::CreateToken {
                 request: b0,
-                run_etb: b1,
+                count: b1,
+                run_etb: b2,
             } = b
             else {
                 unreachable!("cmp_debug_action_payload: same-variant invariant");
             };
-            cmp_debug_token_request(a0, b0).then_with(|| cmp_val(a1, b1))
+            cmp_debug_token_request(a0, b0)
+                .then_with(|| cmp_val(a1, b1))
+                .then_with(|| cmp_val(a2, b2))
         }
         DebugAction::CreateTokenCopy {
             source_id: a0,
             owner: a1,
+            count: a2,
+            nonlegendary: a3,
         } => {
             let DebugAction::CreateTokenCopy {
                 source_id: b0,
                 owner: b1,
+                count: b2,
+                nonlegendary: b3,
             } = b
             else {
                 unreachable!("cmp_debug_action_payload: same-variant invariant");
             };
-            cmp_val(a0, b0).then_with(|| cmp_val(a1, b1))
+            cmp_val(a0, b0)
+                .then_with(|| cmp_val(a1, b1))
+                .then_with(|| cmp_val(a2, b2))
+                .then_with(|| cmp_val(a3, b3))
         }
     }
 }

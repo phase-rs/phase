@@ -181,6 +181,25 @@ describe("ActionButton", () => {
     ]);
   });
 
+  it("leaves native AI Resolve All seat ownership to the server", () => {
+    useGameStore.setState({
+      gameMode: "native-ai",
+      gameState: {
+        ...createGameState(priorityPrompt()),
+        phase: "PostCombatMain",
+        auto_pass: {},
+        stack: [spellStackEntry()],
+      },
+      waitingFor: priorityPrompt(),
+      legalActions: [],
+    });
+
+    render(<ActionButton />);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Resolve All/ }));
+    expect(vi.mocked(dispatchResolveAll)).toHaveBeenLastCalledWith(0, []);
+  });
+
   it("uses the live controller's bot seat binding for a Bot draft match", () => {
     useGameStore.setState({
       gameMode: "draft-match",
@@ -281,6 +300,34 @@ describe("ActionButton", () => {
       type: "DeclareAttackers",
       data: { attacks: [[100, target]] },
     });
+  });
+
+  it("keeps a selected attacker with empty engine support unsubmitted", () => {
+    const target = { type: "Player", data: 1 } as const;
+    const wf: WaitingFor = {
+      type: "DeclareAttackers",
+      data: {
+        player: 0,
+        valid_attacker_ids: [100, 101],
+        valid_attack_targets: [target],
+        valid_attack_targets_by_attacker: { "100": [target], "101": [] },
+      },
+    };
+    useGameStore.setState({
+      gameState: { ...createGameState(wf), phase: "DeclareAttackers", active_player: 0, auto_pass: {} },
+      waitingFor: wf,
+      legalActions: [],
+    });
+    useUiStore.setState({ selectedAttackers: [100, 101], blockerAssignments: new Map() });
+    vi.mocked(dispatchAction).mockClear();
+
+    render(<ActionButton />);
+    fireEvent.click(screen.getByRole("button", { name: "Confirm Attackers (2)" }));
+
+    expect(vi.mocked(dispatchAction)).not.toHaveBeenCalled();
+    expect(screen.getByText("No shared target — switch to Distribute to aim each attacker.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Distribute" }));
+    expect(screen.getByRole("button", { name: "Assign 2 more" })).toBeDisabled();
   });
 
   it("does not client-gate Block with None on an unassigned must-block creature", () => {

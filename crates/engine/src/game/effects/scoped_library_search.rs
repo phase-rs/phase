@@ -543,6 +543,7 @@ fn prepare_scoped_group(
                 action: PlayerActionKind::SearchedLibrary,
                 look_count: None,
                 scry_bottom_count: None,
+                scry_top_count: None,
             });
             state.players_who_searched_library_this_turn.insert(player);
             state
@@ -553,6 +554,12 @@ fn prepare_scoped_group(
                 .push((player, PlayerActionKind::SearchedLibrary));
         }
         if let Some(search) = prepared.active_search {
+            let looked_at = search
+                .looked_at()
+                .iter()
+                .map(|(_, _, identity)| identity.object_id)
+                .collect::<Vec<_>>();
+            state.remember_card_identities(search.learned_audience().iter().copied(), &looked_at);
             state.active_library_searches.insert(search);
         }
         if let Some(event) = prepared.hidden_event {

@@ -134,6 +134,13 @@ pub struct LoopCertificate {
     /// paths require an identical battlefield); wired now so an object-growth path
     /// populates it with no further change. NOT a `ResourceAxis` — concrete permanents.
     pub residual_board_delta: BoardDelta,
+    /// CR 732.2a: the measured resource signature of ONE repetition, published only by a
+    /// producer that narrowed the CR 704 repetition bound (the bounded cycle offer).
+    /// `None` for every other offer, and for every save written before this field existed
+    /// — in which case a drive falls back to the recurrence disjunct, i.e. exactly shipped
+    /// behaviour. `skip_serializing_if` keeps the existing payload byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_cycle: Option<crate::analysis::resource::PeriodicDelta>,
 }
 
 impl LoopCertificate {
@@ -173,12 +180,35 @@ pub struct ShortcutProposal {
     /// streams (skip-if-none), so this is a byte-preserving addition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<DecisionTemplate>,
+    /// CR 732.2a: copied verbatim off the confirmed certificate so the drive reads ONE
+    /// authority for what a conformant cycle looks like. `None` for every offer whose
+    /// producer states no per-period signature (see [`LoopCertificate::per_cycle`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_cycle: Option<crate::analysis::resource::PeriodicDelta>,
 }
 
 /// CR 732.2b/c: an opponent's answer to a proposed loop shortcut. `Accept` lets the
-/// shortcut proceed; `Shorten` names an earlier stopping point (Phase 3 realizes this
-/// conservatively as decline-to-manual — the opponent receives a real priority window
-/// instead of the loop being auto-taken; finite-K materialization is Phase 4).
+/// shortcut proceed; `Shorten` names an earlier stopping point.
+///
+/// CR 732.2b lets a shortening player name the PLACE now and the choice later — "the player
+/// doesn't need to specify at this time what the new choice will be" — which is why `Shorten`
+/// carries `at_iteration` and no choice payload.
+///
+/// DEFICIENCY NOTE — REALIZATION GAP vs THE DESIGN. This is a note, not a defense.
+///
+/// The design is stated at `types::game_state`'s `scheduled_collapse_axes` doc. Under CR 732.2b the
+/// place a responder names "becomes the new ending point", so the shortcut is still TAKEN up to
+/// there. This engine does not do that yet: every `Shorten` is realized as decline-to-manual —
+/// nothing is taken and the responder receives a real priority window, with `at_iteration` carried
+/// and honored as a stop signal rather than as a partial-advance instruction. Finite-K
+/// materialization at the named iteration is the remaining work.
+///
+/// The gap's direction is toward MORE responder agency than CR 732.2b grants (priority strictly
+/// earlier, proposer benefit strictly less), so it can never take a choice away from a player who
+/// asked to diverge — but the target is the rule, not a favorable direction. Closing it is tracked
+/// as the USER-AUTHORIZED follow-up "Shortcut-system rules-correctness completion — true all the
+/// way down" (`.deferred-backlog.md`), which exists to make the design true all the way down rather
+/// than to justify where it is not yet. Out of scope for the PR that wrote this note.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ShortcutResponse {
     /// CR 732.2c: this player agrees to take the shortcut.
@@ -271,6 +301,9 @@ pub fn detect_loop(
         // Invariant pinned by `residual_empty_for_constant_depth` (T12). (No CR
         // annotation: this is an invariant/plumbing comment, not rule-implementing code.)
         residual_board_delta: crate::analysis::resource::board_delta(cycle_start, cycle_end),
+        // CR 732.2a: `detect_loop` states no CR 704 repetition bound, so it publishes no
+        // per-period signature either. Only the bounded-cycle offer does.
+        per_cycle: None,
     })
 }
 
@@ -463,11 +496,51 @@ pub(crate) fn live_mandatory_loop_winner(
 /// (the one non-faller) is. A transient intra-cycle dip that recovers to a
 /// non-negative NET delta would still kill the winner via the CR 704.5a SBA at low
 /// absolute life before the extrapolated win — a net-delta check cannot see it.
-/// Per-resolution granularity IS SBA granularity here (CR 704.3 checks whenever a
-/// player would get priority, between resolutions), and consecutive ring frames are
-/// consecutive resolutions (a non-sampling beat clears the ring), so requiring
-/// `life[winner]` non-decreasing across the matched window (prior frame → every
-/// subsequent ring frame → the live state) is exactly right. Winner draw-from-empty
+/// Per-resolution granularity IS SBA granularity here, but NOT because ring frames are
+/// consecutive resolutions — they are not, and never were. The shipped CR 603.3b
+/// `OrderTriggers` exemption already retains the ring across a non-sampling beat (dump D
+/// measured 35 such beats in one drive), and `WaitingFor::is_forced_cascade_window`
+/// extends that to every forced pre-priority window (CR 603.3d / CR 603.5 + CR 608.2 /
+/// CR 903.9a / CR 704.5j / CR 310.11 / CR 703.1 + CR 117.3a). The invariant this guard
+/// actually needs is weaker and true:
+/// **every point at which CR 704.5a could fire is either sampled or clears the ring.**
+/// CR 704.3 fixes those points: SBAs are checked whenever a player would get priority,
+/// and every such point arrives as `WaitingFor::Priority`, which is deliberately not a
+/// forced-cascade window and therefore samples or clears. The retained windows are
+/// exempt for three DIFFERENT reasons, and the weaker invariant is what covers all
+/// three:
+/// the between-resolutions members (CR 603.3b / CR 603.3d / CR 903.9a / CR 704.5j /
+/// CR 310.11) sit inside the CR 704.3 fixpoint itself, where no life total moves; the
+/// MID-resolution member (`OptionalEffectChoice`, CR 603.5 + CR 608.2) is a pause in the
+/// middle of a resolution, where life absolutely can move — but CR 608.2 performs no SBA
+/// check mid-resolution, so a life change there is not a CR 704.5a point being skipped,
+/// it is a life change that the very next CR 704.3 check (a `Priority` window) observes;
+/// the TURN-BASED members (CR 703.1 + CR 117.3a — untap CR 502.3, declare attackers
+/// CR 508.1/508.1g, declare blockers CR 509.1, cleanup discard CR 514.1) precede the
+/// step's own grant of priority (CR 508.2 is the explicit case), and the DECLARATION
+/// itself moves no life: untapping, declaring, exerting/enlisting and discarding change
+/// no life, and anything that WOULD (an attack trigger) uses the stack and therefore
+/// resolves at an observed `Priority` beat.
+/// That is a claim about the declaration only, and the two life-moving neighbours it
+/// deliberately excludes are why the class is drawn where it is:
+/// * CR 508.1h / CR 509.1d put the declaration's COSTS in a separate sub-step
+///   ("Costs may include paying mana, tapping permanents, sacrificing permanents,
+///   discarding cards, and so on"), and a Phyrexian symbol in an attack or block tax is
+///   paid with 2 life (CR 107.4f) — measured in-code: `engine_combat::handle_pay_combat_tax`
+///   pays through `casting::pay_unless_cost`, which settles `life_payments` via
+///   `life_costs::pay_life_as_cost`. So declaring CAN move life, at
+///   `WaitingFor::CombatTaxPayment` — which is deliberately NOT a member and therefore
+///   clears the ring.
+/// * `AssignCombatDamage` / `AssignBlockerDamage` are likewise NOT members despite being
+///   turn-based (CR 510.1c / CR 510.1d): CR 510.2 deals the assigned damage with no
+///   intervening priority. That window-keyed exclusion is necessary but NOT sufficient,
+///   because the window opens only for a damage DIVISION choice — an unblocked attacker
+///   deals CR 510.2 damage with no window at all. The sufficient guard is event-keyed:
+///   `GameState::invalidate_loop_ring_on_unobserved_life_move`, called from
+///   `game::combat_damage::apply_combat_damage`.
+///
+/// So requiring `life[winner]` non-decreasing across the matched window (prior frame →
+/// every subsequent ring frame → the live state) is exactly right. Winner draw-from-empty
 /// is correctly unreachable (a non-faller never crosses a loss SBA).
 pub(crate) fn winner_life_never_dips(frames: &[&GameState], winner: PlayerId) -> bool {
     let mut prev: Option<i32> = None;
@@ -589,6 +662,13 @@ mod tests {
     fn pid(n: u8) -> PlayerId {
         PlayerId(n)
     }
+
+    // The CR 704.3 partition `winner_life_never_dips` rests on — `Priority` DISJOINT from
+    // the retained class, over both priority seats — is asserted by
+    // `types::game_state::forced_cascade_window_tests::forced_cascade_window_class`, which
+    // covers it strictly more completely (thirteen members and eight non-members, including both
+    // `Priority` seats). A second weaker row here would only be a place for the two to
+    // drift apart.
 
     fn battlefield_creature(state: &mut GameState, id: u64, controller: u8) -> ObjectId {
         let oid = ObjectId(id);
@@ -885,6 +965,7 @@ mod tests {
             win_kind: WinKind::LethalDamage,
             mandatory: true,
             residual_board_delta: BoardDelta::default(),
+            per_cycle: None,
         };
         assert!(cert.covers(&[ResourceAxis::DamageDealt(pid(1))]));
         assert!(cert.covers(&[
@@ -1414,6 +1495,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         }
     }

@@ -26,7 +26,7 @@ use crate::types::ability::{
     QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
     SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta, SpellCastingOption,
     SpellCastingOptionKind, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
-    TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
+    TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, VoteSubject, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -1753,9 +1753,20 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::TimesCostPaidThisResolution => {
             "times the repeated optional cost was paid this resolution".into()
         }
-        QuantityRef::ManaSpentToCast { scope, metric } => {
-            format!("mana spent to cast ({scope:?}, {metric:?})")
-        }
+        QuantityRef::ManaSpentToCast { scope, metric } => match metric {
+            // CR 106.3: the per-color leaf names a concrete color, so render it
+            // in words. The other three metrics keep their existing `{metric:?}`
+            // rendering byte-identically.
+            crate::types::ability::CastManaSpentMetric::OfColor { color } => format!(
+                "mana spent to cast ({scope:?}, {} mana)",
+                fmt_mana_color_full(color)
+            ),
+            crate::types::ability::CastManaSpentMetric::Total
+            | crate::types::ability::CastManaSpentMetric::DistinctColors
+            | crate::types::ability::CastManaSpentMetric::FromSource { .. } => {
+                format!("mana spent to cast ({scope:?}, {metric:?})")
+            }
+        },
         QuantityRef::EventContextSourceCostX => "X of triggering spell".into(),
         QuantityRef::EventContextSourceModesChosen => {
             "modes chosen for the triggering spell".into()
@@ -1808,7 +1819,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
 }
 
 fn fmt_player_filter(pf: &PlayerFilter) -> String {
-    use crate::types::ability::{DamageKindFilter, PlayerRelation};
+    use crate::types::ability::{DamageKindFilter, PlayerRelation, PossessionAxis};
     match pf {
         PlayerFilter::Controller => "you",
         PlayerFilter::Opponent => "each opponent",
@@ -1885,6 +1896,25 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
             };
             return format!("{who} whose {attr:?} {comparator:?} {value:?}");
         }
+        // CR 608.2c + CR 109.4: "each [player class] who controlled/owned a
+        // [filter] this way"
+        PlayerFilter::TrackedSetPossessor {
+            relation,
+            possession,
+            filter,
+            ..
+        } => {
+            let who = match relation {
+                PlayerRelation::Controller => "you",
+                PlayerRelation::Opponent => "each opponent",
+                PlayerRelation::All => "each player",
+            };
+            let verb = match possession {
+                PossessionAxis::Controller => "controlled",
+                PossessionAxis::Owner => "owned",
+            };
+            return format!("{who} who {verb} a {filter:?} this way");
+        }
     }
     .into()
 }
@@ -1945,6 +1975,9 @@ fn fmt_mana_production(mp: &ManaProduction) -> String {
         }
         ManaProduction::ChosenColor { count, .. } => {
             format!("{} of chosen color", fmt_quantity(count))
+        }
+        ManaProduction::NotedType { count } => {
+            format!("{} of noted type", fmt_quantity(count))
         }
         ManaProduction::OpponentLandColors { count } => {
             format!("{} of opponent land colors", fmt_quantity(count))
@@ -2579,6 +2612,13 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             ));
             d.push(("target".into(), fmt_target(target)));
         }
+        Effect::ReproduceEventCounters {
+            target,
+            per_kind_count,
+        } => {
+            d.push(("reproduce counters".into(), format!("{per_kind_count:?}")));
+            d.push(("target".into(), fmt_target(target)));
+        }
         Effect::RemoveCounter {
             counter_type,
             count,
@@ -2912,8 +2952,21 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             if let Some(e) = expiry {
                 d.push(("expiry".into(), format!("{e:?}")));
             }
-            if let Some(t) = target {
-                d.push(("target".into(), fmt_target(t)));
+            // CR 601.2c: `target` is a `ManaTargetRole`. Render each DECLARED
+            // role as its own labeled key so the sticky signature names the
+            // role, not just the filter — a recipient and a count source with
+            // the same filter are different parses and must not collapse to the
+            // same signature. Keys are emitted only when the role declares that
+            // filter, so a single-role mana emits exactly ONE key (as before)
+            // and unqualified manas emit none (#5507's byte-identical
+            // requirement).
+            if let Some(role) = target {
+                if let Some(f) = role.recipient() {
+                    d.push(("mana recipient".into(), fmt_target(f)));
+                }
+                if let Some(f) = role.count_source() {
+                    d.push(("mana count source".into(), fmt_target(f)));
+                }
             }
         }
         Effect::RevealHand {
@@ -3076,7 +3129,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             max_total_mv,
             filter,
             zones,
-            exile_instead_of_graveyard,
+            graveyard_replacement,
         } => {
             d.push(("count".into(), count.to_string()));
             if let Some(mv) = max_total_mv {
@@ -3091,8 +3144,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                     .collect::<Vec<_>>()
                     .join("/"),
             ));
-            if *exile_instead_of_graveyard {
-                d.push(("exile instead of graveyard".into(), "yes".into()));
+            if let Some(destination) = graveyard_replacement {
+                d.push(("graveyard replacement".into(), format!("{destination:?}")));
             }
         }
         Effect::RollDie {
@@ -3419,8 +3472,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("count".into(), format!("{count:?}")));
             d.push(("position".into(), format!("{position:?}")));
         }
-        Effect::PutOnTopOrBottom { target } => {
+        Effect::PutOnTopOrBottom { target, chooser } => {
             d.push(("target".into(), fmt_target(target)));
+            d.push(("chooser".into(), fmt_target(chooser)));
         }
         Effect::Amass { subtype, count } => {
             d.push(("subtype".into(), subtype.clone()));
@@ -3648,6 +3702,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Forage
         | Effect::Harness
         | Effect::Learn
+        | Effect::NoteManaSpent
         | Effect::SwitchPT { .. }
         | Effect::Myriad
         | Effect::Encore
@@ -3816,6 +3871,9 @@ fn fmt_comparator(c: &Comparator) -> &'static str {
 /// Format an `AbilityCondition` as a human-readable string for the parse-details overlay.
 fn fmt_ability_condition(cond: &AbilityCondition) -> String {
     match cond {
+        AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn => {
+            "trigger event target was damaged by source this turn".into()
+        }
         AbilityCondition::AdditionalCostPaid { .. } => "additional cost was paid".into(),
         AbilityCondition::AdditionalCostPaidInstead => "additional cost was paid (instead)".into(),
         AbilityCondition::AlternativeManaCostPaid => "alternative mana cost was paid".into(),
@@ -3880,6 +3938,10 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         },
         AbilityCondition::IsInitiative => "has the initiative".into(),
         AbilityCondition::HasCityBlessing => "has the city's blessing".into(),
+        AbilityCondition::HasEnduringStory => "has an enduring story".into(),
+        AbilityCondition::DiscardedCardMatchesFilter { filter } => {
+            format!("discarded card matches {}", fmt_target(filter))
+        }
         AbilityCondition::IsRingBearer => "is the ring-bearer".into(),
         AbilityCondition::TargetHasKeywordInstead { keyword } => {
             format!("target has {} (instead)", keyword_label(keyword))
@@ -4026,6 +4088,7 @@ fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> Stri
             "a spell was cast with this variant this turn".into()
         }
         TC::HasCityBlessing => "has the city's blessing".into(),
+        TC::HasEnduringStory => "has an enduring story".into(),
         TC::CompletedDungeon { .. } => "completed a dungeon".into(),
         TC::SourceIsTapped => "source is tapped".into(),
         TC::SourceIsTransformed => "source is transformed".into(),
@@ -4182,15 +4245,18 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         SC::IsInitiative => "has the initiative".into(),
         SC::NoMonarch => "no monarch".into(),
         SC::HasCityBlessing => "has the city's blessing".into(),
+        SC::HasEnduringStory => "has an enduring story".into(),
         SC::CompletedADungeon => "completed a dungeon".into(),
         SC::WasStartingPlayer { .. } => "was the starting player".into(),
         SC::SpellCastWithVariantThisTurn { .. } => {
             "a spell was cast with this variant this turn".into()
         }
+        SC::AnyPlayerAttackedYouLastTurn => "a player attacked you during their last turn".into(),
         SC::OpponentPoisonAtLeast { count } => format!("an opponent has {count}+ poison"),
         SC::UnlessPay { .. } => "unless a cost is paid".into(),
         SC::Unrecognized { .. } => "unrecognized".into(),
         SC::DuringYourTurn => "during your turn".into(),
+        SC::DuringOpponentsTurn => "during an opponent's turn".into(),
         SC::SharesColorWithMostCommonColorAmongPermanents => {
             "shares a color with the most common color among all permanents".into()
         }
@@ -4750,37 +4816,9 @@ fn build_ability_item(def: &AbilityDefinition) -> ParsedItem {
         children.push(build_ability_item(mode_ability));
     }
 
-    // CR 705.2 (#5601): coin-flip branch effects are embedded `AbilityDefinition`s
-    // (not `sub_ability` links), so — like the sub-ability / else / modal chains
-    // above — recurse into them here. Without this the win/lose branch parse
-    // signatures are swallowed by the bare `("win"/"lose", "yes")` presence
-    // markers in `effect_details`, making a real parser change inside a branch
-    // (e.g. Desperate Gambit's lose-branch `damage_source_filter` flipping
-    // `SelfRef` → `ChosenDamageSource`) invisible to the coverage parse-diff.
-    // Same swallowed-structure class as #5492/#5495/#5501.
-    match &*def.effect {
-        Effect::FlipCoin {
-            win_effect,
-            lose_effect,
-            ..
-        }
-        | Effect::FlipCoins {
-            win_effect,
-            lose_effect,
-            ..
-        } => {
-            if let Some(win) = win_effect {
-                children.push(build_ability_item(win));
-            }
-            if let Some(lose) = lose_effect {
-                children.push(build_ability_item(lose));
-            }
-        }
-        Effect::FlipCoinUntilLose { win_effect } => {
-            children.push(build_ability_item(win_effect));
-        }
-        _ => {}
-    }
+    visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
+        children.push(build_ability_item(payload));
+    });
 
     ParsedItem {
         category: ParseCategory::Ability,
@@ -6191,6 +6229,341 @@ fn visit_face_modifications(face: &CardFace, visit: &mut impl FnMut(&ContinuousM
     }
 }
 
+/// Direct `Effect` fields that carry executable ability definitions.
+///
+/// These payloads are neither ordinary ability chains nor grants inside a
+/// `GenericEffect`. Consumers that need to inspect an ability tree use this
+/// enumeration in addition to their existing traversal for those separate
+/// structures.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum DirectEffectPayloadEdge {
+    VotePerChoice,
+    VoteObjectOutcome,
+    SeparateIntoPilesChosen,
+    SeparateIntoPilesUnchosen,
+    RevealFromHandOnDecline,
+    CreateDelayedTriggerEffect,
+    RollDieResult,
+    FlipCoinWin,
+    FlipCoinLose,
+    FlipCoinsWin,
+    FlipCoinsLose,
+    FlipCoinUntilLoseWin,
+    ChooseOneOfBranch,
+}
+
+/// Visits the one-level executable ability payloads embedded directly in an effect.
+fn visit_direct_effect_ability_payloads<'a>(
+    effect: &'a Effect,
+    mut visit: impl FnMut(DirectEffectPayloadEdge, &'a AbilityDefinition),
+) {
+    match effect {
+        Effect::Vote {
+            per_choice_effect,
+            subject,
+            ..
+        } => {
+            for effect in per_choice_effect {
+                visit(DirectEffectPayloadEdge::VotePerChoice, effect);
+            }
+            if let VoteSubject::Objects {
+                outcome_template, ..
+            } = subject
+            {
+                visit(DirectEffectPayloadEdge::VoteObjectOutcome, outcome_template);
+            }
+        }
+        Effect::SeparateIntoPiles {
+            chosen_pile_effect,
+            unchosen_pile_effect,
+            ..
+        } => {
+            visit(
+                DirectEffectPayloadEdge::SeparateIntoPilesChosen,
+                chosen_pile_effect,
+            );
+            if let Some(unchosen_pile_effect) = unchosen_pile_effect {
+                visit(
+                    DirectEffectPayloadEdge::SeparateIntoPilesUnchosen,
+                    unchosen_pile_effect,
+                );
+            }
+        }
+        Effect::RevealFromHand {
+            on_decline: Some(on_decline),
+            ..
+        } => {
+            visit(DirectEffectPayloadEdge::RevealFromHandOnDecline, on_decline);
+        }
+        Effect::CreateDelayedTrigger { effect, .. } => {
+            visit(DirectEffectPayloadEdge::CreateDelayedTriggerEffect, effect);
+        }
+        Effect::RollDie { results, .. } => {
+            for result in results {
+                visit(DirectEffectPayloadEdge::RollDieResult, &result.effect);
+            }
+        }
+        Effect::FlipCoin {
+            win_effect,
+            lose_effect,
+            ..
+        } => {
+            if let Some(win_effect) = win_effect {
+                visit(DirectEffectPayloadEdge::FlipCoinWin, win_effect);
+            }
+            if let Some(lose_effect) = lose_effect {
+                visit(DirectEffectPayloadEdge::FlipCoinLose, lose_effect);
+            }
+        }
+        Effect::FlipCoins {
+            win_effect,
+            lose_effect,
+            ..
+        } => {
+            if let Some(win_effect) = win_effect {
+                visit(DirectEffectPayloadEdge::FlipCoinsWin, win_effect);
+            }
+            if let Some(lose_effect) = lose_effect {
+                visit(DirectEffectPayloadEdge::FlipCoinsLose, lose_effect);
+            }
+        }
+        Effect::FlipCoinUntilLose { win_effect } => {
+            visit(DirectEffectPayloadEdge::FlipCoinUntilLoseWin, win_effect);
+        }
+        Effect::ChooseOneOf { branches, .. } => {
+            for branch in branches {
+                visit(DirectEffectPayloadEdge::ChooseOneOfBranch, branch);
+            }
+        }
+        // Keep this exhaustive: direct ability payloads must be classified above
+        // when a new `Effect` variant is introduced.
+        Effect::StartYourEngines { .. }
+        | Effect::ChangeSpeed { .. }
+        | Effect::DealDamage { .. }
+        | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::EachDealsDamageEqualToPower { .. }
+        | Effect::EachSourceDealsDamage { .. }
+        | Effect::Draw { .. }
+        | Effect::Pump { .. }
+        | Effect::PairWith { .. }
+        | Effect::Destroy { .. }
+        | Effect::Regenerate { .. }
+        | Effect::RemoveAllDamage { .. }
+        | Effect::Counter { .. }
+        | Effect::CounterAll { .. }
+        | Effect::Token { .. }
+        | Effect::GainLife { .. }
+        | Effect::LoseLife { .. }
+        | Effect::SetTapState { .. }
+        | Effect::RemoveCounter { .. }
+        | Effect::Sacrifice { .. }
+        | Effect::DiscardCard { .. }
+        | Effect::Mill { .. }
+        | Effect::Scry { .. }
+        | Effect::PumpAll { .. }
+        | Effect::DamageAll { .. }
+        | Effect::DamageEachPlayer { .. }
+        | Effect::DestroyAll { .. }
+        | Effect::ChangeZone { .. }
+        | Effect::ChangeZoneAll { .. }
+        | Effect::Dig { .. }
+        | Effect::GainControl { .. }
+        | Effect::GainControlAll { .. }
+        | Effect::ControlNextTurn { .. }
+        | Effect::Attach { .. }
+        | Effect::UnattachAll { .. }
+        | Effect::Surveil { .. }
+        | Effect::Fight { .. }
+        | Effect::Bounce { .. }
+        | Effect::BounceAll { .. }
+        | Effect::Explore
+        | Effect::ExploreAll { .. }
+        | Effect::Investigate
+        | Effect::Tribute { .. }
+        | Effect::TimeTravel
+        | Effect::BecomeMonarch
+        | Effect::NoOp
+        | Effect::Proliferate
+        | Effect::ProliferateTarget { .. }
+        | Effect::Populate
+        | Effect::Clash
+        | Effect::Behold { .. }
+        | Effect::EndTheTurn
+        | Effect::EndCombatPhase
+        | Effect::SwitchPT { .. }
+        | Effect::CopySpell { .. }
+        | Effect::EpicCopy { .. }
+        | Effect::CastCopyOfCard { .. }
+        | Effect::CopyTokenOf { .. }
+        | Effect::CreateTokenCopyFromPool { .. }
+        | Effect::Myriad
+        | Effect::Encore
+        | Effect::CombineHost { .. }
+        | Effect::ChooseAugmentAndCombineWithHost { .. }
+        | Effect::Meld { .. }
+        | Effect::ExileHaunting { .. }
+        | Effect::HideawayConceal { .. }
+        | Effect::CopyTokenBlockingAttacker { .. }
+        | Effect::BecomeCopy { .. }
+        | Effect::ChoosePermanent { .. }
+        | Effect::GainActivatedAbilitiesOfTarget { .. }
+        | Effect::ChooseCard { .. }
+        | Effect::PutCounter { .. }
+        | Effect::ChooseCounterKind { .. }
+        | Effect::PutChosenCounter { .. }
+        | Effect::PutCounterAll { .. }
+        | Effect::MultiplyCounter { .. }
+        | Effect::ChooseCounterAdjustment { .. }
+        | Effect::DoublePT { .. }
+        | Effect::DoublePTAll { .. }
+        | Effect::MoveCounters { .. }
+        | Effect::ReproduceEventCounters { .. }
+        | Effect::Animate { .. }
+        | Effect::ReturnAsAura { .. }
+        | Effect::RegisterBending { .. }
+        | Effect::GenericEffect { .. }
+        | Effect::Cleanup { .. }
+        | Effect::Mana { .. }
+        | Effect::Discard { .. }
+        | Effect::Shuffle { .. }
+        | Effect::Transform { .. }
+        | Effect::FlipPermanent { .. }
+        | Effect::SearchLibrary { .. }
+        | Effect::SearchOutsideGame { .. }
+        | Effect::RevealHand { .. }
+        | Effect::RevealFromHand {
+            on_decline: None, ..
+        }
+        | Effect::Reveal { .. }
+        | Effect::RevealTop { .. }
+        | Effect::ExileTop { .. }
+        | Effect::ExileFaceDownPile { .. }
+        | Effect::TargetOnly { .. }
+        | Effect::Choose { .. }
+        | Effect::OpponentGuess { .. }
+        | Effect::SwapChosenLabels { .. }
+        | Effect::ChooseDamageSource { .. }
+        | Effect::Suspect { .. }
+        | Effect::Unsuspect { .. }
+        | Effect::Connive { .. }
+        | Effect::PhaseOut { .. }
+        | Effect::PhaseIn { .. }
+        | Effect::ForceBlock { .. }
+        | Effect::ForceAttack { .. }
+        | Effect::SolveCase
+        | Effect::BecomePrepared { .. }
+        | Effect::BecomeUnprepared { .. }
+        | Effect::BecomeSaddled { .. }
+        | Effect::SetClassLevel { .. }
+        | Effect::AddTargetReplacement { .. }
+        | Effect::AddRestriction { .. }
+        | Effect::ReduceNextSpellCost { .. }
+        | Effect::GrantNextSpellAbility { .. }
+        | Effect::AddPendingETBCounters { .. }
+        | Effect::AddPendingEntersModifications { .. }
+        | Effect::CreateEmblem { .. }
+        | Effect::PayCost { .. }
+        | Effect::CastFromZone { .. }
+        | Effect::FreeCastFromZones { .. }
+        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
+        | Effect::PreventDamage { .. }
+        | Effect::CreateDamageReplacement { .. }
+        | Effect::CreateDrawReplacement { .. }
+        | Effect::CreatePlaneswalkReplacement { .. }
+        | Effect::LoseTheGame { .. }
+        | Effect::WinTheGame { .. }
+        | Effect::RingTemptsYou
+        | Effect::VentureIntoDungeon
+        | Effect::VentureInto { .. }
+        | Effect::TakeTheInitiative
+        | Effect::ArrangePlanarDeckTop { .. }
+        | Effect::Planeswalk
+        | Effect::ChaosEnsues
+        | Effect::ReverseTurnOrder
+        | Effect::RedistributeLifeTotals
+        | Effect::OpenAttractions { .. }
+        | Effect::RollToVisitAttractions
+        | Effect::AssembleContraptions { .. }
+        | Effect::AssembleContraptionsFromRollDifference
+        | Effect::CrankContraptions { .. }
+        | Effect::ReassembleContraption { .. }
+        | Effect::AssembleContraptionOnSprocket { .. }
+        | Effect::ReassembleContraptionOnSprocket { .. }
+        | Effect::PutSticker { .. }
+        | Effect::ApplySticker { .. }
+        | Effect::ProcessRadCounters
+        | Effect::GrantCastingPermission { .. }
+        | Effect::ChooseFromZone { .. }
+        | Effect::RememberCard { .. }
+        | Effect::NoteManaSpent
+        | Effect::ForEachCategory { .. }
+        | Effect::ChooseObjectsIntoTrackedSet { .. }
+        | Effect::ChooseAndSacrificeRest { .. }
+        | Effect::EachPlayerCopyChosen { .. }
+        | Effect::Exploit { .. }
+        | Effect::GainEnergy { .. }
+        | Effect::GivePlayerCounter { .. }
+        | Effect::LoseAllPlayerCounters { .. }
+        | Effect::ExileFromTopUntil { .. }
+        | Effect::RevealUntil { .. }
+        | Effect::Discover { .. }
+        | Effect::Heist { .. }
+        | Effect::HeistExile
+        | Effect::Cascade
+        | Effect::Ripple { .. }
+        | Effect::MiracleCast { .. }
+        | Effect::MadnessCast { .. }
+        | Effect::PutAtLibraryPosition { .. }
+        | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
+        | Effect::PutOnTopOrBottom { .. }
+        | Effect::GiftDelivery { .. }
+        | Effect::Goad { .. }
+        | Effect::GoadAll { .. }
+        | Effect::Detain { .. }
+        | Effect::SetRoomDoorLock { .. }
+        | Effect::ExchangeControl { .. }
+        | Effect::ChangeTargets { .. }
+        | Effect::Manifest { .. }
+        | Effect::ManifestDread
+        | Effect::Cloak { .. }
+        | Effect::TurnFaceUp { .. }
+        | Effect::TurnFaceDown { .. }
+        | Effect::ExtraTurn { .. }
+        | Effect::GrantExtraLoyaltyActivations { .. }
+        | Effect::SkipNextTurn { .. }
+        | Effect::SkipNextStep { .. }
+        | Effect::AdditionalPhase { .. }
+        | Effect::Double { .. }
+        | Effect::RuntimeHandled { .. }
+        | Effect::Incubate { .. }
+        | Effect::Amass { .. }
+        | Effect::Monstrosity { .. }
+        | Effect::Specialize
+        | Effect::Renown { .. }
+        | Effect::Bolster { .. }
+        | Effect::Adapt { .. }
+        | Effect::Learn
+        | Effect::Forage
+        | Effect::Harness
+        | Effect::CollectEvidence { .. }
+        | Effect::Endure { .. }
+        | Effect::BlightEffect { .. }
+        | Effect::Seek { .. }
+        | Effect::SetLifeTotal { .. }
+        | Effect::ExchangeLifeWithStat { .. }
+        | Effect::ExchangeLifeTotals { .. }
+        | Effect::SetDayNight { .. }
+        | Effect::GiveControl { .. }
+        | Effect::RemoveFromCombat { .. }
+        | Effect::BecomeBlocked { .. }
+        | Effect::Conjure { .. }
+        | Effect::ApplyPerpetual { .. }
+        | Effect::Intensify { .. }
+        | Effect::DraftFromSpellbook { .. }
+        | Effect::Unimplemented { .. } => {}
+    }
+}
+
 /// Recursively visit modifications inside an ability's effect graph.
 /// Descends into `GenericEffect.static_abilities` (the typical carrier of
 /// continuous modifications emitted from animations), sub-abilities, and
@@ -6218,6 +6591,9 @@ fn visit_ability_modifications(
     for mode_ability in &def.mode_abilities {
         visit_ability_modifications(mode_ability, visit);
     }
+    visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
+        visit_ability_modifications(payload, visit);
+    });
 }
 
 /// Validate every `AddSubtype` modification on the face against the lexicon
@@ -6389,6 +6765,13 @@ fn ability_definition_has_unimplemented_parts(def: &AbilityDefinition) -> bool {
             .mode_abilities
             .iter()
             .any(ability_definition_has_unimplemented_parts)
+        || {
+            let mut has_unimplemented_parts = false;
+            visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
+                has_unimplemented_parts |= ability_definition_has_unimplemented_parts(payload);
+            });
+            has_unimplemented_parts
+        }
 }
 
 fn additional_cost_has_unimplemented_parts(additional_cost: &AdditionalCost) -> bool {
@@ -6437,6 +6820,10 @@ fn collect_ability_missing_parts(def: &AbilityDefinition, missing: &mut Vec<Stri
     for mode_ability in &def.mode_abilities {
         collect_ability_missing_parts(mode_ability, missing);
     }
+
+    visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
+        collect_ability_missing_parts(payload, missing);
+    });
 }
 
 fn collect_additional_cost_missing_parts(
@@ -7045,6 +7432,13 @@ fn is_ability_supported(def: &AbilityDefinition) -> bool {
             return false;
         }
     }
+    let mut supported = true;
+    visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
+        supported &= is_ability_supported(payload);
+    });
+    if !supported {
+        return false;
+    }
     true
 }
 
@@ -7261,6 +7655,9 @@ fn extract_ability_features(
     for mode_ab in &def.mode_abilities {
         extract_ability_features(mode_ab, features);
     }
+    visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
+        extract_ability_features(payload, features);
+    });
 }
 
 /// Extract QuantityRef variants from within conditions.
@@ -7342,6 +7739,9 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
     match cond {
         // Handled by `evaluate_condition` / `resolve_ability_chain`
         // (crates/engine/src/game/effects/mod.rs).
+        AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn => {
+            ("TriggerEventTargetDamagedBySourceThisTurn", Handled)
+        }
         AbilityCondition::AdditionalCostPaid { .. } => ("AdditionalCostPaid", Handled),
         AbilityCondition::AdditionalCostPaidInstead => ("AdditionalCostPaidInstead", Handled),
         AbilityCondition::AlternativeManaCostPaid => ("AlternativeManaCostPaid", Handled),
@@ -7380,6 +7780,10 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::CompletedDungeon { .. } => ("CompletedDungeon", Handled),
         AbilityCondition::IsInitiative => ("IsInitiative", Handled),
         AbilityCondition::HasCityBlessing => ("HasCityBlessing", Handled),
+        AbilityCondition::HasEnduringStory => ("HasEnduringStory", Handled),
+        AbilityCondition::DiscardedCardMatchesFilter { .. } => {
+            ("DiscardedCardMatchesFilter", Handled)
+        }
         AbilityCondition::IsRingBearer => ("IsRingBearer", Handled),
         AbilityCondition::TargetHasKeywordInstead { .. } => ("TargetHasKeywordInstead", Handled),
         // CR 608.2c: active-player check; handled by `evaluate_condition` (effects/mod.rs).
@@ -7719,6 +8123,9 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         PlayerFilter::ParentObjectTargetOwner => ("ParentObjectTargetOwner", Handled),
         PlayerFilter::ControlsCount { .. } => ("ControlsCount", Handled),
         PlayerFilter::PlayerAttribute { .. } => ("PlayerAttribute", Handled),
+        // CR 608.2c + CR 109.4: resolved by `quantity::possessed_tracked_set_member`
+        // via both `resolve_player_count` and `matches_player_scope`.
+        PlayerFilter::TrackedSetPossessor { .. } => ("TrackedSetPossessor", Handled),
     }
 }
 
@@ -7744,6 +8151,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         }
         StaticCondition::ClassLevelGE { .. } => ("ClassLevelGE", Handled),
         StaticCondition::DuringYourTurn => ("DuringYourTurn", Handled),
+        StaticCondition::DuringOpponentsTurn => ("DuringOpponentsTurn", Handled),
         StaticCondition::DayNightIs { .. } => ("DayNightIs", Handled),
         StaticCondition::SharesColorWithMostCommonColorAmongPermanents => {
             ("SharesColorWithMostCommonColorAmongPermanents", Handled)
@@ -7779,6 +8187,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::IsInitiative => ("IsInitiative", Handled),
         StaticCondition::NoMonarch => ("NoMonarch", Handled),
         StaticCondition::HasCityBlessing => ("HasCityBlessing", Handled),
+        StaticCondition::HasEnduringStory => ("HasEnduringStory", Handled),
         StaticCondition::CompletedADungeon => ("CompletedADungeon", Unhandled),
         // CR 103.1: bridges to Ability/Trigger `WasStartingPlayer`, both runtime-handled.
         StaticCondition::WasStartingPlayer { .. } => ("WasStartingPlayer", Handled),
@@ -7787,6 +8196,9 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::SpellCastWithVariantThisTurn { .. } => {
             ("SpellCastWithVariantThisTurn", Handled)
         }
+        // CR 508.6: runtime-handled by `layers::evaluate_condition` over the
+        // cleanup-time attack snapshot (drives Avenge's cost reduction).
+        StaticCondition::AnyPlayerAttackedYouLastTurn => ("AnyPlayerAttackedYouLastTurn", Handled),
         StaticCondition::OpponentPoisonAtLeast { .. } => ("OpponentPoisonAtLeast", Unhandled),
         StaticCondition::UnlessPay { .. } => ("UnlessPay", Handled),
         StaticCondition::ControlsCommander { .. } => ("ControlsCommander", Unhandled),
@@ -7846,48 +8258,12 @@ fn ability_tree_any(def: &AbilityDefinition, pred: &impl Fn(&AbilityDefinition) 
             return true;
         }
     }
-    // Compound effects that embed AbilityDefinitions
-    match &*def.effect {
-        Effect::FlipCoin {
-            win_effect,
-            lose_effect,
-            ..
-        }
-        | Effect::FlipCoins {
-            win_effect,
-            lose_effect,
-            ..
-        } => {
-            if let Some(ref w) = win_effect {
-                if ability_tree_any(w, pred) {
-                    return true;
-                }
-            }
-            if let Some(ref l) = lose_effect {
-                if ability_tree_any(l, pred) {
-                    return true;
-                }
-            }
-        }
-        Effect::FlipCoinUntilLose { win_effect } if ability_tree_any(win_effect, pred) => {
-            return true;
-        }
-        Effect::RollDie { results, .. } => {
-            for branch in results {
-                if ability_tree_any(&branch.effect, pred) {
-                    return true;
-                }
-            }
-        }
-        Effect::ChooseOneOf { branches, .. }
-            if branches.iter().any(|branch| ability_tree_any(branch, pred)) =>
-        {
-            return true;
-        }
-        Effect::CreateDelayedTrigger { effect, .. } if ability_tree_any(effect, pred) => {
-            return true;
-        }
-        _ => {}
+    let mut found = false;
+    visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
+        found |= ability_tree_any(payload, pred);
+    });
+    if found {
+        return true;
     }
     // ContinuousModification::GrantAbility inside GenericEffect
     if let Effect::GenericEffect {
@@ -8722,11 +9098,9 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
         if let Some(else_ab) = &def.else_ability {
             push_ability_tree(else_ab, out);
         }
-        if let Effect::ChooseOneOf { branches, .. } = def.effect.as_ref() {
-            for branch in branches {
-                push_ability_tree(branch, out);
-            }
-        }
+        visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
+            push_ability_tree(payload, out);
+        });
     }
     for a in face.abilities.iter() {
         push_ability_tree(a, &mut elements);
@@ -9339,10 +9713,25 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     effective_lower.contains("prevent") && effective_lower.contains("damage")
                 }
                 Effect::CopySpell { .. } => {
-                    // "You may have this creature enter as a copy of ..." lines
-                    // (including "enter tapped as a copy of")
-                    // Parsed as CopySpell without a description string.
+                    // CR 707.5: clone-permanent copies enter "as a copy of ..."
+                    // (including "enter tapped as a copy of").
+                    // CR 707.10: to copy a spell is to put a copy of it onto the
+                    // stack. A CopySpell is parsed without a description string, so
+                    // it is matched here by effect type. Spell copies — "copy that
+                    // spell", "copy it", "copy target instant or sorcery spell" —
+                    // frequently nest
+                    //       inside a CreateDelayedTrigger ("When you next cast ...
+                    //       this turn, copy that spell", CR 603.7b), reached via
+                    //       ability_tree_any's CreateDelayedTrigger recursion. The
+                    //       retarget rider ("you may choose new targets for the
+                    //       copy") is CR 707.10c. Covers Galvanic Iteration /
+                    //       Doublecast / Dual Strike / Twincast / Fork.
                     effective_lower.contains("as a copy of")
+                        || (effective_lower.contains("copy")
+                            && (effective_lower.contains("that spell")
+                                || effective_lower.contains("copy it")
+                                || (effective_lower.contains("copy target")
+                                    && effective_lower.contains("spell"))))
                 }
                 Effect::CastCopyOfCard { .. } => {
                     effective_lower.contains("copy") && effective_lower.contains("cast the copy")
@@ -9367,6 +9756,32 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     (effective_lower.contains("get ") || effective_lower.contains("gets "))
                         && (effective_lower.contains('+') || effective_lower.contains('-'))
                         && effective_lower.contains('/')
+                }
+                // CR 113.6m: "The same is true if the effect of that ability
+                // creates a delayed triggered ability whose effect moves the
+                // object out of a particular zone." Instants/sorceries in the
+                // graveyard-recursion class ("Whenever <event>, [you may pay
+                // <cost>. If you do,] return this card from your graveyard to
+                // your hand." — Spit Flame, Reach of Branches, Asgardian
+                // Inspiration, Endless Ranks of HYDRA) lower to a
+                // descriptionless CreateDelayedTrigger whose nested effect chain
+                // returns SelfRef from the graveyard to hand. `ability_tree_any`
+                // already recurses into the delayed trigger's `effect` and its
+                // `sub_ability`, so crediting this ChangeZone leaf covers the
+                // whole class and clears the false SilentDrop — the AST fully
+                // represents the line; only the per-line description-association
+                // heuristic failed (the delayed trigger carries no description).
+                Effect::ChangeZone {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Hand,
+                    target: TargetFilter::SelfRef,
+                    ..
+                } => {
+                    effective_lower.contains("return")
+                        && effective_lower.contains("graveyard")
+                        && effective_lower.contains("hand")
+                        && (effective_lower.contains("return ~")
+                            || effective_lower.contains("return this card"))
                 }
                 _ => false,
             };
@@ -10816,14 +11231,93 @@ pub fn format_semantic_audit_markdown(summary: &SemanticAuditSummary) -> String 
 
 #[cfg(test)]
 mod tests {
+
+    /// Matrix row 19 — `parse_details` renders each DECLARED mana role under its
+    /// OWN key. Under the old role-blind rendering, Carpet of Flowers (count
+    /// source) and Belbe (recipient) produced indistinguishable `target:` keys
+    /// for opposite roles — the display-layer image of the bug being fixed.
+    ///
+    /// #5507's requirement is the `None` row: an unqualified mana must emit NO
+    /// target-ish key, byte-identical to before. Re-adding `..` to the Mana arm
+    /// (which #5507 exists to forbid) or collapsing both roles onto one `target`
+    /// key fails here.
+    #[test]
+    fn mana_role_parse_details_names_each_role_key() {
+        use crate::types::ability::{ManaProduction, ManaTargetRole, QuantityExpr, TargetFilter};
+
+        let mana = |target| Effect::Mana {
+            produced: ManaProduction::Colorless {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target,
+        };
+        let keys = |effect: &Effect| -> Vec<String> {
+            effect_details(effect).into_iter().map(|(k, _)| k).collect()
+        };
+
+        // (1) `None` — 594 cards. Byte-identical: no target-ish key at all.
+        assert_eq!(
+            keys(&mana(None)),
+            vec!["mana".to_string()],
+            "an unqualified mana must emit only the production key (#5507)"
+        );
+
+        // (2) Recipient-only — the ten fixture recipients.
+        assert_eq!(
+            keys(&mana(Some(ManaTargetRole::Recipient {
+                recipient: TargetFilter::Player
+            }))),
+            vec!["mana".to_string(), "mana recipient".to_string()],
+        );
+
+        // (3) CountSource-only — Carpet of Flowers, Jeska's Will.
+        assert_eq!(
+            keys(&mana(Some(ManaTargetRole::CountSource {
+                count_source: TargetFilter::Player
+            }))),
+            vec!["mana".to_string(), "mana count source".to_string()],
+        );
+
+        // (4) Both — recipient key FIRST, matching declaration order.
+        assert_eq!(
+            keys(&mana(Some(ManaTargetRole::Both {
+                recipient: TargetFilter::Player,
+                count_source: TargetFilter::ScopedPlayer,
+            }))),
+            vec![
+                "mana".to_string(),
+                "mana recipient".to_string(),
+                "mana count source".to_string()
+            ],
+        );
+
+        // The point of the rename: opposite roles with the SAME filter must not
+        // produce the same signature.
+        assert_ne!(
+            effect_details(&mana(Some(ManaTargetRole::Recipient {
+                recipient: TargetFilter::Player
+            }))),
+            effect_details(&mana(Some(ManaTargetRole::CountSource {
+                count_source: TargetFilter::Player
+            }))),
+            "a recipient and a count source with the same filter are different \
+             parses and must not collapse to the same sticky signature"
+        );
+    }
+
     use std::sync::Arc;
 
     use super::*;
     use crate::database::legality::{legalities_to_export_map, LegalityStatus};
     use crate::parser::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
     use crate::types::ability::{
-        AbilityKind, CounterTransferMode, Effect, PreventionAmount, PreventionScope,
-        ReplacementCondition, TargetFilter,
+        AbilityCondition, AbilityKind, ContinuousModification, ControllerRef, CounterTransferMode,
+        DieResultBranch, Effect, PileSource, PlayerFilter, PlayerScope, PreventionAmount,
+        PreventionScope, ReplacementCondition, StaticDefinition, TargetFilter, VoteTally,
+        VoteVisibility, VoterScope,
     };
     use crate::types::card_type::CardType;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -11738,6 +12232,374 @@ mod tests {
         }
     }
 
+    fn delayed_trigger_payload(effect: Effect) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(AbilityDefinition::new(AbilityKind::Spell, effect)),
+                uses_tracked_set: false,
+            },
+        )
+    }
+
+    fn direct_effect_payload_matrix() -> Vec<AbilityDefinition> {
+        let payload = |name: &str| {
+            let mut payload = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::unimplemented(name, format!("unsupported {name}")),
+            );
+            payload.condition = Some(AbilityCondition::HasMaxSpeed);
+            Box::new(payload)
+        };
+
+        vec![
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Vote {
+                    choices: vec!["choice one".into(), "choice two".into()],
+                    per_choice_effect: vec![
+                        payload("vote_per_choice_one"),
+                        payload("vote_per_choice_two"),
+                    ],
+                    starting_with: ControllerRef::You,
+                    voter_scope: VoterScope::AllPlayers,
+                    tally_mode: VoteTally::PerVote,
+                    subject: VoteSubject::Named,
+                    visibility: VoteVisibility::Open,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Vote {
+                    choices: vec![],
+                    per_choice_effect: vec![],
+                    starting_with: ControllerRef::You,
+                    voter_scope: VoterScope::AllPlayers,
+                    tally_mode: VoteTally::PerVote,
+                    subject: VoteSubject::Objects {
+                        candidate_filter: TargetFilter::Any,
+                        outcome_template: payload("vote_object_outcome"),
+                    },
+                    visibility: VoteVisibility::Open,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::SeparateIntoPiles {
+                    partition_subject: VoterScope::EachOpponent,
+                    object_filter: TargetFilter::Any,
+                    chooser: PlayerScope::Controller,
+                    chosen_pile_effect: payload("separate_chosen"),
+                    pile_source: PileSource::Battlefield,
+                    unchosen_pile_effect: Some(payload("separate_unchosen")),
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::RevealFromHand {
+                    filter: TargetFilter::Any,
+                    on_decline: Some(payload("reveal_decline")),
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::CreateDelayedTrigger {
+                    condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                    effect: payload("delayed_trigger"),
+                    uses_tracked_set: false,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::RollDie {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    sides: 6,
+                    results: vec![
+                        DieResultBranch {
+                            min: 1,
+                            max: 1,
+                            effect: payload("roll_die_result_one"),
+                        },
+                        DieResultBranch {
+                            min: 2,
+                            max: 2,
+                            effect: payload("roll_die_result_two"),
+                        },
+                    ],
+                    modifier: None,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::FlipCoin {
+                    win_effect: Some(payload("flip_coin_win")),
+                    lose_effect: None,
+                    flipper: TargetFilter::Controller,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::FlipCoin {
+                    win_effect: None,
+                    lose_effect: Some(payload("flip_coin_lose")),
+                    flipper: TargetFilter::Controller,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::FlipCoins {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    win_effect: Some(payload("flip_coins_win")),
+                    lose_effect: None,
+                    flipper: TargetFilter::Controller,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::FlipCoins {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    win_effect: None,
+                    lose_effect: Some(payload("flip_coins_lose")),
+                    flipper: TargetFilter::Controller,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::FlipCoinUntilLose {
+                    win_effect: payload("flip_until_lose_win"),
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChooseOneOf {
+                    chooser: PlayerFilter::Controller,
+                    branches: vec![
+                        *payload("choose_one_branch_one"),
+                        *payload("choose_one_branch_two"),
+                    ],
+                },
+            ),
+        ]
+    }
+
+    #[test]
+    fn direct_effect_payload_edges_reach_coverage_consumers() {
+        let mut all_edges = Vec::new();
+        for definition in direct_effect_payload_matrix() {
+            let mut visited = Vec::new();
+            visit_direct_effect_ability_payloads(&definition.effect, |actual_edge, payload| {
+                let Effect::Unimplemented { name, .. } = payload.effect.as_ref() else {
+                    panic!("payload matrix must contain an unimplemented leaf");
+                };
+                visited.push((actual_edge, name.clone()));
+            });
+            let expected_names: Vec<_> = visited.iter().map(|(_, name)| name.clone()).collect();
+            let projected = build_ability_item(&definition);
+            assert_eq!(
+                projected
+                    .children
+                    .iter()
+                    .map(|child| child.label.clone())
+                    .collect::<Vec<_>>(),
+                expected_names,
+                "the parse-details report must project every direct payload"
+            );
+            assert!(ability_definition_has_unimplemented_parts(&definition));
+            assert!(!is_ability_supported(&definition));
+            for (_, name) in &visited {
+                assert!(ability_tree_any(&definition, &|payload| {
+                    matches!(payload.effect.as_ref(), Effect::Unimplemented { name: payload_name, .. } if payload_name == name)
+                }));
+            }
+
+            let mut missing = Vec::new();
+            collect_ability_missing_parts(&definition, &mut missing);
+            let expected_gaps: Vec<_> = visited
+                .iter()
+                .map(|(_, name)| format!("Effect:{name}"))
+                .collect();
+            assert_eq!(missing, expected_gaps);
+
+            let mut face = make_face();
+            face.abilities.push(definition.clone());
+            assert_eq!(
+                card_face_gaps(&face),
+                expected_gaps,
+                "the card-face gap report must include every direct payload"
+            );
+            assert!(card_face_has_unimplemented_parts(&face));
+
+            let mut features = HashMap::new();
+            extract_ability_features(&definition, &mut features);
+            assert!(features.contains_key("condition:HasMaxSpeed"));
+            all_edges.extend(visited.into_iter().map(|(edge, _)| edge));
+        }
+        assert_eq!(
+            all_edges,
+            vec![
+                DirectEffectPayloadEdge::VotePerChoice,
+                DirectEffectPayloadEdge::VotePerChoice,
+                DirectEffectPayloadEdge::VoteObjectOutcome,
+                DirectEffectPayloadEdge::SeparateIntoPilesChosen,
+                DirectEffectPayloadEdge::SeparateIntoPilesUnchosen,
+                DirectEffectPayloadEdge::RevealFromHandOnDecline,
+                DirectEffectPayloadEdge::CreateDelayedTriggerEffect,
+                DirectEffectPayloadEdge::RollDieResult,
+                DirectEffectPayloadEdge::RollDieResult,
+                DirectEffectPayloadEdge::FlipCoinWin,
+                DirectEffectPayloadEdge::FlipCoinLose,
+                DirectEffectPayloadEdge::FlipCoinsWin,
+                DirectEffectPayloadEdge::FlipCoinsLose,
+                DirectEffectPayloadEdge::FlipCoinUntilLoseWin,
+                DirectEffectPayloadEdge::ChooseOneOfBranch,
+                DirectEffectPayloadEdge::ChooseOneOfBranch,
+            ]
+        );
+    }
+
+    #[test]
+    fn direct_effect_payload_controls_are_empty_or_supported() {
+        let empty = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoin {
+                win_effect: None,
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
+            },
+        );
+        let mut visited = Vec::new();
+        visit_direct_effect_ability_payloads(&empty.effect, |edge, _| visited.push(edge));
+        assert!(visited.is_empty());
+        assert!(build_ability_item(&empty).children.is_empty());
+        assert!(!ability_definition_has_unimplemented_parts(&empty));
+        assert!(is_ability_supported(&empty));
+
+        let supported = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                )],
+            },
+        );
+        assert!(is_ability_supported(&supported));
+        assert!(!ability_definition_has_unimplemented_parts(&supported));
+        let mut missing = Vec::new();
+        collect_ability_missing_parts(&supported, &mut missing);
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn direct_effect_payloads_reach_modification_visitors() {
+        let definition = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::RevealFromHand {
+                filter: TargetFilter::Any,
+                on_decline: Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GenericEffect {
+                        static_abilities: vec![StaticDefinition::continuous().modifications(vec![
+                            ContinuousModification::AddSubtype {
+                                subtype: "Wizard".into(),
+                            },
+                        ])],
+                        duration: None,
+                        target: None,
+                        end_cost: None,
+                    },
+                ))),
+            },
+        );
+        let mut subtypes = Vec::new();
+        visit_ability_modifications(&definition, &mut |modification| {
+            if let ContinuousModification::AddSubtype { subtype } = modification {
+                subtypes.push(subtype.clone());
+            }
+        });
+        assert_eq!(subtypes, vec!["Wizard"]);
+    }
+
+    #[test]
+    fn delayed_trigger_payload_projects_and_reports_unimplemented_parts() {
+        let unsupported = delayed_trigger_payload(Effect::unimplemented(
+            "delayed_payload",
+            "unsupported delayed effect",
+        ));
+        let projected = build_ability_item(&unsupported);
+        assert_eq!(
+            projected.children.len(),
+            1,
+            "a delayed trigger's executable payload must appear in its parse signature"
+        );
+        assert_eq!(projected.children[0].label, "delayed_payload");
+
+        let mut unsupported_face = make_face();
+        unsupported_face.abilities.push(unsupported);
+        assert!(
+            card_face_gaps(&unsupported_face)
+                .iter()
+                .any(|gap| gap == "Effect:delayed_payload"),
+            "an unimplemented delayed payload must be reported as a card-face gap"
+        );
+        assert!(
+            card_face_has_unimplemented_parts(&unsupported_face),
+            "an unimplemented delayed payload must make the card face unsupported"
+        );
+
+        let mut supported_face = make_face();
+        supported_face
+            .abilities
+            .push(delayed_trigger_payload(Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            }));
+        assert!(
+            card_face_gaps(&supported_face).is_empty(),
+            "a supported delayed payload must not create a card-face gap"
+        );
+        assert!(
+            !card_face_has_unimplemented_parts(&supported_face),
+            "a supported delayed payload must keep the card face supported"
+        );
+    }
+
+    #[test]
+    fn replacement_execute_projects_delayed_trigger_payload_support() {
+        let replacement_supported = |payload| {
+            let mut face = make_face();
+            face.replacements.push(
+                ReplacementDefinition::new(ReplacementEvent::Draw)
+                    .execute(delayed_trigger_payload(payload)),
+            );
+            build_parse_details_for_face(&face)
+                .into_iter()
+                .find(|item| item.category == ParseCategory::Replacement)
+                .expect("replacement must be projected")
+                .supported
+        };
+
+        assert!(
+            !replacement_supported(Effect::unimplemented(
+                "delayed_replacement_payload",
+                "unsupported replacement payload",
+            )),
+            "an unimplemented delayed payload must make replacement execution unsupported"
+        );
+        assert!(
+            replacement_supported(Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            }),
+            "a supported delayed payload must keep replacement execution supported"
+        );
+    }
+
     #[test]
     fn card_face_with_nested_mode_unimplemented_is_detected() {
         let mut face = make_face();
@@ -12619,6 +13481,7 @@ mod tests {
             Effect::CreateDelayedTrigger {
                 condition: DelayedTriggerCondition::WheneverEvent {
                     trigger: Box::new(delayed_trigger),
+                    expiry: crate::types::ability::WheneverEventExpiry::EndOfTurn,
                 },
                 effect: Box::new(delayed_effect),
                 uses_tracked_set: false,
@@ -12633,6 +13496,241 @@ mod tests {
                     || matches!(f, SemanticFinding::WrongParameter { field, .. } if field == "pump")
             }),
             "Descriptionless delayed trigger should credit nested pump/duration: {findings:?}"
+        );
+    }
+
+    /// Build a graveyard-recursion `ChangeZone` leaf ability with no description
+    /// string, mirroring the class shape (Spit Flame / Reach of Branches /
+    /// Endless Ranks of HYDRA): return an object from one zone to another.
+    fn recursion_change_zone(
+        origin: Option<Zone>,
+        destination: Zone,
+        target: TargetFilter,
+    ) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin,
+                destination,
+                target,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        )
+    }
+
+    /// Wrap an inner ability in a descriptionless "Whenever your commander
+    /// enters or attacks" delayed trigger — the exact lowering the parser emits
+    /// for the non-permanent graveyard-recursion class (CR 113.6m).
+    fn recursion_delayed_trigger(inner: AbilityDefinition) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WheneverEvent {
+                    trigger: Box::new(TriggerDefinition::new(TriggerMode::EntersOrAttacks)),
+                    expiry: crate::types::ability::WheneverEventExpiry::EndOfTurn,
+                },
+                effect: Box::new(inner),
+                uses_tracked_set: false,
+            },
+        )
+    }
+
+    /// Endless Ranks of HYDRA line 2 and the whole "[you may pay <cost>. If you
+    /// do,] return this card from your graveyard to your hand" class. The
+    /// delayed trigger carries no description, so the per-line audit can only
+    /// credit the line through the nested `ChangeZone(Graveyard -> Hand,
+    /// SelfRef)` leaf. Reverting the new CR 113.6m arm makes this fail (the
+    /// recursion line is reported as SilentDrop). The control line proves the
+    /// audit machinery is live, so the recursion line's clean result is not
+    /// vacuous.
+    #[test]
+    fn test_audit_credits_descriptionless_delayed_trigger_graveyard_recursion_to_hand() {
+        let mut face = make_face();
+        let recursion_line = "Whenever your commander enters or attacks, you may pay {1}{B}. If you do, return this card from your graveyard to your hand.";
+        let control_line = "Draw seven cards and then discard three cards at random.";
+        let oracle = format!("{recursion_line}\n{control_line}");
+        face.oracle_text = Some(oracle.clone());
+
+        let pay = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PayCost {
+                cost: AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::Black],
+                        generic: 1,
+                    },
+                },
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+        )
+        .optional()
+        .sub_ability(
+            recursion_change_zone(Some(Zone::Graveyard), Zone::Hand, TargetFilter::SelfRef)
+                .condition(AbilityCondition::EffectOutcome {
+                    signal: EffectOutcomeSignal::OptionalEffectPerformed,
+                }),
+        );
+        face.abilities.push(recursion_delayed_trigger(pay));
+
+        let findings = audit_card_lines(&oracle, &face);
+
+        assert!(
+            !findings.iter().any(|f| matches!(
+                f,
+                SemanticFinding::SilentDrop { oracle_line }
+                    if oracle_line.contains("return this card from your graveyard")
+            )),
+            "graveyard-recursion delayed trigger must not be flagged as SilentDrop: {findings:?}"
+        );
+        assert!(
+            findings.iter().any(|f| matches!(
+                f,
+                SemanticFinding::SilentDrop { oracle_line }
+                    if oracle_line.contains("Draw seven cards")
+            )),
+            "control line with no parsed element must still surface as SilentDrop (reach guard): {findings:?}"
+        );
+    }
+
+    /// Reach of Branches sub-shape: the delayed trigger's effect IS the
+    /// `ChangeZone` directly (no `PayCost` wrapper). Exercises `ability_tree_any`
+    /// recursion into `effect` (vs. the `sub_ability` path of the with-cost
+    /// class), proving both sub-shapes of the class are covered.
+    #[test]
+    fn test_audit_credits_delayed_trigger_direct_graveyard_return_without_cost() {
+        let mut face = make_face();
+        let oracle = "Whenever a Forest enters the battlefield, you may return this card from your graveyard to your hand.";
+        face.oracle_text = Some(oracle.to_string());
+        face.abilities
+            .push(recursion_delayed_trigger(recursion_change_zone(
+                Some(Zone::Graveyard),
+                Zone::Hand,
+                TargetFilter::SelfRef,
+            )));
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
+            "direct (no-cost) graveyard-recursion delayed trigger must be credited: {findings:?}"
+        );
+    }
+
+    /// Over-crediting guard (destination axis): a reanimation delayed trigger
+    /// that returns the card to the BATTLEFIELD is a larger, different effect.
+    /// The oracle line here contains all three text-guard words (return /
+    /// graveyard / hand), so only the structural `destination: Hand` pattern
+    /// keeps it from being credited — dropping that pattern would regress this.
+    #[test]
+    fn test_audit_still_flags_delayed_trigger_return_to_battlefield() {
+        let mut face = make_face();
+        let oracle = "Whenever this dies, you may return this card from your graveyard to the battlefield rather than to your hand.";
+        face.oracle_text = Some(oracle.to_string());
+        face.abilities
+            .push(recursion_delayed_trigger(recursion_change_zone(
+                Some(Zone::Graveyard),
+                Zone::Battlefield,
+                TargetFilter::SelfRef,
+            )));
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
+            "return-to-battlefield delayed trigger must NOT be credited by the graveyard-to-hand arm: {findings:?}"
+        );
+    }
+
+    /// Over-crediting guard (target axis): targeted graveyard recovery ("return
+    /// target creature card from your graveyard to your hand") does not return
+    /// the object the ability is on, so CR 113.6m does not apply. The text guard
+    /// passes here; only the `target: SelfRef` pattern keeps it uncredited.
+    #[test]
+    fn test_audit_still_flags_targeted_graveyard_to_hand_return() {
+        let mut face = make_face();
+        let oracle = "Whenever a creature dies, return target creature card from your graveyard to your hand.";
+        face.oracle_text = Some(oracle.to_string());
+        face.abilities
+            .push(recursion_delayed_trigger(recursion_change_zone(
+                Some(Zone::Graveyard),
+                Zone::Hand,
+                TargetFilter::Typed(TypedFilter::creature()),
+            )));
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
+            "targeted (non-SelfRef) graveyard-to-hand return must NOT be credited by the SelfRef arm: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn test_audit_graveyard_recursion_does_not_cross_credit_targeted_return_line() {
+        let mut face = make_face();
+        let recursion =
+            "Whenever a Dragon enters, return this card from your graveyard to your hand.";
+        let targeted = "Return target creature card from your graveyard to your hand.";
+        let oracle = format!("{recursion}\n{targeted}");
+        face.oracle_text = Some(oracle.clone());
+        face.abilities
+            .push(recursion_delayed_trigger(recursion_change_zone(
+                Some(Zone::Graveyard),
+                Zone::Hand,
+                TargetFilter::SelfRef,
+            )));
+
+        let findings = audit_card_lines(&oracle, &face);
+
+        assert!(
+            !findings.iter().any(|f| matches!(f, SemanticFinding::SilentDrop { oracle_line } if oracle_line == recursion)),
+            "the self-reference line must be credited: {findings:?}"
+        );
+        assert!(
+            findings.iter().any(|f| matches!(f, SemanticFinding::SilentDrop { oracle_line } if oracle_line == targeted)),
+            "the SelfRef leaf must not credit a different targeted-return line: {findings:?}"
+        );
+    }
+
+    /// Conjunctivity guard (text axis): the structural match alone must not
+    /// credit a line — the return/graveyard/hand text guard is required. An
+    /// unrelated oracle line paired with the recursion effect shape is still
+    /// reported, proving the heuristic is a conservative confirmation.
+    #[test]
+    fn test_audit_graveyard_recursion_text_guard_is_conjunctive() {
+        let mut face = make_face();
+        let oracle = "Whenever a creature dies, exile the top three cards of your library.";
+        face.oracle_text = Some(oracle.to_string());
+        face.abilities
+            .push(recursion_delayed_trigger(recursion_change_zone(
+                Some(Zone::Graveyard),
+                Zone::Hand,
+                TargetFilter::SelfRef,
+            )));
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
+            "structural match without the text-guard words must remain a SilentDrop: {findings:?}"
         );
     }
 
@@ -13542,6 +14640,141 @@ mod tests {
                 .iter()
                 .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
             "unsupported non-Defiler cost reduction should remain visible: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn delayed_spell_copy_line_is_not_a_silent_drop() {
+        // CR 707.10 / CR 603.7b: "When you next cast an instant or sorcery spell
+        // this turn, copy that spell. You may choose new targets for the copy."
+        // parses to a description-less CopySpell nested inside a
+        // CreateDelayedTrigger. The description matcher misses (no description
+        // string at any level), so coverage must come from the effect-type
+        // fallback reaching the nested CopySpell via ability_tree_any's
+        // CreateDelayedTrigger recursion. Covers the whole delayed spell-copy
+        // class (Galvanic Iteration / Doublecast / Dual Strike), not one card.
+        // The delayed-trigger condition variant is immaterial to the seam under
+        // test (the audit inspects only the effect subtree for coverage), so a
+        // minimal AtNextPhase stands in for the real WhenNextEvent.
+        use crate::types::ability::CopyRetargetPermission;
+
+        let delayed_copy = || {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::CreateDelayedTrigger {
+                    condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                    effect: Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::CopySpell {
+                            target: TargetFilter::TriggeringSource,
+                            retarget: CopyRetargetPermission::MayChooseNewTargets,
+                            copier: None,
+                            additional_modifications: vec![],
+                            starting_loyalty_from_casualty_sacrifice: false,
+                        },
+                    )),
+                    uses_tracked_set: false,
+                },
+            )
+        };
+
+        for oracle in [
+            // Galvanic Iteration / Doublecast
+            "When you next cast an instant or sorcery spell this turn, copy that spell. You may choose new targets for the copy.",
+            // Dual Strike — mana-value-restricted variant of the same class
+            "When you next cast an instant or sorcery spell with mana value 4 or less this turn, copy that spell. You may choose new targets for the copy.",
+        ] {
+            let mut face = make_face();
+            face.oracle_text = Some(oracle.to_string());
+            face.abilities.push(delayed_copy());
+            let findings = audit_card_lines(oracle, &face);
+            assert!(
+                findings.is_empty(),
+                "delayed spell-copy line falsely flagged: {oracle} -> {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_spell_copy_line_without_description_is_not_a_silent_drop() {
+        // CR 707.10: "Copy target instant or sorcery spell. You may choose new
+        // targets for the copy." (Twincast / Fork). The real printings carry an
+        // ability description that the description matcher catches, but a
+        // description-less CopySpell of the same direct-copy class must still be
+        // covered by the effect-type fallback rather than flagged as a SilentDrop.
+        use crate::types::ability::CopyRetargetPermission;
+
+        let oracle =
+            "Copy target instant or sorcery spell. You may choose new targets for the copy.";
+        let mut face = make_face();
+        face.oracle_text = Some(oracle.to_string());
+        face.abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CopySpell {
+                target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
+                copier: None,
+                additional_modifications: vec![],
+                starting_loyalty_from_casualty_sacrifice: false,
+            },
+        ));
+        let findings = audit_card_lines(oracle, &face);
+        assert!(
+            findings.is_empty(),
+            "direct spell-copy line falsely flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn spell_copy_effect_does_not_cover_unparsed_ability_copy_line() {
+        // CR 707.10 distinguishes copying a spell from copying an activated
+        // ability. The face-wide CopySpell fallback must not hide a separate,
+        // unparsed ability-copy line.
+        use crate::types::ability::CopyRetargetPermission;
+
+        let oracle = "Copy target instant or sorcery spell.\nCopy target activated ability.";
+        let mut face = make_face();
+        face.oracle_text = Some(oracle.to_string());
+        face.abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CopySpell {
+                target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
+                copier: None,
+                additional_modifications: vec![],
+                starting_loyalty_from_casualty_sacrifice: false,
+            },
+        ));
+
+        let findings = audit_card_lines(oracle, &face);
+        assert!(
+            findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
+            "unparsed ability-copy line must remain visible: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn spell_copy_line_without_copyspell_effect_is_still_a_silent_drop() {
+        // Reach-guard (non-vacuous): proves the negatives above are caused by the
+        // CopySpell arm actually reaching the effect — not by the line being
+        // skipped for an unrelated reason. The same "... copy that spell ..." line
+        // on a face whose only effect is an unimplemented stub (no CopySpell) MUST
+        // still surface as a SilentDrop.
+        let oracle = "When you next cast an instant or sorcery spell this turn, copy that spell. You may choose new targets for the copy.";
+        let mut face = make_face();
+        face.oracle_text = Some(oracle.to_string());
+        face.abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::unimplemented("copy that spell", oracle),
+        ));
+        let findings = audit_card_lines(oracle, &face);
+        assert!(
+            findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
+            "spell-copy line without a CopySpell effect must remain a SilentDrop: {findings:?}"
         );
     }
 

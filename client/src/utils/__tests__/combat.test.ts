@@ -209,8 +209,8 @@ describe("buildAttacks", () => {
     ]);
   });
 
-  it("drops an attacker the engine gives no legal target (present map, missing key)", () => {
-    expect(buildAttacks([101, 102], { "101": [P1] }, [P1])).toEqual([[101, P1]]);
+  it("returns null instead of dropping an attacker with empty authoritative support", () => {
+    expect(buildAttacks([101, 102], { "101": [P1], "102": [] }, [P1])).toBeNull();
   });
 
   it("uses the aggregate for a legacy payload", () => {

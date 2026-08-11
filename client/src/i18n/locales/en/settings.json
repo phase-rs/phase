@@ -29,6 +29,11 @@
     "logDefault": "Log Default",
     "spellPayment": "Spell Payment",
     "manualManaPayment": "Manual mana payment for spells",
+    "spellPaymentOptions": {
+      "auto": "Automatic",
+      "autoExceptSacrificialMana": "Ask before sacrificing",
+      "manual": "Manual"
+    },
     "nativeEngine": "Use native engine for local games and hosted multiplayer",
     "nativeEngineDescription": "Use the downloaded engine for local AI games and games you host through a lobby. Guests still connect through the lobby's peer-to-peer connection. Falls back to the built-in engine when unavailable.",
     "boardBackground": "Board Background",
@@ -166,9 +171,10 @@
     "lastSynced": "Last synced {{time}}",
     "never": "never",
     "conflictTitle": "Both copies have changes",
-    "conflictBody": "This device and your cloud account both have data and we can't tell which is current. Pick which copy to keep — the other will be replaced.",
+    "conflictBody": "This device and your cloud account both have data and we can't tell which is current. Choose one copy, or keep both deck collections.",
     "keepCloud": "Use cloud",
     "keepLocal": "Keep this device",
+    "keepBothDecks": "Keep both deck collections",
     "savesNote": "Game saves and caches stay on this device.",
     "diffDecks": "Decks: {{added}} added, {{modified}} changed, {{removed}} removed",
     "diffPrefs": "Preferences differ",

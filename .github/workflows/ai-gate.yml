@@ -79,6 +79,11 @@ jobs:
         id: gate
         continue-on-error: true
         run: |
+          # bash opens the redirect before cargo runs, so `target/` has to exist
+          # first. On a cardgen cache hit the `Generate card data` step above is
+          # skipped, and nothing else has invoked cargo yet — the redirect then
+          # dies with "No such file or directory" and the gate never executes.
+          mkdir -p target
           cargo ai-gate --full-suite --games 100 > target/ai-gate-report.md
 
       - name: Open or update drift issue
@@ -87,6 +92,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           title="Nightly AI gate drift"
+          if [ ! -s target/ai-gate-report.md ]; then
+            echo "AI gate failed without a drift report" >&2
+            exit 1
+          fi
           body="$(cat target/ai-gate-report.md)"
           existing="$(gh issue list --label ai-gate-drift --state open --json number --jq '.[0].number')"
           if [ -n "$existing" ]; then
@@ -126,9 +135,12 @@ jobs:
         run: |
           cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
 
-      # debug profile (authoritative): counter VALUES are profile-independent and the
-      # shared rust-ai-gate cache is debug-warm (win-rate jobs populate it). Runs
-      # PERF_SAMPLE_COUNT independent sample processes; compares the per-counter median (#4878).
+      # server-release profile (authoritative, set by the `cargo ai-perf-gate` alias):
+      # counter VALUES are profile-independent, and the shared rust-ai-gate cache stays
+      # coherent because every job in this workflow builds the same profile — the
+      # win-rate jobs populate it and the perf jobs reuse it. Expect one cold build on
+      # the first run after the dev -> server-release move.
+      # Runs PERF_SAMPLE_COUNT independent sample processes; compares the per-counter median (#4878).
       - name: Run decision-cost perf gate
         run: cargo ai-perf-gate
 
@@ -153,15 +165,23 @@ jobs:
         run: |
           cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
 
-      # debug profile (authoritative): counter VALUES are profile-independent and the
-      # shared rust-ai-gate cache is debug-warm (win-rate jobs populate it). Runs
-      # PERF_SAMPLE_COUNT independent sample processes; compares the per-counter median (#4878).
+      # server-release profile (authoritative, set by the `cargo ai-perf-gate` alias):
+      # counter VALUES are profile-independent, and the shared rust-ai-gate cache stays
+      # coherent because every job in this workflow builds the same profile — the
+      # win-rate jobs populate it and the perf jobs reuse it. Expect one cold build on
+      # the first run after the dev -> server-release move.
+      # Runs PERF_SAMPLE_COUNT independent sample processes; compares the per-counter median (#4878).
       # `cargo` build progress goes to stderr and spawned children are Stdio::null on
       # stdout, so the redirect captures only the binary's clean markdown table.
       - name: Run decision-cost perf gate
         id: gate
         continue-on-error: true
         run: |
+          # bash opens the redirect before cargo runs, so `target/` has to exist
+          # first. On a cardgen cache hit the `Generate card data` step above is
+          # skipped, and nothing else has invoked cargo yet — the redirect then
+          # dies with "No such file or directory" and the gate never executes.
+          mkdir -p target
           cargo ai-perf-gate > target/ai-perf-gate-report.md
 
       - name: Open or update drift issue
@@ -170,6 +190,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           title="Nightly decision-cost perf drift"
+          if [ ! -s target/ai-perf-gate-report.md ]; then
+            echo "Decision-cost perf gate failed without a drift report" >&2
+            exit 1
+          fi
           body="$(cat target/ai-perf-gate-report.md)"
           existing="$(gh issue list --label ai-perf-drift --state open --json number --jq '.[0].number')"
           if [ -n "$existing" ]; then

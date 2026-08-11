@@ -92,6 +92,7 @@ pub(crate) fn epic_upkeep_trigger(effect: &EpicEffect) -> DelayedTrigger {
         // Synthesized fresh each upkeep; the one-shot flag is irrelevant because
         // it is never stored — `epic_effects` is the persistent generator.
         one_shot: true,
+        provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
     }
 }
 
@@ -162,6 +163,7 @@ pub(crate) fn resolve(
                 actual_mana_spent: 0,
             },
         },
+        None,
         events,
     );
 

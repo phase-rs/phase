@@ -100,17 +100,20 @@ fn install_lose_control_draw(
     let mut trig = TriggerDefinition::new(TriggerMode::ChangesController);
     trig.valid_card = Some(TargetFilter::SpecificObject { id: scoped_obj });
     trig.execute = None;
-    runner.state_mut().delayed_triggers.push(DelayedTrigger {
-        condition: DelayedTriggerCondition::WhenNextEvent {
-            trigger: Box::new(trig),
-            or_trigger: None,
-            lifetime: DelayedTriggerLifetime::ThisTurn,
-        },
-        ability: Box::new(ability),
-        controller,
-        source_id: source,
-        one_shot: true,
-    });
+    runner
+        .state_mut()
+        .delayed_triggers
+        .push(DelayedTrigger::new(
+            DelayedTriggerCondition::WhenNextEvent {
+                trigger: Box::new(trig),
+                or_trigger: None,
+                lifetime: DelayedTriggerLifetime::ThisTurn,
+            },
+            Box::new(ability),
+            controller,
+            source,
+            true,
+        ));
 }
 
 /// Install a SELF-REFERENTIAL "when you lose control of ~, draw a card"

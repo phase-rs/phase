@@ -5,6 +5,11 @@
     "close": "Chiudi",
     "closeNamed": "Chiudi {{name}}"
   },
+  "scryOutcome": {
+    "title": "Scry completato",
+    "you": "Tu",
+    "result": "{{player}} — {{top}} in cima · {{bottom}} in fondo"
+  },
   "modal": {
     "defaultEyebrow": "Strumento dello spazio di lavoro"
   },
@@ -48,7 +53,7 @@
     "updated": "aggiornato"
   },
   "comboDetector": {
-    "label": "Rilevatore di combo",
+    "label": "Rilevatore di combo (sperimentale)",
     "title": "Rileva i loop infiniti: termina automaticamente i loop obbligatori e mostra le risorse ∞ (disattivato per impostazione predefinita)",
     "on": "Attivo",
     "off": "Disattivato",
@@ -78,6 +83,7 @@
     "showAiHand": "Mostra mano IA",
     "hideAiHand": "Nascondi mano IA",
     "requestTakeback": "Richiedi ripristino",
+    "undoLastAction": "Annulla ultima azione",
     "concede": "Concedi",
     "backToDraft": "Torna al Draft",
     "mainMenu": "Menu principale",

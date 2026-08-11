@@ -5,6 +5,9 @@
  * then resolve the corresponding promise when the worker responds.
  */
 import type {
+  AiActionProposal,
+  AiDecisionDiagnosticReceipt,
+  AiProposalSubmission,
   BatchResolveResult,
   FormatConfig,
   GameAction,
@@ -46,8 +49,7 @@ const ENGINE_INITIALIZATION_TIMEOUT_MS = 30_000;
 type RequestTimeoutBehavior = "notify" | "reject";
 
 /**
- * Watchdog timeout for AI search round-trips (getAiAction /
- * getAiScoredCandidates / selectActionFromScores). Deliberately much larger
+ * Watchdog timeout for AI proposal generation. Deliberately much larger
  * than ENGINE_REQUEST_TIMEOUT_MS: AI search legitimately exceeds 60s on
  * pathological boards (turn-40 squirrel / mana-token storms take hundreds of
  * seconds in debug; release is ~10-50x faster but can still cross a minute),
@@ -176,6 +178,10 @@ export class EngineWorkerClient {
     return this.request<number>({ type: "loadCardDbFromUrl" });
   }
 
+  async buildAiCardSubset(): Promise<string> {
+    return this.request<string>({ type: "buildAiCardSubset" });
+  }
+
   async evaluateDeckCompatibility(request: unknown): Promise<unknown> {
     return this.request<unknown>({ type: "evaluateDeckCompatibility", request });
   }
@@ -190,15 +196,6 @@ export class EngineWorkerClient {
 
   async getCardRulings(cardName: string): Promise<unknown> {
     return this.request<unknown>({ type: "getCardRulings", cardName });
-  }
-
-  /**
-   * Build the game-scoped AI card-DB subset for THIS game. Returns the
-   * serialized `AiCardSubsetResult` tagged union (parse with `JSON.parse`).
-   * Called ONLY on the MAIN engine client (full CARD_DB + live GAME_STATE).
-   */
-  async buildAiCardSubset(): Promise<string> {
-    return this.request<string>({ type: "buildAiCardSubset" });
   }
 
   async initializeGame(
@@ -225,8 +222,7 @@ export class EngineWorkerClient {
   // continue (and that holds the dispatch mutex). They carry a watchdog that
   // surfaces a "still waiting" prompt after ENGINE_REQUEST_TIMEOUT_MS without
   // cancelling the underlying worker request. Human round-trips use 60s;
-  // the AI-search getters (getAiAction / getAiScoredCandidates /
-  // selectActionFromScores) use the far longer ENGINE_AI_TIMEOUT_MS because a
+  // AI proposal generation uses the far longer ENGINE_AI_TIMEOUT_MS because a
   // healthy search can legitimately exceed a minute on pathological boards.
   // Bulk/long setup calls (card-DB load, game init, deck compatibility, batch
   // resolve, restore/resume, export, bracket estimate) deliberately omit the
@@ -298,56 +294,90 @@ export class EngineWorkerClient {
     );
   }
 
-  async getAiAction(
+  async getAiActionProposal(
     difficulty: string,
     playerId: number,
-  ): Promise<GameAction | null> {
-    return this.request<GameAction | null>(
-      {
-        type: "getAiAction",
-        difficulty,
-        playerId,
-      },
+  ): Promise<AiActionProposal | null> {
+    return this.request<AiActionProposal | null>(
+      { type: "getAiActionProposal", difficulty, playerId },
       ENGINE_AI_TIMEOUT_MS,
     );
   }
 
-  async getAiFallbackAction(): Promise<GameAction | null> {
-    return this.request<GameAction | null>(
-      { type: "getAiFallbackAction" },
+  async getAiActionProposalWithDiagnostics(
+    difficulty: string,
+    playerId: number,
+  ): Promise<{ proposal: AiActionProposal; receipt: AiDecisionDiagnosticReceipt } | null> {
+    return this.request(
+      { type: "getAiActionProposalWithDiagnostics", difficulty, playerId },
+      ENGINE_AI_TIMEOUT_MS,
+    );
+  }
+
+  /** Engine-owned tactical floor for a decision whose optional scorer timed out. */
+  async getAiTacticalActionProposal(
+    difficulty: string,
+    playerId: number,
+  ): Promise<AiActionProposal | null> {
+    return this.request<AiActionProposal | null>(
+      { type: "getAiTacticalActionProposal", difficulty, playerId },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
   }
 
+  async getAiTacticalActionProposalWithDiagnostics(
+    difficulty: string,
+    playerId: number,
+  ): Promise<{ proposal: AiActionProposal; receipt: AiDecisionDiagnosticReceipt } | null> {
+    return this.request(
+      { type: "getAiTacticalActionProposalWithDiagnostics", difficulty, playerId },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  /** This worker-side endpoint scores only; it cannot mint a proposal. */
   async getAiScoredCandidates(
     difficulty: string,
     playerId: number,
     seed: number,
   ): Promise<[GameAction, number][]> {
     return this.request<[GameAction, number][]>(
-      {
-        type: "getAiScoredCandidates",
-        difficulty,
-        playerId,
-        seed,
-      },
+      { type: "getAiScoredCandidates", difficulty, playerId, seed },
       ENGINE_AI_TIMEOUT_MS,
     );
   }
 
-  async selectActionFromScores(
+  /** Main authority filters scores through a fresh contract before minting. */
+  async getAiActionProposalFromScores(
     scoresJson: string,
     difficulty: string,
+    playerId: number,
     seed: number,
-  ): Promise<GameAction | null> {
-    return this.request<GameAction | null>(
-      {
-        type: "selectActionFromScores",
-        scoresJson,
-        difficulty,
-        seed,
-      },
+  ): Promise<AiActionProposal | null> {
+    return this.request<AiActionProposal | null>(
+      { type: "getAiActionProposalFromScores", scoresJson, difficulty, playerId, seed },
       ENGINE_AI_TIMEOUT_MS,
+    );
+  }
+
+  async getAiActionProposalFromScoresWithDiagnostics(
+    scoresJson: string,
+    difficulty: string,
+    playerId: number,
+    seed: number,
+  ): Promise<{ proposal: AiActionProposal; receipt: AiDecisionDiagnosticReceipt } | null> {
+    return this.request(
+      { type: "getAiActionProposalFromScoresWithDiagnostics", scoresJson, difficulty, playerId, seed },
+      ENGINE_AI_TIMEOUT_MS,
+    );
+  }
+
+  async submitAiActionProposal(
+    proposal: AiActionProposal,
+  ): Promise<AiProposalSubmission> {
+    return this.request<AiProposalSubmission>(
+      { type: "submitAiActionProposal", proposal },
+      ENGINE_REQUEST_TIMEOUT_MS,
     );
   }
 

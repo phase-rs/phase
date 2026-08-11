@@ -82,12 +82,49 @@
     "picking": "Wybieranie…",
     "autoPick": "Wybór automatyczny"
   },
+  "sealedOpening": {
+    "title": "Otwórz swoją pulę Sealed",
+    "subtitle": "Otwórz sześć boosterów, po jednym na raz.",
+    "packProgress": "Booster {{current}} z {{total}}",
+    "openPack": "Otwórz booster",
+    "openPackArt": "Otwórz grafikę boostera",
+    "pulls": "Twoje karty",
+    "nextPack": "Następny booster",
+    "viewPool": "Zobacz swoją pulę",
+    "poolTitle": "Twoja pula Sealed",
+    "poolSubtitle": "Wszystkie {{count}} karty, pogrupowane według typu.",
+    "buildDeck": "Zbuduj talię"
+  },
   "pool": {
     "cardsDrafted": "{{count}} wybranych kart",
     "empty": "Nie wybrano jeszcze żadnych kart",
     "sortColor": "Kolor",
     "sortType": "Typ",
-    "sortCmc": "CMC"
+    "sortCmc": "CMC",
+    "groups": {
+      "white": "Biały",
+      "blue": "Niebieski",
+      "black": "Czarny",
+      "red": "Czerwony",
+      "green": "Zielony",
+      "multicolor": "Wielokolorowy",
+      "colorless": "Bezkolorowy",
+      "creature": "Stworzenie",
+      "instant": "Instant",
+      "sorcery": "Sorcery",
+      "enchantment": "Enchantment",
+      "artifact": "Artefakt",
+      "planeswalker": "Planeswalker",
+      "land": "Ląd",
+      "other": "Inne",
+      "manaValue0": "0 CMC",
+      "manaValue1": "1 CMC",
+      "manaValue2": "2 CMC",
+      "manaValue3": "3 CMC",
+      "manaValue4": "4 CMC",
+      "manaValue5": "5 CMC",
+      "manaValue6Plus": "6+ CMC"
+    }
   },
   "standings": {
     "title": "Klasyfikacja — Runda {{round}}",
@@ -104,9 +141,12 @@
     "mainDeck": "Talia główna",
     "emptyDeckHint": "Klikaj karty z puli, aby dodać je do talii.",
     "addableCards": "Karty do dodania",
+    "searchAddableCards": "Szukaj kart do dodania...",
     "autoLands": "Automatyczne ziemie",
     "suggestDeck": "Zaproponuj talię",
     "submitDeck": "Zatwierdź talię",
+    "validationTitle": "Talia wymaga uwagi",
+    "submitFailed": "Nie można zatwierdzić talii",
     "removeCard": "Usuń {{name}}",
     "addCard": "Dodaj {{name}}",
     "cardCount": "/ {{min}} kart",
@@ -125,6 +165,10 @@
     "quickDraft": {
       "title": "Szybki draft",
       "description": "Zdraftuj 3 boostery z 7 botami, zbuduj talię z 40 kart, a potem rozegraj mecz Bo1 przeciwko jednemu z nich."
+    },
+    "sealed": {
+      "title": "Sealed",
+      "description": "Otwórz sześć boosterów, przejrzyj całą pulę, a potem zbuduj talię z 40 kart na mecz Bo1."
     },
     "cubeDraft": {
       "title": "Draft kostki",
@@ -156,6 +200,7 @@
   },
   "quickPhase": {
     "drafting": "Draftowanie",
+    "opening": "Otwieranie boosterów",
     "deckbuilding": "Budowanie talii",
     "matchRecord": "Mecz {{number}} — {{wins}}W-{{losses}}P",
     "record": "{{wins}}W-{{losses}}P",
@@ -236,6 +281,7 @@
   "page": {
     "cubeDraftTitle": "Draft kostki",
     "quickDraftTitle": "Szybki draft",
+    "sealedTitle": "Sealed",
     "setDraftTab": "Draft dodatku",
     "cubeTab": "Kostka"
   },
@@ -261,6 +307,8 @@
     "kindPremierDesc": "Mecze turniejowe do jednej wygranej po budowaniu talii. Szybsze rundy, bez wymiany kart bocznych między grami.",
     "kindTraditional": "Tradycyjny",
     "kindTraditionalDesc": "Mecze turniejowe do dwóch wygranych po budowaniu talii, z wymianą kart bocznych między grami.",
+    "kindSealed": "Sealed",
+    "kindSealedDesc": "Otwórz sześć boosterów bezpośrednio do puli każdego gracza, a następnie zbuduj talię turniejową do jednej wygranej.",
     "tournamentFormat": "Format turnieju",
     "tournamentSwiss": "Szwajcarski",
     "tournamentSwissDesc": "Wszyscy grają przez trzy rundy, nawet po porażce.",

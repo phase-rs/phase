@@ -89,6 +89,10 @@ struct MtgjsonSheet {
     cards: HashMap<String, u64>,
     total_weight: u64,
     #[serde(default)]
+    allow_duplicates: bool,
+    #[serde(default)]
+    fixed: bool,
+    #[serde(default)]
     foil: bool,
     #[serde(default)]
     balance_colors: bool,
@@ -212,6 +216,8 @@ fn extract_set_pool_indexed(
             SheetDefinition {
                 cards,
                 total_weight: mtg_sheet.total_weight,
+                allow_duplicates: mtg_sheet.allow_duplicates,
+                fixed: mtg_sheet.fixed,
                 foil: mtg_sheet.foil,
                 balance_colors: mtg_sheet.balance_colors,
             },

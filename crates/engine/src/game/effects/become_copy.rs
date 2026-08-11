@@ -1167,6 +1167,7 @@ mod tests {
                 casting_restrictions: vec![],
                 casting_options: vec![],
                 layout_kind: None,
+                parse_warnings: vec![],
             });
         }
 

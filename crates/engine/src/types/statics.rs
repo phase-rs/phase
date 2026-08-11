@@ -806,6 +806,88 @@ pub enum AttackDefenderScope {
     Controller,
 }
 
+/// CR 508.1d + CR 611.2 / CR 604.2: how the required defending player of a
+/// [`StaticMode::MustAttackPlayer`] requirement is determined. Struct variants
+/// (NOT tuple/newtype) so internal `#[serde(tag = "type")]` tagging stays valid
+/// — this mirrors [`super::ability::QuantityExpr`] (`Fixed { value }` |
+/// `Ref { qty }`), which uses struct variants for the same serde reason: a
+/// newtype variant wrapping a `#[serde(transparent)]` scalar (`PlayerId(u8)`)
+/// or an already-`#[serde(tag)]` map (`PlayerFilter`) cannot be internally
+/// tagged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type")]
+pub enum RequiredDefender {
+    /// CR 611.2: the specific player determined during the resolution of the
+    /// spell/ability that generates the continuous effect (`Effect::ForceAttack`,
+    /// Encore) and stored as a literal. Not re-evaluated — contrast the static
+    /// form below (CR 611.2c: "this works differently than a continuous effect
+    /// from a static ability").
+    Fixed { player: PlayerId },
+    /// CR 604.1 / CR 604.2 + CR 508.1d: a player CLASS re-evaluated each
+    /// declare-attackers step against live game state (Galactus, "an opponent
+    /// with the most life among your opponents"). A static-ability continuous
+    /// effect is continuously applied; the requirement is re-checked each
+    /// declare-attackers step. Resolved via `game::effects::matches_player_scope`.
+    Matching { filter: PlayerFilter },
+}
+
+impl From<PlayerId> for RequiredDefender {
+    fn from(player: PlayerId) -> Self {
+        Self::Fixed { player }
+    }
+}
+
+/// CR 611.2 / CR 604.2: Back-compatible `Deserialize` for [`RequiredDefender`].
+/// Accepts BOTH the canonical tagged struct form (`{"type":"Fixed","player":N}`
+/// / `{"type":"Matching","filter":{…}}`) and the legacy bare `PlayerId` integer
+/// (`N`) that pre-`RequiredDefender` `MustAttackPlayer` snapshots stored when the
+/// field was a plain `PlayerId`. Mirrors the `QuantityExpr` migration so every
+/// serialized static round-trips without regenerating captured data. `Serialize`
+/// stays derived (tagged) so new writes are canonical. Struct variants keep this
+/// sound: `{"type":"Matching","filter":{"type":"PlayerAttribute",…}}` nests the
+/// `PlayerFilter` map under `filter`, so the inner `type` never collides with the
+/// outer tag — the exact failure a newtype variant would have.
+impl<'de> Deserialize<'de> for RequiredDefender {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match &value {
+            // Legacy: a bare integer is the old concrete `PlayerId`.
+            serde_json::Value::Number(n) => {
+                let raw = n.as_u64().ok_or_else(|| {
+                    serde::de::Error::custom("expected u8 PlayerId for RequiredDefender")
+                })?;
+                let id = u8::try_from(raw).map_err(|_| {
+                    serde::de::Error::custom("RequiredDefender PlayerId out of u8 range")
+                })?;
+                Ok(RequiredDefender::Fixed {
+                    player: PlayerId(id),
+                })
+            }
+            // Canonical tagged form — delegate to a derived mirror.
+            serde_json::Value::Object(_) => {
+                #[derive(Deserialize)]
+                #[serde(tag = "type")]
+                enum Tagged {
+                    Fixed { player: PlayerId },
+                    Matching { filter: PlayerFilter },
+                }
+                let tagged: Tagged =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                Ok(match tagged {
+                    Tagged::Fixed { player } => RequiredDefender::Fixed { player },
+                    Tagged::Matching { filter } => RequiredDefender::Matching { filter },
+                })
+            }
+            _ => Err(serde::de::Error::custom(
+                "expected an integer or a tagged object for RequiredDefender",
+            )),
+        }
+    }
+}
+
 /// All static ability modes from Forge's static ability registry.
 /// Matched case-sensitively against Forge mode strings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1145,15 +1227,22 @@ pub enum StaticMode {
     /// runtime-implemented; other arms are inert.
     PlayerProtection(super::keywords::ProtectionTarget),
     MustAttack,
-    /// CR 508.1d: This creature must attack a *specific* player if able ("target
-    /// creature attacks you this combat if able"; Alluring Siren, Dulcet Sirens).
-    /// Unlike the generic
-    /// [`MustAttack`] (attack any defender), this carries the `PlayerId` that must
-    /// be attacked. Data-carrying variant — not registry-registered (see
-    /// `coverage::is_data_carrying_static`); enforced by direct pattern-match in
-    /// `combat.rs` declare-attackers validation. Mirrors [`MustBlockAttacker`].
+    /// CR 508.1d: This creature must attack a *specific* player (or a live player
+    /// CLASS) if able. The required defender is a [`RequiredDefender`]:
+    /// - `Fixed { player }` — a resolution-time snapshot id (Alluring Siren,
+    ///   Dulcet Sirens, Encore; grafted via `Effect::ForceAttack`), CR 611.2.
+    /// - `Matching { filter }` — a printed static's live player class re-evaluated
+    ///   each declare-attackers step (Galactus, "an opponent with the most life
+    ///   among your opponents"), CR 604.1 / CR 604.2.
+    ///
+    /// Unlike the generic [`MustAttack`] (attack any defender), this narrows the
+    /// requirement to specific players. Data-carrying variant — not
+    /// registry-registered (see `coverage::is_data_carrying_static`); enforced by
+    /// direct pattern-match in `combat.rs` declare-attackers validation (the
+    /// resolver at `must_attack_player_directives_for_creature` resolves the
+    /// `RequiredDefender` to concrete `PlayerId`s). Mirrors [`MustBlockAttacker`].
     MustAttackPlayer {
-        player: PlayerId,
+        player: RequiredDefender,
     },
     MustBlock,
     /// CR 702.39a / CR 509.1c: This creature must block a *specific* attacker if
@@ -2384,7 +2473,16 @@ impl Hash for StaticMode {
             }
             StaticMode::ExtraBlockers { count } => count.hash(state),
             StaticMode::MustBlockAttacker { attacker } => attacker.hash(state),
-            StaticMode::MustAttackPlayer { player } => player.hash(state),
+            // CR 508.1d: `RequiredDefender::Matching` wraps a non-Hash
+            // `PlayerFilter`; hash the discriminant for both arms and the
+            // concrete id only for `Fixed` (precedent: the non-Hash TargetFilter
+            // arms below). Equal values still hash equal.
+            StaticMode::MustAttackPlayer { player } => {
+                std::mem::discriminant(player).hash(state);
+                if let RequiredDefender::Fixed { player: p } = player {
+                    p.hash(state);
+                }
+            }
             StaticMode::MaxAttackersEachCombat { max, defender } => {
                 max.hash(state);
                 defender.hash(state);
@@ -4444,6 +4542,92 @@ mod tests {
         let json2 = r#"{"mode":"GrantsExtraVote"}"#;
         let w2: Wrapper = serde_json::from_str(json2).unwrap();
         assert_eq!(w2.mode, StaticMode::GrantsExtraVote);
+    }
+
+    /// CR 611.2: the grafted `Fixed` required defender serializes to the canonical
+    /// tagged struct form and round-trips.
+    #[test]
+    fn required_defender_fixed_round_trips_tagged() {
+        let d = RequiredDefender::Fixed {
+            player: PlayerId(2),
+        };
+        let json = serde_json::to_string(&d).unwrap();
+        assert_eq!(json, r#"{"type":"Fixed","player":2}"#);
+        let back: RequiredDefender = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, d);
+    }
+
+    /// CR 604.1: the `Matching` required defender nests its `#[serde(tag="type")]`
+    /// `PlayerFilter` under `filter`, so the inner `type` never collides with the
+    /// outer tag — the exact serde failure a newtype variant would have hit.
+    #[test]
+    fn required_defender_matching_round_trips_without_tag_collision() {
+        let d = RequiredDefender::Matching {
+            filter: PlayerFilter::Opponent,
+        };
+        let json = serde_json::to_string(&d).unwrap();
+        assert_eq!(json, r#"{"type":"Matching","filter":{"type":"Opponent"}}"#);
+        let back: RequiredDefender = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, d);
+    }
+
+    /// Pre-`RequiredDefender` `MustAttackPlayer` snapshots stored a bare `PlayerId`
+    /// integer; the custom `Deserialize` must load it as `Fixed { player }`.
+    #[test]
+    fn required_defender_deserializes_legacy_bare_player_id() {
+        let back: RequiredDefender = serde_json::from_str("3").unwrap();
+        assert_eq!(
+            back,
+            RequiredDefender::Fixed {
+                player: PlayerId(3)
+            }
+        );
+    }
+
+    /// A malformed tagged object errors rather than silently defaulting.
+    #[test]
+    fn required_defender_rejects_malformed_tag() {
+        assert!(serde_json::from_str::<RequiredDefender>(r#"{"type":"Bogus"}"#).is_err());
+    }
+
+    /// The production serde path: `MustAttackPlayer` carries a `RequiredDefender`,
+    /// and BOTH forms must round-trip through the derived `StaticMode`
+    /// (de)serialization (card-data export + game-state snapshots).
+    #[test]
+    fn must_attack_player_round_trips_through_static_mode() {
+        for mode in [
+            StaticMode::MustAttackPlayer {
+                player: RequiredDefender::Fixed {
+                    player: PlayerId(1),
+                },
+            },
+            StaticMode::MustAttackPlayer {
+                player: RequiredDefender::Matching {
+                    filter: PlayerFilter::Opponent,
+                },
+            },
+        ] {
+            let json = serde_json::to_string(&mode).unwrap();
+            let back: StaticMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(mode, back);
+        }
+    }
+
+    /// Legacy `MustAttackPlayer` snapshots serialized the `player` field as a bare
+    /// `PlayerId` integer; the derived `StaticMode` deser must materialize it as
+    /// `Fixed { player }` via `RequiredDefender`'s back-compat `Deserialize`.
+    #[test]
+    fn must_attack_player_deserializes_legacy_bare_player_field() {
+        let legacy = r#"{"MustAttackPlayer":{"player":1}}"#;
+        let mode: StaticMode = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            mode,
+            StaticMode::MustAttackPlayer {
+                player: RequiredDefender::Fixed {
+                    player: PlayerId(1)
+                },
+            }
+        );
     }
 
     /// CR 609.4b: `SpendManaAsAnyColor` widened from a unit variant to a struct

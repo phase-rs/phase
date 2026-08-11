@@ -1,6 +1,7 @@
 import type {
   EngineAdapter,
   EngineSnapshot,
+  BatchResolveResult,
   GameAction,
   GameEvent,
   GameLogEntry,
@@ -11,6 +12,8 @@ import type {
   ObjectId,
   PlayerId,
   PersistedGameState,
+  RewindOption,
+  RewindTarget,
   SubmitResult,
   FormatConfig,
 } from "./types";
@@ -25,7 +28,11 @@ import {
   type PhaseSocketTransport,
 } from "../services/openPhaseSocket";
 import { isValidWebSocketUrl, mixedContentBlockReason } from "../services/serverDetection";
-import type { WsSessionData } from "../services/multiplayerSession";
+import type { FullSessionKey, WsSessionData } from "../services/multiplayerSession";
+import {
+  commitFullTerminalDelivery,
+  type FullTerminalDelivery,
+} from "../services/fullTerminalResult";
 
 /** Deck data format matching server protocol. */
 export interface DeckData {
@@ -37,6 +44,100 @@ export interface DeckData {
   planar_deck?: string[];
   scheme_deck?: string[];
   sticker_sheets?: string[];
+}
+
+export type { FullSessionKey } from "../services/multiplayerSession";
+
+/**
+ * Performs one terminal-only request on a fresh raw websocket. This never
+ * constructs a WebSocketAdapter, so a recovered terminal cannot initialize a
+ * game loop or acquire a normal Full attachment.
+ */
+async function terminalSocketRequest(
+  serverUrl: string,
+  request: unknown,
+  socketFactory?: PhaseSocketFactory,
+): Promise<{ type: string; data?: unknown }> {
+  const socket = await openPhaseSocket(serverUrl, { socketFactory });
+  return new Promise((resolve, reject) => {
+    const closeAndResolve = (message: { type: string; data?: unknown }) => {
+      socket.ws.close();
+      resolve(message);
+    };
+    socket.ws.onmessage = (event) => {
+      try {
+        closeAndResolve(JSON.parse(event.data as string) as { type: string; data?: unknown });
+      } catch (error) {
+        socket.ws.close();
+        reject(error);
+      }
+    };
+    socket.ws.onerror = () => {
+      socket.ws.close();
+      reject(new Error("Terminal websocket request failed"));
+    };
+    socket.ws.onclose = () => {
+      reject(new Error("Terminal websocket closed before a response"));
+    };
+    socket.ws.send(JSON.stringify(request));
+  });
+}
+
+export async function bootstrapFullTerminalDelivery(
+  serverUrl: string,
+  key: FullSessionKey,
+  playerToken: string,
+  requestId: string,
+  socketFactory?: PhaseSocketFactory,
+): Promise<FullTerminalDelivery | null> {
+  const response = await terminalSocketRequest(
+    serverUrl,
+    {
+      type: "BootstrapTerminalDelivery",
+      data: {
+        request: {
+          key,
+          playerToken,
+          requestId,
+        },
+      },
+    },
+    socketFactory,
+  );
+  if (response.type !== "TerminalBootstrapResult") {
+    throw new Error("Unexpected terminal bootstrap response");
+  }
+  return (response.data as { delivery?: FullTerminalDelivery }).delivery ?? null;
+}
+
+export async function readFullTerminalResult(
+  serverUrl: string,
+  credential: string,
+  socketFactory?: PhaseSocketFactory,
+): Promise<FullTerminalDelivery | null> {
+  const response = await terminalSocketRequest(
+    serverUrl,
+    { type: "ReadTerminalResult", data: { credential } },
+    socketFactory,
+  );
+  if (response.type !== "TerminalResult") {
+    throw new Error("Unexpected terminal result response");
+  }
+  return (response.data as { delivery?: FullTerminalDelivery }).delivery ?? null;
+}
+
+export async function acknowledgeFullTerminalDelivery(
+  serverUrl: string,
+  deliveryId: string,
+  credential: string,
+  socketFactory?: PhaseSocketFactory,
+): Promise<boolean> {
+  const response = await terminalSocketRequest(
+    serverUrl,
+    { type: "AckTerminalDelivery", data: { delivery_id: deliveryId, credential } },
+    socketFactory,
+  );
+  return response.type === "TerminalDeliveryAcknowledged";
 }
 
 /** AI seat configuration for the private native-engine host path. */
@@ -73,12 +174,13 @@ export interface NativeSocketAdapterOptions {
 export type NativePregameAdapterOptions =
   | ({ kind: "host"; aiSeats: NativeAiSeat[]; playerCount: number; formatConfig?: FormatConfig; matchConfig?: MatchConfig } & NativeSocketAdapterOptions)
   | ({ kind: "guest" } & NativeSocketAdapterOptions)
-  | ({ kind: "reconnect"; gameCode: string; playerId: PlayerId; playerToken: string } & NativeSocketAdapterOptions);
+  | ({ kind: "reconnect"; gameCode: string; playerId: PlayerId; playerToken: string; fullKey: FullSessionKey } & NativeSocketAdapterOptions);
 
 export interface NativeSessionAttachment {
   gameCode: string;
   playerId: PlayerId;
   playerToken: string;
+  fullKey: FullSessionKey;
 }
 
 export interface WebSocketAdapterOptions {
@@ -101,6 +203,19 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 29 — Added requester-correlated ResolveAllRejected response frames.
+ * 28 — Added native ResolveAll request/result frames.
+ * 27 — Added DraftKind.Sealed, serialized by draft WebSocket messages.
+ * 26 — Added ActionNoOp acknowledgement for accepted transport no-ops.
+ * 25 — DebugCardEntries added a serialized, private resolution frame for
+ *      multi-card sandbox battlefield entries that pause for replacement or
+ *      as-enters choices. Old peers cannot deserialize that GameState shape.
+ * 24 — DerivedViews.unbounded_families carries the engine-owned per-seat family
+ *      collapse state behind each ∞ badge. A CAPABILITY bump, not a parse bump:
+ *      the field is serde-optional, but this client deleted its row-flag
+ *      OR-fold derivation, so a v23 server that omits the field would leave
+ *      this client rendering NO infinity badges — silently, with no parse error
+ *      to catch it. The handshake is the only place that pairing is refusable.
  * 23 — PayableResource::ManaGeneric changed from { per_x } to
  *      { base_cost: ManaCost } (#6410) — a GameState payload field type
  *      change, and base_cost intentionally carries no serde default (a
@@ -121,7 +236,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 23;
+export const PROTOCOL_VERSION = 29;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -173,9 +288,14 @@ export type WsAdapterEvent =
   | { type: "reconnecting"; attempt: number; maxAttempts: number }
   | { type: "reconnected" }
   | { type: "reconnectFailed" }
+  | { type: "terminalDelivery"; delivery: FullTerminalDelivery }
+  | { type: "terminalUnavailable"; message: string }
   /** The engine pair travels as one `EngineSnapshot` — see the P2P adapter's
    *  `stateChanged` for why the halves must stay inseparable. */
-  | { type: "stateChanged"; snapshot: EngineSnapshot; events: GameEvent[]; logEntries?: GameLogEntry[]; serverRevision?: number }
+  | { type: "stateChanged"; snapshot: EngineSnapshot; events: GameEvent[]; logEntries?: GameLogEntry[]; serverRevision?: number;
+      /** Server-published turn boundaries. Always an array on this transport —
+       *  `[]` means "the server published none", never "unknown". */
+      rewindTargets?: RewindOption[] }
   | { type: "sessionAttached"; attachment: NativeSessionAttachment }
   | { type: "emoteReceived"; fromPlayer: PlayerId; emote: string }
   | { type: "conceded"; player: PlayerId }
@@ -205,6 +325,9 @@ function playerNamesFromWire(names: string[]): Record<number, string> {
  * for multiplayer games.
  */
 export class WebSocketAdapter implements EngineAdapter {
+  readonly supportsMatchConcede = true;
+  readonly supportsServerRewind = true;
+  readonly resolveAllUsesServerAi: true | undefined;
   private ws: PhaseSocketTransport | null = null;
   /**
    * The single cached engine pair, rebuilt (and re-stamped) once per inbound
@@ -216,8 +339,15 @@ export class WebSocketAdapter implements EngineAdapter {
   private _playerId: PlayerId | null = null;
   private playerToken: string | null = null;
   private _gameCode: string | null = null;
+  private fullSessionKey: FullSessionKey | null = null;
   private pendingResolve: ((result: SubmitResult) => void) | null = null;
   private pendingReject: ((error: Error) => void) | null = null;
+  private nextResolveAllRequestId = 1;
+  private pendingResolveAll: {
+    requestId: number;
+    resolve: (result: BatchResolveResult) => void;
+    reject: (error: Error) => void;
+  } | null = null;
   private nextManaPaymentPreviewRequestId = 1;
   private pendingManaPaymentPreviews = new Map<
     number,
@@ -282,6 +412,7 @@ export class WebSocketAdapter implements EngineAdapter {
     private readonly displayName = "Player",
     private readonly options: WebSocketAdapterOptions = {},
   ) {
+    this.resolveAllUsesServerAi = options.nativeAi ? true : undefined;
     // 0 is terminal, not "retry once": `attemptReconnect` compares
     // `reconnectAttempt >= maxReconnectAttempts`, so 0 >= 0 is true on the
     // very first attempt — it emits `reconnectFailed` and returns without
@@ -333,14 +464,15 @@ export class WebSocketAdapter implements EngineAdapter {
    *  persist this so a suspended game can be resumed by constructing a
    *  `kind: "reconnect"` adapter. The player token is issued once at creation
    *  and lives only client-side — it is the reconnect security boundary. */
-  get nativeSession(): { gameCode: string; playerId: PlayerId; playerToken: string } | null {
-    if (this._gameCode === null || this._playerId === null || this.playerToken === null) {
+  get nativeSession(): { gameCode: string; playerId: PlayerId; playerToken: string; fullKey: FullSessionKey } | null {
+    if (this._gameCode === null || this._playerId === null || this.playerToken === null || this.fullSessionKey === null) {
       return null;
     }
     return {
       gameCode: this._gameCode,
       playerId: this._playerId,
       playerToken: this.playerToken,
+      fullKey: this.fullSessionKey,
     };
   }
 
@@ -436,6 +568,7 @@ export class WebSocketAdapter implements EngineAdapter {
       this._gameCode = options.gameCode;
       this._playerId = options.playerId;
       this.playerToken = options.playerToken;
+      this.fullSessionKey = options.fullKey;
     }
     return new Promise<NativeSessionAttachment>((resolve, reject) => {
       this.pregameResolve = resolve;
@@ -577,6 +710,12 @@ export class WebSocketAdapter implements EngineAdapter {
         this.pendingResolve = null;
         this.pendingReject = null;
       }
+      if (this.pendingResolveAll) {
+        this.pendingResolveAll.reject(
+          new AdapterError("WS_CLOSED", "Connection closed during Resolve All", true),
+        );
+        this.pendingResolveAll = null;
+      }
       this.rejectPendingManaPaymentPreviews(
         new AdapterError("WS_CLOSED", "Connection closed during mana-payment preview", true),
       );
@@ -665,6 +804,31 @@ export class WebSocketAdapter implements EngineAdapter {
     });
   }
 
+  async resolveAll(
+    _requester: PlayerId,
+    _aiSeats: { playerId: number; difficulty: string }[],
+    maxResolutions = 5_000,
+  ): Promise<BatchResolveResult> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
+    }
+    if (this.pendingResolveAll) {
+      throw new AdapterError("WS_ERROR", "Resolve All already pending", false);
+    }
+
+    const requestId = this.nextResolveAllRequestId++;
+    return new Promise<BatchResolveResult>((resolve, reject) => {
+      this.pendingResolveAll = { requestId, resolve, reject };
+      if (!this.send({
+        type: "ResolveAll",
+        data: { request_id: requestId, max_resolutions: maxResolutions },
+      })) {
+        this.pendingResolveAll = null;
+        reject(new AdapterError("WS_CLOSED", "Failed to send Resolve All", true));
+      }
+    });
+  }
+
   async previewManaPayment(action: GameAction, _actor: PlayerId): Promise<ObjectId[]> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
@@ -685,10 +849,6 @@ export class WebSocketAdapter implements EngineAdapter {
       throw new AdapterError("WS_ERROR", "No game state available", false);
     }
     return this.snapshot.state;
-  }
-
-  getAiAction(_difficulty: string, _playerId: number): GameAction | null {
-    return null;
   }
 
   async getLegalActions(): Promise<LegalActionsResult> {
@@ -729,14 +889,32 @@ export class WebSocketAdapter implements EngineAdapter {
     this.send({ type: "Concede" });
   }
 
+  /** Requests a whole-match concession for this authenticated session. */
+  sendMatchConcede(): void {
+    this.send({ type: "ConcedeMatch" });
+  }
+
   sendEmote(emote: string): void {
     this.send({ type: "Emote", data: { emote } });
   }
 
-  /** GH #1507: ask every other human player to approve rolling the game
-   * back to the state immediately before this player's last action. */
-  sendRequestTakeback(): void {
-    this.send({ type: "RequestTakeback" });
+  /**
+   * GH #1507: ask every other human player to approve rolling the game back.
+   * Defaults to the pre-existing last-action granularity, which keeps the
+   * existing zero-argument call site behaving identically.
+   *
+   * The last-action frame deliberately carries NO `data` key — byte-identical
+   * to the frame this client has always sent, and the shape the server's
+   * `Option<RewindTarget>` newtype variant exists to accept. Only a turn rewind
+   * carries a payload, and the client can only ask for a turn the server itself
+   * published in `rewind_targets`.
+   */
+  sendRequestTakeback(target: RewindTarget = { kind: "last_action" }): void {
+    if (target.kind === "last_action") {
+      this.send({ type: "RequestTakeback" });
+      return;
+    }
+    this.send({ type: "RequestTakeback", data: target });
   }
 
   /** Approve or decline a pending takeback request. */
@@ -785,8 +963,15 @@ export class WebSocketAdapter implements EngineAdapter {
     this._playerId = null;
     this.playerToken = null;
     this._gameCode = null;
+    this.fullSessionKey = null;
     this.pendingResolve = null;
     this.pendingReject = null;
+    if (this.pendingResolveAll) {
+      this.pendingResolveAll.reject(
+        new AdapterError("WS_CLOSED", "Adapter disposed during Resolve All", true),
+      );
+      this.pendingResolveAll = null;
+    }
     this.rejectPendingManaPaymentPreviews(
       new AdapterError("WS_CLOSED", "Adapter disposed during mana-payment preview", true),
     );
@@ -809,6 +994,7 @@ export class WebSocketAdapter implements EngineAdapter {
   tryReconnect(session: WsSessionData): boolean {
     this._gameCode = session.gameCode;
     this.playerToken = session.playerToken;
+    this.fullSessionKey = session.fullKey;
 
     if (!this.isNativeSocket() && !isValidWebSocketUrl(this.serverUrl)) {
       this.emit({ type: "reconnectFailed" });
@@ -821,6 +1007,7 @@ export class WebSocketAdapter implements EngineAdapter {
       data: {
         game_code: session.gameCode,
         player_token: session.playerToken,
+        full_key: session.fullKey,
       },
     }).catch(() => {
       // attachSocket handles reconnect-driven retries via `attemptReconnect`
@@ -926,6 +1113,7 @@ export class WebSocketAdapter implements EngineAdapter {
       data: {
         game_code: options.gameCode,
         player_token: options.playerToken,
+        full_key: options.fullKey,
       },
     };
   }
@@ -1022,9 +1210,14 @@ export class WebSocketAdapter implements EngineAdapter {
       // post-handshake message loop begins.
 
       case "GameCreated": {
-        const data = msg.data as { game_code: string; player_token: string };
+        const data = msg.data as {
+          game_code: string;
+          player_token: string;
+          full_key?: FullSessionKey;
+        };
         this._gameCode = data.game_code;
         this.playerToken = data.player_token;
+        if (data.full_key && !this.acceptFullSessionKey(data.full_key)) break;
         this.hostWaitingForOpponent = true;
         this.emit({ type: "sessionChanged", session: this.currentSession() });
         this.emit({ type: "gameCreated", gameCode: data.game_code });
@@ -1033,13 +1226,25 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "SessionAttached": {
-        const data = msg.data as { game_code: string; player_id: PlayerId; player_token: string };
+        const data = msg.data as {
+          game_code: string;
+          player_id: PlayerId;
+          player_token: string;
+          full_key?: FullSessionKey;
+        };
+        this._gameCode = data.game_code;
+        const fullKey = data.full_key;
+        if (!fullKey) {
+          this.acceptFullSessionKey(undefined);
+          break;
+        }
+        if (!this.acceptFullSessionKey(fullKey)) break;
         const attachment: NativeSessionAttachment = {
           gameCode: data.game_code,
           playerId: data.player_id,
           playerToken: data.player_token,
+          fullKey,
         };
-        this._gameCode = attachment.gameCode;
         this._playerId = attachment.playerId;
         this.playerToken = attachment.playerToken;
         this.emit({ type: "sessionChanged", session: this.currentSession() });
@@ -1118,7 +1323,7 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "GameStarted": {
-        const data = msg.data as { state_revision: number; state: GameState; your_player: PlayerId; opponent_name?: string; player_names?: string[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; end_continuous_effect_offers?: LegalActionsResult["endContinuousEffectOffers"]; mana_payment_shortcut_actions?: GameAction[]; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; viewer_interaction?: LegalActionsResult["viewerInteraction"]; derived?: GameState["derived"]; player_token?: string; events?: GameEvent[] };
+        const data = msg.data as { state_revision: number; state: GameState; your_player: PlayerId; opponent_name?: string; player_names?: string[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; end_continuous_effect_offers?: LegalActionsResult["endContinuousEffectOffers"]; mana_payment_shortcut_actions?: GameAction[]; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; viewer_interaction?: LegalActionsResult["viewerInteraction"]; derived?: GameState["derived"]; player_token?: string; full_key?: FullSessionKey; events?: GameEvent[]; rewind_targets?: RewindOption[] };
         if (this.reconnectInFlight) {
           this.reconnectInFlight = false;
           this.reconnectAttempt = 0;
@@ -1159,6 +1364,7 @@ export class WebSocketAdapter implements EngineAdapter {
             gameCode: expected.gameCode,
             playerId: expected.playerId,
             playerToken: expected.playerToken,
+            fullKey: expected.fullKey,
           };
           this.emit({ type: "sessionChanged", session: this.currentSession() });
           this.emit({ type: "sessionAttached", attachment });
@@ -1172,6 +1378,7 @@ export class WebSocketAdapter implements EngineAdapter {
         if (!this._gameCode && this.joinGameCode) {
           this._gameCode = this.joinGameCode;
         }
+        if (data.full_key && !this.acceptFullSessionKey(data.full_key)) break;
         if (data.player_token) {
           this.playerToken = data.player_token;
           this.emit({ type: "sessionChanged", session: this.currentSession() });
@@ -1201,25 +1408,35 @@ export class WebSocketAdapter implements EngineAdapter {
           this.gameStartedResolve = null;
           this.gameStartedReject = null;
         }
+        // Always an array, never `undefined`: on this transport `undefined`
+        // would mean "this transport does not publish", which is false here —
+        // an omitted field means the server published none.
+        const startedRewindTargets = data.rewind_targets ?? [];
         if (this.options.nativePregame) {
           this.emit({
             type: "stateChanged",
             snapshot: startedSnapshot,
             events: data.events ?? [],
             serverRevision: data.state_revision,
+            rewindTargets: startedRewindTargets,
           });
         } else if (!initializedNow) {
           // Reconnect path — no initResolve pending, so emit state change
           // so GameProvider's event listener populates the store. Emits the
           // cached snapshot, which carries the derived-attached state (this
           // emit previously sent the raw `data.state`, dropping `derived`).
-          this.emit({ type: "stateChanged", snapshot: startedSnapshot, events: [] });
+          this.emit({
+            type: "stateChanged",
+            snapshot: startedSnapshot,
+            events: [],
+            rewindTargets: startedRewindTargets,
+          });
         }
         break;
       }
 
       case "StateUpdate": {
-        const data = msg.data as { state_revision: number; state: GameState; events: GameEvent[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; end_continuous_effect_offers?: LegalActionsResult["endContinuousEffectOffers"]; mana_payment_shortcut_actions?: GameAction[]; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; viewer_interaction?: LegalActionsResult["viewerInteraction"]; log_entries?: GameLogEntry[]; derived?: GameState["derived"] };
+        const data = msg.data as { state_revision: number; state: GameState; events: GameEvent[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; end_continuous_effect_offers?: LegalActionsResult["endContinuousEffectOffers"]; mana_payment_shortcut_actions?: GameAction[]; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; viewer_interaction?: LegalActionsResult["viewerInteraction"]; log_entries?: GameLogEntry[]; derived?: GameState["derived"]; rewind_targets?: RewindOption[] };
         // Attach the engine-authored derived views to the state snapshot so
         // components (e.g. CommanderDamage) can read them via gameState.derived
         // without a separate subscription path. See
@@ -1250,6 +1467,7 @@ export class WebSocketAdapter implements EngineAdapter {
             events: data.events,
             logEntries: data.log_entries,
             serverRevision: data.state_revision,
+            rewindTargets: data.rewind_targets ?? [],
           });
         }
         break;
@@ -1277,6 +1495,52 @@ export class WebSocketAdapter implements EngineAdapter {
           // TAKEBACK's reason string, which would be a misattribution rather
           // than merely a stale spinner.
           this.emit({ type: "requestRejected", reason: data.reason });
+        }
+        break;
+      }
+
+      case "ResolveAllResult": {
+        const data = msg.data as {
+          request_id: number;
+          items_resolved: number;
+          total: number;
+        };
+        if (this.pendingResolveAll?.requestId === data.request_id) {
+          const waitingFor = this.snapshot?.state.waiting_for;
+          if (!waitingFor) {
+            this.pendingResolveAll.reject(
+              new AdapterError("WS_ERROR", "Resolve All result arrived without a state snapshot", false),
+            );
+            this.pendingResolveAll = null;
+            break;
+          }
+          this.pendingResolveAll.resolve({
+            events: [],
+            waitingFor,
+            logEntries: [],
+            itemsResolved: data.items_resolved,
+            total: data.total,
+          });
+          this.pendingResolveAll = null;
+        }
+        break;
+      }
+
+      case "ResolveAllRejected": {
+        const data = msg.data as { request_id: number; reason: string };
+        if (this.pendingResolveAll?.requestId === data.request_id) {
+          this.pendingResolveAll.reject(actionRejectionError(data.reason));
+          this.pendingResolveAll = null;
+        }
+        break;
+      }
+
+      case "ActionNoOp": {
+        this.emit({ type: "actionPendingChanged", pending: false });
+        if (this.pendingResolve) {
+          this.pendingResolve({ events: [], log_entries: [] });
+          this.pendingResolve = null;
+          this.pendingReject = null;
         }
         break;
       }
@@ -1312,6 +1576,35 @@ export class WebSocketAdapter implements EngineAdapter {
 
       case "OpponentReconnected": {
         this.emit({ type: "opponentReconnected" });
+        break;
+      }
+
+      case "TerminalResult": {
+        const delivery = (msg.data as { delivery?: FullTerminalDelivery }).delivery;
+        if (!delivery) break;
+        void (async () => {
+          if (!(await commitFullTerminalDelivery(delivery))) {
+            this.emit({
+              type: "terminalUnavailable",
+              message: "Failed to retain terminal delivery",
+            });
+            return;
+          }
+          this.gameEnded = true;
+          this.emit({ type: "actionPendingChanged", pending: false });
+          this.emit({ type: "sessionChanged", session: null });
+          this.emit({ type: "terminalDelivery", delivery });
+          await acknowledgeFullTerminalDelivery(
+            this.serverUrl,
+            delivery.delivery_id,
+            delivery.credential,
+          );
+        })().catch((error: unknown) => {
+          this.emit({
+            type: "terminalUnavailable",
+            message: error instanceof Error ? error.message : "Terminal acknowledgement failed",
+          });
+        });
         break;
       }
 
@@ -1443,14 +1736,37 @@ export class WebSocketAdapter implements EngineAdapter {
   }
 
   private currentSession(): WsSessionData | null {
-    if (!this._gameCode || !this.playerToken) {
+    if (!this._gameCode || !this.playerToken || !this.fullSessionKey) {
       return null;
     }
     return {
       gameCode: this._gameCode,
       playerToken: this.playerToken,
+      fullKey: this.fullSessionKey,
       serverUrl: this.serverUrl,
       timestamp: Date.now(),
     };
+  }
+
+  /** Rejects missing or changed Full identities before they can be persisted. */
+  private acceptFullSessionKey(key: FullSessionKey | undefined): boolean {
+    if (!key || key.game_code !== this._gameCode || key.generation < 1) {
+      const error = new AdapterError("WS_ERROR", "Server omitted a valid Full session identity", false);
+      this.rejectInitialization(error);
+      this.emit({ type: "error", message: error.message });
+      return false;
+    }
+    if (
+      this.fullSessionKey
+      && (this.fullSessionKey.game_code !== key.game_code
+        || this.fullSessionKey.generation !== key.generation)
+    ) {
+      const error = new AdapterError("WS_ERROR", "Server changed the Full session identity", false);
+      this.rejectInitialization(error);
+      this.emit({ type: "error", message: error.message });
+      return false;
+    }
+    this.fullSessionKey = key;
+    return true;
   }
 }

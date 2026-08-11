@@ -11,6 +11,18 @@ import type {
 } from "../adapter/types";
 import type { InteractionSubmission, ViewerInteraction } from "../adapter/generated/interaction";
 import type { SeatMutation, SeatView } from "../multiplayer/seatTypes";
+import type { P2PAuthorityStamp, P2PSessionKey } from "../services/p2pSession";
+import type { P2PTerminalResult } from "../services/p2pTerminalResult";
+
+/**
+ * The stable session identity is carried on reconnect so a resumed host can
+ * accept a legitimate guest while replacing its previous host incarnation.
+ * Every host-originated frame is stamped by P2PHostAdapter; the optional
+ * shape keeps first-contact guest_deck messages intentionally credentialless.
+ */
+export interface P2PAuthorityWire {
+  authority?: P2PAuthorityStamp;
+}
 
 /**
  * Wire-format projection of `LegalActionsResult`. Single source of truth for
@@ -68,6 +80,10 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * of silently corrupting state.
  *
  * Bumps to date:
+ *  19 — Added an action_noop acknowledgement for accepted transport no-ops.
+ *  18 — DebugCardEntries added a serialized, private resolution frame for
+ *       multi-card sandbox battlefield entries that pause for replacement or
+ *       as-enters choices. Old peers cannot deserialize that GameState shape.
  *  16 — PayableResource::ManaGeneric changed from { per_x } to
  *       { base_cost: ManaCost } (#6410) — a GameState payload field type
  *       change, and base_cost intentionally carries no serde default (a
@@ -80,6 +96,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *   4 — Archenemy derived view and scheme deck payloads
  *   5 — CardPredicateGuessMade game event shape
  *  13 — Actor-scoped priority-passing settings and filtered per-player state.
+ *  17 — Sacrificial-mana source selection action and waiting-state snapshots.
  *  12 — Connive exact subject snapshots and resident paused post-replacement
  *       drains changed P2P GameState snapshots.
  *  11 — Serialized GameState trigger provenance and paused logical zone-change owners.
@@ -87,19 +104,23 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *   9 — Meld pair and attacking-entry choices after mana-payment preview variants.
  *   8 — Mana-payment preview request/response variants.
  *   7 — PrecastCopyShortcut action and its two WaitingFor variants.
+ *  17 — Bound draft-match concession request. A Traditional-draft guest
+ *       asks its match authority to settle the match; it must not send a
+ *       game-level concession through the ordinary P2P path.
  *   6 — Mulligan bottoming folded into a MulliganDecisionPhase::BottomCards
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 16 as const;
+export const WIRE_PROTOCOL_VERSION = 19 as const;
 
-export type P2PMessage =
+export type P2PMessage = P2PAuthorityWire & (
   | { type: "guest_deck"; deckData: unknown; displayName?: string; reservationToken?: string }
   | ({
       type: "game_setup";
       wireProtocolVersion: typeof WIRE_PROTOCOL_VERSION;
       assignedPlayerId: number;
       playerToken: string;
+      revision?: number;
       state: GameState;
       events: GameEvent[];
       playerNames?: Record<number, string>;
@@ -109,11 +130,13 @@ export type P2PMessage =
   | { type: "preview_mana_payment"; requestId: number; action: GameAction }
   | ({
       type: "state_update";
+      revision?: number;
       state: GameState;
       events: GameEvent[];
       logEntries?: GameLogEntry[];
     } & LegalActionsWire)
   | { type: "action_rejected"; reason: string }
+  | { type: "action_noop" }
   | { type: "mana_payment_preview"; requestId: number; sourceIds: ObjectId[] }
   | { type: "mana_payment_preview_rejected"; requestId: number; reason: string }
   | { type: "ping"; timestamp: number }
@@ -121,12 +144,15 @@ export type P2PMessage =
   | { type: "disconnect"; reason: string }
   | { type: "emote"; emote: string }
   | { type: "concede" }
+  /** Protected by a draft-installed match capability on the host. */
+  | { type: "match_concede" }
   // Reconnect: guest presents prior token; host accepts (with fresh state) or rejects.
-  | { type: "reconnect"; playerToken: string }
+  | { type: "reconnect"; playerToken: string; sessionKey?: P2PSessionKey }
   | ({
       type: "reconnect_ack";
       wireProtocolVersion: typeof WIRE_PROTOCOL_VERSION;
       assignedPlayerId: number;
+      revision?: number;
       state: GameState;
       playerNames?: Record<number, string>;
     } & LegalActionsWire)
@@ -144,6 +170,10 @@ export type P2PMessage =
   // send this, since those cases may be transient and the reconnect loop is
   // correct behavior there.
   | { type: "host_left"; reason: string }
+  /** Recipient-scoped terminal commitment. It is host-originated and
+   * lease-bound; guests pin the first valid terminal id and never reconnect
+   * after accepting the commitment for their filtered state. */
+  | { type: "terminal_result"; result: P2PTerminalResult }
   // Lifecycle broadcasts (host → all remaining peers).
   | { type: "player_kicked"; playerId: number; reason: string }
   // Host chose "continue without them" OR guest self-conceded mid-game. Wire
@@ -157,7 +187,8 @@ export type P2PMessage =
   // Pre-game lobby progress (host → all peers in the lobby).
   | { type: "lobby_progress"; joined: number; total: number }
   | { type: "seat_mutate"; mutation: SeatMutation }
-  | { type: "seat_snapshot"; view: SeatView };
+  | { type: "seat_snapshot"; view: SeatView }
+);
 
 const VALID_TYPES = new Set([
   "guest_deck",
@@ -167,6 +198,7 @@ const VALID_TYPES = new Set([
   "preview_mana_payment",
   "state_update",
   "action_rejected",
+  "action_noop",
   "mana_payment_preview",
   "mana_payment_preview_rejected",
   "ping",
@@ -174,11 +206,13 @@ const VALID_TYPES = new Set([
   "disconnect",
   "emote",
   "concede",
+  "match_concede",
   "reconnect",
   "reconnect_ack",
   "reconnect_rejected",
   "kick",
   "host_left",
+  "terminal_result",
   "player_kicked",
   "player_conceded",
   "player_disconnected",

@@ -256,6 +256,15 @@ pub enum GameAction {
     TapLandForMana {
         selection: ManaSourceSelection,
     },
+    /// CR 605.3a: Activate one exact engine-authored mana-source capability.
+    /// Unlike the legacy land-only action, this covers mana abilities on every
+    /// permanent type and preserves the selected output provenance.
+    ActivateManaSource {
+        selection: ManaSourceSelection,
+    },
+    /// Return from a sacrificial-mana choice to the exact saved payment state
+    /// without re-planning or mutating the mana pool.
+    BackToManaPayment,
     /// CR 605.3a: Undo a manual mana ability activation — untap source, remove produced mana.
     /// Only valid for lands in `lands_tapped_for_mana` whose mana hasn't been spent.
     UntapLandForMana {
@@ -670,7 +679,7 @@ pub enum GameAction {
     ChooseLegend {
         keep: ObjectId,
     },
-    /// CR 310.10 + CR 704.5w + CR 704.5x: Choose which player becomes the
+    /// CR 310.11 + CR 704.5w + CR 704.5x: Choose which player becomes the
     /// battle's new protector when the SBA pauses with a `BattleProtectorChoice`.
     ChooseBattleProtector {
         protector: PlayerId,
@@ -878,9 +887,21 @@ pub enum GameAction {
     /// CR 732.2a: the proposer (the loop's determinate winner, holding priority)
     /// declares the loop shortcut. `count` is the repeat count — Phase 3 only produces
     /// [`IterationCount::UntilLethal`]. `template` pins the per-iteration choices for a
-    /// choice-bearing loop; it MUST be `None` in Phase 3 (the B3 consumer that reads it
-    /// is Phase 4 — the field is present now so Phase 4 adds no dispatch-signature
-    /// change).
+    /// choice-bearing loop, and `Some` IS accepted and consumed: the declare handler binds
+    /// `template.owner` to the engine-issued `offer.proposer` (CR 603.5 — a proposer may pin only
+    /// their own choices) and, for a non-empty schema, requires
+    /// `decision_template::{predictability_gate, validate_pins}` to pass before the pins drive the
+    /// cycle; any failure rejects the declaration and hands back to manual play. That owner binding
+    /// plus pin validation IS L2 (unconditionality by construction) enforced AT THE WIRE: an
+    /// accepted template cannot carry a choice its proposer never pinned or was not entitled to
+    /// pin, so the sequence the table accepts is the sequence that runs — which is why accepting
+    /// `Some` costs the CR 732.2a argument nothing.
+    ///
+    /// The CURRENT FRONTEND always sends `null` (`LoopShortcutModal`, pinned by that modal's T2
+    /// test) — that is a client-side policy, NOT this action's contract. Engine-side per-iteration
+    /// pin CAPTURE is what remains outstanding, as part of the "Shortcut-system rules-correctness
+    /// completion" follow-up in `.deferred-backlog.md` (see
+    /// `analysis::loop_check::ShortcutResponse`'s deficiency note).
     DeclareShortcut {
         count: crate::analysis::decision_template::IterationCount,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -983,6 +1004,16 @@ fn default_true() -> bool {
     true
 }
 
+/// Default and maximum debug-spawn batch sizes. The ceiling is deliberately
+/// small relative to the server's 10,000-object snapshot ceiling: debug spawns
+/// can still be multiplied by ordinary token replacement effects.
+pub const MAX_DEBUG_CREATE_COUNT: u32 = 100;
+
+/// Serde default for debug create counts: legacy payloads create one object.
+fn default_debug_create_count() -> u32 {
+    1
+}
+
 /// Direct game-state manipulation actions for debugging, testing, and remediation.
 /// Bypasses `WaitingFor` validation — fires from any game state without disrupting
 /// the current prompt. Gated on `GameState::debug_mode`.
@@ -1012,6 +1043,11 @@ pub enum DebugAction {
         card_name: String,
         owner: PlayerId,
         zone: Zone,
+        /// Number of card objects to create. The WASM card-database bridge
+        /// currently supports one-at-a-time materialization only, because an
+        /// entry can pause for a replacement or ETB choice.
+        #[serde(default = "default_debug_create_count")]
+        count: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attach_to: Option<AttachTarget>,
         /// When `true`, route a `Battlefield` spawn through the real ETB pipeline
@@ -1020,6 +1056,12 @@ pub enum DebugAction {
         /// consulted for `zone == Battlefield`; ignored for other destinations.
         #[serde(default = "default_true")]
         run_etb: bool,
+        /// Strip the Legendary supertype from the spawned card's copiable
+        /// characteristics. This sandbox-only override is applied before an
+        /// optional battlefield entry so legend-rule SBAs see the requested
+        /// characteristics.
+        #[serde(default)]
+        nonlegendary: bool,
     },
     /// Remove an object from the game entirely.
     RemoveObject { object_id: ObjectId },
@@ -1151,6 +1193,10 @@ pub enum DebugAction {
     /// pass are skipped — mirrors `MoveToZone { simulate: false }`.
     CreateToken {
         request: DebugTokenRequest,
+        /// Number of tokens proposed in one creation event. This intentionally
+        /// reaches the normal replacement pipeline as one batch.
+        #[serde(default = "default_debug_create_count")]
+        count: u32,
         #[serde(default = "default_true")]
         run_etb: bool,
     },
@@ -1159,6 +1205,13 @@ pub enum DebugAction {
     CreateTokenCopy {
         source_id: ObjectId,
         owner: PlayerId,
+        /// Number of token copies created by the normal copy-token resolver.
+        #[serde(default = "default_debug_create_count")]
+        count: u32,
+        /// Apply the existing `RemoveSupertype(Legendary)` copy modification
+        /// while synthesizing the token.
+        #[serde(default)]
+        nonlegendary: bool,
     },
 }
 
@@ -1205,6 +1258,35 @@ impl DebugTokenRequest {
 }
 
 impl DebugAction {
+    /// A zero-count create request is an authorized, state-preserving no-op.
+    /// The action boundary recognizes it before lifecycle/finalization work so
+    /// UI count controls can submit zero without invalidating replays.
+    pub fn is_zero_count_create(&self) -> bool {
+        matches!(
+            self,
+            Self::CreateCard { count: 0, .. }
+                | Self::CreateToken { count: 0, .. }
+                | Self::CreateTokenCopy { count: 0, .. }
+        )
+    }
+
+    /// Rejects hostile or accidental debug spawn batches before they allocate
+    /// objects. Zero is legal and is handled as a no-op by the action boundary.
+    pub fn validate_create_count(&self) -> Result<(), String> {
+        let count = match self {
+            Self::CreateCard { count, .. }
+            | Self::CreateToken { count, .. }
+            | Self::CreateTokenCopy { count, .. } => *count,
+            _ => return Ok(()),
+        };
+        if count > MAX_DEBUG_CREATE_COUNT {
+            return Err(format!(
+                "Debug create count {count} exceeds the maximum {MAX_DEBUG_CREATE_COUNT}"
+            ));
+        }
+        Ok(())
+    }
+
     /// Human-readable description of this debug action, used by the sandbox
     /// audit log so all players see what an authorized debugger did. Engine
     /// owns the wording so the FE remains a pure display layer.
@@ -1251,8 +1333,10 @@ impl DebugAction {
                 card_name,
                 owner,
                 zone,
+                count,
                 attach_to,
                 run_etb,
+                nonlegendary,
             } => {
                 let attach_suffix = match attach_to {
                     Some(AttachTarget::Object(id)) => format!(" attached to {}", obj(*id)),
@@ -1262,13 +1346,16 @@ impl DebugAction {
                     None => String::new(),
                 };
                 let etb_suffix = if *run_etb { "" } else { " (no ETB)" };
+                let nonlegendary_suffix = if *nonlegendary { " (nonlegendary)" } else { "" };
                 format!(
-                    "CreateCard ({} for {} in {:?}{}{})",
+                    "CreateCard ({} ×{} for {} in {:?}{}{}{})",
                     card_name,
+                    count,
                     player_label(*owner),
                     zone,
                     attach_suffix,
                     etb_suffix,
+                    nonlegendary_suffix,
                 )
             }
             DebugAction::RemoveObject { object_id } => {
@@ -1399,7 +1486,11 @@ impl DebugAction {
                 player_label(*active_player)
             ),
             DebugAction::RunStateBasedActions => "RunStateBasedActions".to_string(),
-            DebugAction::CreateToken { request, run_etb } => {
+            DebugAction::CreateToken {
+                request,
+                count,
+                run_etb,
+            } => {
                 let counters = if request.enter_with_counters().is_empty() {
                     String::new()
                 } else {
@@ -1430,17 +1521,25 @@ impl DebugAction {
                     } => characteristics.display_name.clone(),
                 };
                 format!(
-                    "CreateToken ({} for {}{}{})",
+                    "CreateToken ({} ×{} for {}{}{})",
                     token_label,
+                    count,
                     player_label(request.owner()),
                     counters,
                     etb_suffix
                 )
             }
-            DebugAction::CreateTokenCopy { source_id, owner } => format!(
-                "CreateTokenCopy ({} for {})",
+            DebugAction::CreateTokenCopy {
+                source_id,
+                owner,
+                count,
+                nonlegendary,
+            } => format!(
+                "CreateTokenCopy ({} ×{} for {}{})",
                 obj(*source_id),
-                player_label(*owner)
+                count,
+                player_label(*owner),
+                if *nonlegendary { " (nonlegendary)" } else { "" },
             ),
         }
     }
@@ -1497,6 +1596,7 @@ impl GameAction {
         matches!(
             self,
             GameAction::TapLandForMana { .. }
+                | GameAction::ActivateManaSource { .. }
                 | GameAction::UntapLandForMana { .. }
                 // CR 118.3a: pinning/unpinning a pool unit is a mana-payment-window
                 // action; classifying it here keeps it out of AI priority-action
@@ -1551,6 +1651,7 @@ impl GameAction {
             | GameAction::CastSpellAsMadness { object_id, .. } => Some(*object_id),
             GameAction::ActivateAbility { source_id, .. } => Some(*source_id),
             GameAction::TapLandForMana { selection } => Some(selection.source.object_id),
+            GameAction::ActivateManaSource { selection } => Some(selection.source.object_id),
             GameAction::UntapLandForMana { object_id } => Some(*object_id),
             // CR 118.3a: act on a pool pip, not a battlefield object.
             GameAction::SpendPoolMana { .. } | GameAction::UnspendPoolMana { .. } => None,
@@ -1588,6 +1689,7 @@ impl GameAction {
             | GameAction::ChooseReplacement { .. }
             | GameAction::OrderTriggers { .. }
             | GameAction::CancelCast
+            | GameAction::BackToManaPayment
             | GameAction::SubmitSideboard { .. }
             | GameAction::ChoosePlayDraw { .. }
             | GameAction::ChooseOption { .. }
@@ -1870,6 +1972,9 @@ mod tests {
                         },
                         ability_index: None,
                         mana_type: crate::types::mana::ManaType::Green,
+                        output: crate::types::mana::ManaSourceOutput::Concrete(
+                            crate::types::mana::ManaType::Green,
+                        ),
                         atomic_combination: None,
                         restrictions: Vec::new(),
                         penalty: crate::types::mana::ManaSourcePenalty::None,

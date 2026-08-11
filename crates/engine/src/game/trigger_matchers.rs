@@ -10,7 +10,7 @@ use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{GameState, TriggerSourceContext};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
-use crate::types::triggers::{PlaneswalkRole, TriggerMode};
+use crate::types::triggers::{AbilityLifecyclePoint, PlaneswalkRole, TriggerMode};
 use crate::types::zones::Zone;
 
 use super::triggers::TriggerMatcher;
@@ -126,6 +126,10 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         // matcher that reads the `PlaneswalkRole` off the trigger's mode — `From`
         // and `To` bind the source to that endpoint, `Any` is source-independent.
         TriggerMode::Planeswalked { .. } => match_planeswalked,
+        // CR 714.2e: "whenever the final chapter ability of a Saga you control
+        // triggers/resolves" — one matcher reads the lifecycle axis off the
+        // mode.
+        TriggerMode::FinalSagaChapterAbility { .. } => match_saga_chapter_ability,
         // CR 904.9 / CR 701.32b: "When you set this scheme in motion" fires for
         // the scheme set in motion.
         TriggerMode::SetInMotion => match_set_in_motion,
@@ -402,6 +406,18 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         PlaneswalkRole::Any,
     ] {
         r.insert(TriggerMode::Planeswalked { role }, match_planeswalked);
+    }
+    // CR 714.2e: one matcher for each lifecycle point; it reads the axis off the
+    // trigger's mode. Each point is a distinct registry key (it participates in
+    // `TriggerMode`'s Hash/Eq).
+    for lifecycle in [
+        AbilityLifecyclePoint::Triggered,
+        AbilityLifecyclePoint::Resolved,
+    ] {
+        r.insert(
+            TriggerMode::FinalSagaChapterAbility { lifecycle },
+            match_saga_chapter_ability,
+        );
     }
     // CR 904.9 / CR 701.32b / CR 701.33b: Archenemy scheme triggers
     r.insert(TriggerMode::SetInMotion, match_set_in_motion);
@@ -1022,6 +1038,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::ClassLevelGained { .. }
         | GameEvent::MonarchChanged { .. }
         | GameEvent::CityBlessingGained { .. }
+        | GameEvent::EnduringStoryGained { .. }
         | GameEvent::DieRolled { .. }
         | GameEvent::CoinFlipped { .. }
         | GameEvent::RingTemptsYou { .. }
@@ -1063,6 +1080,9 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::StartingPlayerContest { .. }
         | GameEvent::Foretold { .. }
         | GameEvent::BecameForetold { .. }
+        // CR 714.2: names a Saga, but chapter-ability meta-triggers are never
+        // batched ("one or more" has no reading over chapter resolutions).
+        | GameEvent::SagaChapterAbilityResolved { .. }
         | GameEvent::HiddenSearchViewed { .. } => 0,
     }
 }
@@ -1883,6 +1903,19 @@ fn attack_target_matches(
         if !attack_target_type_matches(target, filter) {
             return false;
         }
+        // CR 725.1: "attacks the monarch" additionally requires the defending
+        // player to currently hold the monarch designation. The monarch is a
+        // dynamic single-player identity, so it cannot be evaluated by the pure
+        // type matcher above — it is checked here against `state.monarch`. If no
+        // player is the monarch (CR 725.1), the trigger does not fire (The Spear
+        // of Bashenga).
+        if matches!(filter, crate::types::triggers::AttackTargetFilter::Monarch) {
+            let defending_player =
+                attack_target_defending_player(state, target, fallback_defending_player);
+            if state.monarch != Some(defending_player) {
+                return false;
+            }
+        }
     }
 
     if trigger.valid_target.is_some() {
@@ -1913,6 +1946,12 @@ pub(super) fn attack_target_type_matches(
         ) | (
             crate::types::triggers::AttackTargetFilter::Battle,
             crate::game::combat::AttackTarget::Battle(_)
+        ) | (
+            // CR 725.1: "attacks the monarch" is a Player-type attack; the
+            // monarch-identity constraint is applied statefully in
+            // `attack_target_matches` (The Spear of Bashenga).
+            crate::types::triggers::AttackTargetFilter::Monarch,
+            crate::game::combat::AttackTarget::Player(_)
         )
     )
 }
@@ -2127,12 +2166,20 @@ pub(super) fn match_counter_added(
         object_id,
         counter_type,
         count,
+        actor,
     } = event
     {
         if !valid_card_matches(trigger, state, *object_id, source_context) {
             return false;
         }
-        // CR 714.2a: Apply counter filter (type + optional threshold crossing).
+        // CR 603.2c: "whenever you put …" / "whenever an opponent puts …" gates
+        // on the player who placed the counters. No-op when `valid_target` is
+        // `None` (the passive "counters are put on ~" form, which every existing
+        // counter-added card uses).
+        if !valid_player_matches(trigger, state, *actor, source_context) {
+            return false;
+        }
+        // CR 714.2b: Apply counter filter (type + optional threshold crossing).
         if let Some(ref filter) = trigger.counter_filter {
             if filter.counter_type != *counter_type {
                 return false;
@@ -2177,6 +2224,105 @@ pub(super) fn match_counter_added(
     }
 }
 
+/// CR 714.2e: "Whenever the final chapter ability of a Saga you control
+/// triggers/resolves" (Historian's Boon, Narci, Fable Singer, Tom Bombadil).
+///
+/// The observed Saga is constrained by the trigger's ordinary `valid_card`
+/// filter ("a Saga you control"), matched with last-known information: CR 714.4
+/// sacrifices a Saga once its final chapter ability has left the stack, and a
+/// chapter ability may remove the Saga itself (Fable of the Mirror-Breaker III),
+/// so the permanent frequently no longer exists when this trigger is collected.
+///
+/// The two lifecycle points read different events because they ARE different
+/// events (CR 603.2 vs CR 608.2):
+///
+/// * `Triggered` — chapter abilities have no event of their own. CR 714.2b
+///   defines a chapter symbol as "When one or more lore counters are put onto
+///   this Saga, if the number of lore counters on it was less than N and became
+///   at least N, [effect]", so the trigger event is the same
+///   `CounterAdded { Lore }` that `match_counter_added` consumes.
+/// * `Resolved` — `SagaChapterAbilityResolved`, published by `stack.rs` only on
+///   the path where a triggered ability genuinely finished resolving.
+pub(super) fn match_saga_chapter_ability(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_context: &TriggerSourceContext,
+    state: &GameState,
+) -> bool {
+    // The registry only routes `FinalSagaChapterAbility` triggers here, but read
+    // the lifecycle axis off the mode rather than assuming it.
+    let TriggerMode::FinalSagaChapterAbility { lifecycle } = &trigger.mode else {
+        return false;
+    };
+
+    match (lifecycle, event) {
+        (
+            AbilityLifecyclePoint::Resolved,
+            GameEvent::SagaChapterAbilityResolved {
+                saga,
+                chapter: resolved_chapter,
+                final_chapter,
+                ..
+            },
+        ) => {
+            // CR 400.7: match "a Saga you control" against the SOURCE
+            // incarnation's own last-known characteristics, not against whatever
+            // now occupies its storage id. The Saga is routinely gone by now —
+            // CR 714.4 sacrifices it as soon as the final chapter ability leaves
+            // the stack — and may have been replaced by a re-entered copy.
+            let subject_matches = trigger.valid_card.as_ref().is_none_or(|filter| {
+                super::filter::matches_target_filter_on_lki_snapshot(
+                    state,
+                    saga.identity.reference.object_id,
+                    &saga.lki,
+                    filter,
+                    &super::filter::FilterContext::from_trigger_source(source_context),
+                )
+            });
+            // CR 714.2e: the final chapter ability is the one whose chapter
+            // symbol carries the Saga's final chapter number (CR 714.2d).
+            subject_matches && resolved_chapter == final_chapter
+        }
+        (
+            AbilityLifecyclePoint::Triggered,
+            // CR 714.2b: the chapter ability's own trigger event. `actor` (who
+            // placed the counter) is irrelevant — CR 714.3c's turn-based action
+            // and any effect that adds lore both make chapter abilities trigger.
+            GameEvent::CounterAdded {
+                object_id,
+                counter_type,
+                count,
+                ..
+            },
+        ) => {
+            if *counter_type != crate::types::counter::CounterType::Lore {
+                return false;
+            }
+            if !valid_card_matches_with_lki(trigger, state, *object_id, source_context) {
+                return false;
+            }
+            // CR 714.2b: a chapter ability triggers when the lore count "was less
+            // than N and became at least N". The same crossing arithmetic
+            // `match_counter_added` performs for the Saga's own chapter triggers,
+            // evaluated here against the observed Saga's final chapter number.
+            let Some(saga) = state.objects.get(object_id) else {
+                return false;
+            };
+            let current = saga
+                .counters
+                .get(&crate::types::counter::CounterType::Lore)
+                .copied()
+                .unwrap_or(0);
+            let previous = current.saturating_sub(*count);
+            // A lore counter added to a Saga already past its final chapter
+            // (proliferate before CR 714.4 sacrifices it) crosses nothing.
+            saga.final_chapter_number()
+                .is_some_and(|final_chapter| previous < final_chapter && final_chapter <= current)
+        }
+        _ => false,
+    }
+}
+
 pub(super) fn match_evolved(
     event: &GameEvent,
     trigger: &TriggerDefinition,
@@ -2205,7 +2351,7 @@ pub(super) fn match_counter_removed(
         if !valid_card_matches(trigger, state, *object_id, source_context) {
             return false;
         }
-        // CR 310.11b + CR 714.2a-mirror: Apply counter filter (type + optional
+        // CR 310.12b + CR 714.2b-mirror: Apply counter filter (type + optional
         // "crossed zero" threshold). Used by the Siege victory trigger
         // "When the last defense counter is removed from this permanent".
         // A threshold of Some(0) means "fire only when the current count
@@ -2571,6 +2717,7 @@ pub(super) fn match_becomes_target(
     let GameEvent::BecomesTarget {
         target,
         source_id: targeting_spell_id,
+        ..
     } = event
     else {
         return false;
@@ -5007,6 +5154,60 @@ mod tests {
     /// Helper to create a minimal TriggerDefinition with typed fields.
     fn make_trigger(mode: TriggerMode) -> TriggerDefinition {
         TriggerDefinition::new(mode)
+    }
+
+    /// Issue #5249 — The Spear of Bashenga: "Whenever equipped creature attacks
+    /// the monarch, ...". `AttackTargetFilter::Monarch` is a Player-type attack
+    /// whose defending player must currently hold the monarch designation
+    /// (CR 725.1). The identity check is stateful (`state.monarch`), so it lives
+    /// in `attack_target_matches`, not the pure type matcher. Attacking the
+    /// monarch matches; attacking a non-monarch player does not; and with no
+    /// monarch in the game (CR 725.1) it never matches — the revert canary.
+    #[test]
+    fn attack_target_matches_monarch_requires_monarch_defender() {
+        let mut state = setup();
+        let mut trigger = make_trigger(TriggerMode::Attacks);
+        trigger.attack_target_filter = Some(crate::types::triggers::AttackTargetFilter::Monarch);
+        let source_id = ObjectId(99);
+
+        // P1 is the monarch; attacking P1 matches.
+        state.monarch = Some(PlayerId(1));
+        assert!(
+            attack_target_matches(
+                &trigger,
+                &state,
+                crate::game::combat::AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+                &test_trigger_source_context(&state, source_id),
+            ),
+            "attacking the monarch (P1) must match"
+        );
+
+        // P0 is NOT the monarch; attacking P0 must NOT match (the reported bug).
+        assert!(
+            !attack_target_matches(
+                &trigger,
+                &state,
+                crate::game::combat::AttackTarget::Player(PlayerId(0)),
+                PlayerId(0),
+                &test_trigger_source_context(&state, source_id),
+            ),
+            "attacking a non-monarch player must NOT match"
+        );
+
+        // No monarch in the game (CR 725.1) → never matches, even for the
+        // fallback defending player.
+        state.monarch = None;
+        assert!(
+            !attack_target_matches(
+                &trigger,
+                &state,
+                crate::game::combat::AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+                &test_trigger_source_context(&state, source_id),
+            ),
+            "with no monarch, the monarch attack-target filter must never match"
+        );
     }
 
     /// CR 701.31 / CR 701.31d / CR 901.11: the unified `match_planeswalked` matcher
@@ -7733,6 +7934,7 @@ mod tests {
             action: PlayerActionKind::SearchedLibrary,
             look_count: None,
             scry_bottom_count: None,
+            scry_top_count: None,
         };
         assert!(match_player_action(
             &event,
@@ -7761,6 +7963,7 @@ mod tests {
             action: PlayerActionKind::SearchedLibrary,
             look_count: None,
             scry_bottom_count: None,
+            scry_top_count: None,
         };
         assert!(!match_player_action(
             &event,
@@ -7789,6 +7992,7 @@ mod tests {
             action: PlayerActionKind::SearchedLibrary,
             look_count: None,
             scry_bottom_count: None,
+            scry_top_count: None,
         };
         assert!(match_player_action(
             &event,
@@ -7817,6 +8021,7 @@ mod tests {
             action: PlayerActionKind::Surveil,
             look_count: None,
             scry_bottom_count: None,
+            scry_top_count: None,
         };
         assert!(match_player_action(
             &event,
@@ -7845,6 +8050,7 @@ mod tests {
             action: PlayerActionKind::SearchedLibrary,
             look_count: None,
             scry_bottom_count: None,
+            scry_top_count: None,
         };
         assert!(!match_player_action(
             &event,
@@ -7873,6 +8079,7 @@ mod tests {
             action: PlayerActionKind::Proliferate,
             look_count: None,
             scry_bottom_count: None,
+            scry_top_count: None,
         };
         assert!(match_player_action(
             &event,
@@ -8165,48 +8372,28 @@ mod tests {
     }
 
     #[test]
-    fn changes_zone_origin_zones_matches_library_source() {
-        // CR 603.10a: Laelia-style — source can be library OR graveyard.
-        let state = setup();
-        let mut trigger = make_trigger(TriggerMode::ChangesZoneAll);
-        trigger.origin_zones = vec![Zone::Library, Zone::Graveyard];
-        trigger.destination = Some(Zone::Exile);
+    fn changes_zone_origin_zones_matches_each_listed_source() {
+        // CR 603.10a: Laelia-style — source can be library OR graveyard. Every zone in
+        // `origin_zones` must match; `match_changes_zone` treats the list as a
+        // set-membership constraint (`OriginConstraint::OneOf`).
+        for origin in [Zone::Library, Zone::Graveyard] {
+            let state = setup();
+            let mut trigger = make_trigger(TriggerMode::ChangesZoneAll);
+            trigger.origin_zones = vec![Zone::Library, Zone::Graveyard];
+            trigger.destination = Some(Zone::Exile);
 
-        let event = zone_changed_event(
-            ObjectId(5),
-            Zone::Library,
-            Zone::Exile,
-            Vec::new(),
-            Vec::new(),
-        );
-        assert!(match_changes_zone(
-            &event,
-            &trigger,
-            &test_trigger_source_context(&state, ObjectId(1)),
-            &state
-        ));
-    }
-
-    #[test]
-    fn changes_zone_origin_zones_matches_graveyard_source() {
-        let state = setup();
-        let mut trigger = make_trigger(TriggerMode::ChangesZoneAll);
-        trigger.origin_zones = vec![Zone::Library, Zone::Graveyard];
-        trigger.destination = Some(Zone::Exile);
-
-        let event = zone_changed_event(
-            ObjectId(5),
-            Zone::Graveyard,
-            Zone::Exile,
-            Vec::new(),
-            Vec::new(),
-        );
-        assert!(match_changes_zone(
-            &event,
-            &trigger,
-            &test_trigger_source_context(&state, ObjectId(1)),
-            &state
-        ));
+            let event =
+                zone_changed_event(ObjectId(5), origin, Zone::Exile, Vec::new(), Vec::new());
+            assert!(
+                match_changes_zone(
+                    &event,
+                    &trigger,
+                    &test_trigger_source_context(&state, ObjectId(1)),
+                    &state
+                ),
+                "listed origin {origin:?} → Exile must match"
+            );
+        }
     }
 
     #[test]
@@ -10977,6 +11164,7 @@ mod tests {
             action: PlayerActionKind::ShuffledLibrary,
             look_count: None,
             scry_bottom_count: None,
+            scry_top_count: None,
         };
         let trigger = make_trigger(TriggerMode::Shuffled);
         assert!(match_shuffled(
@@ -11009,6 +11197,7 @@ mod tests {
             action: PlayerActionKind::ShuffledLibrary,
             look_count: None,
             scry_bottom_count: None,
+            scry_top_count: None,
         };
         assert!(match_shuffled(
             &opp_event,
@@ -11023,6 +11212,7 @@ mod tests {
             action: PlayerActionKind::ShuffledLibrary,
             look_count: None,
             scry_bottom_count: None,
+            scry_top_count: None,
         };
         assert!(!match_shuffled(
             &self_event,
@@ -11541,6 +11731,7 @@ mod tests {
             object_id: saga_id,
             counter_type: crate::types::counter::CounterType::Lore,
             count: 1,
+            actor: PlayerId(0),
         };
 
         // Trigger for chapter 1 (threshold=1) should fire: 0 < 1 <= 1
@@ -11609,6 +11800,7 @@ mod tests {
             object_id: saga_id,
             counter_type: crate::types::counter::CounterType::Lore,
             count: 3,
+            actor: PlayerId(0),
         };
         assert!(
             match_counter_added(
@@ -11656,6 +11848,7 @@ mod tests {
             object_id: normal_id,
             counter_type: crate::types::counter::CounterType::Lore,
             count: 3,
+            actor: PlayerId(0),
         };
         assert!(
             match_counter_added(
@@ -11681,6 +11874,7 @@ mod tests {
             object_id: saga_id,
             counter_type: crate::types::counter::CounterType::Plus1Plus1,
             count: 2,
+            actor: PlayerId(0),
         };
         let p1p1_trigger = TriggerDefinition::new(TriggerMode::CounterAdded)
             .valid_card(TargetFilter::SelfRef)
@@ -11719,6 +11913,7 @@ mod tests {
             object_id: saga_id,
             counter_type: crate::types::counter::CounterType::Lore,
             count: 2, // Added 2 at once
+            actor: PlayerId(0),
         };
 
         // Both chapter 1 (threshold=1) and chapter 2 (threshold=2) should fire
@@ -11789,6 +11984,7 @@ mod tests {
             object_id: saga_id,
             counter_type: crate::types::counter::CounterType::Plus1Plus1,
             count: 1,
+            actor: PlayerId(0),
         };
 
         let trigger = TriggerDefinition::new(TriggerMode::CounterAdded)
@@ -11829,6 +12025,7 @@ mod tests {
             object_id: saga_id,
             counter_type: crate::types::counter::CounterType::Lore,
             count: 1,
+            actor: PlayerId(0),
         };
 
         // Filter with no threshold fires on any addition of the matching type
@@ -12109,6 +12306,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
         // No valid_card, so fallback: event.object_id == source_id param
         assert!(match_becomes_target(
@@ -12136,6 +12334,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
         assert!(match_becomes_target(
             &event,
@@ -12156,6 +12355,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
+            source_controller: PlayerId(0),
         };
         assert!(!match_becomes_target(
             &event,
@@ -12194,6 +12394,7 @@ mod tests {
                 source_name: String::new(),
                 subject_match_count: None,
                 die_result: None,
+                provenance: None,
             },
         });
         (state, ability_id)
@@ -12215,6 +12416,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
+            source_controller: PlayerId(0),
         };
         assert!(match_becomes_target(
             &event,
@@ -12239,6 +12441,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
+            source_controller: PlayerId(0),
         };
         assert!(!match_becomes_target(
             &event,
@@ -12259,6 +12462,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
+            source_controller: PlayerId(0),
         };
         assert!(match_becomes_target(
             &event,
@@ -12285,6 +12489,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
         assert!(match_becomes_target(
             &event,
@@ -12311,6 +12516,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
         assert!(!match_becomes_target(
             &event,
@@ -12336,6 +12542,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
         assert!(match_becomes_target(
             &event,
@@ -12362,6 +12569,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
         assert!(!match_becomes_target(
             &event,
@@ -12387,6 +12595,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
+            source_controller: PlayerId(0),
         };
         assert!(match_becomes_target(
             &event,
@@ -12412,6 +12621,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
+            source_controller: PlayerId(0),
         };
         assert!(!match_becomes_target(
             &event,
@@ -12438,6 +12648,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Player(PlayerId(0)),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
 
         assert!(match_becomes_target(
@@ -12465,6 +12676,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Player(PlayerId(1)),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
 
         assert!(!match_becomes_target(
@@ -12492,6 +12704,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Player(PlayerId(0)),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
 
         assert!(!match_becomes_target(
@@ -12556,6 +12769,7 @@ mod tests {
         let obj_event = GameEvent::BecomesTarget {
             target: TargetRef::Object(permanent),
             source_id: ability_id,
+            source_controller: PlayerId(0),
         };
         assert!(
             match_becomes_target(
@@ -12572,6 +12786,7 @@ mod tests {
         let player_event = GameEvent::BecomesTarget {
             target: TargetRef::Player(PlayerId(1)),
             source_id: ability_id,
+            source_controller: PlayerId(0),
         };
         assert!(
             match_becomes_target(
@@ -12612,6 +12827,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(permanent),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
         assert!(
             !match_becomes_target(
@@ -12652,6 +12868,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(permanent),
             source_id: ability_id,
+            source_controller: PlayerId(0),
         };
         assert!(
             !match_becomes_target(
@@ -12695,6 +12912,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(graveyard_card),
             source_id: ability_id,
+            source_controller: PlayerId(0),
         };
         assert!(
             !match_becomes_target(
@@ -12741,6 +12959,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Player(PlayerId(1)),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
         assert!(
             !match_becomes_target(&event, &trigger, &test_trigger_source_context(&state, rotpriest), &state),
@@ -12758,6 +12977,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
         assert!(match_becomes_target(
             &event,
@@ -12777,6 +12997,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
         assert!(!match_becomes_target(
             &event,
@@ -12796,6 +13017,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
+            source_controller: PlayerId(0),
         };
         assert!(!match_becomes_target(
             &event,
@@ -12815,6 +13037,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
         assert!(match_becomes_target(
             &event,
@@ -12834,6 +13057,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
         assert!(match_becomes_target(
             &event,
@@ -12853,6 +13077,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
         assert!(!match_becomes_target(
             &event,
@@ -12872,6 +13097,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
+            source_controller: PlayerId(0),
         };
         assert!(!match_becomes_target(
             &event,
@@ -12916,6 +13142,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
+            source_controller: PlayerId(0),
         };
         assert!(!match_becomes_target(
             &event,
@@ -12957,6 +13184,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
+            source_controller: PlayerId(0),
         };
         assert!(match_becomes_target(
             &event,
@@ -13017,6 +13245,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
+            source_controller: PlayerId(0),
         };
         // Should NOT fire because the ability (entry.id = ability_id) is controlled by PlayerId(1)
         // The other entry with different controller should not be considered
@@ -13082,6 +13311,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: pw_id,
+            source_controller: PlayerId(0),
         };
         // Should NOT fire because the ability (entry.source_id = pw_id) is controlled by PlayerId(0)
         // The trigger requires opponent control
@@ -13138,6 +13368,7 @@ mod tests {
                 source_name: "Innkeeper's Talent".to_string(),
                 subject_match_count: Some(0),
                 die_result: None,
+                provenance: None,
             },
         });
 
@@ -13152,6 +13383,7 @@ mod tests {
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: innkeepers_talent_id,
+            source_controller: PlayerId(0),
         };
         // Should NOT fire because the triggered ability is controlled by PlayerId(0)
         // The trigger requires opponent control

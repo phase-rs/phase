@@ -1861,6 +1861,7 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
         | TriggerCondition::IsInitiative
         | TriggerCondition::NoMonarch
         | TriggerCondition::HasCityBlessing
+        | TriggerCondition::HasEnduringStory
         | TriggerCondition::CompletedDungeon { .. }
         | TriggerCondition::TributeNotPaid
         | TriggerCondition::CastDuringPhase { .. }
@@ -1879,12 +1880,14 @@ fn legacy_ability_condition(x: &AbilityCondition) -> bool {
         }
         AbilityCondition::PreviousEffectAmount { rhs, .. } => legacy_quantity_expr(rhs),
         AbilityCondition::ScopedPlayerMatches { filter } => legacy_player_filter(filter),
+        AbilityCondition::DiscardedCardMatchesFilter { filter } => legacy_target_filter(filter),
         AbilityCondition::ConditionInstead { inner }
         | AbilityCondition::Not { condition: inner } => legacy_ability_condition(inner),
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
             conditions.iter().any(legacy_ability_condition)
         }
-        AbilityCondition::ObjectsShareQuality { .. }
+        AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+        | AbilityCondition::ObjectsShareQuality { .. }
         | AbilityCondition::TargetMatchesFilter { .. }
         | AbilityCondition::SourceMatchesFilter { .. }
         | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
@@ -1923,6 +1926,7 @@ fn legacy_ability_condition(x: &AbilityCondition) -> bool {
         | AbilityCondition::CompletedDungeon { .. }
         | AbilityCondition::IsInitiative
         | AbilityCondition::HasCityBlessing
+        | AbilityCondition::HasEnduringStory
         | AbilityCondition::IsRingBearer
         | AbilityCondition::TargetHasKeywordInstead { .. }
         | AbilityCondition::HasObjectTarget
@@ -1952,6 +1956,7 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::SourceIsTapped
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
+        | StaticCondition::AnyPlayerAttackedYouLastTurn
         | StaticCondition::SourceMatchesFilter { .. }
         | StaticCondition::TopOfLibraryMatches { .. }
         | StaticCondition::UnlessPay { .. }
@@ -1984,9 +1989,11 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
+        | StaticCondition::HasEnduringStory
         | StaticCondition::CompletedADungeon
         | StaticCondition::Unrecognized { .. }
         | StaticCondition::DuringYourTurn
+        | StaticCondition::DuringOpponentsTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
@@ -2182,6 +2189,9 @@ fn legacy_player_filter(x: &PlayerFilter) -> bool {
         | PlayerFilter::PerformedActionThisWay { .. }
         | PlayerFilter::OwnersOfCardsExiledBySource
         | PlayerFilter::VotedFor { .. }
+        // Per-resolution chain ledger read, like `ZoneChangedThisWay` and the
+        // `TrackedSetSize` quantity refs — not one of the retained legacy refs.
+        | PlayerFilter::TrackedSetPossessor { .. }
         | PlayerFilter::ChosenPlayer { .. } => false,
     }
 }
@@ -2844,7 +2854,6 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::Exploit { target }
         | Effect::LoseAllPlayerCounters { target }
         | Effect::Heist { target, .. }
-        | Effect::PutOnTopOrBottom { target }
         | Effect::Goad { target }
         | Effect::GoadAll { target }
         | Effect::Detain { target }
@@ -2865,7 +2874,14 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::GrantCastingPermission { target, .. }
         | Effect::AddTargetReplacement { target, .. }
         | Effect::DiscardCard { target, .. }
+        // CR 122.1 + CR 603.2c: only the reproduction target carries a legacy tag;
+        // the per-kind magnitude is a plain enum with no batch-prompt semantics.
+        | Effect::ReproduceEventCounters { target, .. }
         | Effect::Animate { target, .. } => legacy_target_filter(target),
+
+        Effect::PutOnTopOrBottom { target, chooser } => {
+            legacy_target_filter(target) || legacy_target_filter(chooser)
+        }
 
         Effect::ForceBlock {
             target, duration, ..
@@ -3158,9 +3174,21 @@ fn legacy_effect(x: &Effect) -> bool {
         }
 
         // ---- Options-only carriers ----
-        Effect::Mana { target, .. }
-        | Effect::LoseTheGame { target }
-        | Effect::WinTheGame { target } => otf(target),
+        // CR 601.2c (D5): `Effect::Mana`'s target is a ROLE (`ManaTargetRole`),
+        // not a bare `Option<TargetFilter>`, so it can no longer share the
+        // or-pattern below. It must still be scanned: several shipping mana
+        // cards carry exactly the frozen event-context tags this visitor exists
+        // to find — `TriggeringPlayer` (Bubbling Muck, High Tide, Mana Flare)
+        // and `ParentTargetController` (Fertile Ground, Utopia Sprawl, Wild
+        // Growth, Shimmerwilds Growth). Dropping Mana from the visitor would
+        // silently change `legacy_*` verdicts for all of them. Scan EVERY
+        // declared role filter (`declared_filters`, not `surfaced_filters`) —
+        // the tags live on context-ref filters, which `surfaced_filters`
+        // excludes by definition.
+        Effect::Mana { target, .. } => target
+            .as_ref()
+            .is_some_and(|role| role.declared_filters().any(|(_, f)| legacy_target_filter(f))),
+        Effect::LoseTheGame { target } | Effect::WinTheGame { target } => otf(target),
         Effect::ChooseFromZone { filter, .. } => otf(filter),
         Effect::ReduceNextSpellCost { spell_filter, .. }
         | Effect::GrantNextSpellAbility { spell_filter, .. } => otf(spell_filter),
@@ -3386,6 +3414,7 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::RegisterBending { .. }
         | Effect::Cleanup { .. }
         | Effect::Learn
+        | Effect::NoteManaSpent
         | Effect::Forage
         | Effect::Harness
         | Effect::CollectEvidence { .. }
@@ -3702,6 +3731,7 @@ fn walk_ability(
         trigger_source: _,     // exact triggered-source authority, no read/write effect
         trigger_definition_ref: _, // exact trigger occurrence, no read/write effect
         force_block_attacker: _, // exact force-block referent, no read/write effect
+        target_incarnations: _, // CR 400.7 pins on the referents, no read/write effect
         controller: _,
         original_controller: _,
         scoped_player: _,
@@ -3720,6 +3750,7 @@ fn walk_ability(
         distribution: _,
         chosen_x: _,
         cost_paid_object: _,
+        noted_mana_payment: _, // concrete captured payment snapshot, no read/write effect
         cost_paid_object_ids: _,
         effect_context_object: _,
         amassed_army_object: _,
@@ -4370,6 +4401,18 @@ fn rw_effect(
             if let Some(c) = count {
                 p.merge(rw_quantity_expr(c));
             }
+            (p, sc)
+        }
+        // CR 122.1 + CR 603.2c + CR 608.2h: writes ObjectCounters on the target;
+        // the reproduced kind+count multiset is read from the triggering event
+        // batch (`state.current_trigger_events`) — a live event-context read, not
+        // a read of any object's counter map.
+        Effect::ReproduceEventCounters {
+            target,
+            per_kind_count: _,
+        } => {
+            let (mut p, sc) = obj(StateKind::ObjectCounters, target);
+            p.merge(reads_event_live());
             (p, sc)
         }
         Effect::Bolster { count } => {
@@ -5631,6 +5674,7 @@ fn rw_effect(
         | Effect::Harness
         | Effect::ChooseAndSacrificeRest { .. }
         | Effect::RememberCard { .. }
+        | Effect::NoteManaSpent
         | Effect::ForEachCategory { .. }
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
@@ -5974,6 +6018,9 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
 
 fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
     match x {
+        // CR 608.2c + CR 603.3b: the damage record is frozen at the trigger
+        // event; a sibling cannot alter whether this source dealt that damage.
+        AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn => frozen_source_read(),
         AbilityCondition::QuantityCheck {
             lhs,
             rhs,
@@ -6074,6 +6121,7 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
         // feed — the read is the write's own reveal output). So `conservative()`
         // (which the coarse fallback assigned) falsely conflicts.
         AbilityCondition::RevealedHasCardType { .. } => RwProfile::empty(),
+        AbilityCondition::DiscardedCardMatchesFilter { .. } => RwProfile::empty(),
         AbilityCondition::SourceEnteredThisTurn
         | AbilityCondition::AdditionalCostPaid { .. }
         | AbilityCondition::CastVariantPaid { .. }
@@ -6107,6 +6155,7 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
         | AbilityCondition::CompletedDungeon { .. }
         | AbilityCondition::IsInitiative
         | AbilityCondition::HasCityBlessing
+        | AbilityCondition::HasEnduringStory
         | AbilityCondition::IsRingBearer
         | AbilityCondition::TargetHasKeywordInstead { .. }
         | AbilityCondition::HasObjectTarget
@@ -6224,6 +6273,7 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
         | TriggerCondition::IsInitiative
         | TriggerCondition::NoMonarch
         | TriggerCondition::HasCityBlessing
+        | TriggerCondition::HasEnduringStory
         | TriggerCondition::CompletedDungeon { .. }
         | TriggerCondition::TributeNotPaid
         | TriggerCondition::CastDuringPhase { .. }
@@ -6261,6 +6311,14 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         }
         StaticCondition::SpellCastWithVariantThisTurn { .. } => {
             reads_player_of(StateKind::JournalCast)
+        }
+        // CR 508.6 + CR 514.2: reads the cleanup-time attack-history snapshot
+        // (`attacked_defenders_last_turn`), which changes only at turn boundaries.
+        // `TurnStructure` is the sequencing kind written by cleanup/turn advance;
+        // conservatively depending on it invalidates the cached gate whenever the
+        // turn sequence changes.
+        StaticCondition::AnyPlayerAttackedYouLastTurn => {
+            reads_player_of(StateKind::TurnStructure)
         }
         StaticCondition::SourceMatchesFilter { filter: _ } => reads_src_of(StateKind::ObjectPt),
         // CR 401/402: reads the controller's library top card (contents + order).
@@ -6312,9 +6370,11 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
+        | StaticCondition::HasEnduringStory
         | StaticCondition::CompletedADungeon
         | StaticCondition::Unrecognized { .. }
         | StaticCondition::DuringYourTurn
+        | StaticCondition::DuringOpponentsTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
@@ -6480,6 +6540,21 @@ fn rw_player_filter(x: &PlayerFilter) -> RwProfile {
         // like `ControllerRef::EnchantedPlayer`) and reads this-combat attack
         // declarations against it ⇒ member-bound (refuse batch-T1).
         PlayerFilter::OpponentAttackingEnchantedPlayer => member_bound_read(),
+        // CR 603.10a + CR 608.2h: reads the per-resolution tracked object set and
+        // its cause stamps — a look-back referent keyed on specific members (and
+        // their LKI) ⇒ member-bound, refuse batch-T1. The inner filter is
+        // additionally evaluated against board set membership for members still
+        // on the battlefield, exactly like `ControlsCount`.
+        PlayerFilter::TrackedSetPossessor {
+            filter,
+            relation: _,
+            possession: _,
+            caused_by: _,
+        } => {
+            let mut p = board_membership_read(filter);
+            p.merge(member_bound_read());
+            p
+        }
         PlayerFilter::Controller
         | PlayerFilter::Opponent
         | PlayerFilter::DefendingPlayer
@@ -6553,6 +6628,60 @@ mod tests {
     use crate::types::ability::{
         AbilityKind, ChoiceType, Comparator, CountScope, PtValue, TargetSelectionMode,
     };
+
+    use crate::game::test_fixtures::mana_fixture_roles;
+
+    /// Matrix rows 15b + 17 — zero delta for the D5 frozen-event-tag visitor,
+    /// which reads `Effect::Mana`'s target DIRECTLY and bypasses
+    /// `Effect::target_filter()` entirely.
+    ///
+    /// CR 603.10a: this visitor exists to find frozen event-context tags, and
+    /// seven of the eleven fixture mana entries carry exactly those tags
+    /// (`TriggeringPlayer` on Bubbling Muck / High Tide / Mana Flare,
+    /// `ParentTargetController` on the four Auras). Deleting Mana from the
+    /// or-pattern to silence the compiler — the path of least resistance — would
+    /// silently flip all seven; writing the split arm with `surfaced_filters()`
+    /// would too, since the tags live on context-ref filters that
+    /// `surfaced_filters` excludes by definition. Both mistakes fail here.
+    #[test]
+    fn legacy_effect_verdict_unchanged_for_every_fixture_mana_role() {
+        use crate::types::ability::{ManaProduction, QuantityExpr};
+
+        for (name, role) in mana_fixture_roles() {
+            let sole = role
+                .declared_filters()
+                .next()
+                .map(|(_, f)| f)
+                .expect("every shipping role declares exactly one filter");
+            // The pre-change verdict: `otf(target)` over the bare filter.
+            let expected = legacy_target_filter(sole);
+            let effect = Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: Some(role.clone()),
+            };
+            assert_eq!(
+                legacy_effect(&effect),
+                expected,
+                "{name}: D5 frozen-tag verdict must be identical to the pre-role reading"
+            );
+        }
+
+        // Reach guard: at least one fixture role IS tagged, so the loop above is
+        // not vacuously comparing `false == false` everywhere.
+        assert!(
+            mana_fixture_roles().iter().any(|(_, role)| {
+                role.declared_filters()
+                    .any(|(_, f)| legacy_target_filter(f))
+            }),
+            "the fixture set must contain at least one frozen-tag-bearing role,              or this test proves nothing"
+        );
+    }
+
     use crate::types::counter::CounterType;
     use crate::types::identifiers::{ObjectId, TrackedSetId};
     use crate::types::player::PlayerId;
@@ -8229,5 +8358,55 @@ mod tests {
         let twin = rw_quantity_ref(&QuantityRef::EventContextSourceModesChosen);
         assert_eq!(p.reads_event_live, twin.reads_event_live);
         assert_eq!(p.legacy_batch_prompt(), twin.legacy_batch_prompt());
+    }
+
+    /// CR 400.7d: the Adamant *rider* cards (Slaying Fire, Cauldron's Gift, …)
+    /// re-route from `AbilityCondition::ManaColorSpent` — an inert,
+    /// reads-nothing arm — to the generic
+    /// `QuantityCheck { ManaSpentToCast { OfColor } }`, which resolves through
+    /// `legacy_ref()`. Pin BOTH sides so the delta is explicit rather than
+    /// incidental: the flip is toward the MORE conservative classification
+    /// (batch-prompt rather than silent auto-order), which is fail-safe, and a
+    /// future retirement of `ManaColorSpent` cannot silently change it.
+    ///
+    /// Companion to `adamant_rider_generic_shape_reads_all_scan_axes` in
+    /// `ability_scan.rs`, which pins the corresponding scan-axis delta. Without
+    /// this test the `ability_rw` half of that re-routing is unpinned.
+    #[test]
+    fn adamant_rider_generic_shape_is_more_conservative_than_legacy() {
+        use crate::types::ability::{CastManaObjectScope, CastManaSpentMetric};
+        use crate::types::mana::ManaColor;
+
+        let generic = AbilityCondition::QuantityCheck {
+            lhs: qref(QuantityRef::ManaSpentToCast {
+                scope: CastManaObjectScope::SelfObject,
+                metric: CastManaSpentMetric::OfColor {
+                    color: ManaColor::Red,
+                },
+            }),
+            comparator: Comparator::GE,
+            rhs: qfix(3),
+        };
+        let legacy = AbilityCondition::ManaColorSpent {
+            color: ManaColor::Red,
+            minimum: 3,
+        };
+
+        // SCOPE OF THIS TEST: it pins the rw CLASSIFICATION of both shapes. It
+        // constructs the conditions directly and never invokes the parser, so it
+        // does NOT detect a revert of the `OfColor` lowering — that is guarded by
+        // `leading_word_mana_spent_condition_parses_adamant` in
+        // `parser/oracle_effect/conditions.rs`. What reverting the lowering WOULD
+        // do is make this test's `generic` shape unreachable in production while
+        // leaving it green; the pin below is what keeps the two classifications
+        // visibly different so such a change cannot pass unnoticed.
+        assert!(
+            rw_ability_condition(&generic).legacy_batch_prompt(),
+            "the generic ManaSpentToCast shape must carry the legacy_ref batch-prompt marker"
+        );
+        assert!(
+            !rw_ability_condition(&legacy).legacy_batch_prompt(),
+            "the legacy ManaColorSpent arm reads nothing; pinned so the delta stays visible"
+        );
     }
 }

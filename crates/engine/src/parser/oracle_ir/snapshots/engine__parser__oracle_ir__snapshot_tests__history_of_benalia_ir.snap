@@ -90,6 +90,7 @@ expression: "&ir"
                 "counter_type": "lore",
                 "threshold": 1
               },
+              "saga_chapter": 1,
               "batched": false
             },
             "source_text": "I, II — Create a 2/2 white Knight creature token with vigilance."
@@ -183,6 +184,7 @@ expression: "&ir"
                 "counter_type": "lore",
                 "threshold": 2
               },
+              "saga_chapter": 2,
               "batched": false
             },
             "source_text": "I, II — Create a 2/2 white Knight creature token with vigilance."
@@ -325,6 +327,7 @@ expression: "&ir"
                 "counter_type": "lore",
                 "threshold": 3
               },
+              "saga_chapter": 3,
               "batched": false
             },
             "source_text": "III — Knights you control get +2/+1 until end of turn."

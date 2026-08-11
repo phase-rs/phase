@@ -4,8 +4,8 @@ import { motion } from "framer-motion";
 import { useNavigate, useSearchParams } from "react-router";
 
 import { useDraftStore } from "../stores/draftStore";
-import { CardPreview } from "../components/card/CardPreview";
 import type { CardHoverInfo } from "../components/card/CardPreview";
+import { HoverCardPreview } from "../components/card/HoverCardPreview";
 import { BotDifficultySelector } from "../components/draft/BotDifficultySelector";
 import { CubeSetupPanel } from "../components/draft/CubeSetupPanel";
 import { DraftIntro } from "../components/draft/DraftIntro";
@@ -15,6 +15,7 @@ import { PackDisplay } from "../components/draft/PackDisplay";
 import { PoolPanel } from "../components/draft/PoolPanel";
 import { DraftProgress } from "../components/draft/DraftProgress";
 import { LimitedDeckBuilder } from "../components/draft/LimitedDeckBuilder";
+import { SealedPackOpening } from "../components/draft/SealedPackOpening";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { menuButtonClass } from "../components/menu/buttonStyles";
 import { MenuShell } from "../components/menu/MenuShell";
@@ -29,9 +30,9 @@ const FORMAT_OPTIONS: Array<{ value: DraftRunFormat; labelKey: string; descKey: 
   { value: "run", labelKey: "formatPicker.run.label", descKey: "formatPicker.run.description" },
 ];
 
-type DraftSetupMode = "set" | "cube";
+type DraftSetupMode = "quick" | "sealed" | "cube";
 
-function FormatPicker({ onLaunch }: { onLaunch: () => void }) {
+function FormatPicker({ onLaunch, supportsBo3 }: { onLaunch: () => void; supportsBo3: boolean }) {
   const { t } = useTranslation("draft");
   const runFormat = useDraftStore((s) => s.runFormat);
   const setRunFormat = useDraftStore((s) => s.setRunFormat);
@@ -44,7 +45,7 @@ function FormatPicker({ onLaunch }: { onLaunch: () => void }) {
       </div>
 
       <div className="flex w-full max-w-lg flex-col gap-3">
-        {FORMAT_OPTIONS.map((opt) => (
+        {(supportsBo3 ? FORMAT_OPTIONS : FORMAT_OPTIONS.filter((opt) => opt.value !== "bo3")).map((opt) => (
           <button
             key={opt.value}
             type="button"
@@ -300,6 +301,7 @@ function MatchHistory({ results }: { results: DraftRunState["results"] }) {
 export function DraftPage() {
   const { t } = useTranslation("draft");
   const phase = useDraftStore((s) => s.phase);
+  const draftView = useDraftStore((s) => s.view);
   const reset = useDraftStore((s) => s.reset);
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -308,7 +310,9 @@ export function DraftPage() {
   const [introDismissed, setIntroDismissed] = useState(false);
   const [resumeLoading, setResumeLoading] = useState(false);
   const [setupMode, setSetupMode] = useState<DraftSetupMode>(() =>
-    requestedSetupMode === "cube" ? "cube" : "set",
+    requestedSetupMode === "cube" || requestedSetupMode === "sealed"
+      ? requestedSetupMode
+      : "quick",
   );
 
   useEffect(() => {
@@ -331,7 +335,11 @@ export function DraftPage() {
   }, [searchParams]);
 
   useEffect(() => {
-    setSetupMode(requestedSetupMode === "cube" ? "cube" : "set");
+    setSetupMode(
+      requestedSetupMode === "cube" || requestedSetupMode === "sealed"
+        ? requestedSetupMode
+        : "quick",
+    );
   }, [requestedSetupMode]);
 
   useEffect(() => {
@@ -342,7 +350,7 @@ export function DraftPage() {
 
   const handleStartDraft = useCallback(
     async (setCode: string, setName: string) => {
-      const { difficulty, startDraft } = useDraftStore.getState();
+      const { difficulty, startDraft, startSealedDraft } = useDraftStore.getState();
 
       const resp = await fetch(__DRAFT_POOLS_URL__);
       if (!resp.ok) throw new Error(`Failed to load draft pools: ${resp.status}`);
@@ -350,9 +358,13 @@ export function DraftPage() {
       const setPool = allPools[setCode.toLowerCase()] ?? allPools[setCode.toUpperCase()];
       if (!setPool) throw new Error(`No pool data for set: ${setCode}`);
 
-      await startDraft(JSON.stringify(setPool), setCode, setName, difficulty);
+      if (setupMode === "sealed") {
+        await startSealedDraft(JSON.stringify(setPool), setCode, setName, difficulty);
+      } else {
+        await startDraft(JSON.stringify(setPool), setCode, setName, difficulty);
+      }
     },
-    [],
+    [setupMode],
   );
 
   const handleLaunchMatch = useCallback(async () => {
@@ -372,7 +384,7 @@ export function DraftPage() {
     <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
       <ScreenChrome onBack={() => navigate("/draft")} />
       {phase === "drafting" && introDismissed && (
-        <CardPreview cardName={hoveredCard?.name ?? null} sourcePrinting={hoveredCard?.sourcePrinting} />
+        <HoverCardPreview card={hoveredCard} />
       )}
 
       {/* Centered MenuShell column — identical framing to home/setup/online so
@@ -394,27 +406,33 @@ export function DraftPage() {
         {!resumeLoading && phase === "setup" && (
           <div className="mx-auto w-full max-w-4xl">
             <h1 className="mb-8 menu-display text-3xl text-white">
-              {setupMode === "cube" ? t("page.cubeDraftTitle") : t("page.quickDraftTitle")}
+              {setupMode === "cube"
+                ? t("page.cubeDraftTitle")
+                : setupMode === "sealed"
+                  ? t("page.sealedTitle")
+                  : t("page.quickDraftTitle")}
             </h1>
             <div className="mb-5 inline-flex rounded-lg border border-white/10 bg-black/25 p-1">
-              {(["set", "cube"] as const).map((mode) => (
+              {(["quick", "sealed", "cube"] as const).map((mode) => (
                 <button
                   key={mode}
                   type="button"
                   onClick={() => setSetupMode(mode)}
-                  className={`rounded-md px-4 py-2 text-sm font-medium transition-colors ${
+                  className={`min-h-11 rounded-md px-4 py-2 text-sm font-medium transition-colors ${
                     setupMode === mode
                       ? "bg-emerald-400/18 text-emerald-100"
                       : "text-white/50 hover:bg-white/6 hover:text-white/75"
                   }`}
                 >
-                  {mode === "set" ? t("page.setDraftTab") : t("page.cubeTab")}
+                  {mode === "quick"
+                    ? t("page.quickDraftTitle")
+                    : mode === "sealed"
+                      ? t("page.sealedTitle")
+                      : t("page.cubeDraftTitle")}
                 </button>
               ))}
             </div>
-            {setupMode === "set" ? (
-              <SetSelector onStartDraft={handleStartDraft} />
-            ) : (
+            {setupMode === "cube" ? (
               <div className="flex flex-col gap-6">
                 <BotDifficultySelector />
                 <CubeSetupPanel
@@ -424,12 +442,19 @@ export function DraftPage() {
                   }}
                 />
               </div>
+            ) : (
+              <SetSelector onStartDraft={handleStartDraft} />
             )}
           </div>
         )}
 
         {phase === "drafting" && !introDismissed && (
-          <DraftIntro mode="quick" onContinue={() => setIntroDismissed(true)} />
+          <DraftIntro
+            mode="quick"
+            packCount={draftView?.pack_count}
+            cardsPerPack={draftView?.cards_per_pack}
+            onContinue={() => setIntroDismissed(true)}
+          />
         )}
 
         {phase === "drafting" && introDismissed && (
@@ -448,8 +473,18 @@ export function DraftPage() {
           <LimitedDeckBuilder />
         )}
 
+        {phase === "opening" && draftView && (
+          <SealedPackOpening
+            view={draftView}
+            onComplete={() => useDraftStore.getState().completeSealedOpening()}
+          />
+        )}
+
         {phase === "launching" && (
-          <FormatPicker onLaunch={handleLaunchMatch} />
+          <FormatPicker
+            onLaunch={handleLaunchMatch}
+            supportsBo3={draftView?.match_config.match_type === "Bo3"}
+          />
         )}
 
         {!resumeLoading && phase === "playing" && (

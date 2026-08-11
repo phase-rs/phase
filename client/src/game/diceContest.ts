@@ -75,3 +75,26 @@ export function flashInGameRolls(events: GameEvent[]): void {
     flash({ kind: "coin", playerId: coin.data.player_id, won: coin.data.won, context: "ability" });
   }
 }
+
+/**
+ * Surface a completed scry using the engine's public top/bottom counts. A
+ * partially-resolved scry has no event yet, and non-scry player actions have
+ * no display effect.
+ */
+export function flashCompletedScry(events: GameEvent[]): void {
+  for (const scry of events) {
+    if (
+      scry.type !== "PlayerPerformedAction" ||
+      scry.data.action !== "Scry" ||
+      scry.data.scry_top_count === undefined ||
+      scry.data.scry_bottom_count === undefined
+    ) {
+      continue;
+    }
+    useUiStore.getState().flashScryOutcome({
+      playerId: scry.data.player_id,
+      topCount: scry.data.scry_top_count,
+      bottomCount: scry.data.scry_bottom_count,
+    });
+  }
+}

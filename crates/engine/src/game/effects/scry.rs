@@ -295,6 +295,7 @@ mod tests {
                 action: crate::types::events::PlayerActionKind::Scry,
                 look_count: Some(2),
                 scry_bottom_count: Some(0),
+                scry_top_count: Some(2),
                 ..
             }
         )));
@@ -339,6 +340,7 @@ mod tests {
                 action: crate::types::events::PlayerActionKind::Scry,
                 look_count: Some(2),
                 scry_bottom_count: Some(1),
+                scry_top_count: Some(1),
                 ..
             }
         )));

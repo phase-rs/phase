@@ -46,7 +46,6 @@ impl MulliganPolicy for KeepablesByLandCount {
         mulligans_taken: u8,
     ) -> MulliganScore {
         let hand_size = hand.len();
-
         // After 2+ mulligans, be much more lenient — keep any hand with at
         // least 1 land + 1 spell.
         if mulligans_taken >= 2 {

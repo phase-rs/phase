@@ -198,6 +198,8 @@ fn candidate_discards_controller(ctx: &PolicyContext<'_>) -> bool {
         | GameAction::MulliganDecision { .. }
         | GameAction::ReorderHand { .. }
         | GameAction::TapLandForMana { .. }
+        | GameAction::ActivateManaSource { .. }
+        | GameAction::BackToManaPayment
         | GameAction::UntapLandForMana { .. }
         | GameAction::SpendPoolMana { .. }
         | GameAction::UnspendPoolMana { .. }

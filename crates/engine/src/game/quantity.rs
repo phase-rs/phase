@@ -11,15 +11,16 @@ use crate::game::filter::{
     matches_target_filter, matches_target_filter_on_attack_declaration_record,
     matches_target_filter_on_counter_added_record, matches_target_filter_on_damage_record_source,
     matches_target_filter_on_zone_change_record, player_matches_target_filter_in_state,
-    spell_record_matches_filter, type_filter_matches, FilterContext,
+    shared_quality_characteristic_reads, spell_record_matches_filter,
+    target_filter_characteristic_reads_at, type_filter_matches, CharacteristicKinds, FilterContext,
 };
 use crate::game::speed::effective_speed;
 use crate::types::ability::{
     AggregateFunction, AttackScope, BasicLandType, CardTypeSetSource, CastManaObjectScope,
     CastManaSpentMetric, ContinuousModification, ControllerRef, CountScope, DamageChannel,
-    FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
-    ResolvedAbility, RoundingMode, StaticCondition, SubtypeExclusion, TargetFilter, TargetRef,
-    TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
+    FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PossessionAxis,
+    QuantityExpr, QuantityRef, ResolvedAbility, RoundingMode, StaticCondition, SubtypeExclusion,
+    TargetFilter, TargetRef, ThisWayCause, TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_types, CounterType};
@@ -830,13 +831,16 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
+        | StaticCondition::HasEnduringStory
         | StaticCondition::CompletedADungeon
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
+        | StaticCondition::AnyPlayerAttackedYouLastTurn
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
         | StaticCondition::DuringYourTurn
+        | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceHasDealtDamage
         | StaticCondition::WasCast { .. }
@@ -998,6 +1002,267 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
     }
 }
 
+/// CR 613.1: Which layer-writable characteristic kinds does this magnitude read?
+///
+/// Structural twin of `quantity_expr_uses_object_count`: that predicate answers
+/// "can board MEMBERSHIP change this magnitude"; this one answers "which
+/// layer-writable CHARACTERISTICS does it read". Both are needed — a count of
+/// tapped permanents is population-sensitive but reads no layer-written kind.
+pub(crate) fn quantity_expr_characteristic_reads_at(
+    expr: &QuantityExpr,
+    depth: u32,
+) -> CharacteristicKinds {
+    let Some(depth) = depth.checked_sub(1) else {
+        return CharacteristicKinds::ALL;
+    };
+    match expr {
+        QuantityExpr::Fixed { .. } => CharacteristicKinds::EMPTY,
+        QuantityExpr::Ref { qty } => quantity_ref_characteristic_reads(qty, depth),
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => {
+            quantity_expr_characteristic_reads_at(inner, depth)
+        }
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().fold(CharacteristicKinds::EMPTY, |acc, e| {
+                if acc.is_all() {
+                    acc
+                } else {
+                    acc.union(quantity_expr_characteristic_reads_at(e, depth))
+                }
+            })
+        }
+        QuantityExpr::UpTo { max } => quantity_expr_characteristic_reads_at(max, depth),
+        QuantityExpr::Power { exponent, .. } => {
+            quantity_expr_characteristic_reads_at(exponent, depth)
+        }
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_characteristic_reads_at(left, depth)
+                .union(quantity_expr_characteristic_reads_at(right, depth))
+        }
+    }
+}
+
+/// CR 613.1: Leaf classification for [`quantity_expr_characteristic_reads_at`].
+/// EXHAUSTIVE and wildcard-free over `QuantityRef`, arm-for-arm with
+/// `quantity_ref_uses_object_count`, so a new variant forces both decisions.
+///
+/// Two payload rules apply on top of each arm's intrinsic reads:
+/// 1. every arm whose count is taken over a LIVE object filter recurses into
+///    that filter, because the filter's own predicates read characteristics;
+/// 2. every arm carrying a `ControllerRef` unions
+///    [`CharacteristicKinds::CONTROLLER`], because CR 613.1b can move objects
+///    across the scope the reference is asking about.
+///
+/// Arms that read a FROZEN per-turn history record (sacrificed / attacked /
+/// zone-change / damage / token-creation journals) read no live characteristic:
+/// those records store the object's characteristics as of the recorded event, so
+/// no later layer write can change the tally. They classify EMPTY, and their
+/// embedded filters are deliberately NOT recursed.
+fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> CharacteristicKinds {
+    match qty {
+        // ---- Live object censuses: recurse the counted filter. ----
+        QuantityRef::ObjectCount { filter }
+        | QuantityRef::CountersOnObjects { filter, .. }
+        | QuantityRef::EnteredThisTurn { filter }
+        // CR 403.3: the tally is a per-turn journal, but its filter is matched
+        // against LIVE objects, so the filter's reads count.
+        | QuantityRef::BattlefieldEntriesThisTurn { filter, .. }
+        // CR 122.1: counter kinds are not layer-written; only the filter reads.
+        | QuantityRef::DistinctCounterKindsAmong { filter } => {
+            target_filter_characteristic_reads_at(filter, depth)
+        }
+        // CR 608.2c: tracked-set members are addressed by identity and matched live.
+        QuantityRef::FilteredTrackedSetSize { filter, .. } => {
+            target_filter_characteristic_reads_at(filter, depth)
+        }
+        // CR 201.2 + CR 603.4: dedupe key is a characteristic read of its own.
+        QuantityRef::ObjectCountDistinct { filter, qualities } => qualities
+            .iter()
+            .fold(
+                target_filter_characteristic_reads_at(filter, depth),
+                |acc, q| acc.union(shared_quality_characteristic_reads(q)),
+            ),
+        // CR 109.3 + CR 205.3m: grouping key is a characteristic read.
+        QuantityRef::ObjectCountBySharedQuality {
+            filter, quality, ..
+        } => target_filter_characteristic_reads_at(filter, depth)
+            .union(shared_quality_characteristic_reads(quality)),
+        // CR 202.3: aggregated object property plus the scanned filter.
+        QuantityRef::Aggregate {
+            property, filter, ..
+        } => object_property_characteristic_reads(property)
+            .union(target_filter_characteristic_reads_at(filter, depth)),
+        // CR 109.5 + CR 613.1b: per-player partition of a live census.
+        QuantityRef::ControlledByEachPlayer { filter, .. } => CharacteristicKinds::CONTROLLER
+            .union(target_filter_characteristic_reads_at(filter, depth)),
+        // CR 106.1 + CR 109.1: distinct colors over a live census.
+        QuantityRef::DistinctColorsAmongPermanents { filter } => CharacteristicKinds::COLOR
+            .union(target_filter_characteristic_reads_at(filter, depth)),
+        // CR 205.2a / CR 205.3: the object-filter source scans live objects; the
+        // zone / linked-exile / tracked-set sources do not read a live filter.
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. } => {
+            CharacteristicKinds::CARD_TYPES.union(match source {
+                CardTypeSetSource::Objects { filter, .. } => {
+                    target_filter_characteristic_reads_at(filter, depth)
+                }
+                CardTypeSetSource::Zone { .. }
+                | CardTypeSetSource::ExiledBySource
+                | CardTypeSetSource::TrackedSet { .. } => CharacteristicKinds::EMPTY,
+            })
+        }
+        // CR 604.3: a zone census, filtered by typeline and by an optional
+        // filter, scoped by controller.
+        QuantityRef::ZoneCardCount {
+            card_types, filter, ..
+        } => {
+            let mut kinds = CharacteristicKinds::CONTROLLER;
+            if !card_types.is_empty() {
+                kinds = kinds.union(CharacteristicKinds::CARD_TYPES);
+            }
+            filter.as_ref().map_or(kinds, |f| {
+                kinds.union(target_filter_characteristic_reads_at(f, depth))
+            })
+        }
+        // CR 700.8: party reads Cleric/Rogue/Warrior/Wizard creature types among
+        // the scoped player's creatures — CR 702.73a Changeling applies.
+        QuantityRef::PartySize { .. } => CharacteristicKinds::CARD_TYPES
+            .union(CharacteristicKinds::ABILITIES)
+            .union(CharacteristicKinds::CONTROLLER),
+        // CR 305.6: distinct basic land types among the referenced player's
+        // lands. Carries a `ControllerRef` (payload rule 2).
+        QuantityRef::BasicLandTypeCount { .. } => {
+            CharacteristicKinds::CARD_TYPES.union(CharacteristicKinds::CONTROLLER)
+        }
+        // CR 700.5: devotion counts mana symbols in the mana costs of the
+        // permanents the scoped player controls.
+        QuantityRef::Devotion { .. } => {
+            CharacteristicKinds::MANA_COST.union(CharacteristicKinds::CONTROLLER)
+        }
+        // CR 903.3d: mana value of a commander, scoped by a `ControllerRef`.
+        QuantityRef::CommanderManaValue { .. } => {
+            CharacteristicKinds::MANA_COST.union(CharacteristicKinds::CONTROLLER)
+        }
+
+        // ---- Single-object characteristic reads. ----
+        // CR 208.1 / CR 209.1.
+        QuantityRef::Power { .. } | QuantityRef::Toughness { .. } => {
+            CharacteristicKinds::POWER_TOUGHNESS
+        }
+        // CR 607.2b: power of a card in exile, read the same way.
+        QuantityRef::ExiledCardPower { .. } => CharacteristicKinds::POWER_TOUGHNESS,
+        // CR 202.3 / CR 107.4a.
+        QuantityRef::ObjectManaValue { .. }
+        | QuantityRef::ManaSymbolsInManaCost { .. }
+        | QuantityRef::SelfManaValue => CharacteristicKinds::MANA_COST,
+        // CR 202.3 + CR 115.1: mana value of the object chosen for this ref's own
+        // target slot, whose candidates are `filter`.
+        QuantityRef::TargetObjectManaValue { filter } => CharacteristicKinds::MANA_COST
+            .union(target_filter_characteristic_reads_at(filter, depth)),
+        // CR 105.1 + CR 105.2.
+        QuantityRef::ObjectColorCount { .. } => CharacteristicKinds::COLOR,
+        // CR 201.1 + CR 201.2.
+        QuantityRef::ObjectNameWordCount { .. } => CharacteristicKinds::NAME_TEXT,
+        // CR 205.4a + CR 205.2a + CR 205.3: supertypes + card types + subtypes.
+        QuantityRef::ObjectTypelineComponentCount { .. } => CharacteristicKinds::CARD_TYPES,
+        // CR 608.2c: aggregates an object property over an identity-addressed set.
+        QuantityRef::TrackedSetAggregate { property, .. } => {
+            object_property_characteristic_reads(property)
+        }
+        // CR 122.1f + CR 109.4: reads the controller of the parent target.
+        QuantityRef::TargetControllerCounter { .. } => CharacteristicKinds::CONTROLLER,
+        // CR 400.7 + CR 613.1b: look-back attachment snapshot, optionally scoped
+        // by a `ControllerRef` (payload rule 2).
+        QuantityRef::AttachmentsOnLeavingObject { .. } => CharacteristicKinds::CONTROLLER,
+
+        // ---- Reads no layer-writable characteristic. ----
+        // Player-level totals, counters (CR 122.1 — counters are not
+        // characteristics), payments, choices, and the FROZEN per-turn /
+        // per-game history journals described in the doc comment. Enumerated
+        // explicitly (no wildcard).
+        QuantityRef::HandSize { .. }
+        | QuantityRef::LifeTotal { .. }
+        | QuantityRef::GraveyardSize { .. }
+        | QuantityRef::LifeAboveStarting
+        | QuantityRef::StartingLifeTotal
+        | QuantityRef::TriggeringDiscoverValue
+        | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount
+        | QuantityRef::PlayerCount { .. }
+        | QuantityRef::EventContextPlayerCount { .. }
+        | QuantityRef::CountersOn { .. }
+        | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::Variable { .. }
+        // Digital-only Alchemy counter-like value; no layer writes it.
+        | QuantityRef::Intensity { .. }
+        | QuantityRef::TargetZoneCardCount { .. }
+        | QuantityRef::CardsExiledBySource
+        | QuantityRef::TrackedSetSize
+        | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::UnspentMana { .. }
+        | QuantityRef::Speed { .. }
+        | QuantityRef::EventContextAmount
+        | QuantityRef::EventContextSourceCostX
+        | QuantityRef::EventContextSourceModesChosen
+        // CR 117.1: spell-cast journals store each spell's cast-time
+        // characteristics.
+        | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCastThisGame { .. }
+        // CR 701.16a: sacrifice-time characteristics.
+        | QuantityRef::SacrificedThisTurn { .. }
+        | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::BendTypesThisTurn
+        | QuantityRef::LifeGainedThisTurn { .. }
+        | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::LandsPlayedThisTurn { .. }
+        | QuantityRef::TurnsTaken
+        // CR 400.7 + CR 700.4: zone-change records store last-known information.
+        | QuantityRef::ZoneChangeCountThisTurn { .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+        // CR 120.1: damage records store the amount actually dealt.
+        | QuantityRef::DamageDealtThisTurn { .. }
+        | QuantityRef::ChosenNumber
+        // CR 508.1: declaration-time attacker snapshots.
+        | QuantityRef::AttackedThisTurn { .. }
+        | QuantityRef::DescendedThisTurn
+        | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
+        | QuantityRef::SpellsCastLastTurn
+        // CR 122.1: counter-addition journal.
+        | QuantityRef::CounterAddedThisTurn { .. }
+        | QuantityRef::CardsDiscardedThisTurn { .. }
+        // CR 111.2: creation-time token characteristics.
+        | QuantityRef::TokensCreatedThisTurn { .. }
+        | QuantityRef::PlayerActionsThisTurn { .. }
+        | QuantityRef::DungeonsCompleted
+        | QuantityRef::CostXPaid
+        | QuantityRef::KickerCount
+        | QuantityRef::AdditionalCostPaymentCount
+        | QuantityRef::AdditionalCostPaymentCountFor { .. }
+        | QuantityRef::ConvokedCreatureCount
+        | QuantityRef::TimesCostPaidThisResolution
+        | QuantityRef::ManaSpentToCast { .. }
+        // CR 903.4: color identity is fixed by the printed card.
+        | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::VoteCount { .. } => CharacteristicKinds::EMPTY,
+    }
+}
+
+/// CR 208.1 + CR 209.1 + CR 202.3 + CR 107.4a: which characteristic an
+/// aggregated object property reads.
+fn object_property_characteristic_reads(property: &ObjectProperty) -> CharacteristicKinds {
+    match property {
+        ObjectProperty::Power | ObjectProperty::Toughness => CharacteristicKinds::POWER_TOUGHNESS,
+        ObjectProperty::ManaValue | ObjectProperty::ManaSymbolCount(_) => {
+            CharacteristicKinds::MANA_COST
+        }
+    }
+}
+
 /// CR 611.3a + CR 700.5: ENTRY-AWARE narrowing for a population-sensitive
 /// magnitude. `quantity_expr_uses_object_count` proves an effect's magnitude
 /// *can* read board population; this proves a SPECIFIC entering object can
@@ -1081,9 +1346,13 @@ fn entered_object_perturbs_quantity_ref(
         // that one reads the ENTRY-TIME record snapshot, so a
         // `FilterProp::WithKeyword` whose keyword a Layer-6 effect later removes,
         // or a controller-bearing filter under a non-`Controller` `player` scope,
-        // can still under-trigger. Neither is reachable from any producer today
-        // (all emit a bare `Typed`/`Or[Typed]`); the upgrade is a plain `=> true`
-        // if one becomes reachable.
+        // can still under-trigger. Neither is reachable from any producer today —
+        // measured over `data/card-data.json`: `WithKeyword` is 0/60 refs and a
+        // filter-level `controller` is 0/60. Property-bearing shapes ARE live, though:
+        // 13 of 60 REFS carry a `FilterProp` (10 `Typed[Another]`, 1 `Or[4x Another]`,
+        // 1 `HasColor`, 1 `FaceDown`), which is 16 property-bearing LEAVES (the one
+        // `Or` contributes 4). The upgrade is a plain `=> true` if either divergence
+        // case becomes reachable.
         | QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => {
             matches_target_filter(state, entered.id, filter, ctx)
         }
@@ -1640,6 +1909,9 @@ pub(crate) fn resolve_mana_spent_to_cast_metric(
         CastManaSpentMetric::DistinctColors => {
             usize_to_i32_saturating(spent_colors.distinct_colors())
         }
+        // CR 106.3 + CR 601.2h: how much mana of exactly this color paid the
+        // cost, read off the same per-color payment tally.
+        CastManaSpentMetric::OfColor { color } => u32_to_i32_saturating(spent_colors.get(*color)),
         CastManaSpentMetric::FromSource { source_filter } => usize_to_i32_saturating(
             source_snapshots
                 .iter()
@@ -1783,11 +2055,48 @@ pub fn resolve_quantity_with_targets_slice(
 /// `scope_player` binds `ControllerRef::ScopedPlayer` during the per-player
 /// iteration; the ability controller (from the source object) is used for
 /// `ControllerRef::You` ("creatures you control").
+///
+/// This is the no-target case of [`resolve_quantity_scoped_with_targets`]: it
+/// delegates with an empty `targets` slice so there is a single authoritative
+/// scoped resolver. Callers with no ability target(s) (the condition/restriction
+/// paths in `restrictions.rs`) use this wrapper.
 pub(crate) fn resolve_quantity_scoped(
     state: &GameState,
     expr: &QuantityExpr,
     source_id: ObjectId,
     scope_player: PlayerId,
+) -> i32 {
+    resolve_quantity_scoped_with_targets(state, expr, source_id, scope_player, &[])
+}
+
+/// Resolve a per-player `DamageEachPlayer` quantity that also references the
+/// resolving ability's object target(s) — e.g. Lady Loki, Agent of Chaos:
+/// "deals damage to each opponent equal to the difference between that spell's
+/// mana value and that nonland card's mana value", where "that nonland card"
+/// (`ObjectManaValue { scope: Target }`) is the exile-until hit injected into
+/// `ability.targets`.
+///
+/// This is the authoritative scoped resolver; [`resolve_quantity_scoped`] is the
+/// no-target wrapper that delegates here with an empty `targets` slice. It binds
+/// `scope_player` for `ControllerRef::ScopedPlayer` (per-recipient scope) and
+/// passes `targets` so the `ObjectManaValue { scope: Target }` leaf (and any
+/// other `Target`-scoped ref nested inside a `Difference`/`Sum`) reads the
+/// injected hit instead of resolving to 0.
+///
+/// CR 120.3: per-player damage scope. CR 202.3e: mana value of an object off the
+/// stack (X = 0). CR 608.2c: object referents follow the instruction order.
+///
+/// `ability` is intentionally kept `None` in the `resolve_ref` call: the
+/// `ObjectScope::Target` arm reads ONLY `targets`, never `ability`, and passing
+/// `Some(ability)` would take `resolve_ref`'s `Some(_)` branch, which never
+/// assigns `scoped_iteration_player` — silently regressing every
+/// `ControllerRef::ScopedPlayer`-relative `DamageEachPlayer` (Acidic Soil et al.).
+pub(crate) fn resolve_quantity_scoped_with_targets(
+    state: &GameState,
+    expr: &QuantityExpr,
+    source_id: ObjectId,
+    scope_player: PlayerId,
+    targets: &[TargetRef],
 ) -> i32 {
     // CR 109.5: "you"/"your" in the quantity remain bound to the ability's
     // controller, not to the current DamageEachPlayer recipient.
@@ -1810,12 +2119,14 @@ pub(crate) fn resolve_quantity_scoped(
                 recipient: None,
                 scoped_player: Some(scope_player),
             },
-            &[],
+            targets,
             None,
             None,
         ),
+        // Recurse into SELF so `targets` reach a `Target`-scoped leaf nested
+        // inside a composite (e.g. the `right` operand of `Difference`).
         other => fold_compose(other, |inner| {
-            resolve_quantity_scoped(state, inner, source_id, scope_player)
+            resolve_quantity_scoped_with_targets(state, inner, source_id, scope_player, targets)
         }),
     }
 }
@@ -3738,7 +4049,7 @@ fn resolve_ref(
                 )
             },
         ),
-        // CR 710.2: Crimes committed this turn — uses tracked counter on player.
+        // CR 700.13: Crimes committed this turn — uses tracked counter on player.
         QuantityRef::CrimesCommittedThisTurn => {
             player.map_or(0, |p| u32_to_i32_saturating(p.crimes_committed_this_turn))
         }
@@ -5502,6 +5813,23 @@ where
 /// CR 202.3: Resolve an object's mana value through the same ObjectScope axis
 /// used for power/toughness. Source scope falls back to LKI for objects that
 /// moved during resolution; target scope reads the selected object target.
+/// CR 400.7 + CR 202.3: The mana value an event supplies for its OWN pinned
+/// subject incarnation, when the current trigger event carries one.
+///
+/// Only `SagaChapterAbilityResolved` pins a subject today. Its Saga is routinely
+/// gone by the time an observer resolves — CR 714.4 sacrifices it the moment the
+/// final chapter ability leaves the stack — and a re-entered Saga can occupy the
+/// same storage id, so neither live state nor the id-keyed LKI cache can be
+/// trusted to answer for the original.
+fn event_source_mana_value_override(state: &GameState) -> Option<i32> {
+    match current_or_detection_trigger_event(state)? {
+        GameEvent::SagaChapterAbilityResolved { saga, .. } => {
+            Some(u32_to_i32_saturating(saga.lki.mana_value))
+        }
+        _ => None,
+    }
+}
+
 fn resolve_object_mana_value(
     state: &GameState,
     scope: ObjectScope,
@@ -5532,6 +5860,15 @@ fn resolve_object_mana_value(
             .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
             .unwrap_or(0),
         ObjectScope::EventSource => {
+            // CR 400.7 + CR 202.3: an event that pins its own subject incarnation
+            // answers for that incarnation directly. Reading live state (or the
+            // id-keyed LKI cache) would let a re-entered permanent at the same
+            // storage id supply the value instead — Narci draining for the NEW
+            // Saga's mana value after a blink. Checked first, so the id-based
+            // fallback below only runs for events with no pinned subject.
+            if let Some(mana_value) = event_source_mana_value_override(state) {
+                return mana_value;
+            }
             let Some(object_id) =
                 object_id_for_scope(state, ObjectScope::EventSource, ctx, targets)
             else {
@@ -6152,6 +6489,95 @@ pub(crate) fn opponent_dealt_damage_matches(
     false
 }
 
+/// CR 608.2c + CR 608.2h + CR 109.4: Did `player` possess a member of the most
+/// recent tracked object set matching `filter` (and `caused_by`, when bound)?
+///
+/// Single authority for `PlayerFilter::TrackedSetPossessor`, shared by the count
+/// path (`resolve_player_count`) and the recipient path
+/// (`effects::matches_player_scope`) — those two carry explicit "must stay in
+/// sync" contracts, so the predicate is written once and delegated to twice.
+///
+/// Set selection, the cause gate, and the live-vs-LKI filter branch mirror
+/// `QuantityRef::FilteredTrackedSetSize` exactly; only the final possession gate
+/// is new. `.any()` gives distinct-player semantics for free — a player who
+/// possessed three members is still one player.
+pub(crate) fn possessed_tracked_set_member(
+    state: &GameState,
+    player: PlayerId,
+    possession: PossessionAxis,
+    filter: &TargetFilter,
+    caused_by: Option<ThisWayCause>,
+    controller: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    let Some((set_id, ids)) = state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0) else {
+        return false;
+    };
+    let filter_ctx = FilterContext::from_source_with_controller(source_id, controller);
+    ids.iter().any(|&oid| {
+        // CR 608.2c + CR 614.6: an action-bound population ("a creature
+        // sacrificed this way") admits only members whose recorded producer
+        // ACTION equals the bound cause — keyed on the action, not the final
+        // zone, because CR 614.6 lets a replacement redirect the member
+        // elsewhere (a sacrifice sent to exile is still `Sacrificed`).
+        // `None` accepts every member.
+        let cause_ok = match caused_by {
+            None => true,
+            Some(cause) => state
+                .tracked_set_member_causes
+                .get(set_id)
+                .and_then(|causes| causes.get(&oid))
+                .is_some_and(|member_cause| *member_cause == cause),
+        };
+        if !cause_ok {
+            return false;
+        }
+        // CR 608.2h: a member that has left the battlefield is filtered on its
+        // last known information.
+        let matches_filter = if state.battlefield.contains(&oid) {
+            matches_target_filter(state, oid, filter, &filter_ctx)
+        } else {
+            state.lki_cache.get(&oid).map_or_else(
+                || matches_target_filter(state, oid, filter, &filter_ctx),
+                |lki| {
+                    crate::game::filter::matches_target_filter_on_lki_snapshot(
+                        state,
+                        oid,
+                        lki,
+                        filter,
+                        &filter_ctx,
+                    )
+                },
+            )
+        };
+        if !matches_filter {
+            return false;
+        }
+        let holder = match possession {
+            PossessionAxis::Controller => {
+                if state.battlefield.contains(&oid) {
+                    // CR 109.4: an object ON the battlefield HAS a controller,
+                    // so read it live. Its `lki_cache` entry, if any, is a stale
+                    // snapshot from an EARLIER battlefield exit and must not win.
+                    state.objects.get(&oid).map(|o| o.controller)
+                } else {
+                    // CR 109.4 + CR 608.2h: off the battlefield it has NO
+                    // controller, so last known information is the only answer.
+                    // Deliberately NO owner fallback: crediting the owner is
+                    // precisely the wrong answer for a stolen creature, and a
+                    // silent one. A member that never was on the battlefield or
+                    // in exile has no LKI and matches nobody — correct, since
+                    // "who controlled it" is unanswerable under CR 109.4.
+                    state.lki_cache.get(&oid).map(|lki| lki.controller)
+                }
+            }
+            // CR 108.3: owner is stable across zone changes.
+            PossessionAxis::Owner => state.objects.get(&oid).map(|o| o.owner),
+        };
+        holder == Some(player)
+    })
+}
+
 /// Count players matching a PlayerFilter relative to the controller.
 pub(crate) fn resolve_player_count(
     state: &GameState,
@@ -6395,6 +6821,30 @@ pub(crate) fn resolve_player_count(
                                 state, p, controller, attr,
                             )
                             .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
+                        }
+                        // CR 608.2c + CR 608.2h + CR 109.4: "for each opponent
+                        // who controlled a creature returned this way" — count
+                        // candidates satisfying both the `relation` predicate
+                        // and possession of a tracked-set member. Delegates to
+                        // the single authority shared with
+                        // `effects::matches_player_scope`.
+                        PlayerFilter::TrackedSetPossessor {
+                            relation,
+                            possession,
+                            filter,
+                            caused_by,
+                        } => {
+                            crate::game::players::matches_relation(
+                                state, p.id, controller, *relation,
+                            ) && possessed_tracked_set_member(
+                                state,
+                                p.id,
+                                *possession,
+                                filter,
+                                *caused_by,
+                                controller,
+                                source_id,
+                            )
                         }
                     }
             })
@@ -12157,6 +12607,84 @@ mod tests {
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 3);
     }
 
+    /// `ZoneCardCount::filter` is evaluated against the card object rather than
+    /// reduced to its type list. This is the runtime half of the parser's
+    /// `there are no nonbasic land cards in your library` condition: a basic
+    /// land must not make the count nonzero, while a nonbasic land must.
+    #[test]
+    fn resolve_zone_card_count_preserves_nonbasic_land_filter() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(800),
+            PlayerId(0),
+            "Magmatic Scorchwing".to_string(),
+            Zone::Battlefield,
+        );
+        let basic = create_object(
+            &mut state,
+            CardId(801),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Library,
+        );
+        let basic_obj = state.objects.get_mut(&basic).unwrap();
+        basic_obj.card_types.core_types.push(CoreType::Land);
+        basic_obj.card_types.supertypes.push(Supertype::Basic);
+
+        let nonbasic_land =
+            TargetFilter::Typed(
+                TypedFilter::land().properties(vec![FilterProp::NotSupertype {
+                    value: Supertype::Basic,
+                }]),
+            );
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Library,
+                card_types: Vec::new(),
+                filter: Some(nonbasic_land),
+                scope: CountScope::Controller,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 0);
+
+        let opponent_nonbasic = create_object(
+            &mut state,
+            CardId(802),
+            PlayerId(1),
+            "Opponent's Karplusan Forest".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&opponent_nonbasic)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), source),
+            0,
+            "your library must not count an opponent's nonbasic land"
+        );
+
+        let nonbasic = create_object(
+            &mut state,
+            CardId(803),
+            PlayerId(0),
+            "Karplusan Forest".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&nonbasic)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 1);
+    }
+
     #[test]
     fn resolve_quantity_counters_on_self() {
         let mut state = GameState::new_two_player(42);
@@ -16023,6 +16551,170 @@ mod tests {
             count_for(None),
             4,
             "None must count every member of the set (legacy parity)"
+        );
+    }
+
+    /// H3 (issue #6943) — MULTI-AUTHORITY. CR 109.4: for a member that has left
+    /// the battlefield, the `Controller` axis reads the AT-EXIT CONTROLLER from
+    /// last known information (CR 608.2h), never the owner.
+    ///
+    /// The fixture is a stolen creature: owned by P0 (the caster), controlled by
+    /// P1 (an opponent) when it was bounced. "Each opponent who controlled a
+    /// creature returned this way" must count P1 — 1 player.
+    ///
+    /// This genuinely discriminates: an owner-keyed implementation (the mistake
+    /// `PlayerFilter::ZoneChangedThisWay` makes, which reads `obj.owner`) credits
+    /// P0, who is not an opponent, and the count is 0. The two readings differ,
+    /// so the fixture cannot pass under both.
+    #[test]
+    fn tracked_set_possessor_controller_axis_reads_lki_controller_not_owner() {
+        let mut state = GameState::new_two_player(42);
+        // Owned by P0, but P1 controlled it when it left the battlefield.
+        let stolen = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Stolen Creature".into(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&stolen).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.controller = PlayerId(1);
+        }
+        let lki = state.objects[&stolen].snapshot_public_characteristics();
+        assert_eq!(lki.owner, PlayerId(0), "fixture: owner is the caster");
+        assert_eq!(
+            lki.controller,
+            PlayerId(1),
+            "fixture: controller is the opponent — the two authorities MUST differ, \
+             or this fixture cannot discriminate"
+        );
+        // Bounce it: off the battlefield, so CR 109.4 leaves no live controller.
+        state.lki_cache.insert(stolen, lki);
+        state.battlefield.retain(|id| *id != stolen);
+        state.objects.get_mut(&stolen).unwrap().zone = Zone::Hand;
+
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state.tracked_object_sets.insert(set_id, vec![stolen]);
+        state.chain_tracked_set_id = Some(set_id);
+
+        let creature = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature));
+        assert!(
+            possessed_tracked_set_member(
+                &state,
+                PlayerId(1),
+                PossessionAxis::Controller,
+                &creature,
+                None,
+                PlayerId(0),
+                ObjectId(999),
+            ),
+            "P1 CONTROLLED the returned creature — the Controller axis must credit them"
+        );
+        assert!(
+            !possessed_tracked_set_member(
+                &state,
+                PlayerId(0),
+                PossessionAxis::Controller,
+                &creature,
+                None,
+                PlayerId(0),
+                ObjectId(999),
+            ),
+            "P0 merely OWNED it — an owner-keyed implementation would wrongly credit them"
+        );
+        // H7: the same fixture read on the Owner axis flips the answer, proving
+        // `possession` is a live parameter rather than a dead one. CR 108.3.
+        assert!(
+            possessed_tracked_set_member(
+                &state,
+                PlayerId(0),
+                PossessionAxis::Owner,
+                &creature,
+                None,
+                PlayerId(0),
+                ObjectId(999),
+            ),
+            "the Owner axis must credit the owner (Kefka, Dancing Mad's reading)"
+        );
+        assert!(
+            !possessed_tracked_set_member(
+                &state,
+                PlayerId(1),
+                PossessionAxis::Owner,
+                &creature,
+                None,
+                PlayerId(0),
+                ObjectId(999),
+            ),
+            "the Owner axis must NOT credit the controller"
+        );
+    }
+
+    /// H8 (issue #6943) — LIVE vs LKI ordering. CR 109.4: an object that IS on
+    /// the battlefield HAS a controller, so it is read LIVE. Its `lki_cache`
+    /// entry may be a stale snapshot from an EARLIER battlefield exit (the
+    /// Sudden Salvation shape: permanents that died this turn and were returned)
+    /// and must not win.
+    ///
+    /// Revert discriminator: an LKI-first implementation reads P1 and both
+    /// assertions flip.
+    #[test]
+    fn tracked_set_possessor_prefers_live_controller_for_on_battlefield_member() {
+        let mut state = GameState::new_two_player(42);
+        let member = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Returned Permanent".into(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&member).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.controller = PlayerId(0);
+        }
+        // A STALE snapshot from an earlier battlefield exit naming a different
+        // controller. It must be ignored while the object is on the battlefield.
+        let mut stale_lki = state.objects[&member].snapshot_public_characteristics();
+        stale_lki.controller = PlayerId(1);
+        state.lki_cache.insert(member, stale_lki);
+        assert!(
+            state.battlefield.contains(&member),
+            "fixture: the member must be ON the battlefield for this branch"
+        );
+
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state.tracked_object_sets.insert(set_id, vec![member]);
+        state.chain_tracked_set_id = Some(set_id);
+
+        let creature = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature));
+        assert!(
+            possessed_tracked_set_member(
+                &state,
+                PlayerId(0),
+                PossessionAxis::Controller,
+                &creature,
+                None,
+                PlayerId(0),
+                ObjectId(999),
+            ),
+            "the LIVE controller must win for an on-battlefield member"
+        );
+        assert!(
+            !possessed_tracked_set_member(
+                &state,
+                PlayerId(1),
+                PossessionAxis::Controller,
+                &creature,
+                None,
+                PlayerId(0),
+                ObjectId(999),
+            ),
+            "the STALE LKI controller must not win for an on-battlefield member"
         );
     }
 

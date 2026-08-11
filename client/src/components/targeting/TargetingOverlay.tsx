@@ -243,7 +243,7 @@ export function TargetingOverlay() {
             <button
               onClick={handleConfirmTap}
               disabled={selectedCardIds.length !== waitingFor.data.count}
-              className="rounded-lg bg-emerald-700 px-6 py-2 font-semibold text-gray-100 shadow-lg transition hover:bg-emerald-600 disabled:cursor-not-allowed disabled:bg-gray-700 disabled:text-gray-400"
+              className="rounded-lg bg-emerald-700 px-6 py-2 font-semibold text-white shadow-lg transition hover:bg-emerald-600 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-white/50"
             >
               {t("targeting.confirmTap", { selected: selectedCardIds.length, count: waitingFor.data.count })}
             </button>
@@ -260,7 +260,7 @@ export function TargetingOverlay() {
             <button
               onClick={handleConfirmBoardChoice}
               disabled={!canConfirmBoardChoice(boardChoice, selectedBoardChoiceIds, objects)}
-              className={`${boardChoiceConfirmClass(boardChoice)} rounded-lg px-6 py-2 font-semibold text-gray-100 shadow-lg transition disabled:cursor-not-allowed disabled:bg-gray-700 disabled:text-gray-400`}
+              className={`${boardChoiceConfirmClass(boardChoice)} rounded-lg px-6 py-2 font-semibold text-white shadow-lg transition disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-white/50`}
             >
               {boardChoiceConfirmLabel(boardChoice, selectedBoardChoiceIds, objects, t)}
             </button>
@@ -268,9 +268,9 @@ export function TargetingOverlay() {
           {boardChoice?.skipAction && (
             <button
               onClick={handleSkipBoardChoice}
-              className="rounded-lg bg-amber-700 px-6 py-2 font-semibold text-gray-100 shadow-lg transition hover:bg-amber-600"
+              className="rounded-lg bg-amber-700 px-6 py-2 font-semibold text-white shadow-lg transition hover:bg-amber-600"
             >
-              {t("boardChoice.skip")}
+              {boardChoiceSkipLabel(boardChoice, t)}
             </button>
           )}
           {canKeepCurrentTargets && (
@@ -280,7 +280,7 @@ export function TargetingOverlay() {
                   type: "KeepAllCopyTargets",
                 })
               }
-              className="rounded-lg bg-emerald-700 px-6 py-2 font-semibold text-gray-100 shadow-lg transition hover:bg-emerald-600"
+              className="rounded-lg bg-emerald-700 px-6 py-2 font-semibold text-white shadow-lg transition hover:bg-emerald-600"
             >
               {t("targeting.keepCurrentTargets")}
             </button>
@@ -288,7 +288,7 @@ export function TargetingOverlay() {
           {isOptionalCurrentSlot && (
             <button
               onClick={handleSkip}
-              className="rounded-lg bg-amber-700 px-6 py-2 font-semibold text-gray-100 shadow-lg transition hover:bg-amber-600"
+              className="rounded-lg bg-amber-700 px-6 py-2 font-semibold text-white shadow-lg transition hover:bg-amber-600"
             >
               {t("targeting.skip")}
             </button>
@@ -520,6 +520,8 @@ function boardChoiceConfirmClass(choice: BoardChoiceView): string {
       return "bg-red-700 hover:bg-red-600";
     case "tap":
       return "bg-emerald-700 hover:bg-emerald-600";
+    case "untap":
+      return "bg-emerald-700 hover:bg-emerald-600";
     case "blight":
       return "bg-purple-700 hover:bg-purple-600";
     case "ringBearer":
@@ -531,5 +533,14 @@ function boardChoiceConfirmClass(choice: BoardChoiceView): string {
     case "station":
     case "keep":
       return "bg-sky-700 hover:bg-sky-600";
+  }
+}
+
+function boardChoiceSkipLabel(choice: BoardChoiceView, t: TFunction<"game">): string {
+  switch (choice.skipLabel) {
+    case "keepTapped":
+      return t("gamePage.untap.keepTapped");
+    case undefined:
+      return t("boardChoice.skip");
   }
 }

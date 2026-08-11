@@ -19,7 +19,10 @@ use super::game_state::{
     DelayedTrigger, SpellCastRecord, StackEntry, StackEntryKind, StackPaidSnapshot,
     TransientContinuousEffect, ZoneChangeRecord,
 };
-use super::identifiers::{ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION};
+use super::identifiers::{
+    DelayedTriggerInstanceId, DelayedTriggerToken, ObjectId, ObjectIncarnationRef, TriggerFiring,
+    LEGACY_INCARNATION,
+};
 use super::mana::{ManaPipId, ManaUnit};
 use super::player::{PlayerCounterKind, PlayerId};
 use super::proposed_event::{CopyTokenSpec, TokenSpec};
@@ -262,6 +265,9 @@ pub enum ResolvedAttachmentReplayInvariantError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedDelayedTriggerCommand {
     pub trigger: DelayedTrigger,
+    /// CR 603.7: The exact installation identity, minted live and replayed verbatim.
+    #[serde(default)]
+    pub token: DelayedTriggerToken,
     pub expected_installed_count: usize,
     pub cause: RulesExecutionNodeRef,
 }
@@ -271,6 +277,26 @@ pub struct ResolvedDelayedTriggerCommand {
 pub enum ResolvedDelayedTriggerReplayInvariantError {
     #[error("delayed-trigger install precondition mismatch: expected {expected} already installed, found {found}")]
     InstalledCountPreconditionMismatch { expected: usize, found: usize },
+    #[error("delayed-trigger install command {token:?} has no provenance")]
+    MissingProvenance { token: DelayedTriggerToken },
+    #[error(
+        "delayed-trigger provenance token {provenance:?} does not match command token {command:?}"
+    )]
+    ProvenanceTokenMismatch {
+        command: DelayedTriggerToken,
+        provenance: DelayedTriggerToken,
+    },
+    #[error("delayed-trigger provenance source {provenance:?} does not match trigger source {trigger:?}")]
+    ProvenanceSourceMismatch {
+        trigger: ObjectId,
+        provenance: ObjectId,
+    },
+    #[error("delayed-trigger provenance must use nonzero token and instance")]
+    ZeroProvenance,
+    #[error("delayed-trigger provenance token {token:?} is already installed")]
+    DuplicateProvenanceToken { token: DelayedTriggerToken },
+    #[error("delayed-trigger provenance instance {instance:?} is already installed")]
+    DuplicateProvenanceInstance { instance: DelayedTriggerInstanceId },
 }
 
 /// One exact CR 611.2a transient continuous-effect installation.
@@ -780,6 +806,12 @@ pub enum ResolvedLedgerEdit {
         expected_turn_count: u32,
         expected_game_count: u32,
     },
+    /// CR 700.13: Record the first committed crime of the turn after its
+    /// targeting action is successfully placed on the stack.
+    CrimeCommitted {
+        player: PlayerId,
+        expected_turn_count: u32,
+    },
     /// CR 603.2c: Record one constrained trigger occurrence.
     TriggerFired {
         trigger: TriggerDefinitionRef,
@@ -873,6 +905,8 @@ pub enum ResolvedZoneChangeReplayInvariantError {
     DestinationPositionMismatch { expected: usize, found: usize },
     #[error("zone-change turn-record index mismatch: expected {expected}, found {found}")]
     TurnRecordIndexMismatch { expected: usize, found: usize },
+    #[error("zone-change recorded-turn mismatch: expected {expected}, found {found}")]
+    RecordedTurnMismatch { expected: u32, found: u32 },
     #[error("zone-change battlefield entry is missing its timestamp")]
     MissingBattlefieldEntryTimestamp,
     #[error("zone-change nonbattlefield entry unexpectedly has a timestamp")]
@@ -1017,6 +1051,10 @@ pub struct ResolvedStackPushCommand {
     /// Boxed because `StackEntryKind` embeds a whole `ResolvedAbility`, which
     /// would otherwise widen every `ResolvedRulesCommand` in the journal.
     pub entry: Box<StackEntry>,
+    /// Private CR 603.7 firing classification; present exactly for a triggered
+    /// ability, allowing replay to restore the stack side-map atomically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) trigger_firing: Option<TriggerFiring>,
     pub origin: ResolvedStackPushOrigin,
     /// Zero-based index the entry occupies after the push (CR 405.2).
     pub resulting_position: usize,
@@ -1032,6 +1070,8 @@ pub enum ResolvedStackPushReplayInvariantError {
     DuplicateStackEntry(ObjectId),
     #[error("stack-push command references an unknown controller {0:?}")]
     UnknownController(PlayerId),
+    #[error("stack-push trigger firing does not match entry kind")]
+    TriggerFiringShapeMismatch,
 }
 
 /// One exact CR 601.2i cast finalization, retagging an announced stack entry.
@@ -1604,6 +1644,7 @@ pub enum ResolvedLedgerEditReplayInvariantError {
     UnknownPlayer(PlayerId),
     SpellCastPreconditionMismatch,
     AbilityActivationPreconditionMismatch,
+    CrimeCommittedPreconditionMismatch,
     CardsDrawnPreconditionMismatch,
     DrawnObjectMismatch {
         expected: ObjectIncarnationRef,
@@ -1633,6 +1674,9 @@ impl std::fmt::Display for ResolvedLedgerEditReplayInvariantError {
                 f,
                 "resolved activated-ability command does not match its ledger prefix"
             ),
+            Self::CrimeCommittedPreconditionMismatch => {
+                write!(f, "resolved crime command does not match its ledger prefix")
+            }
             Self::CardsDrawnPreconditionMismatch => write!(
                 f,
                 "resolved draw-bookkeeping command does not match its ledger prefix"
@@ -3150,6 +3194,10 @@ pub(crate) fn ledger_edit_is_invalid(edit: &ResolvedLedgerEdit) -> bool {
             expected_game_count,
             ..
         } => *expected_turn_count == u32::MAX || *expected_game_count == u32::MAX,
+        ResolvedLedgerEdit::CrimeCommitted {
+            expected_turn_count,
+            ..
+        } => *expected_turn_count != 0,
         ResolvedLedgerEdit::CardsDrawn {
             drawn_object,
             attempted_empty_library,

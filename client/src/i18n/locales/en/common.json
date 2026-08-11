@@ -5,6 +5,11 @@
     "close": "Close",
     "closeNamed": "Close {{name}}"
   },
+  "scryOutcome": {
+    "title": "Scry complete",
+    "you": "You",
+    "result": "{{player}} — {{top}} on top · {{bottom}} on bottom"
+  },
   "modal": {
     "defaultEyebrow": "Workspace Tool"
   },
@@ -48,7 +53,7 @@
     "updated": "updated"
   },
   "comboDetector": {
-    "label": "Combo Detector",
+    "label": "Combo Detector (experimental)",
     "title": "Detect infinite loops: end mandatory loops automatically and show ∞ resources (off by default)",
     "on": "On",
     "off": "Off",
@@ -78,6 +83,7 @@
     "showAiHand": "Show AI Hand",
     "hideAiHand": "Hide AI Hand",
     "requestTakeback": "Request Takeback",
+    "undoLastAction": "Undo Last Action",
     "concede": "Concede",
     "backToDraft": "Back to Draft",
     "mainMenu": "Main Menu",

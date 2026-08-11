@@ -423,6 +423,11 @@ fn effect_pay_cost_mana_resume(
     if let WaitingFor::ManaPayment {
         player,
         convoke_mode,
+    }
+    | WaitingFor::ManaSourceSelection {
+        player,
+        convoke_mode,
+        ..
     } = &state.waiting_for
     {
         return Some(ManaAbilityResume::ManaPayment {
@@ -1089,6 +1094,7 @@ fn pay_ability_cost_inner(
                     effect_kind: EffectKind::PayCost,
                     up_to: false,
                     unless_filter: None,
+                    discard_frame: None,
                 };
             }
         }
@@ -1376,6 +1382,41 @@ fn pay_ability_cost_inner(
                 player,
                 delta: -(amount as i32),
             });
+        }
+        // CR 702.21a + CR 122.1 + CR 104.3d: Ward cost paid by giving the
+        // paying player counters of a kind (The Serpent Society). No
+        // affordability check (see `can_pay_resolution`) — a player may
+        // always choose to accept more counters. Routes through
+        // `add_player_counter_with_replacement` — not a raw
+        // `resolve_and_apply_player_edit` call — so "players can't get
+        // counters" replacement effects still apply, mirroring the
+        // `EffectCost`/`PutCounter` arm's use of the sibling
+        // `effects::counters::add_counter_with_replacement` above. A
+        // replacement that PREVENTS the addition (Solemnity) is a genuinely
+        // FAILED payment here, not a paused one: unlike effect resolution
+        // (where "prevented" and "applied" both just mean the pending item is
+        // resolved), a cost that silently gives zero counters must not be
+        // mistaken for having actually been paid, or Ward's deterrent is
+        // bypassed for free.
+        AbilityCost::GetPlayerCounters {
+            counter_kind,
+            count,
+        } => {
+            match super::effects::player_counter::add_player_counter_with_replacement(
+                state, player, player, *counter_kind, *count, events,
+            ) {
+                super::effects::player_counter::PlayerCounterAdditionOutcome::Applied => {}
+                super::effects::player_counter::PlayerCounterAdditionOutcome::Prevented => {
+                    return Ok(payment_failed(
+                        "Player-counter cost prevented by a replacement effect",
+                    ));
+                }
+                super::effects::player_counter::PlayerCounterAdditionOutcome::NeedsChoice => {
+                    return Ok(PaymentOutcome::Paused {
+                        remaining_cost: None,
+                    });
+                }
+            }
         }
         AbilityCost::PaySpeed { amount } => {
             let amount = resolve_cost_quantity(state, amount, player, source_id, scope);
@@ -1767,6 +1808,9 @@ pub(crate) fn supported_at_resolution(cost: &AbilityCost) -> bool {
         | AbilityCost::PaySpeed { .. }
         | AbilityCost::TapCreatures { .. }
         | AbilityCost::Composite { .. }
+        // CR 702.21a + CR 122.1: Ward's unless-pay always resolves at
+        // resolution time (never activation), so this must be true here.
+        | AbilityCost::GetPlayerCounters { .. }
         | AbilityCost::OneOf { .. } => true,
         // Only the chosen-from-hand discard has a resolution arm (the
         // `WaitingFor::DiscardChoice` / forced-choice fast path). The source-card
@@ -1938,6 +1982,10 @@ fn can_pay_resolution(
         AbilityCost::OneOf { costs } => costs
             .iter()
             .any(|cost| can_pay_resolution(state, payer, cost, ability)),
+        // CR 702.21a + CR 122.1: Always payable — no resource/eligibility
+        // limit on giving yourself more counters (poison's ten-or-more loss
+        // condition is a separate SBA, not a payment-time affordability gate).
+        AbilityCost::GetPlayerCounters { .. } => true,
         // Variants below have no resolution-time payment arm
         // (`supported_at_resolution` is the shared membership authority).
         // Refusing here is the conservative affordability answer (treat as
@@ -2118,6 +2166,10 @@ mod tests {
             AbilityCost::KeywordCostOfCastSpell { .. } => AbilityCost::KeywordCostOfCastSpell {
                 keyword: crate::types::keywords::KeywordKind::Suspend,
             },
+            AbilityCost::GetPlayerCounters { .. } => AbilityCost::GetPlayerCounters {
+                counter_kind: crate::types::player::PlayerCounterKind::Poison,
+                count: 1,
+            },
             AbilityCost::Unimplemented { .. } => AbilityCost::Unimplemented {
                 description: "test".to_string(),
             },
@@ -2230,6 +2282,10 @@ mod tests {
             },
             AbilityCost::KeywordCostOfCastSpell {
                 keyword: crate::types::keywords::KeywordKind::Suspend,
+            },
+            AbilityCost::GetPlayerCounters {
+                counter_kind: crate::types::player::PlayerCounterKind::Poison,
+                count: 1,
             },
             AbilityCost::Unimplemented {
                 description: String::new(),

@@ -13,9 +13,12 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
 
+use engine::ai_support::{CertifiedFetchFollowUp, CertifiedFetchPrompt, CertifiedPactPlan};
 use engine::game::DeckEntry;
+use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
+use engine::util::Deadline;
 
 use crate::deck_profile::DeckProfile;
 use crate::features::DeckFeatures;
@@ -33,6 +36,10 @@ use crate::synergy::SynergyGraph;
 /// singleton main-deck card.
 const COMMANDER_ANALYSIS_WEIGHT: u32 = 4;
 
+type ProspectiveFetchProposals = HashMap<PlayerId, Vec<(GameAction, CertifiedFetchPrompt)>>;
+pub(crate) type PactRouteStore = HashMap<PlayerId, CertifiedPactPlan>;
+pub(crate) type PactPlanProposals = HashMap<PlayerId, Vec<(GameAction, CertifiedPactPlan)>>;
+
 /// Per-game cache shared by all decisions.
 #[derive(Clone, Default)]
 pub struct AiSession {
@@ -46,6 +53,24 @@ pub struct AiSession {
     /// `turn_number` + `active_player`, so stale entries from prior turns
     /// never match — no explicit invalidation needed.
     pub projection_cache: Arc<RwLock<HashMap<ProjectionKey, Arc<Projection>>>>,
+    /// Reducer-certified fetch selection armed only after this session chose
+    /// its corresponding root activation. The engine token contains no clone
+    /// or hidden terminal state and rejects any stale prompt.
+    pub(crate) prospective_fetch_prompt: Arc<RwLock<HashMap<PlayerId, CertifiedFetchPrompt>>>,
+    /// One exact cast unlocked by a redeemed prospective fetch prompt. The
+    /// engine validates the complete post-selection state before yielding it.
+    pub(crate) prospective_fetch_follow_up: Arc<RwLock<HashMap<PlayerId, CertifiedFetchFollowUp>>>,
+    /// Root-scoring proposals awaiting the same decision's final action. The
+    /// chosen proposal is moved into `prospective_fetch_prompt`; all others
+    /// are discarded immediately.
+    pub(crate) prospective_fetch_proposals: Arc<RwLock<ProspectiveFetchProposals>>,
+    /// Opaque Pact route retained only after this session selects the exact
+    /// certified root. The engine owns delayed-trigger provenance and rejects
+    /// every stale, aliased, or non-delayed redemption attempt.
+    pub(crate) pact_routes: Arc<RwLock<PactRouteStore>>,
+    /// Scoring drafts awaiting root selection. These are never durable routes:
+    /// selection atomically transfers only the chosen root's certificate.
+    pub(crate) pact_proposals: Arc<RwLock<PactPlanProposals>>,
     #[cfg(test)]
     pub(crate) policy_registry_override: Option<Arc<PolicyRegistry>>,
 }
@@ -61,6 +86,17 @@ impl std::fmt::Debug for AiSession {
             .field("synergy", &self.synergy)
             .field("memory", &self.memory)
             .field("projection_cache", &self.projection_cache)
+            .field("prospective_fetch_prompt", &self.prospective_fetch_prompt)
+            .field(
+                "prospective_fetch_follow_up",
+                &self.prospective_fetch_follow_up,
+            )
+            .field(
+                "prospective_fetch_proposals",
+                &self.prospective_fetch_proposals,
+            )
+            .field("pact_routes", &self.pact_routes)
+            .field("pact_proposals", &self.pact_proposals)
             .finish()
     }
 }
@@ -103,6 +139,11 @@ impl AiSession {
             synergy,
             memory: Arc::default(),
             projection_cache: Arc::default(),
+            prospective_fetch_prompt: Arc::default(),
+            prospective_fetch_follow_up: Arc::default(),
+            prospective_fetch_proposals: Arc::default(),
+            pact_routes: Arc::default(),
+            pact_proposals: Arc::default(),
             #[cfg(test)]
             policy_registry_override: None,
         }
@@ -188,12 +229,19 @@ impl AiSession {
     /// Retrieve a cached projection, computing it on miss. Turn-scoped
     /// key means stale entries never match. Read-path is lock-free;
     /// write-path briefly acquires a write lock.
+    ///
+    /// `deadline` bounds only the cache-miss computation; a cache HIT is
+    /// returned regardless of expiry. Callers holding an `AiConfig` must pass
+    /// `projection::projection_deadline(config.execution_mode)` — evaluated
+    /// inline at the call, never hoisted into a `let` that spans multiple
+    /// projections.
     pub fn get_or_project(
         &self,
         base: &GameState,
         ai_player: PlayerId,
         target_opponent: PlayerId,
         horizon: ProjectionHorizon,
+        deadline: Deadline,
     ) -> Result<Arc<Projection>, BailReason> {
         let key = ProjectionKey {
             state_hash: quick_state_hash(base),
@@ -210,7 +258,13 @@ impl AiSession {
             }
         }
 
-        let projection = Arc::new(project_to(base, ai_player, target_opponent, horizon)?);
+        let projection = Arc::new(project_to(
+            base,
+            ai_player,
+            target_opponent,
+            horizon,
+            deadline,
+        )?);
 
         if let Ok(mut cache) = self.projection_cache.write() {
             cache.insert(key, Arc::clone(&projection));
@@ -341,8 +395,11 @@ mod tests {
     };
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType};
-    use engine::types::game_state::{GameState, PlayerDeckPool, WaitingFor};
+    use engine::types::game_state::{GameState, PersistedGameState, PlayerDeckPool, WaitingFor};
     use engine::types::identifiers::ObjectId;
+    use engine::util::Deadline;
+
+    use crate::projection::BailReason;
     use engine::types::player::PlayerId;
     use engine::types::statics::StaticMode;
     use std::sync::Arc;
@@ -512,6 +569,7 @@ mod tests {
                 PlayerId(0),
                 PlayerId(1),
                 ProjectionHorizon::OpponentAttackersDeclared,
+                Deadline::none(),
             )
             .unwrap();
         let b = session
@@ -520,6 +578,7 @@ mod tests {
                 PlayerId(0),
                 PlayerId(1),
                 ProjectionHorizon::OpponentAttackersDeclared,
+                Deadline::none(),
             )
             .unwrap();
         assert!(
@@ -541,6 +600,7 @@ mod tests {
                 PlayerId(1),
                 PlayerId(1),
                 ProjectionHorizon::OpponentAttackersDeclared,
+                Deadline::none(),
             )
             .unwrap();
         assert!(
@@ -551,6 +611,124 @@ mod tests {
             session.projection_cache.read().unwrap().len(),
             2,
             "a distinct key must add a second cache entry"
+        );
+    }
+
+    /// T3 — the deadline reaches `project_to` THROUGH the cache wrapper, and a
+    /// bail is not cached.
+    ///
+    /// Two arms on the same full-loop fixture. Arm 1 is not optional garnish:
+    /// without it, arm 2's `len() == 0` cannot distinguish "a bail is not
+    /// cached" from "nothing ever caches on this fixture."
+    #[test]
+    fn get_or_project_forwards_deadline_and_does_not_cache_a_bail() {
+        let state = crate::projection::projection_fixtures::opponent_turn_precombat_fixture();
+        crate::projection::projection_fixtures::assert_traverses_to(
+            &state,
+            PlayerId(0),
+            PlayerId(1),
+            ProjectionHorizon::OpponentAttackersDeclared,
+        );
+
+        // Arm 1 — a non-expiring deadline forwards through the wrapper, the
+        // projection completes, and the result is cached.
+        let session = AiSession::empty();
+        let ok = session.get_or_project(
+            &state,
+            PlayerId(0),
+            PlayerId(1),
+            ProjectionHorizon::OpponentAttackersDeclared,
+            Deadline::none(),
+        );
+        assert!(
+            ok.is_ok(),
+            "arm 1: a non-expiring deadline must let the wrapped projection complete; got {:?}",
+            ok.err()
+        );
+        assert_eq!(
+            session.projection_cache.read().unwrap().len(),
+            1,
+            "arm 1: a successful projection must be cached"
+        );
+
+        // Arm 2 — a fresh session with a pre-expired deadline: the wrapper must
+        // forward it (so the bail is the wall-clock one) and must not cache it.
+        let bailing = AiSession::empty();
+        let err = bailing.get_or_project(
+            &state,
+            PlayerId(0),
+            PlayerId(1),
+            ProjectionHorizon::OpponentAttackersDeclared,
+            Deadline::after(0),
+        );
+        assert!(
+            matches!(err, Err(BailReason::TimeCapExceeded { .. })),
+            "arm 2: get_or_project must FORWARD its deadline to project_to — ignoring the \
+             parameter leaves the projection to complete; got {err:?}"
+        );
+        assert_eq!(
+            bailing.projection_cache.read().unwrap().len(),
+            0,
+            "arm 2: a bail must not be cached"
+        );
+    }
+
+    /// T4 — multi-authority hostile fixture: the cache and the deadline both
+    /// govern "should this call do work", and on a HIT the cache wins.
+    ///
+    /// Fails only for one specific wrong implementation — adding an
+    /// `if deadline.expired() { return Err(..) }` check ahead of the cache read
+    /// in `get_or_project` — which passes every other test in this change.
+    /// Deliberately uses the already-at-horizon fixture class, the opposite of
+    /// T3's, so the first call is deterministic and free.
+    #[test]
+    fn get_or_project_serves_cache_hit_under_expired_deadline() {
+        let mut s = GameState::new_two_player(42);
+        s.turn_number = 2;
+        s.active_player = PlayerId(1);
+        s.creatures_attacked_this_turn.insert(ObjectId(1));
+        s.stack.clear();
+        s.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+        crate::projection::projection_fixtures::assert_already_at_horizon(
+            &s,
+            PlayerId(0),
+            PlayerId(1),
+            ProjectionHorizon::OpponentAttackersDeclared,
+        );
+
+        let session = AiSession::empty();
+        let first = session
+            .get_or_project(
+                &s,
+                PlayerId(0),
+                PlayerId(1),
+                ProjectionHorizon::OpponentAttackersDeclared,
+                Deadline::none(),
+            )
+            .expect("the already-at-horizon fixture must project");
+        assert_eq!(
+            session.projection_cache.read().unwrap().len(),
+            1,
+            "the first call must populate the cache"
+        );
+
+        let second = session
+            .get_or_project(
+                &s,
+                PlayerId(0),
+                PlayerId(1),
+                ProjectionHorizon::OpponentAttackersDeclared,
+                Deadline::after(0),
+            )
+            .expect(
+                "a cache HIT must be served regardless of expiry — the deadline gates \
+                 computation, never lookup",
+            );
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "the expired-deadline call must return the cached Arc, not recompute"
         );
     }
 
@@ -656,7 +834,7 @@ mod tests {
     }
 
     /// Serde stability: the fingerprint hashes deck content, not Arc identity,
-    /// so it must survive a `GameState` serde round-trip.
+    /// so it must survive the production persistence round-trip.
     #[test]
     fn fingerprint_is_stable_across_serde_round_trip() {
         let mut state = GameState::new_two_player(42);
@@ -673,8 +851,11 @@ mod tests {
         });
 
         let before = deck_pools_fingerprint(&state);
-        let json = serde_json::to_string(&state).expect("GameState serializes");
-        let restored: GameState = serde_json::from_str(&json).expect("GameState deserializes");
+        let json = serde_json::to_string(&PersistedGameState::capture(state))
+            .expect("persisted game state serializes");
+        let restored = serde_json::from_str::<PersistedGameState>(&json)
+            .expect("persisted game state deserializes")
+            .into_game_state();
         let after = deck_pools_fingerprint(&restored);
 
         assert_eq!(

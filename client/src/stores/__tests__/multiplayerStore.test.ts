@@ -302,11 +302,13 @@ describe("multiplayerStore", () => {
     emitServerMessage("GameCreated", {
       game_code: "ABCDE",
       player_token: "host-token",
+      full_key: { game_code: "ABCDE", generation: 1 },
     });
 
     expect(loadWsSession()).toMatchObject({
       gameCode: "ABCDE",
       playerToken: "host-token",
+      fullKey: { game_code: "ABCDE", generation: 1 },
       serverUrl: "ws://localhost:8787",
       hostIsPublic: true,
       hostSession: {
@@ -321,6 +323,7 @@ describe("multiplayerStore", () => {
     saveWsSession({
       gameCode: "ABCDE",
       playerToken: "host-token",
+      fullKey: { game_code: "ABCDE", generation: 1 },
       serverUrl: "ws://localhost:8787",
       timestamp: Date.now(),
       hostIsPublic: true,
@@ -339,6 +342,7 @@ describe("multiplayerStore", () => {
       data: {
         game_code: "ABCDE",
         player_token: "host-token",
+        full_key: { game_code: "ABCDE", generation: 1 },
       },
     });
 
@@ -349,6 +353,7 @@ describe("multiplayerStore", () => {
     emitServerMessage("GameCreated", {
       game_code: "ABCDE",
       player_token: "host-token",
+      full_key: { game_code: "ABCDE", generation: 1 },
     });
     emitServerMessage("PlayerSlotsUpdate", { slots });
 
@@ -371,6 +376,7 @@ describe("multiplayerStore", () => {
     saveWsSession({
       gameCode: "ABCDE",
       playerToken: "host-token",
+      fullKey: { game_code: "ABCDE", generation: 1 },
       serverUrl: "ws://localhost:8787",
       timestamp: Date.now(),
     });
@@ -392,6 +398,7 @@ describe("multiplayerStore", () => {
     emitServerMessage("GameCreated", {
       game_code: "ABCDE",
       player_token: "host-token",
+      full_key: { game_code: "ABCDE", generation: 1 },
     });
 
     emitServerMessage("GameStarted", {});
@@ -399,6 +406,7 @@ describe("multiplayerStore", () => {
     expect(loadWsSession()).toMatchObject({
       gameCode: "ABCDE",
       playerToken: "host-token",
+      fullKey: { game_code: "ABCDE", generation: 1 },
       serverUrl: "ws://localhost:8787",
     });
     expect(loadWsSession()?.hostSession).toBeUndefined();
