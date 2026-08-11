@@ -679,6 +679,8 @@ fn player_matches_filter(
     source_context: &TriggerSourceContext,
 ) -> bool {
     let trigger_controller = source_context.source_read(state).controller();
+    // CR 102.3: In games between teams, teammates are not opponents; use the
+    // shared team-topology authority for every opponent-scoped player filter.
     match filter {
         TargetFilter::Player => true,
         TargetFilter::AllPlayers => true,
