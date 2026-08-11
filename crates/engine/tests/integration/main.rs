@@ -1260,6 +1260,7 @@ mod swords_life_equals_power_counters_2895;
 mod taigam_master_opportunist_exiles_cast_spell_749;
 mod taii_wakeen;
 mod tamiyo_inquisitive_student_flip;
+mod target_incarnation_revalidation;
 mod teamwork_keyword;
 mod teferis_puzzle_box_4241;
 mod temporal_anchor;

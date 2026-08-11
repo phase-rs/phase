@@ -24184,6 +24184,11 @@ pub struct ResolvedAbility {
     /// `source_incarnation`'s `is_none_or` fail-open at `source_is_current`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target_incarnations: Vec<ObjectIncarnationRef>,
+    /// CR 400.7 + CR 601.2c: Incarnations captured for ordinary player- or
+    /// controller-selected object targets. Separate from `target_incarnations`,
+    /// whose keyed pins are reserved for delayed-trigger referents.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_target_incarnations: Vec<ObjectIncarnationRef>,
     pub controller: PlayerId,
     /// CR 109.5: The controller of the spell or ability before any
     /// resolution-time player-scope iteration rebinds the acting player.
@@ -24495,6 +24500,7 @@ impl ResolvedAbility {
             trigger_definition_ref: None,
             force_block_attacker: None,
             target_incarnations: Vec::new(),
+            selected_target_incarnations: Vec::new(),
             modal: None,
             mode_abilities: Vec::new(),
             parent_target_missing_reason: None,
@@ -24658,6 +24664,7 @@ impl ResolvedAbility {
         // whether two abilities would resolve identically, and two pins at
         // different epochs would not. Same field, different questions.
         self.target_incarnations.clear();
+        self.selected_target_incarnations.clear();
         if let Some(sub) = self.sub_ability.as_mut() {
             sub.clear_trigger_identity_recursive();
         }
@@ -24703,6 +24710,31 @@ impl ResolvedAbility {
         }
     }
 
+    /// CR 115.1a/c/d + CR 400.7 + CR 601.2c + CR 602.2b + CR 603.3d: Capture ordinary object targets at the shared
+    /// announcement/selection seam. Existing pins belong to delayed-trigger
+    /// referents and must not be replaced by a later assignment.
+    pub fn capture_target_incarnations_recursive(
+        &mut self,
+        state: &crate::types::game_state::GameState,
+    ) {
+        self.selected_target_incarnations = self
+            .targets
+            .iter()
+            .filter_map(|target| match target {
+                TargetRef::Object(id) => {
+                    state.objects.get(id).map(ObjectIncarnationRef::from_object)
+                }
+                TargetRef::Player(_) => None,
+            })
+            .collect();
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.capture_target_incarnations_recursive(state);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.capture_target_incarnations_recursive(state);
+        }
+    }
+
     /// CR 400.7 + CR 603.7c: True when `id` may still be affected by this
     /// ability.
     ///
@@ -24727,6 +24759,48 @@ impl ResolvedAbility {
             .iter()
             .find(|pin| pin.object_id == id)
             .is_none_or(|pin| pin.is_current(state))
+    }
+
+    /// CR 400.7: True when an ordinary selected target still names the
+    /// incarnation captured at announcement/selection time.
+    pub fn selected_target_pin_is_current(
+        &self,
+        id: ObjectId,
+        state: &crate::types::game_state::GameState,
+    ) -> bool {
+        self.selected_target_incarnations
+            .iter()
+            .find(|pin| pin.object_id == id)
+            .is_none_or(|pin| pin.is_current(state))
+    }
+
+    /// CR 115.7: A retarget refreshes the pin when the target changes, including
+    /// a same-ID target that left and returned as a new object.
+    pub fn retarget_target_requires_pin_refresh(
+        &self,
+        old: &TargetRef,
+        new: &TargetRef,
+        state: &crate::types::game_state::GameState,
+    ) -> bool {
+        old != new
+            || matches!(
+                new,
+                TargetRef::Object(id) if !self.selected_target_pin_is_current(*id, state)
+            )
+    }
+
+    /// CR 115.7: Refresh the selected-target pin for one target changed by a
+    /// retargeting effect, leaving every unchanged slot's original pin intact.
+    pub fn update_selected_target_incarnation(&mut self, pin: ObjectIncarnationRef) {
+        if let Some(existing) = self
+            .selected_target_incarnations
+            .iter_mut()
+            .find(|existing| existing.object_id == pin.object_id)
+        {
+            *existing = pin;
+        } else {
+            self.selected_target_incarnations.push(pin);
+        }
     }
 
     /// CR 603.7c + CR 400.7: The subset of `targets` this ability may still

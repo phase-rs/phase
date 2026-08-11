@@ -3732,6 +3732,7 @@ fn walk_ability(
         trigger_definition_ref: _, // exact trigger occurrence, no read/write effect
         force_block_attacker: _, // exact force-block referent, no read/write effect
         target_incarnations: _, // CR 400.7 pins on the referents, no read/write effect
+        selected_target_incarnations: _, // CR 400.7 selected-target pins, no read/write effect
         controller: _,
         original_controller: _,
         scoped_player: _,

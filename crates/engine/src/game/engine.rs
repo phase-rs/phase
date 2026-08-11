@@ -15,7 +15,7 @@ use crate::types::game_state::{
     MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveResume, RetargetScope, StackEntry,
     StackEntryKind, WaitingFor,
 };
-use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId};
+use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIncarnationRef};
 use crate::types::match_config::MatchType;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -6742,9 +6742,32 @@ fn finalize_copy_retarget(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let changed_pins = state
+        .stack
+        .iter()
+        .find(|entry| entry.id == copy_id)
+        .and_then(|entry| entry.ability())
+        .map(|ability| {
+            ability
+                .targets
+                .iter()
+                .zip(targets.iter())
+                .filter(|(old, new)| ability.retarget_target_requires_pin_refresh(old, new, state))
+                .filter_map(|(_, target)| match target {
+                    TargetRef::Object(id) => {
+                        state.objects.get(id).map(ObjectIncarnationRef::from_object)
+                    }
+                    TargetRef::Player(_) => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     if let Some(entry) = state.stack.iter_mut().find(|e| e.id == copy_id) {
         if let Some(ability) = entry.ability_mut() {
             ability.targets = targets;
+            for pin in changed_pins {
+                ability.update_selected_target_incarnation(pin);
+            }
         }
     }
     events.push(GameEvent::EffectResolved {
@@ -11729,8 +11752,31 @@ fn apply_retarget(
     }
 
     if stack_entry_index < state.stack.len() {
+        let target_pins: Vec<_> = state
+            .stack
+            .get(stack_entry_index)
+            .and_then(|entry| entry.ability())
+            .map(|ability| {
+                current_targets
+                    .iter()
+                    .zip(new_targets.iter())
+                    .filter(|(old, new)| {
+                        ability.retarget_target_requires_pin_refresh(old, new, state)
+                    })
+                    .filter_map(|(_, target)| match target {
+                        TargetRef::Object(id) => {
+                            state.objects.get(id).map(ObjectIncarnationRef::from_object)
+                        }
+                        TargetRef::Player(_) => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         if let Some(ability) = state.stack[stack_entry_index].ability_mut() {
             ability.targets = new_targets;
+            for pin in target_pins {
+                ability.update_selected_target_incarnation(pin);
+            }
         }
     } else {
         return Err(EngineError::InvalidAction(
@@ -16355,7 +16401,7 @@ mod stage2_injector_tests {
                 //
                 // SET PRESERVATION: unchanged. Upstream adds no line matching the needle to this file and
                 // neither does this branch — total still 37, partition still 5/7/25.
-                "game/engine.rs:11942".to_string(),
+                "game/engine.rs:11988".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \

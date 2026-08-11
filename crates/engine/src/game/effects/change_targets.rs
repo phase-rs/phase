@@ -85,8 +85,24 @@ pub fn resolve(
             // `vec![new_target]`, which would delete the untouched slot.
             let updated =
                 forced_retarget_targets(state, &stack_ability, &current_targets, new_target);
+            let changed = updated
+                .iter()
+                .zip(current_targets.iter())
+                .find(|(updated, current)| {
+                    stack_ability.retarget_target_requires_pin_refresh(current, updated, state)
+                })
+                .and_then(|(target, _)| match target {
+                    TargetRef::Object(id) => state
+                        .objects
+                        .get(id)
+                        .map(crate::types::identifiers::ObjectIncarnationRef::from_object),
+                    TargetRef::Player(_) => None,
+                });
             if let Some(stack_ability_mut) = state.stack[stack_entry_index].ability_mut() {
                 stack_ability_mut.targets = updated;
+                if let Some(pin) = changed {
+                    stack_ability_mut.update_selected_target_incarnation(pin);
+                }
             }
         }
         events.push(GameEvent::EffectResolved {

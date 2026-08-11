@@ -1777,10 +1777,12 @@ pub fn assign_targets_in_chain(
 ) -> Result<(), EngineError> {
     if is_per_opponent_target_fanout(ability) {
         ability.targets = targets.to_vec();
+        ability.capture_target_incarnations_recursive(state);
         return Ok(());
     }
     if !chain_has_target_sink(ability) {
         ability.targets = targets.to_vec();
+        ability.capture_target_incarnations_recursive(state);
         return Ok(());
     }
     let mut next_target = 0usize;
@@ -1790,6 +1792,7 @@ pub fn assign_targets_in_chain(
             "Unused selected targets".to_string(),
         ));
     }
+    ability.capture_target_incarnations_recursive(state);
     Ok(())
 }
 
@@ -1800,10 +1803,12 @@ pub fn assign_selected_slots_in_chain(
 ) -> Result<(), EngineError> {
     if is_per_opponent_target_fanout(ability) {
         ability.targets = selected_slots.iter().flatten().cloned().collect();
+        ability.capture_target_incarnations_recursive(state);
         return Ok(());
     }
     if !chain_has_target_sink(ability) {
         ability.targets = selected_slots.iter().flatten().cloned().collect();
+        ability.capture_target_incarnations_recursive(state);
         return Ok(());
     }
     let mut next_slot = 0usize;
@@ -1813,6 +1818,7 @@ pub fn assign_selected_slots_in_chain(
             "Unused selected target slots".to_string(),
         ));
     }
+    ability.capture_target_incarnations_recursive(state);
     Ok(())
 }
 
@@ -1860,6 +1866,28 @@ pub fn distribution_targets(ability: &ResolvedAbility) -> Vec<TargetRef> {
 }
 
 /// CR 608.2b: Re-validate targets on resolution — remove any that are no longer legal.
+fn target_is_current(ability: &ResolvedAbility, target: &TargetRef, state: &GameState) -> bool {
+    match target {
+        TargetRef::Object(id) => {
+            ability.target_pin_is_current(*id, state)
+                && ability.selected_target_pin_is_current(*id, state)
+        }
+        TargetRef::Player(_) => true,
+    }
+}
+
+fn validate_pinned_targets(
+    state: &GameState,
+    targets: &[TargetRef],
+    filter: &TargetFilter,
+    ability: &ResolvedAbility,
+) -> Vec<TargetRef> {
+    targeting::validate_targets_for_ability(state, targets, filter, ability)
+        .into_iter()
+        .filter(|target| target_is_current(ability, target, state))
+        .collect()
+}
+
 pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -> ResolvedAbility {
     let mut validated = ability.clone();
     validated.targets = if is_per_opponent_target_fanout(&validated) {
@@ -1876,7 +1904,7 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
             .filter(|filter| !filter.is_context_ref())
             .zip(validated.targets.iter())
             .filter_map(|(filter, target_ref)| {
-                let legal = targeting::validate_targets_for_ability(
+                let legal = validate_pinned_targets(
                     state,
                     std::slice::from_ref(target_ref),
                     filter,
@@ -1905,14 +1933,10 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
             let Some(target_ref) = target_iter.next() else {
                 continue;
             };
-            if let Some(legal) = targeting::validate_targets_for_ability(
-                state,
-                std::slice::from_ref(target_ref),
-                filter,
-                &validated,
-            )
-            .into_iter()
-            .next()
+            if let Some(legal) =
+                validate_pinned_targets(state, std::slice::from_ref(target_ref), filter, &validated)
+                    .into_iter()
+                    .next()
             {
                 kept.push(legal);
             }
@@ -1967,13 +1991,8 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
             let Some(target_ref) = target_iter.next() else {
                 break;
             };
-            if !targeting::validate_targets_for_ability(
-                state,
-                std::slice::from_ref(target_ref),
-                filter,
-                &validated,
-            )
-            .is_empty()
+            if !validate_pinned_targets(state, std::slice::from_ref(target_ref), filter, &validated)
+                .is_empty()
             {
                 any_legal = true;
             }
@@ -1998,7 +2017,7 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
                 let Some(target_ref) = target_iter.next() else {
                     continue;
                 };
-                if let Some(legal) = targeting::validate_targets_for_ability(
+                if let Some(legal) = validate_pinned_targets(
                     state,
                     std::slice::from_ref(target_ref),
                     filter,
@@ -2043,15 +2062,10 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
             let explicit: Vec<TargetRef> = candidate_targets
                 .iter()
                 .filter(|t| {
-                    targeting::validate_targets_for_ability(
-                        state,
-                        std::slice::from_ref(t),
-                        target,
-                        &validated,
-                    )
-                    .into_iter()
-                    .next()
-                    .is_some()
+                    validate_pinned_targets(state, std::slice::from_ref(t), target, &validated)
+                        .into_iter()
+                        .next()
+                        .is_some()
                 })
                 .cloned()
                 .collect();
@@ -2062,7 +2076,9 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
                     let TargetRef::Object(id) = t else {
                         return false;
                     };
-                    !explicit.contains(t) && fight_creature_on_battlefield(state, *id)
+                    !explicit.contains(t)
+                        && fight_creature_on_battlefield(state, *id)
+                        && target_is_current(&validated, t, state)
                 }) {
                     kept.push(ally.clone());
                 }
@@ -2077,7 +2093,7 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
         // would fizzle-filter the spell to battlefield presence and drop it
         // (the spell lives on the STACK). Re-validate against the source leaf
         // (`InZone Stack`-aware) instead, preserving the spell target.
-        targeting::validate_targets_for_ability(state, &validated.targets, &src_leaf, &validated)
+        validate_pinned_targets(state, &validated.targets, &src_leaf, &validated)
     } else {
         match triggers::extract_target_filter_from_effect(&validated.effect) {
             Some(filter) if matches!(validated.effect, Effect::PairWith { .. }) => {
@@ -2085,7 +2101,10 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
                 validated
                     .targets
                     .iter()
-                    .filter(|target| legal_choices.contains(target))
+                    .filter(|target| {
+                        legal_choices.contains(target)
+                            && target_is_current(&validated, target, state)
+                    })
                     .cloned()
                     .collect()
             }
@@ -2102,7 +2121,12 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
                     Some((_, rest)) => rest,
                     None => &[],
                 };
-                kept.extend(targeting::validate_targets_for_ability(
+                if let Some(companion) = kept.first() {
+                    if !target_is_current(&validated, companion, state) {
+                        kept.clear();
+                    }
+                }
+                kept.extend(validate_pinned_targets(
                     state,
                     primary_targets,
                     filter,
@@ -2110,12 +2134,7 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
                 ));
                 kept
             }
-            Some(filter) => targeting::validate_targets_for_ability(
-                state,
-                &validated.targets,
-                filter,
-                &validated,
-            ),
+            Some(filter) => validate_pinned_targets(state, &validated.targets, filter, &validated),
             // CR 608.2b: A context-ref filter (`ParentTarget`,
             // `TriggeringSource`, etc.) carries a resolution-time *snapshot*,
             // not a player-chosen target. `extract_target_filter_from_effect`
@@ -2160,17 +2179,17 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
                     state,
                     validated.source_id,
                 ) {
-                    Some(filter) => targeting::validate_targets_for_ability(
-                        state,
-                        &validated.targets,
-                        &filter,
-                        &validated,
-                    ),
+                    Some(filter) => {
+                        validate_pinned_targets(state, &validated.targets, &filter, &validated)
+                    }
                     None => validated
                         .targets
                         .iter()
                         .filter(|target| match target {
-                            TargetRef::Object(object_id) => state.battlefield.contains(object_id),
+                            TargetRef::Object(object_id) => {
+                                state.battlefield.contains(object_id)
+                                    && target_is_current(&validated, target, state)
+                            }
                             TargetRef::Player(_) => true,
                         })
                         .cloned()
@@ -2181,7 +2200,10 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
                 .targets
                 .iter()
                 .filter(|target| match target {
-                    TargetRef::Object(object_id) => state.battlefield.contains(object_id),
+                    TargetRef::Object(object_id) => {
+                        state.battlefield.contains(object_id)
+                            && target_is_current(&validated, target, state)
+                    }
                     TargetRef::Player(_) => true,
                 })
                 .cloned()
