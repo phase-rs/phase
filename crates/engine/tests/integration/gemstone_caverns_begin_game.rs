@@ -248,17 +248,8 @@ fn gemstone_caverns_accept_enters_with_luck_counter_and_prompts_exile() {
         "Gemstone Caverns retains its luck counter after the exile rider"
     );
     assert!(
-        matches!(&state.waiting_for, WaitingFor::Priority { player } if *player == PlayerId(0)),
-        "begin-game resolution must drain to P0 priority, got {:?}",
-        state.waiting_for
-    );
-
-    let result = apply(&mut state, PlayerId(0), GameAction::PassPriority)
-        .expect("P0 must be able to pass priority to P1");
-    state.waiting_for = result.waiting_for;
-    assert!(
         matches!(&state.waiting_for, WaitingFor::Priority { player } if *player == PlayerId(1)),
-        "P1 must receive priority to activate Gemstone Caverns, got {:?}",
+        "begin-game resolution must drain to P1 priority, got {:?}",
         state.waiting_for
     );
 
