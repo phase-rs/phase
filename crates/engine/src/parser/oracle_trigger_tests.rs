@@ -11352,7 +11352,7 @@ fn trigger_other_than_first_mismatched_spell_filter_is_unknown() {
 
 #[test]
 fn nth_spell_constraint_serde_defaults_and_omits_exact_comparator() {
-    let old = r#"{\"type\":\"NthSpellThisTurn\",\"n\":2}"#;
+    let old = r#"{"type":"NthSpellThisTurn","n":2}"#;
     let decoded: TriggerConstraint = serde_json::from_str(old).expect("legacy export loads");
     assert_eq!(
         decoded,
@@ -11936,6 +11936,7 @@ fn trigger_nth_spell_opponent_noncreature() {
         def.constraint,
         Some(TriggerConstraint::NthSpellThisTurn {
             n: 1,
+            comparator: Comparator::EQ,
             filter: Some(TargetFilter::Typed(TypedFilter {
                 type_filters: vec![TypeFilter::Non(Box::new(TypeFilter::Creature))],
                 controller: None,
