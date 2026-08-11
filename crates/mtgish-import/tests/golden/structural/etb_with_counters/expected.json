@@ -10,7 +10,7 @@
         "execute": {
           "kind": "Spell",
           "effect": {
-            "type": "AddCounter",
+            "type": "PutCounter",
             "counter_type": "P1P1",
             "count": {
               "type": "Ref",
@@ -27,7 +27,6 @@
           "duration": null,
           "description": null,
           "target_prompt": null,
-          "sorcery_speed": false,
           "condition": null,
           "optional_targeting": false,
           "optional": false,
