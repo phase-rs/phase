@@ -1,6 +1,6 @@
 //! Final authority for composable per-event ledger facts.
 
-use crate::types::ability::TriggerDefinitionRef;
+use crate::types::ability::{TriggerDefinitionRef, TriggerFireLedgerKey};
 use crate::types::game_state::{GameState, SpellCastRecord};
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -457,9 +457,7 @@ pub fn apply_resolved_ledger_edit(
                 expected_old,
                 ledger_key,
             } => {
-                let key = ledger_key.as_ref().cloned().unwrap_or_else(|| {
-                    crate::types::ability::TriggerFireLedgerKey::Definition(trigger.clone())
-                });
+                let key = trigger_fire_ledger_key_for_replay(state, trigger, ledger_key.as_ref());
                 let found = state
                     .trigger_fire_counts_this_turn
                     .get(&key)
@@ -513,6 +511,105 @@ pub fn apply_resolved_ledger_edit(
         }
     }
     Ok(())
+}
+
+fn trigger_fire_ledger_key_for_replay(
+    state: &GameState,
+    trigger: &TriggerDefinitionRef,
+    ledger_key: Option<&TriggerFireLedgerKey>,
+) -> TriggerFireLedgerKey {
+    if let Some(ledger_key) = ledger_key {
+        return ledger_key.clone();
+    }
+
+    let grant_producer = state
+        .objects
+        .get(&trigger.source.object_id)
+        .filter(|object| object.incarnation == trigger.source.incarnation)
+        .and_then(|object| {
+            object
+                .trigger_definitions
+                .iter_all()
+                .find(|entry| entry.occurrence == trigger.occurrence)
+        })
+        .and_then(|entry| entry.grant_producer.clone());
+
+    grant_producer
+        .map(TriggerFireLedgerKey::Grant)
+        .unwrap_or_else(|| TriggerFireLedgerKey::Definition(trigger.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::game_object::GameObject;
+    use crate::types::ability::{
+        TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerEntry, TriggerGrantProducerKey,
+        TriggerProducerOrigin,
+    };
+    use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+    use crate::types::player::PlayerId;
+    use crate::types::resolved_commands::{ResolvedCommandOrdinal, RulesExecutionNodeRef};
+    use crate::types::triggers::TriggerMode;
+    use crate::types::zones::Zone;
+    use crate::types::CardId;
+
+    #[test]
+    fn legacy_max_times_replay_resolves_migrated_grant_key() {
+        let object_id = ObjectId(1);
+        let mut state = GameState::new_two_player(42);
+        let mut object = GameObject::new(
+            object_id,
+            CardId(1),
+            PlayerId(0),
+            "Granted trigger".to_string(),
+            Zone::Battlefield,
+        );
+        let producer = TriggerGrantProducerKey::Granted {
+            origin: TriggerProducerOrigin::Static {
+                source: ObjectIncarnationRef::from_object(&object),
+                definition_index: 0,
+                modification_index: 0,
+            },
+            output_index: 0,
+        };
+        let grant_instance = object
+            .trigger_occurrence_state
+            .grant_instance_for(producer.clone())
+            .expect("grant instance allocates");
+        let entry = TriggerEntry::with_grant_producer(
+            TriggerDefinitionOccurrenceRef::Granted { grant_instance },
+            TriggerDefinition::new(TriggerMode::Attacks),
+            producer.clone(),
+        );
+        let trigger = object.trigger_definition_ref(&entry);
+        object.trigger_definitions.push(entry);
+        state.objects.insert(object_id, object);
+        state
+            .trigger_fire_counts_this_turn
+            .insert(TriggerFireLedgerKey::Grant(producer.clone()), 2);
+
+        let command = ResolvedLedgerEditCommand {
+            edit: ResolvedLedgerEdit::TriggerFired {
+                trigger,
+                edit: ResolvedTriggerLedgerEdit::MaxTimesPerTurn {
+                    expected_old: 2,
+                    ledger_key: None,
+                },
+            },
+            cause: RulesExecutionNodeRef::Proposal(ResolvedCommandOrdinal(0)),
+        };
+
+        apply_resolved_ledger_edit(&mut state, &command).expect("legacy replay resolves grant key");
+        assert_eq!(
+            state
+                .trigger_fire_counts_this_turn
+                .get(&TriggerFireLedgerKey::Grant(producer))
+                .copied(),
+            Some(3)
+        );
+        assert_eq!(state.trigger_fire_counts_this_turn.len(), 1);
+    }
 }
 
 fn history_len(len: usize) -> Result<u32, ResolvedLedgerEditReplayInvariantError> {
