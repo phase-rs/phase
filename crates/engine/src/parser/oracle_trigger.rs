@@ -15896,7 +15896,9 @@ fn parse_proliferate_player_action(input: &str) -> OracleResult<'_, PlayerAction
 /// trigger with a NthSpellThisTurn constraint.
 fn try_parse_nth_spell_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     match parse_other_than_first_spell_trigger(lower) {
-        OtherThanFirstSpellParse::Accepted(def) => return Some((TriggerMode::SpellCast, def)),
+        OtherThanFirstSpellParse::Accepted(def) => {
+            return Some((TriggerMode::SpellCast, *def));
+        }
         // The marker commits this grammar: never let a malformed qualifier
         // silently broaden through the generic SpellCast parser.
         OtherThanFirstSpellParse::Rejected => {
@@ -15925,7 +15927,7 @@ fn try_parse_nth_spell_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefin
 enum OtherThanFirstSpellParse {
     NotCandidate,
     Rejected,
-    Accepted(TriggerDefinition),
+    Accepted(Box<TriggerDefinition>),
 }
 
 #[derive(Clone, Copy)]
@@ -15940,6 +15942,10 @@ enum OtherThanFirstSpellActor {
 /// intervening-if condition. The recognizer owns the predicate only after it
 /// reaches the marker, so a malformed repeated qualifier fails closed.
 fn parse_other_than_first_spell_trigger(input: &str) -> OtherThanFirstSpellParse {
+    // `parse_trigger_condition` passes the complete trigger head (including
+    // "whenever"), while direct classifier tests pass its payload. Normalize
+    // both callers before matching the actor phrase.
+    let input = input.strip_prefix("whenever ").unwrap_or(input);
     let mut actor_parser = alt((
         value(
             OtherThanFirstSpellActor::You,
@@ -16047,7 +16053,7 @@ fn parse_other_than_first_spell_trigger(input: &str) -> OtherThanFirstSpellParse
         comparator: Comparator::GT,
         filter: first_filter,
     });
-    OtherThanFirstSpellParse::Accepted(def)
+    OtherThanFirstSpellParse::Accepted(Box::new(def))
 }
 
 /// Timing-clause kind for nth-spell/nth-draw triggers.
