@@ -6734,19 +6734,22 @@ mod tests {
         state.objects.get_mut(&class_id).unwrap().class_level = Some(2);
         let saga = state.objects.get_mut(&saga_id).unwrap();
         saga.card_types.subtypes.push("Saga".to_string());
+        // CR 714.2: `saga_chapter` is the chapter-symbol provenance that marks a
+        // trigger as a chapter ability; a bare lore threshold is not one, so
+        // `final_chapter_number` would report `None` without it.
         saga.trigger_definitions = vec![
-            TriggerDefinition::new(TriggerMode::CounterAdded).counter_filter(
-                CounterTriggerFilter {
+            TriggerDefinition::new(TriggerMode::CounterAdded)
+                .counter_filter(CounterTriggerFilter {
                     counter_type: CounterType::Lore,
                     threshold: Some(1),
-                },
-            ),
-            TriggerDefinition::new(TriggerMode::CounterAdded).counter_filter(
-                CounterTriggerFilter {
+                })
+                .saga_chapter(1),
+            TriggerDefinition::new(TriggerMode::CounterAdded)
+                .counter_filter(CounterTriggerFilter {
                     counter_type: CounterType::Lore,
                     threshold: Some(3),
-                },
-            ),
+                })
+                .saga_chapter(3),
         ]
         .into();
 
