@@ -952,7 +952,7 @@ fn mixed_destroy_all_not_penalized_when_only_population_is_hexproof() {
 ///   "targets" (CR 701.8), so the unbound companion player is a
 ///   target-declaration bookkeeping gap, not a legality problem for the wipe.
 /// * **Reference R** is the identical target-player wipe ALONE — the
-///   reviewer's apples-to-apples baseline: both M and R carry the same
+///   apples-to-apples baseline: both M and R carry the same
 ///   `TargetOpponent` wipe; only M adds the non-lethal damage half. So M must
 ///   score ≈ R (within the half-penalty margin). Pre-fix the mass population
 ///   read as empty → `can_kill_any_legal_target` did not credit the wipe → M's
@@ -998,8 +998,8 @@ fn mixed_target_opponent_wipe_is_not_penalized_when_player_unbound() {
         })
         .id();
 
-    // Reference: the SAME TargetOpponent wipe alone (the reviewer's
-    // target-player wipe baseline).
+    // Reference: the SAME TargetOpponent wipe alone — the honest
+    // baseline (same wipe, no damage half).
     let reference = scenario
         .add_spell_to_hand(P0, "Pure Player Wipe", true)
         .with_ability(Effect::DestroyAll {
