@@ -3295,6 +3295,9 @@ fn incubator_phyrexian_back_face() -> BackFaceData {
         strive_cost: None,
         casting_restrictions: vec![],
         casting_options: vec![],
+        // Built in code from CR 111.10i, not parsed from printed text, so there is
+        // no parse to have gone wrong.
+        parse_warnings: vec![],
         layout_kind: None,
     }
 }

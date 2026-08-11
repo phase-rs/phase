@@ -8994,16 +8994,12 @@ pub fn synthesize_read_ahead(face: &mut CardFace) {
     if !face.keywords.contains(&Keyword::ReadAhead) {
         return;
     }
-    // CR 714.2d: final chapter number = greatest lore-counter threshold among
-    // this Saga's chapter triggers. No chapter abilities → nothing to read ahead to.
-    let Some(final_chapter) = face
-        .triggers
-        .iter()
-        .filter_map(|t| t.counter_filter.as_ref())
-        .filter(|f| f.counter_type == CounterType::Lore)
-        .filter_map(|f| f.threshold)
-        .max()
-    else {
+    // CR 714.2d: final chapter number = the greatest value among this Saga's
+    // chapter abilities, read from the chapter-symbol provenance the Saga parser
+    // records. Not inferred from lore thresholds: CR 714.2b gives a chapter
+    // symbol that shape, but a lore threshold trigger acquired some other way is
+    // not a chapter ability. No chapter abilities → nothing to read ahead to.
+    let Some(final_chapter) = face.triggers.iter().filter_map(|t| t.saga_chapter).max() else {
         return;
     };
 
@@ -22939,7 +22935,10 @@ mod devour_synthesis_tests {
                     .counter_filter(CounterTriggerFilter {
                         counter_type: CounterType::Lore,
                         threshold: Some(n),
-                    }),
+                    })
+                    // CR 714.2: mirror what the Saga parser records — these
+                    // fixtures stand in for real chapter symbols.
+                    .saga_chapter(n),
             );
         }
         face.replacements.push(

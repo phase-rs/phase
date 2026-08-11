@@ -151,6 +151,90 @@ describe("WebSocketAdapter", () => {
     expect(ws.send).toHaveBeenLastCalledWith(JSON.stringify({ type: "ConcedeMatch" }));
   });
 
+  it("publishes a Resolve All decision state before resolving its acknowledgement", async () => {
+    const listener = vi.fn();
+    adapter.onEvent(listener);
+    const resultPromise = adapter.resolveAll(0, [{ playerId: 1, difficulty: "Medium" }], 5);
+
+    expect(JSON.parse(ws.send.mock.lastCall![0] as string)).toEqual({
+      type: "ResolveAll",
+      data: { request_id: 1, max_resolutions: 5 },
+    });
+
+    const conniveState = {
+      ...createMockState(),
+      stack: [{ id: 1 }],
+      waiting_for: {
+        type: "ConniveDiscard",
+        data: { player: 0, conniver_id: 4, source_id: 4, cards: [9, 10], count: 1 },
+      },
+    } as GameState;
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({ type: "StateUpdate", data: { state: conniveState, events: [] } }),
+    );
+
+    expect(listener).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "stateChanged",
+        snapshot: expect.objectContaining({ state: conniveState }),
+      }),
+    );
+
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({
+        type: "ResolveAllResult",
+        data: {
+          request_id: 1,
+          items_resolved: 1,
+          total: 2,
+        },
+      }),
+    );
+
+    await expect(resultPromise).resolves.toMatchObject({
+      waitingFor: conniveState.waiting_for,
+      itemsResolved: 1,
+      total: 2,
+    });
+  });
+
+  it("settles Resolve All only from its correlated server response", async () => {
+    const resultPromise = adapter.resolveAll(0, [{ playerId: 1, difficulty: "Medium" }], 5);
+    const settled = vi.fn();
+    void resultPromise.then(settled, settled);
+
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({ type: "Error", data: { message: "batch snapshot rejected" } }),
+    );
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({ type: "ActionRejected", data: { reason: "stale action rejection" } }),
+    );
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({
+        type: "ResolveAllRejected",
+        data: { request_id: 2, reason: "a different batch" },
+      }),
+    );
+
+    await Promise.resolve();
+    expect(settled).not.toHaveBeenCalled();
+
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({
+        type: "ResolveAllRejected",
+        data: { request_id: 1, reason: "batch snapshot rejected" },
+      }),
+    );
+
+    await expect(resultPromise).rejects.toMatchObject({ message: "batch snapshot rejected" });
+  });
+
   describe("server rewind capability (F2)", () => {
     it("declares the capability through the standalone type guard", () => {
       expect(supportsServerRewind(adapter)).toBe(true);

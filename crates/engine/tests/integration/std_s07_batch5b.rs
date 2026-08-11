@@ -119,6 +119,7 @@ fn add_aang_dfc(state: &mut GameState) -> ObjectId {
         casting_restrictions: vec![],
         casting_options: vec![],
         layout_kind: None,
+        parse_warnings: vec![],
     });
     id
 }

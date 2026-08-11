@@ -10574,6 +10574,7 @@ fn hearth_elemental_self_cost_reduction_counts_adventures() {
                 casting_restrictions: vec![],
                 casting_options: vec![],
                 layout_kind: Some(crate::types::card::LayoutKind::Adventure),
+                parse_warnings: vec![],
             });
         }
     }
@@ -26689,6 +26690,7 @@ fn create_adventure_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId
         casting_restrictions: Vec::new(),
         casting_options: Vec::new(),
         layout_kind: None,
+        parse_warnings: vec![],
     });
 
     obj_id
@@ -26781,6 +26783,7 @@ fn create_enchantment_adventure_in_hand(state: &mut GameState, player: PlayerId)
         casting_restrictions: Vec::new(),
         casting_options: Vec::new(),
         layout_kind: Some(LayoutKind::Adventure),
+        parse_warnings: vec![],
     });
 
     obj_id
@@ -26866,6 +26869,7 @@ fn create_omen_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId {
         casting_restrictions: Vec::new(),
         casting_options: Vec::new(),
         layout_kind: Some(LayoutKind::Omen),
+        parse_warnings: vec![],
     });
 
     obj_id
@@ -30680,6 +30684,7 @@ fn add_disturb_creature_to_graveyard(
         casting_restrictions: Vec::new(),
         casting_options: Vec::new(),
         layout_kind: Some(LayoutKind::Transform),
+        parse_warnings: vec![],
     });
     obj_id
 }
@@ -36967,6 +36972,7 @@ mod mtmte_cast_flow {
             casting_restrictions: Vec::new(),
             casting_options: Vec::new(),
             layout_kind: Some(LayoutKind::Transform),
+            parse_warnings: vec![],
         }
     }
 
@@ -50977,6 +50983,7 @@ fn exact_resolution_offer_does_not_inherit_sibling_cast_transformed() {
             casting_restrictions: Vec::new(),
             casting_options: Vec::new(),
             layout_kind: Some(LayoutKind::Transform),
+            parse_warnings: vec![],
         });
         obj.casting_permissions
             .push(CastingPermission::ExileWithAltCost {

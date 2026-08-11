@@ -82,12 +82,49 @@
     "picking": "Scelta…",
     "autoPick": "Scelta automatica"
   },
+  "sealedOpening": {
+    "title": "Apri il tuo pool Sealed",
+    "subtitle": "Apri sei buste, una alla volta.",
+    "packProgress": "Busta {{current}} di {{total}}",
+    "openPack": "Apri busta",
+    "openPackArt": "Apri l’illustrazione della busta",
+    "pulls": "Le tue carte",
+    "nextPack": "Busta successiva",
+    "viewPool": "Vedi il tuo pool",
+    "poolTitle": "Il tuo pool Sealed",
+    "poolSubtitle": "Tutte le {{count}} carte, raggruppate per tipo.",
+    "buildDeck": "Costruisci il mazzo"
+  },
   "pool": {
     "cardsDrafted": "{{count}} carte draftate",
     "empty": "Nessuna carta ancora draftata",
     "sortColor": "Colore",
     "sortType": "Tipo",
-    "sortCmc": "CMC"
+    "sortCmc": "CMC",
+    "groups": {
+      "white": "Bianco",
+      "blue": "Blu",
+      "black": "Nero",
+      "red": "Rosso",
+      "green": "Verde",
+      "multicolor": "Multicolore",
+      "colorless": "Incolore",
+      "creature": "Creatura",
+      "instant": "Istantaneo",
+      "sorcery": "Stregoneria",
+      "enchantment": "Incantesimo",
+      "artifact": "Artefatto",
+      "planeswalker": "Planeswalker",
+      "land": "Terra",
+      "other": "Altro",
+      "manaValue0": "0 CMC",
+      "manaValue1": "1 CMC",
+      "manaValue2": "2 CMC",
+      "manaValue3": "3 CMC",
+      "manaValue4": "4 CMC",
+      "manaValue5": "5 CMC",
+      "manaValue6Plus": "6+ CMC"
+    }
   },
   "standings": {
     "title": "Classifica — Round {{round}}",
@@ -129,6 +166,10 @@
       "title": "Quick Draft",
       "description": "Drafta 3 buste con 7 draftatori IA, costruisci un mazzo da 40 carte, poi gioca una partita Bo1 contro uno di loro."
     },
+    "sealed": {
+      "title": "Sealed",
+      "description": "Apri sei buste, esamina il pool completo e poi costruisci un mazzo da 40 carte per una partita Bo1."
+    },
     "cubeDraft": {
       "title": "Cube Draft",
       "description": "Incolla o carica una lista cube, regola le regole di busta e mazzo, poi fai un quick draft contro i bot IA."
@@ -159,6 +200,7 @@
   },
   "quickPhase": {
     "drafting": "Draft",
+    "opening": "Apertura buste",
     "deckbuilding": "Costruzione mazzo",
     "matchRecord": "Partita {{number}} — {{wins}}V-{{losses}}S",
     "record": "{{wins}}V-{{losses}}S",

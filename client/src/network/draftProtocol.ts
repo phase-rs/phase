@@ -39,8 +39,9 @@ import type {
  *   6 — durable authorized Bo3 intergame command ledger
  *   7 — forward authenticated match-host between-games observations
  *   8 — add Sealed event kind and deckbuilding-first start flow
+ *   9 — add engine-owned limited-pool presentation groups
  */
-export const DRAFT_PROTOCOL_VERSION = 8 as const;
+export const DRAFT_PROTOCOL_VERSION = 9 as const;
 
 /**
  * Typed reason for a draft pause, used over the wire and on the i18n key path.

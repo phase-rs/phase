@@ -558,7 +558,7 @@ mod tests {
         (state, source)
     }
 
-    /// Forces `LazyLock` evaluation in `cargo test -p engine` so an unknown
+    /// Forces `LazyLock` evaluation in `cargo test -p phase-engine` so an unknown
     /// `Keyword`/`CoreType`/`ManaColor` variant or a duplicate id panics in
     /// CI rather than at first production access. (Malformed TOML fails
     /// earlier, in `build.rs`; the structural conversion there cannot catch

@@ -97,6 +97,7 @@ fn wedding_announcement_human_branch_transforms_and_applies_festivity_anthem() {
             casting_restrictions: vec![],
             casting_options: vec![],
             layout_kind: None,
+            parse_warnings: vec![],
         });
         wedding
     };

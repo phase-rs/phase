@@ -118,13 +118,13 @@ jobs:
           ./scripts/check-test-card-data-load.sh "$BASE"
 
   rust-test:
-    name: Rust tests (shard ${{ matrix.shard }}/2)
+    name: Rust tests (shard ${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
 
@@ -174,7 +174,7 @@ jobs:
         # caught before it lands on the branch that feeds staging/preview.
         env:
           PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '32' || '256' }}
-        run: cargo nextest run --profile ci --partition count:${{ matrix.shard }}/2 --workspace --exclude phase-tauri --exclude mtgish-import --features engine/proptest --status-level fail --final-status-level fail
+        run: cargo nextest run --profile ci --partition count:${{ matrix.shard }}/4 --workspace --exclude phase-tauri --exclude mtgish-import --features engine/proptest --status-level fail --final-status-level fail
 
   card-data-gate:
     name: Card data (generate, validate, coverage)
@@ -297,6 +297,13 @@ jobs:
         if: steps.cardgen-cache.outputs.cache-hit != 'true'
         run: |
           cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
+
+      - name: Verify Gemstone Caverns production-export drift guard
+        run: |
+          test -s data/card-data.json
+          test_name='gemstone_caverns_begin_game::gemstone_caverns_full_export_retains_luck_counter_mana_contract'
+          cargo test -p phase-engine --test integration "$test_name" -- --exact 2>&1 | tee /tmp/gemstone-export-guard.log
+          grep -F 'test result: ok. 1 passed' /tmp/gemstone-export-guard.log
 
       - name: Card export must not mutate the tracked parser vocabulary
         # Regression guard: the export is a PURE READ of the tracked tree.

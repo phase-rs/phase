@@ -39,6 +39,12 @@ const view: DraftPlayerView = {
     },
   ],
   pool: [],
+  pool_groups: {
+    color_groups: [],
+    type_groups: [],
+    cmc_groups: [],
+    color_counts: { white: 0, blue: 0, black: 0, red: 0, green: 0 },
+  },
   seats: [],
   cards_per_pack: 14,
   pack_count: 3,

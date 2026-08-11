@@ -14656,7 +14656,7 @@ mod tests {
     /// `compute_combat_tax` hot path after #4312/#4329: go-wide attackers
     /// against several active tax statics. Run explicitly with:
     ///
-    /// `cargo test -p engine combat_tax_profile_gate_go_wide_board -- --ignored --nocapture`
+    /// `cargo test -p phase-engine combat_tax_profile_gate_go_wide_board -- --ignored --nocapture`
     #[test]
     #[ignore = "perf benchmark; run manually"]
     fn combat_tax_profile_gate_go_wide_board() {

@@ -104,6 +104,7 @@ fn siege_victory_cast_during_resolution_enters_transformed() {
             casting_restrictions: Vec::new(),
             casting_options: Vec::new(),
             layout_kind: None,
+            parse_warnings: vec![],
         });
     }
 

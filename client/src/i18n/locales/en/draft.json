@@ -82,12 +82,49 @@
     "picking": "Picking…",
     "autoPick": "Auto-pick"
   },
+  "sealedOpening": {
+    "title": "Open your sealed pool",
+    "subtitle": "Open six packs, one at a time.",
+    "packProgress": "Pack {{current}} of {{total}}",
+    "openPack": "Open pack",
+    "openPackArt": "Open pack artwork",
+    "pulls": "Your pulls",
+    "nextPack": "Next pack",
+    "viewPool": "View your pool",
+    "poolTitle": "Your sealed pool",
+    "poolSubtitle": "All {{count}} cards, grouped by type.",
+    "buildDeck": "Build deck"
+  },
   "pool": {
     "cardsDrafted": "{{count}} cards drafted",
     "empty": "No cards drafted yet",
     "sortColor": "Color",
     "sortType": "Type",
-    "sortCmc": "CMC"
+    "sortCmc": "CMC",
+    "groups": {
+      "white": "White",
+      "blue": "Blue",
+      "black": "Black",
+      "red": "Red",
+      "green": "Green",
+      "multicolor": "Multicolor",
+      "colorless": "Colorless",
+      "creature": "Creature",
+      "instant": "Instant",
+      "sorcery": "Sorcery",
+      "enchantment": "Enchantment",
+      "artifact": "Artifact",
+      "planeswalker": "Planeswalker",
+      "land": "Land",
+      "other": "Other",
+      "manaValue0": "0 CMC",
+      "manaValue1": "1 CMC",
+      "manaValue2": "2 CMC",
+      "manaValue3": "3 CMC",
+      "manaValue4": "4 CMC",
+      "manaValue5": "5 CMC",
+      "manaValue6Plus": "6+ CMC"
+    }
   },
   "standings": {
     "title": "Standings — Round {{round}}",
@@ -129,6 +166,10 @@
       "title": "Quick Draft",
       "description": "Draft 3 packs with 7 AI drafters, build a 40-card deck, then play a Bo1 match against one of them."
     },
+    "sealed": {
+      "title": "Sealed",
+      "description": "Open six packs, review the full pool, then build a 40-card deck for a Bo1 match."
+    },
     "cubeDraft": {
       "title": "Cube Draft",
       "description": "Paste or load a cube list, tune pack and deck rules, then quick draft against AI bots."
@@ -159,6 +200,7 @@
   },
   "quickPhase": {
     "drafting": "Drafting",
+    "opening": "Opening Packs",
     "deckbuilding": "Deck Building",
     "matchRecord": "Match {{number}} — {{wins}}W-{{losses}}L",
     "record": "{{wins}}W-{{losses}}L",

@@ -4088,6 +4088,93 @@ fn trigger_attacks_you_or_planeswalker_not_split() {
     );
 }
 
+/// CR 603.1 + CR 603.2: a SUBJECT disjunction ("<self> or <class> <verb>") is
+/// one trigger with an `Or` subject, not a cross-subject compound. The
+/// second-half event-verb gate in `split_cross_subject_event_compound` cannot
+/// tell the two apart on its own — Ironsoul Enforcer's second subject is
+/// followed by "attacks", a narrow-lexicon active-voice verb — so the split
+/// also requires an event in the FIRST half. Without that symmetric gate the
+/// line splits into `Unknown("Whenever ~")` + the commander leg, silently
+/// dropping the self leg so the card never fires off its own attack.
+///
+/// This is the production path (`parse_trigger_lines`); `parse_trigger_line`
+/// alone never reaches the splitter and so cannot catch the regression.
+#[test]
+fn trigger_self_or_class_subject_disjunction_not_split() {
+    let triggers = parse_trigger_lines(
+        "Whenever this creature or a commander you control attacks alone, return target artifact card from your graveyard to the battlefield.",
+        "Ironsoul Enforcer",
+    );
+    assert_eq!(
+        triggers.len(),
+        1,
+        "a shared-event subject disjunction must stay one trigger: {:?}",
+        triggers.iter().map(|t| &t.mode).collect::<Vec<_>>()
+    );
+    assert_eq!(triggers[0].mode, TriggerMode::Attacks);
+    let Some(TargetFilter::Or { filters }) = triggers[0].valid_card.as_ref() else {
+        panic!("expected an Or subject, got {:?}", triggers[0].valid_card);
+    };
+    assert_eq!(filters.len(), 2, "one leg per subject: {filters:?}");
+    assert_eq!(filters[0], TargetFilter::SelfRef);
+    assert!(
+        matches!(&filters[1], TargetFilter::Typed(tf)
+            if tf.properties.contains(&FilterProp::IsCommander)),
+        "CR 903.3: second leg must carry IsCommander, got {:?}",
+        filters[1]
+    );
+    assert_eq!(
+        triggers[0].condition,
+        Some(TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::MinCoAttackers {
+                minimum: 1,
+                filter: None,
+            }),
+        }),
+        "CR 506.5: the alone gate applies to whichever subject attacked"
+    );
+}
+
+/// CR 603.1: the same gate, a different event family — the fix must be
+/// class-level, not attack-specific. Campsite Cuisine's "this enchantment or a
+/// legendary creature you control enters" shares one ETB event between two
+/// subjects; before the first-half gate it split into `Unknown("Whenever ~")`
+/// plus the legendary-creature leg, so the enchantment's own ETB never fired.
+#[test]
+fn trigger_self_or_class_subject_disjunction_not_split_etb() {
+    let triggers = parse_trigger_lines(
+        "Whenever this enchantment or a legendary creature you control enters, create a Food token.",
+        "Campsite Cuisine",
+    );
+    assert_eq!(
+        triggers.len(),
+        1,
+        "a shared-ETB subject disjunction must stay one trigger: {:?}",
+        triggers.iter().map(|t| &t.mode).collect::<Vec<_>>()
+    );
+    assert_eq!(triggers[0].mode, TriggerMode::ChangesZone);
+    assert_eq!(triggers[0].destination, Some(Zone::Battlefield));
+    let Some(TargetFilter::Or { filters }) = triggers[0].valid_card.as_ref() else {
+        panic!("expected an Or subject, got {:?}", triggers[0].valid_card);
+    };
+    assert_eq!(filters.len(), 2, "one leg per subject: {filters:?}");
+    assert_eq!(
+        filters[0],
+        TargetFilter::SelfRef,
+        "the source's own ETB leg must survive the split gate"
+    );
+    assert!(
+        matches!(&filters[1], TargetFilter::Typed(tf)
+        if tf.controller == Some(ControllerRef::You)
+            && tf.type_filters == vec![TypeFilter::Creature]
+            && tf.properties.contains(&FilterProp::HasSupertype {
+                value: Supertype::Legendary
+            })),
+        "second leg must be a legendary creature you control, got {:?}",
+        filters[1]
+    );
+}
+
 #[test]
 fn trigger_counter_put_on_self() {
     let def = parse_trigger_line(
@@ -14832,6 +14919,50 @@ fn trigger_dragon_you_control_attacks() {
                 .subtype("Dragon".to_string())
                 .controller(ControllerRef::You)
         ))
+    );
+}
+
+/// CR 506.5 + CR 903.3: a *disjunctive* attacks-alone subject — a
+/// self-reference OR'd with a non-self class (Ironsoul Enforcer's "this
+/// creature or a commander you control"). Two building blocks must compose:
+/// `parse_trigger_subject`'s `" or "` fold must produce an `Or` whose second
+/// leg carries `FilterProp::IsCommander` (the CR 903.3 designation, NOT a
+/// subtype), and `strip_attack_alone_qualifier` must still gate the whole
+/// trigger on zero co-attackers. The alone-gate lives on the condition, not on
+/// either leg, so it applies to whichever disjunct matched.
+#[test]
+fn trigger_self_or_commander_attacks_alone() {
+    let def = parse_trigger_line(
+        "Whenever this creature or a commander you control attacks alone, return target artifact card from your graveyard to the battlefield.",
+        "Ironsoul Enforcer",
+    );
+    assert!(matches!(def.mode, TriggerMode::Attacks));
+    let Some(TargetFilter::Or { filters }) = def.valid_card.as_ref() else {
+        panic!("expected a disjunctive subject, got {:?}", def.valid_card);
+    };
+    assert_eq!(filters.len(), 2, "one leg per disjunct: {filters:?}");
+    assert_eq!(
+        filters[0],
+        TargetFilter::SelfRef,
+        "\"this creature\" must bind to the trigger source"
+    );
+    let TargetFilter::Typed(commander) = &filters[1] else {
+        panic!("expected a typed commander leg, got {:?}", filters[1]);
+    };
+    assert_eq!(commander.controller, Some(ControllerRef::You));
+    assert!(
+        commander.properties.contains(&FilterProp::IsCommander),
+        "CR 903.3: \"commander\" is the IsCommander designation, not a subtype: {commander:?}"
+    );
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::MinCoAttackers {
+                minimum: 1,
+                filter: None,
+            }),
+        }),
+        "CR 506.5: the alone gate must survive the disjunctive subject"
     );
 }
 

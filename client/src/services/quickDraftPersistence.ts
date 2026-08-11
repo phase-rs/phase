@@ -15,7 +15,7 @@ export interface ActiveQuickDraftMeta {
   difficulty: number;
   /** Defaults to Quick for snapshots created before local Sealed existed. */
   kind?: LocalDraftKind;
-  phase: "drafting" | "deckbuilding" | "launching" | "playing" | "complete";
+  phase: "drafting" | "opening" | "deckbuilding" | "launching" | "playing" | "complete";
   pickCount: number;
   updatedAt: number;
   runFormat?: DraftRunFormat;

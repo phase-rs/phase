@@ -24719,6 +24719,7 @@ pub mod tests {
                 casting_restrictions: vec![],
                 casting_options: vec![],
                 layout_kind: None,
+                parse_warnings: vec![],
             });
         }
 
@@ -37537,7 +37538,7 @@ pub mod tests {
     /// Requires `/tmp/gamestate.json` to be present (the captured snapshot
     /// is not committed). Skips cleanly when absent.
     #[test]
-    #[ignore = "perf benchmark; run with `cargo test -p engine scute_swarm_throughput -- --ignored --nocapture`"]
+    #[ignore = "perf benchmark; run with `cargo test -p phase-engine scute_swarm_throughput -- --ignored --nocapture`"]
     fn scute_swarm_throughput() {
         let path = "/tmp/gamestate.json";
         let raw = match std::fs::read_to_string(path) {

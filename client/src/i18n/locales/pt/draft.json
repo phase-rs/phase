@@ -82,12 +82,49 @@
     "picking": "Escolhendo…",
     "autoPick": "Escolha automática"
   },
+  "sealedOpening": {
+    "title": "Abra seu pool de Selado",
+    "subtitle": "Abra seis boosters, um de cada vez.",
+    "packProgress": "Booster {{current}} de {{total}}",
+    "openPack": "Abrir booster",
+    "openPackArt": "Abrir arte do booster",
+    "pulls": "Suas cartas",
+    "nextPack": "Próximo booster",
+    "viewPool": "Ver seu pool",
+    "poolTitle": "Seu pool de Selado",
+    "poolSubtitle": "Todas as {{count}} cartas, agrupadas por tipo.",
+    "buildDeck": "Montar deck"
+  },
   "pool": {
     "cardsDrafted": "{{count}} cartas draftadas",
     "empty": "Nenhuma carta draftada ainda",
     "sortColor": "Cor",
     "sortType": "Tipo",
-    "sortCmc": "CMC"
+    "sortCmc": "CMC",
+    "groups": {
+      "white": "Branco",
+      "blue": "Azul",
+      "black": "Preto",
+      "red": "Vermelho",
+      "green": "Verde",
+      "multicolor": "Multicolorido",
+      "colorless": "Incolor",
+      "creature": "Criatura",
+      "instant": "Mágica instantânea",
+      "sorcery": "Feitiço",
+      "enchantment": "Encantamento",
+      "artifact": "Artefato",
+      "planeswalker": "Planeswalker",
+      "land": "Terreno",
+      "other": "Outro",
+      "manaValue0": "0 CMC",
+      "manaValue1": "1 CMC",
+      "manaValue2": "2 CMC",
+      "manaValue3": "3 CMC",
+      "manaValue4": "4 CMC",
+      "manaValue5": "5 CMC",
+      "manaValue6Plus": "6+ CMC"
+    }
   },
   "standings": {
     "title": "Classificação — Rodada {{round}}",
@@ -129,6 +166,10 @@
       "title": "Quick Draft",
       "description": "Drafte 3 boosters com 7 draftadores de IA, monte um deck de 40 cartas e jogue uma partida Bo1 contra um deles."
     },
+    "sealed": {
+      "title": "Sealed",
+      "description": "Abra seis boosters, revise o pool completo e depois monte um deck de 40 cartas para uma partida Bo1."
+    },
     "cubeDraft": {
       "title": "Cube Draft",
       "description": "Cole ou carregue uma lista de Cube, ajuste as regras de booster e deck e depois faça um quick draft contra bots de IA."
@@ -159,6 +200,7 @@
   },
   "quickPhase": {
     "drafting": "Draftando",
+    "opening": "Abrindo boosters",
     "deckbuilding": "Montagem de Deck",
     "matchRecord": "Partida {{number}} — {{wins}}V-{{losses}}D",
     "record": "{{wins}}V-{{losses}}D",

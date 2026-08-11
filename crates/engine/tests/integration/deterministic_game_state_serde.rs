@@ -1191,6 +1191,7 @@ fn back_face(name: &str) -> BackFaceData {
         casting_restrictions: Vec::new(),
         casting_options: Vec::new(),
         layout_kind: None,
+        parse_warnings: vec![],
     }
 }
 

@@ -62,6 +62,7 @@ fn make_back_face(
         casting_restrictions: Vec::new(),
         casting_options: Vec::new(),
         layout_kind,
+        parse_warnings: vec![],
     }
 }
 

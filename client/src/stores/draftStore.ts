@@ -27,7 +27,7 @@ import type {
 
 // ── Types ───────────────────────────────────────────────────────────────
 
-export type DraftPhase = "setup" | "drafting" | "deckbuilding" | "launching" | "playing" | "complete";
+export type DraftPhase = "setup" | "drafting" | "opening" | "deckbuilding" | "launching" | "playing" | "complete";
 export type LocalDraftKind = "Quick" | "Sealed";
 export type PoolSortMode = "color" | "type" | "cmc";
 
@@ -53,6 +53,7 @@ interface DraftStoreActions {
   startDraft: (setPoolJson: string, setCode: string, setName: string, difficulty: number) => Promise<void>;
   startSealedDraft: (setPoolJson: string, setCode: string, setName: string, difficulty: number) => Promise<void>;
   startCubeDraft: (cubeListText: string, cubeName: string, settings: CubeDraftSettings, difficulty: number) => Promise<void>;
+  completeSealedOpening: () => void;
   resumeDraft: () => Promise<void>;
   abandonDraft: () => Promise<void>;
   pickCard: (cardInstanceId: string) => Promise<void>;
@@ -182,6 +183,15 @@ function persistDraftDebounced(): void {
   debounceTimer = setTimeout(persistDraft, 500);
 }
 
+function phaseForView(view: DraftPlayerView, persistedPhase: DraftPhase): DraftPhase {
+  if (view.status === "Deckbuilding") {
+    return view.kind === "Sealed" && persistedPhase === "opening"
+      ? "opening"
+      : "deckbuilding";
+  }
+  return view.status === "Pairing" ? "launching" : persistedPhase;
+}
+
 /** Apply an updated draft view after a pick (manual or auto) and persist. */
 function applyPickResult(view: DraftPlayerView): void {
   const nextPhase: DraftPhase =
@@ -249,7 +259,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
         draftId,
         adapter,
         view,
-        phase: view.status === "Deckbuilding" ? "deckbuilding" : "drafting",
+        phase: "opening",
         difficulty,
         selectedSet: setCode,
         selectedSetName: setName,
@@ -296,6 +306,11 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
       persistDraft();
     },
 
+    completeSealedOpening: () => {
+      set({ phase: "deckbuilding" });
+      persistDraft();
+    },
+
     resumeDraft: async () => {
       const meta = loadActiveQuickDraft();
       if (!meta) return;
@@ -331,11 +346,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
           draftId: meta.id,
           adapter,
           view,
-          phase: view.status === "Deckbuilding"
-            ? "deckbuilding"
-            : view.status === "Pairing"
-              ? "launching"
-              : meta.phase,
+          phase: phaseForView(view, meta.phase),
           difficulty: meta.difficulty,
           selectedSet: meta.setCode,
           selectedSetName: meta.setName ?? null,
@@ -372,11 +383,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
           draftId: meta.id,
           adapter,
           view,
-          phase: view.status === "Deckbuilding"
-            ? "deckbuilding"
-            : view.status === "Pairing"
-              ? "launching"
-              : meta.phase,
+          phase: phaseForView(view, meta.phase),
           difficulty: meta.difficulty,
           selectedSet: meta.setCode,
           selectedSetName: meta.setName ?? null,

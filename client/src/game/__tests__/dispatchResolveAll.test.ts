@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BatchResolveResult, EngineSnapshot, GameState } from "../../adapter/types";
 import { nextSnapshotSeq } from "../../adapter/types";
 import { useGameStore } from "../../stores/gameStore";
+import { useAppNotificationStore } from "../../stores/appToastStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { buildGameState, buildPriorityWaitingFor, buildStackEntry } from "../../test/factories/gameStateFactory";
 import { dispatchResolveAll } from "../dispatch";
@@ -41,6 +42,7 @@ describe("dispatchResolveAll progress", () => {
   beforeEach(() => {
     progressCalls = [];
     usePreferencesStore.setState({ animationSpeedMultiplier: 1.0 });
+    useAppNotificationStore.setState({ notification: null, expiresAt: 0 });
     // Stack length read at each iteration start to classify pressure; keep it
     // in the "Instant" band (>=100) so the rAF-yield branch is exercised.
     useGameStore.setState({
@@ -165,6 +167,51 @@ describe("dispatchResolveAll progress", () => {
       { type: "SetAutoPass", data: { mode: { type: "UntilStackEmpty" } } },
       0,
     );
+  });
+
+  it("uses an empty AI-seat list when the adapter delegates native AI ownership to its server", async () => {
+    const resolveAll = vi.fn<EngineResolveAll>().mockResolvedValue(chunk(0, 2));
+    const getState = vi.fn().mockResolvedValue(stateWithStack(0));
+    const submitAction = vi.fn();
+    useGameStore.setState({
+      gameState: stateWithStack(2),
+      adapter: {
+        resolveAll,
+        resolveAllUsesServerAi: true,
+        submitAction,
+        getState,
+        getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
+        getSnapshot: snapshotVia(getState),
+      } as never,
+    });
+
+    await dispatchResolveAll(0, []);
+
+    expect(resolveAll).toHaveBeenCalledWith(0, [], 5);
+    expect(submitAction).not.toHaveBeenCalled();
+  });
+
+  it("shows a server-provided Resolve All rejection without rejecting the click handler", async () => {
+    const resolveAll = vi
+      .fn<EngineResolveAll>()
+      .mockRejectedValue(new Error("Resolve All requires your priority"));
+    const getState = vi.fn().mockResolvedValue(stateWithStack(2));
+    useGameStore.setState({
+      gameState: stateWithStack(2),
+      adapter: {
+        resolveAll,
+        resolveAllUsesServerAi: true,
+        getState,
+        getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
+        getSnapshot: snapshotVia(getState),
+      } as never,
+    });
+
+    await expect(dispatchResolveAll(0, [])).resolves.toBeUndefined();
+
+    expect(useAppNotificationStore.getState().notification).toMatchObject({
+      description: "Resolve All requires your priority",
+    });
   });
 
   it("falls back to an engine-side UntilStackEmpty auto-pass when the adapter has no batch resolveAll (multiplayer)", async () => {

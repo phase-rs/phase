@@ -10226,8 +10226,8 @@ mod tests {
     /// than a stricter sentence.
     ///
     /// POPULATION IS DISCOVERED, NOT LISTED. The guard walks the crate and enforces on every file
-    /// carrying the opt-in marker comment, so a seventh file joining the class is covered the
-    /// moment it opts in, and a hardcoded list cannot drift out of sync with the class it names.
+    /// carrying the opt-in marker comment, so a newly enrolling file is covered the moment it opts
+    /// in, and a hardcoded list cannot drift out of sync with the class it names.
     /// A whole-crate sweep was measured and rejected as out of scope, not as unnecessary:
     /// `crates/engine/src` carries 216 such anchors across 61 files (`game/engine.rs` alone 29),
     /// ~20x this change. Regenerate that census with:
@@ -10254,7 +10254,7 @@ mod tests {
         const TEST_MOD: &str = "#[cfg(test)]\nmod tests {";
         // Enrolment floor. Not a list — a non-vacuity guard, so a broken walk or a renamed marker
         // reds instead of passing on an empty population. Raise it when a file joins.
-        const ENROLLED_FLOOR: usize = 6;
+        const ENROLLED_FLOOR: usize = 8;
 
         // `CR 732.2a` has no colon; `std::vec` no digit; `field:1` and `{"Life":1}` have a name or
         // a quote before the colon. A bare back-reference is recognized only after whitespace, a

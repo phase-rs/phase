@@ -1234,17 +1234,37 @@ fn parse_commander_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> 
     Ok((rest, QuantityRef::CommanderManaValue { owner }))
 }
 
-/// CR 122.1: Parse "counters among [filter]" — sum across every counter type.
+/// CR 122.1: Parse "[kind] counters among [filter]".
 ///
-/// Used for phrases like "thirty or more counters among artifacts and creatures
-/// you control" (Lux Artillery's intervening-if). The counter type is `None`
-/// because the Oracle text does not restrict to any particular counter kind;
-/// the resolver sums counters of every type on every matching object.
+/// The counter-kind qualifier is optional, which is the whole variation axis of
+/// this phrase:
+///
+/// * absent — "thirty or more counters among artifacts and creatures you
+///   control" (Lux Artillery's intervening-if). `counter_type: None`, and the
+///   resolver sums counters of EVERY kind on every matching object.
+/// * present — "four or more lore counters among Sagas you control" (Tom
+///   Bombadil). `counter_type: Some(kind)` narrows the sum to that kind.
+///
+/// One `opt` rather than two combinators: the qualifier is a leaf parameter of
+/// the same phrase, and every counter kind `parse_counter_type_typed` knows is
+/// covered by writing it once.
 ///
 /// Composes with `parse_there_are_conditions` to form the full
-/// "there are N or more counters among [filter]" condition.
+/// "there are N or more [kind] counters among [filter]" condition.
 fn parse_counters_among_ref(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = tag("counters among ").parse(input)?;
+    // The qualifier and the noun are ONE unit, not an `opt` qualifier followed by
+    // a separate noun: `parse_counter_type_typed` also accepts the bare word
+    // "counters" (as `CounterType::Any`), so an `opt` would succeed on the
+    // untyped phrase, consume the noun as if it were the qualifier, and then
+    // strand the parse with no branch left to back off to.
+    let (rest, counter_type) = alt((
+        map(
+            terminated(parse_counter_type_typed, tag(" counters among ")),
+            Some,
+        ),
+        value(None, tag("counters among ")),
+    ))
+    .parse(input)?;
     let type_text = rest.trim_end_matches('.').trim_end_matches(',');
     let (filter, remainder) = parse_type_phrase(type_text);
     if matches!(filter, TargetFilter::Any) {
@@ -1260,7 +1280,7 @@ fn parse_counters_among_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     Ok((
         &input[consumed..],
         QuantityRef::CountersOnObjects {
-            counter_type: None,
+            counter_type,
             filter,
         },
     ))
@@ -4700,6 +4720,15 @@ fn parse_object_possessive_scope(input: &str) -> OracleResult<'_, ObjectScope> {
         value(ObjectScope::Target, tag("target creature's")),
         value(ObjectScope::Target, tag("target permanent's")),
         value(ObjectScope::EventSource, tag("that spell's")),
+        // CR 608.2k + CR 714.2e: "that Saga's mana value" (Narci, Fable Singer).
+        // Same shape as the "that spell's" arm above and bound the same way: an
+        // untargeted back-reference to the object the TRIGGER CONDITION named,
+        // not a threaded target. The "that <core type>'s" arms below bind to
+        // `Target` because their referent is a target this ability announced;
+        // a Saga-chapter meta-trigger announces none, so `EventSource` — the
+        // Saga carried by `GameEvent::SagaChapterAbilityResolved` — is the only
+        // referent that exists.
+        value(ObjectScope::EventSource, tag("that saga's")),
         // CR 202.3 + CR 608.2c: "that <type> card's" — the type-qualified anaphor
         // for the exile-until hit ("that nonland card's mana value", Lady Loki).
         // The type qualifier is REQUIRED, not optional: a bare "that card's" is

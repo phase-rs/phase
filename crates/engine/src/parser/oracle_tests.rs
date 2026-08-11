@@ -2839,6 +2839,125 @@ fn sita_varma_full_card_supported_inverted_genitive_base_pt() {
     );
 }
 
+/// CR 603.2 + CR 115.1 + CR 208.1 + CR 613.4b: Exuberant Wolfbear's attack
+/// trigger uses the transitive inverted-genitive base-P/T form, "change the
+/// base power and toughness of target Human you control to this creature's
+/// power and toughness." The target must remain a real target slot (rather
+/// than a resolution-time descriptor), and each axis reads the attacking source.
+#[test]
+fn exuberant_wolfbear_full_oracle_attack_trigger_targets_human_and_sets_dynamic_base_pt() {
+    const ORACLE: &str = "Whenever this creature attacks, you may change the base power and toughness of target Human you control to this creature's power and toughness until end of turn.";
+
+    let parsed = parse(
+        ORACLE,
+        "Exuberant Wolfbear",
+        &[],
+        &["Creature"],
+        &["Wolf", "Bear"],
+    );
+    assert_eq!(
+        parsed.triggers.len(),
+        1,
+        "expected one attack trigger: {parsed:#?}"
+    );
+    assert!(
+        parsed
+            .abilities
+            .iter()
+            .all(|ability| !matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })),
+        "Wolfbear must not produce standalone Unimplemented abilities: {parsed:#?}"
+    );
+
+    let trigger = &parsed.triggers[0];
+    assert_eq!(trigger.mode, TriggerMode::Attacks);
+    assert!(trigger.optional, "'you may' must keep the trigger optional");
+    let execute = trigger
+        .execute
+        .as_deref()
+        .expect("attack trigger must have an execute body");
+
+    fn assert_no_unimplemented(definition: &AbilityDefinition) {
+        assert!(
+            !matches!(definition.effect.as_ref(), Effect::Unimplemented { .. }),
+            "unexpected unimplemented effect: {definition:#?}"
+        );
+        if let Some(sub_ability) = definition.sub_ability.as_deref() {
+            assert_no_unimplemented(sub_ability);
+        }
+    }
+    assert_no_unimplemented(execute);
+
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        target,
+        ..
+    } = execute.effect.as_ref()
+    else {
+        panic!("expected base-P/T GenericEffect, got {:#?}", execute.effect);
+    };
+    assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+    assert_eq!(
+        target,
+        &Some(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Subtype("Human".to_string()))
+                .controller(ControllerRef::You)
+        )),
+        "the explicit target keyword must produce a Human-you-control target slot"
+    );
+
+    let modifications = &static_abilities[0].modifications;
+    for (label, modification) in [
+        (
+            "power",
+            ContinuousModification::SetPowerDynamic {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Source,
+                    },
+                },
+            },
+        ),
+        (
+            "toughness",
+            ContinuousModification::SetToughnessDynamic {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Toughness {
+                        scope: ObjectScope::Source,
+                    },
+                },
+            },
+        ),
+    ] {
+        assert!(
+            modifications.contains(&modification),
+            "Wolfbear must set dynamic base {label} from the source: {modifications:#?}"
+        );
+    }
+}
+
+/// Regression: Brine Hag's durationless, descriptor-scoped inverted transitive
+/// base-P/T effect must remain an explicit parser gap. Only the `target`
+/// syntactic form can use the new target-slot lowering path.
+#[test]
+fn brine_hag_durationless_descriptor_base_pt_effect_remains_unimplemented() {
+    const ORACLE: &str = "When this creature dies, change the base power and toughness of all creatures that dealt damage to it this turn to 0/2. (This effect lasts indefinitely.)";
+
+    let parsed = parse(ORACLE, "Brine Hag", &[], &["Creature"], &[]);
+    assert_eq!(
+        parsed.triggers.len(),
+        1,
+        "expected Brine Hag's dies trigger: {parsed:#?}"
+    );
+    assert!(
+        has_unimplemented_mentioning(
+            &parsed,
+            "change the base power and toughness of all creatures that dealt damage to it this turn to 0/2",
+        ),
+        "the durationless descriptor form must not lower through the target-only path: {parsed:#?}"
+    );
+}
+
 /// CR 601.2a + CR 609.4b + CR 601.3b: Azula, Cunning Usurper — the
 /// cast-from-exile static line must lower to a supported
 /// `StaticMode::ExileCastPermission` carrying the persistent Cast permission,

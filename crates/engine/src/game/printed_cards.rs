@@ -184,6 +184,10 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     obj.base_printed_ref = obj.printed_ref.clone();
     obj.source_related_token_ids = card_face.metadata.related_token_ids.clone();
     obj.spellbook = card_face.metadata.spellbook.clone();
+    // Evidence that this face's printed text did not parse cleanly. Carried onto
+    // the object so a consumer can tell "this card has no such ability" apart from
+    // "the parser could not read that clause".
+    obj.parse_warnings = card_face.parse_warnings.clone();
     obj.modal = card_face.modal.clone();
     obj.additional_cost = card_face.additional_cost.clone();
     obj.strive_cost = card_face.strive_cost.clone();
@@ -292,6 +296,9 @@ pub fn apply_card_face_to_back_face(back_face: &mut BackFaceData, card_face: &Ca
     back_face.strive_cost = card_face.strive_cost.clone();
     back_face.casting_restrictions = card_face.casting_restrictions.clone();
     back_face.casting_options = card_face.casting_options.clone();
+    // Same copy, same reason, as `apply_card_face_to_object`: evidence that THIS
+    // face's printed text did not parse cleanly travels with the face.
+    back_face.parse_warnings = card_face.parse_warnings.clone();
 }
 
 pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) {
@@ -341,6 +348,10 @@ pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) 
     obj.strive_cost = back_face.strive_cost;
     obj.casting_restrictions = back_face.casting_restrictions;
     obj.casting_options = back_face.casting_options;
+    // The displayed face's diagnostics replace the outgoing face's. Both
+    // directions matter and both are this one line: a back face the parser could
+    // not fully read starts gating here, and transforming back off it stops.
+    obj.parse_warnings = back_face.parse_warnings;
 }
 
 /// CR 306.5b + CR 310.4b + CR 614.1c: Seed the intrinsic "enters with N
@@ -743,6 +754,9 @@ pub fn snapshot_object_face(obj: &GameObject) -> BackFaceData {
         strive_cost: obj.strive_cost.clone(),
         casting_restrictions: obj.casting_restrictions.clone(),
         casting_options: obj.casting_options.clone(),
+        // The outgoing face's diagnostics ride out with it, so the return trip
+        // restores them rather than inheriting whatever the other face had.
+        parse_warnings: obj.parse_warnings.clone(),
         layout_kind: None,
     }
 }
@@ -788,6 +802,10 @@ pub fn snapshot_object_base_face(obj: &GameObject) -> BackFaceData {
         strive_cost: obj.strive_cost.clone(),
         casting_restrictions: obj.casting_restrictions.clone(),
         casting_options: obj.casting_options.clone(),
+        // Face-derived, with no base/live split to choose between: nothing writes
+        // `parse_warnings` except a face install, so the live field IS the printed
+        // face's diagnostics and the layer system never touches it.
+        parse_warnings: obj.parse_warnings.clone(),
         layout_kind: None,
     }
 }
@@ -1040,6 +1058,8 @@ fn back_face_for_card_face_with_printed_ref(
         strive_cost: None,
         casting_restrictions: Vec::new(),
         casting_options: Vec::new(),
+        // Empty seed; `apply_card_face_to_back_face` below fills it from the face.
+        parse_warnings: Vec::new(),
         layout_kind: None,
     };
     apply_card_face_to_back_face(&mut back, face);
@@ -1902,6 +1922,7 @@ mod tests {
             casting_restrictions: vec![],
             casting_options: vec![],
             layout_kind: None,
+            parse_warnings: vec![],
         });
 
         rehydrate_game_from_card_db(&mut state, &db);

@@ -1807,6 +1807,14 @@ fn hide_card(state: &mut GameState, obj_id: ObjectId) {
         obj.back_face = None;
         obj.token_image_ref = None;
         obj.source_related_token_ids.clear();
+        // CR 400.2: library and hand are hidden zones — a viewer without
+        // look-permission may not see the card's face. `parse_warnings` is
+        // parser evidence derived from that face's printed text (a
+        // `SwallowedClause` carries the rules text verbatim), and only 891 of
+        // 35,657 card faces carry a non-empty vector, so its presence and
+        // contents both fingerprint the card. Redact it with the rest of the
+        // printed identity.
+        obj.parse_warnings.clear();
         obj.foretold = false;
     }
 }
@@ -1836,6 +1844,13 @@ fn redact_face_down_identity_from_observer(obj: &mut crate::game::game_object::G
     obj.printed_ref = None;
     obj.base_printed_ref = None;
     obj.back_face = None;
+    // CR 708.5 + CR 708.2: a face-down permanent has no name and no abilities,
+    // and no player but its controller may look at the card underneath.
+    // `parse_warnings` survives the face-down transformation on the
+    // authoritative object (measured: a manifested card keeps the printed
+    // face's warnings), so it must be redacted here for the same reason
+    // `back_face` is — it is evidence about the hidden printed text.
+    obj.parse_warnings.clear();
 }
 
 /// CR 603.3b + CR 400.2: A pending trigger awaiting its
@@ -2749,6 +2764,116 @@ mod tests {
 
         assert_eq!(hidden.name, "Hidden Card");
         assert!(hidden.back_face.is_none());
+    }
+
+    /// CR 400.2: a hand is a hidden zone. `parse_warnings` is derived from the
+    /// hidden face's printed text — an `IgnoredRemainder`/`SwallowedClause`
+    /// payload quotes that text verbatim, and `skip_serializing_if` makes the
+    /// field's mere presence a fingerprint (891 of 35,657 faces carry one).
+    /// Matched pair: the owner keeps the diagnostic, the opponent gets nothing.
+    /// The owner arm is the reach-guard — without it an empty-opponent
+    /// assertion would pass even if the field were never populated.
+    #[test]
+    fn hidden_hand_card_redacts_parse_warnings_from_opponent() {
+        let mut state = GameState::new_two_player(42);
+        let card_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Warned Card".to_string(),
+            Zone::Hand,
+        );
+        state.objects.get_mut(&card_id).unwrap().parse_warnings = vec![
+            crate::parser::oracle_ir::diagnostic::OracleDiagnostic::IgnoredRemainder {
+                text: "and each opponent loses 2 life".to_string(),
+                parser: "effect_chain".to_string(),
+                line_index: 0,
+            },
+        ];
+
+        let owner_view = filter_state_for_viewer(&state, PlayerId(1));
+        let owned = owner_view.objects.get(&card_id).unwrap();
+        assert_eq!(owned.name, "Warned Card");
+        assert_eq!(
+            owned.parse_warnings.len(),
+            1,
+            "reach guard: the owner must still see the diagnostic, otherwise \
+             the opponent assertion below is vacuous"
+        );
+
+        let opponent_view = filter_state_for_viewer(&state, PlayerId(0));
+        let hidden = opponent_view.objects.get(&card_id).unwrap();
+        assert_eq!(hidden.name, "Hidden Card");
+        assert!(
+            hidden.parse_warnings.is_empty(),
+            "opponent must not receive parse diagnostics for a hidden-zone card"
+        );
+        // The wire payload is the actual leak vector: assert on the serialized
+        // bytes, not just the in-memory field.
+        assert!(
+            !serde_json::to_string(hidden)
+                .unwrap()
+                .contains("each opponent loses 2 life"),
+            "hidden card's serialized payload must not quote its printed text"
+        );
+    }
+
+    /// CR 708.5 + CR 708.2: a face-down permanent has no name and no abilities,
+    /// and only its controller may look at the card underneath. `manifest` does
+    /// not reset `parse_warnings`, so the printed face's diagnostics survive on
+    /// the authoritative object and must be redacted for every other viewer —
+    /// the same reason `back_face` is redacted on this path.
+    #[test]
+    fn face_down_permanent_redacts_parse_warnings_from_observer() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let controller = PlayerId(0);
+        let secret = create_object(
+            &mut state,
+            CardId(7),
+            controller,
+            "Secret Manifest".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&secret).unwrap();
+            obj.card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec![],
+            };
+            obj.parse_warnings = vec![
+                crate::parser::oracle_ir::diagnostic::OracleDiagnostic::IgnoredRemainder {
+                    text: "and each opponent loses 2 life".to_string(),
+                    parser: "effect_chain".to_string(),
+                    line_index: 0,
+                },
+            ];
+        }
+
+        let mut events = Vec::new();
+        manifest(&mut state, controller, &mut events).unwrap();
+        // Reach guard: the field genuinely survives the face-down transform, so
+        // the observer assertion below is not vacuous.
+        assert_eq!(
+            state.objects[&secret].parse_warnings.len(),
+            1,
+            "manifest must leave the printed face's diagnostics on the object"
+        );
+
+        let controller_view = filter_state_for_viewer(&state, controller);
+        assert_eq!(
+            controller_view.objects[&secret].parse_warnings.len(),
+            1,
+            "the controller may look at their own face-down permanent"
+        );
+
+        let observer_view = filter_state_for_viewer(&state, PlayerId(1));
+        let observed = observer_view.objects.get(&secret).unwrap();
+        assert_eq!(observed.name, "Hidden Card");
+        assert!(
+            observed.parse_warnings.is_empty(),
+            "observer must not receive parse diagnostics for a face-down permanent"
+        );
     }
 
     #[test]

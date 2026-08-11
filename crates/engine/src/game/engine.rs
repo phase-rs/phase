@@ -14230,6 +14230,7 @@ mod priority_principal_tests {
             casting_restrictions: Vec::new(),
             casting_options: Vec::new(),
             layout_kind: None,
+            parse_warnings: vec![],
         });
         for _ in 0..mana_count {
             runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
@@ -18687,7 +18688,12 @@ mod bounded_offer_conjunct_tests {
                 .strip_prefix(&root)
                 .expect("under src")
                 .display()
-                .to_string();
+                .to_string()
+                // Canonicalize to forward slashes so the census pins below are
+                // platform-independent: `Path::display()` emits the OS-native
+                // separator (backslash on Windows), but the pins are written in
+                // the crate's forward-slash convention. No-op on Unix/CI.
+                .replace('\\', "/");
             let test_file = rel.trim_end_matches(".rs").ends_with("_tests");
             for (n, line) in lines.iter().enumerate() {
                 if line.trim_start().starts_with("//") {

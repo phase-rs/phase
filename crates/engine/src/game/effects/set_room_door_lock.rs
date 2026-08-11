@@ -139,6 +139,7 @@ mod tests {
             casting_restrictions: Vec::new(),
             casting_options: Vec::new(),
             layout_kind: Some(crate::types::card::LayoutKind::Split),
+            parse_warnings: vec![],
         }
     }
 

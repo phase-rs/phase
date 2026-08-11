@@ -4023,6 +4023,7 @@ mod tests {
                 casting_restrictions: vec![],
                 casting_options: vec![],
                 layout_kind: Some(crate::types::card::LayoutKind::Modal),
+                parse_warnings: vec![],
             });
         }
 
@@ -4188,6 +4189,7 @@ mod tests {
                 casting_restrictions: vec![],
                 casting_options: vec![],
                 layout_kind: Some(crate::types::card::LayoutKind::Modal),
+                parse_warnings: vec![],
             });
         }
         // Apply back face (simulating ChooseModalFace on stack).

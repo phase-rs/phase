@@ -40,7 +40,9 @@ use super::super::oracle_static::{
     parse_continuous_modifications, parse_continuous_subject_filter, parse_static_line,
     parse_static_line_multi, peel_compound_all_quantified_conjuncts,
 };
-use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase};
+use super::super::oracle_target::{
+    parse_target, parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase, TargetSyntax,
+};
 use super::super::oracle_util::{
     merge_or_filters, parse_number, TextPair, SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
 };
@@ -1195,8 +1197,48 @@ fn try_parse_subject_base_pt_set_clause_ast(
             .parse(parse_lower)
             .ok()
     };
-    let (subject, axes, remainder) =
-        if let Some((rest_lower, (axes, _, subject_lower, _, _, _))) = inverted {
+    let targeted_inverted = if is_change {
+        // Transitive inverted genitive: "change the base power [and toughness]
+        // of target <subject> to <value>" (Exuberant Wolfbear). The subject is
+        // a target phrase rather than a possessive, so retain its syntax: only
+        // the explicit `target` keyword creates a target slot on the effect.
+        // Parse the grammatical prefix before delegating the subject phrase to
+        // the shared target parser; then consume the transitive copula from
+        // that parser's exact remainder so a `to` inside the subject cannot be
+        // mistaken for the value boundary.
+        preceded(
+            tag::<_, _, VE>("the "),
+            terminated(parse_base_pt_axes, tag(" of ")),
+        )
+        .parse(parse_lower)
+        .ok()
+        .and_then(|(after_of_lower, axes)| {
+            let target_text = &parse_body[parse_body.len() - after_of_lower.len()..];
+            let (filter, target_remainder, syntax) = parse_target_with_syntax(target_text, ctx);
+            if !matches!(syntax, TargetSyntax::TargetKeyword) {
+                // Durationless inverted-transitive descriptor effects (such as
+                // Brine Hag) need duration provenance the existing
+                // `GenericEffect` representation cannot yet express. Keep
+                // them unsupported rather than lowering them incorrectly as
+                // until-end-of-turn effects; this targeted arm is for cards
+                // such as Exuberant Wolfbear with an explicit duration.
+                return None;
+            }
+            let target_remainder_lower = target_remainder.to_lowercase();
+            let (after_to_lower, _) = tag::<_, _, VE>(" to ")
+                .parse(target_remainder_lower.as_str())
+                .ok()?;
+            let remainder = &target_remainder[target_remainder.len() - after_to_lower.len()..];
+            let application = subject_filter_application(filter, true)?;
+            Some((axes, remainder, application))
+        })
+    } else {
+        None
+    };
+    let (subject, axes, remainder, target_application) =
+        if let Some((axes, remainder, application)) = targeted_inverted {
+            ("", axes, remainder, Some(application))
+        } else if let Some((rest_lower, (axes, _, subject_lower, _, _, _))) = inverted {
             // `subject_lower` is a sub-slice of `parse_lower`; its byte offset is
             // the pointer delta. Recover original case at the same span.
             let subject_start = subject_lower.as_ptr() as usize - parse_lower.as_ptr() as usize;
@@ -1204,7 +1246,7 @@ fn try_parse_subject_base_pt_set_clause_ast(
                 .get(subject_start..subject_start + subject_lower.len())?
                 .trim();
             let remainder = &parse_body[parse_body.len() - rest_lower.len()..];
-            (subject, axes, remainder)
+            (subject, axes, remainder, None)
         } else {
             // Possessive: "<subject>'s base power [and toughness]" followed by the
             // copula (" to " for the transitive "change" frame, else "become[s] ").
@@ -1230,7 +1272,7 @@ fn try_parse_subject_base_pt_set_clause_ast(
             let (rest_lower, ()) = parse_base_pt_copula(rest_lower, is_change).ok()?;
             let subject = parse_body[..subject_lower.len()].trim();
             let remainder = &parse_body[parse_body.len() - rest_lower.len()..];
-            (subject, axes, remainder)
+            (subject, axes, remainder, None)
         };
 
     // Parse the value side. The transitive "change … to" frame carries a bare
@@ -1249,7 +1291,7 @@ fn try_parse_subject_base_pt_set_clause_ast(
     // Parse the optional trailing keyword-grant conjunct ("and they gain trample").
     let keywords = parse_base_pt_set_trailing_keywords(after_pt);
 
-    let application = parse_subject_application(subject, ctx)?;
+    let application = target_application.or_else(|| parse_subject_application(subject, ctx))?;
     let affected = static_affected_for_application(&application);
 
     // CR 208.1 + CR 613.4b: emit per-axis layer-7b set modifications. Fixed
