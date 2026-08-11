@@ -539,6 +539,10 @@ fn trigger_fire_ledger_key_for_replay(
         .unwrap_or_else(|| TriggerFireLedgerKey::Definition(trigger.clone()))
 }
 
+fn history_len(len: usize) -> Result<u32, ResolvedLedgerEditReplayInvariantError> {
+    u32::try_from(len).map_err(|_| ResolvedLedgerEditReplayInvariantError::CounterOverflow)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -610,8 +614,4 @@ mod tests {
         );
         assert_eq!(state.trigger_fire_counts_this_turn.len(), 1);
     }
-}
-
-fn history_len(len: usize) -> Result<u32, ResolvedLedgerEditReplayInvariantError> {
-    u32::try_from(len).map_err(|_| ResolvedLedgerEditReplayInvariantError::CounterOverflow)
 }
