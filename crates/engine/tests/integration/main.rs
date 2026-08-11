@@ -971,6 +971,7 @@ mod throw_instead_tail_class;
 mod timely_ward_regression;
 mod tinybones_joins_up_multi_target;
 mod tobita_master_of_winds_flying_grant;
+mod tom_bombadil_lore_counter_gate;
 mod tombstone_stairwell_per_player_tokens;
 mod top_of_library_mixed_permission;
 mod total_war_attacking_player_scope;
