@@ -442,7 +442,10 @@ fn resume_draw_sequence_outcome(
         );
         match result {
             ReplacementResult::Execute(_) | ReplacementResult::Prevented => {
-                if state.active_draw_sequence().is_some_and(|frame| {
+                if matches!(
+                    state.waiting_for,
+                    crate::types::game_state::WaitingFor::ReplacementChoice { .. }
+                ) || state.active_draw_sequence().is_some_and(|frame| {
                     frame.frame_id == frame_id && frame.pending_delivery.is_some()
                 }) {
                     return DrawSequenceOutcome::Parked(ReplacementResult::NeedsChoice(
