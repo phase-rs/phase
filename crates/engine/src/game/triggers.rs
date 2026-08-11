@@ -11269,20 +11269,9 @@ fn player_field(state: &GameState, controller: PlayerId, f: impl Fn(&Player) -> 
 
 fn trigger_fire_ledger_key(
     definition_ref: &TriggerDefinitionRef,
-    source_context: Option<&TriggerSourceContext>,
+    _source_context: Option<&TriggerSourceContext>,
 ) -> crate::types::ability::TriggerFireLedgerKey {
-    source_context
-        .and_then(|source| {
-            source
-                .trigger_entries
-                .iter()
-                .find(|entry| entry.occurrence == definition_ref.occurrence)
-        })
-        .and_then(|entry| entry.grant_producer.clone())
-        .map(crate::types::ability::TriggerFireLedgerKey::Grant)
-        .unwrap_or_else(|| {
-            crate::types::ability::TriggerFireLedgerKey::Definition(definition_ref.clone())
-        })
+    crate::types::ability::TriggerFireLedgerKey::Definition(definition_ref.clone())
 }
 
 /// Record that a constrained trigger has fired.

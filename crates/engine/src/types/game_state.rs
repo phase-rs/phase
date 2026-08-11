@@ -225,9 +225,6 @@ mod tuple_key_map {
     }
 }
 
-/// Serde adapter for trigger occurrence ledgers. JSON object keys must be
-/// strings, while a `TriggerDefinitionRef` is structured identity; encode the
-/// map as an explicit entry list rather than flattening or guessing a key.
 #[cfg(test)]
 mod legacy_trigger_definition_ref_map {
     use super::*;
@@ -255,6 +252,10 @@ mod legacy_trigger_definition_ref_map {
     }
 }
 
+/// Serde adapter for trigger occurrence ledgers. JSON object keys must be
+/// strings, while a `TriggerDefinitionRef` is structured identity; encode the
+/// map as an explicit entry list. The untagged wire adapter accepts both the
+/// current keyed representation and legacy definition-only entries.
 mod trigger_definition_ref_map {
     use super::*;
 
@@ -311,70 +312,6 @@ where
             .map_err(serde::de::Error::custom)?;
     }
     Ok(objects)
-}
-
-/// Migrates the legacy MaxTimes ledger representation after object trigger
-/// provenance has been restored. A legacy definition key is safe to promote
-/// only when its exact recipient-local grant instance identifies one persisted
-/// producer; equal definition payloads are never used as a fallback.
-fn migrate_legacy_trigger_fire_counts(state: &mut GameState) -> Result<(), String> {
-    let mut producers_by_definition = HashMap::new();
-    for (_, object) in state.objects.iter() {
-        for entry in object.trigger_definitions.iter_all() {
-            let Some(producer) = entry.grant_producer.as_ref() else {
-                continue;
-            };
-            let definition = object.trigger_definition_ref(entry);
-            if let Some(previous) = producers_by_definition.insert(definition, producer.clone()) {
-                if previous != *producer {
-                    return Err(
-                        "legacy trigger ledger definition maps to conflicting grant producers"
-                            .to_string(),
-                    );
-                }
-            }
-        }
-    }
-
-    let legacy_counts: Vec<_> = state
-        .trigger_fire_counts_this_turn
-        .iter()
-        .filter_map(|(key, count)| match key {
-            TriggerFireLedgerKey::Definition(definition) => producers_by_definition
-                .get(definition)
-                .cloned()
-                .map(|producer| (definition.clone(), producer, *count)),
-            TriggerFireLedgerKey::Grant(_) => None,
-        })
-        .collect();
-
-    let mut migrated_counts: HashMap<_, u32> = HashMap::new();
-    let mut legacy_definitions = Vec::with_capacity(legacy_counts.len());
-    for (definition, producer, count) in legacy_counts {
-        let total = migrated_counts.entry(producer).or_insert(0);
-        *total = (*total)
-            .checked_add(count)
-            .ok_or_else(|| "legacy trigger ledger count overflow".to_string())?;
-        legacy_definitions.push(definition);
-    }
-
-    for producer in migrated_counts.keys() {
-        let grant_key = TriggerFireLedgerKey::Grant(producer.clone());
-        if state.trigger_fire_counts_this_turn.contains_key(&grant_key) {
-            return Err("legacy trigger ledger migration collides with a grant count".to_string());
-        }
-    }
-    for definition in legacy_definitions {
-        state
-            .trigger_fire_counts_this_turn
-            .remove(&TriggerFireLedgerKey::Definition(definition));
-    }
-    for (producer, count) in migrated_counts {
-        state
-            .trigger_fire_counts_this_turn
-            .insert(TriggerFireLedgerKey::Grant(producer), count);
-    }
-    Ok(())
 }
 
 /// Tracks whether the game is in day or night state (CR 730).
@@ -16049,7 +15986,6 @@ impl GameStateDecode {
         let mut state = serde_json::from_value::<ResolutionStateWire>(value)
             .map(ResolutionStateWire::into_game_state)
             .map_err(|error| error.to_string())?;
-        migrate_legacy_trigger_fire_counts(&mut state)?;
         validate_restored_zone_change_replay_keys(&state)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         validate_trigger_firing_coherence(&state)?;
@@ -16075,7 +16011,6 @@ impl GameStateDecode {
             )?;
         }
         let mut state = Self::materialize_prepared(value)?;
-        migrate_legacy_trigger_fire_counts(&mut state)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         validate_trigger_firing_coherence(&state)?;
         // Both decode entry points guard, because they are genuinely two ingresses:
@@ -28511,7 +28446,7 @@ mod tests {
     }
 
     #[test]
-    fn game_state_deserialize_migrates_legacy_grant_fire_count_to_producer_key() {
+    fn game_state_deserialize_preserves_legacy_grant_fire_counts_by_recipient() {
         let object_id = ObjectId(993);
         let second_object_id = ObjectId(994);
         let mut state = GameState::new_two_player(42);
@@ -28544,7 +28479,7 @@ mod tests {
         state.objects.insert(object_id, object);
         state
             .trigger_fire_counts_this_turn
-            .insert(TriggerFireLedgerKey::Definition(definition), 2);
+            .insert(TriggerFireLedgerKey::Definition(definition.clone()), 2);
 
         let mut second_object = GameObject::new(
             second_object_id,
@@ -28567,9 +28502,10 @@ mod tests {
         let second_definition = second_object.trigger_definition_ref(&second_entry);
         second_object.trigger_definitions.push(second_entry);
         state.objects.insert(second_object_id, second_object);
-        state
-            .trigger_fire_counts_this_turn
-            .insert(TriggerFireLedgerKey::Definition(second_definition), 3);
+        state.trigger_fire_counts_this_turn.insert(
+            TriggerFireLedgerKey::Definition(second_definition.clone()),
+            3,
+        );
 
         let mut snapshot = serde_json::to_value(state).expect("serialize fixture state");
         snapshot["objects"][object_id.0.to_string()]["trigger_definitions"][0]
@@ -28585,7 +28521,10 @@ mod tests {
             .expect("legacy grant provenance and combined ledger count restore");
         assert_eq!(
             restored.trigger_fire_counts_this_turn,
-            HashMap::from([(TriggerFireLedgerKey::Grant(producer), 5)])
+            HashMap::from([
+                (TriggerFireLedgerKey::Definition(definition), 2),
+                (TriggerFireLedgerKey::Definition(second_definition), 3),
+            ])
         );
     }
 

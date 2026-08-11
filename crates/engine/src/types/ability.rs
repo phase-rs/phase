@@ -128,18 +128,9 @@ mod trigger_occurrence_tests {
             ])
             .unwrap();
         assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].grant_producer, Some(first_producer.clone()));
+        assert_eq!(entries[1].grant_producer, Some(second_producer.clone()));
         assert_ne!(entries[0].occurrence, entries[1].occurrence);
-        assert_ne!(
-            TriggerFireLedgerKey::Grant(first_producer),
-            TriggerFireLedgerKey::Grant(second_producer.clone())
-        );
-        assert_ne!(
-            TriggerFireLedgerKey::Grant(second_producer.clone()),
-            TriggerFireLedgerKey::Definition(TriggerDefinitionRef {
-                source: ObjectIncarnationRef::of(ObjectId(8), 0),
-                occurrence: entries[0].occurrence.clone(),
-            })
-        );
     }
 
     #[test]
@@ -21889,16 +21880,14 @@ pub enum TriggerGrantProducerKey {
     },
 }
 
-/// Identity used only by the MaxTimesPerTurn ledger.
+/// Identity used by the MaxTimesPerTurn ledger.
 ///
-/// A granted trigger's occurrence includes a recipient-local generation, so it
-/// cannot serve as a producer-wide cap key. Full TriggerDefinitionRef remains
-/// the identity for event matching and look-back semantics.
+/// The recipient-local occurrence is part of the identity because each granted
+/// ability functions independently on its recipient (CR 113.2c).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum TriggerFireLedgerKey {
     Definition(TriggerDefinitionRef),
-    Grant(TriggerGrantProducerKey),
 }
 
 /// The immutable occurrence component of a live trigger definition identity.

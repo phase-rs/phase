@@ -1,8 +1,8 @@
 //! Regression for Nadu's granted MaxTimesPerTurn trigger through Lavaspur Boots.
 //!
-//! Nadu grants the targeting trigger to each creature separately, but one grant
-//! producer owns one shared "twice each turn" limit. Each Equip activation below
-//! uses the production targeting and trigger-collection pipeline.
+//! Nadu grants the targeting trigger to each creature separately, and each
+//! recipient's ability owns its own "twice each turn" limit. Each Equip
+//! activation below uses the production targeting and trigger-collection pipeline.
 
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameScenario, P0};
@@ -17,12 +17,12 @@ const LAVASPUR_BOOTS_ORACLE: &str =
     "Equipped creature gets +1/+0 and has haste and ward {1}.\nEquip {1}";
 
 #[test]
-fn nadu_granted_trigger_shares_max_times_cap_across_lavaspur_targets() {
+fn nadu_granted_trigger_has_independent_max_times_caps_per_target() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_mana_pool(
         P0,
-        (0..3)
+        (0..6)
             .map(|_| {
                 ManaUnit::new(
                     ManaType::Colorless,
@@ -33,7 +33,10 @@ fn nadu_granted_trigger_shares_max_times_cap_across_lavaspur_targets() {
             })
             .collect(),
     );
-    scenario.with_library_top(P0, &["Forest", "Island", "Mountain"]);
+    scenario.with_library_top(
+        P0,
+        &["Forest", "Island", "Mountain", "Plains", "Swamp", "Forest"],
+    );
 
     let nadu = scenario
         .add_creature_from_oracle(P0, "Nadu, Winged Wisdom", 3, 4, NADU_ORACLE)
@@ -106,19 +109,30 @@ fn nadu_granted_trigger_shares_max_times_cap_across_lavaspur_targets() {
         first_generation, second_generation,
         "a blinked recipient must receive a fresh grant generation"
     );
-    for target in [first_target, second_target, third_target] {
+    for target in [
+        first_target,
+        second_target,
+        third_target,
+        first_target,
+        second_target,
+        third_target,
+    ] {
         runner.activate(boots, 0).target_object(target).resolve();
     }
 
     let counts = &runner.state().trigger_fire_counts_this_turn;
     assert_eq!(
         counts.values().sum::<u32>(),
-        2,
-        "Nadu's granted trigger must fire only twice across all creatures targeted by Equip"
+        6,
+        "Nadu's granted trigger must fire twice for each creature targeted by Equip"
     );
     assert_eq!(
         counts.len(),
-        1,
-        "one Layer-6 grant producer must own one MaxTimesPerTurn ledger entry"
+        3,
+        "each recipient must own an independent MaxTimesPerTurn ledger entry"
+    );
+    assert!(
+        counts.values().all(|count| *count == 2),
+        "each recipient's granted trigger must retain two uses"
     );
 }

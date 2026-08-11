@@ -514,29 +514,14 @@ pub fn apply_resolved_ledger_edit(
 }
 
 fn trigger_fire_ledger_key_for_replay(
-    state: &GameState,
+    _state: &GameState,
     trigger: &TriggerDefinitionRef,
     ledger_key: Option<&TriggerFireLedgerKey>,
 ) -> TriggerFireLedgerKey {
     if let Some(ledger_key) = ledger_key {
         return ledger_key.clone();
     }
-
-    let grant_producer = state
-        .objects
-        .get(&trigger.source.object_id)
-        .filter(|object| object.incarnation == trigger.source.incarnation)
-        .and_then(|object| {
-            object
-                .trigger_definitions
-                .iter_all()
-                .find(|entry| entry.occurrence == trigger.occurrence)
-        })
-        .and_then(|entry| entry.grant_producer.clone());
-
-    grant_producer
-        .map(TriggerFireLedgerKey::Grant)
-        .unwrap_or_else(|| TriggerFireLedgerKey::Definition(trigger.clone()))
+    TriggerFireLedgerKey::Definition(trigger.clone())
 }
 
 fn history_len(len: usize) -> Result<u32, ResolvedLedgerEditReplayInvariantError> {
@@ -559,7 +544,7 @@ mod tests {
     use crate::types::CardId;
 
     #[test]
-    fn legacy_max_times_replay_resolves_migrated_grant_key() {
+    fn max_times_replay_resolves_recipient_key() {
         let object_id = ObjectId(1);
         let mut state = GameState::new_two_player(42);
         let mut object = GameObject::new(
@@ -591,11 +576,11 @@ mod tests {
         state.objects.insert(object_id, object);
         state
             .trigger_fire_counts_this_turn
-            .insert(TriggerFireLedgerKey::Grant(producer.clone()), 2);
+            .insert(TriggerFireLedgerKey::Definition(trigger.clone()), 2);
 
         let command = ResolvedLedgerEditCommand {
             edit: ResolvedLedgerEdit::TriggerFired {
-                trigger,
+                trigger: trigger.clone(),
                 edit: ResolvedTriggerLedgerEdit::MaxTimesPerTurn {
                     expected_old: 2,
                     ledger_key: None,
@@ -608,7 +593,7 @@ mod tests {
         assert_eq!(
             state
                 .trigger_fire_counts_this_turn
-                .get(&TriggerFireLedgerKey::Grant(producer))
+                .get(&TriggerFireLedgerKey::Definition(trigger))
                 .copied(),
             Some(3)
         );
