@@ -225,6 +225,51 @@ fn gemstone_caverns_full_export_retains_luck_counter_mana_contract() {
         Some("luck"),
         "the counter condition must inspect Generic(luck), not every counter"
     );
+    let condition = conditional
+        .get("condition")
+        .and_then(|condition| condition.get("inner"))
+        .expect("the replacement condition must have an inner quantity comparison");
+    assert_eq!(
+        condition.get("comparator").and_then(|value| value.as_str()),
+        Some("GE"),
+        "the luck-counter replacement must require at least one counter"
+    );
+    assert_eq!(
+        condition
+            .get("rhs")
+            .and_then(|rhs| rhs.get("type"))
+            .and_then(|value| value.as_str()),
+        Some("Fixed")
+    );
+    assert_eq!(
+        condition
+            .get("rhs")
+            .and_then(|rhs| rhs.get("value"))
+            .and_then(|value| value.as_i64()),
+        Some(1),
+        "the luck-counter replacement threshold must be one"
+    );
+    let produced = conditional
+        .get("effect")
+        .and_then(|effect| effect.get("produced"))
+        .expect("the replacement branch must define produced mana");
+    assert_eq!(
+        produced.get("type").and_then(|value| value.as_str()),
+        Some("AnyOneColor")
+    );
+    assert_eq!(
+        produced
+            .get("color_options")
+            .and_then(|value| value.as_array())
+            .expect("the replacement branch must offer colors")
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["White", "Blue", "Black", "Red", "Green"]
+            .into_iter()
+            .collect(),
+        "the replacement must offer all five colors"
+    );
 }
 
 #[test]
