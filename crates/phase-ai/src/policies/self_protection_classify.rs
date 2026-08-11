@@ -379,7 +379,7 @@ fn grant_from_keyword(keyword: &Keyword) -> Vec<DefensiveGrant> {
     }
 }
 
-/// CR 702.18a / CR 702.11a: targeting immunity answers only harmful effects
+/// CR 702.18a / CR 702.11b: targeting immunity answers only harmful effects
 /// that select the protected permanent as a target — not player burn, beneficial
 /// buffs, or untargeted mass removal.
 fn any_stack_harmful_answerable_by_grants(
@@ -456,8 +456,14 @@ fn grant_answers_harmful_effect(
     }
 }
 
-/// Harmful single-target effects that select a permanent (answered by shroud /
-/// hexproof / protection when the source is not exempt).
+/// Harmful SINGLE-TARGET effects that select a permanent (answered by shroud /
+/// hexproof / protection when the source is not exempt). Mass/untargeted
+/// effects — `DestroyAll` (CR 115.10a: an affected object is not a target) —
+/// are excluded: targeting immunity grants (CR 702.11/702.16/702.18) save
+/// nothing from a wipe. `extract_target_filter` is target-only, so it already
+/// returns `None` for `DestroyAll` (a wipe has no selectable target), making
+/// the `.is_some()` check below false — mass effects are thus excluded by the
+/// extraction itself, with no separate match needed.
 fn harmful_effect_uses_object_targeting(effect: &Effect) -> bool {
     !matches!(extract_target_filter(effect), Some(TargetFilter::Player))
         && extract_target_filter(effect).is_some()
