@@ -2460,6 +2460,14 @@ export type GameEvent =
   | { type: "LandPlayed"; data: { object_id: ObjectId; player_id: PlayerId; from_zone: Zone } }
   | { type: "StackPushed"; data: { object_id: ObjectId } }
   | { type: "StackResolved"; data: { object_id: ObjectId } }
+  // CR 714.2: a Saga's chapter ability finished resolving. Bookkeeping the
+  // engine publishes for meta-triggers (Narci, Fable Singer); non-visual, since
+  // the chapter ability's own effects already animate.
+  // `saga` is the engine's TriggerSourceContext for the exact Saga incarnation
+  // (CR 400.7). It is deliberately left unmodelled: this event is non-visual
+  // (see eventNormalizer) and the client never reads the payload, so declaring a
+  // partial shape here would assert a contract nothing checks.
+  | { type: "SagaChapterAbilityResolved"; data: { saga: unknown; controller: PlayerId; chapter: number; final_chapter: number } }
   | { type: "Discarded"; data: { player_id: PlayerId; object_id: ObjectId } }
   | { type: "EnduringStoryGained"; data: { player_id: PlayerId } }
   | { type: "DamageCleared"; data: { object_id: ObjectId } }

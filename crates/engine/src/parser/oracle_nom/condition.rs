@@ -19606,3 +19606,59 @@ mod tests {
         );
     }
 }
+
+/// CR 122.1: the "[kind] counters among [filter]" quantity phrase, at the
+/// building-block level — both ends of its one variation axis.
+#[cfg(test)]
+mod counters_among_condition_tests {
+    use super::parse_inner_condition;
+    use crate::types::ability::{Comparator, QuantityExpr, QuantityRef, StaticCondition};
+    use crate::types::counter::CounterType;
+
+    fn counters_among(text: &str) -> (Option<CounterType>, Comparator, i32) {
+        let (rest, condition) = parse_inner_condition(text).expect("condition must parse");
+        assert_eq!(rest, "", "the whole clause must be consumed");
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOnObjects { counter_type, .. },
+                },
+            comparator,
+            rhs: QuantityExpr::Fixed { value },
+        } = condition
+        else {
+            panic!("expected a counters-among comparison, got {condition:?}");
+        };
+        (counter_type, comparator, value)
+    }
+
+    /// Tom Bombadil — a counter-kind qualifier narrows the sum to that kind.
+    #[test]
+    fn typed_counters_among_narrows_to_that_kind() {
+        assert_eq!(
+            counters_among("there are four or more lore counters among sagas you control"),
+            (Some(CounterType::Lore), Comparator::GE, 4)
+        );
+    }
+
+    /// Lux Artillery — the qualifier is optional, and its absence still means
+    /// "every kind", not "some default kind".
+    #[test]
+    fn untyped_counters_among_sums_every_kind() {
+        assert_eq!(
+            counters_among(
+                "there are thirty or more counters among artifacts and creatures you control"
+            ),
+            (None, Comparator::GE, 30)
+        );
+    }
+
+    /// The qualifier is a real parameter, not a lore special case.
+    #[test]
+    fn other_counter_kinds_qualify_too() {
+        assert_eq!(
+            counters_among("there are two or more stun counters among creatures you control"),
+            (Some(CounterType::Stun), Comparator::GE, 2)
+        );
+    }
+}

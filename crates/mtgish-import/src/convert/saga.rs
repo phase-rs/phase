@@ -39,7 +39,7 @@ pub fn convert(chapters: &[SagaChapter]) -> ConvResult<Vec<TriggerDefinition>> {
     let mut out = Vec::new();
     for chapter in chapters {
         let SagaChapter::SagaChapter(nums, actions) = chapter;
-        // CR 714.2a + CR 113.3a: Build the chapter body via the shared
+        // CR 714.2 + CR 113.3a: Build the chapter body via the shared
         // ActionsConversion pipeline so Modal / MayAction / MayCost / If /
         // Unless / IfElse / EachPlayerAction shapes lift through the same
         // ability-shaping code as a spell body.
@@ -57,6 +57,12 @@ pub fn convert(chapters: &[SagaChapter]) -> ConvResult<Vec<TriggerDefinition>> {
                     counter_type: EngineCounterType::Lore,
                     threshold: Some(ordinal),
                 })
+                // CR 714.2: this ordinal IS a chapter symbol, so record the
+                // provenance. Without it the engine cannot tell these apart from
+                // any other lore threshold trigger, and `final_chapter_number`
+                // (CR 714.2d) — which CR 714.4's sacrifice and read-ahead both
+                // depend on — would report nothing for an imported Saga.
+                .saga_chapter(ordinal)
                 .execute(exec.clone())
                 .trigger_zones(vec![Zone::Battlefield])
                 .description(format!("Chapter {ordinal}"));
