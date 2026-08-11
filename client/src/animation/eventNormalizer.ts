@@ -30,6 +30,9 @@ const NON_VISUAL_EVENTS = new Set([
   "PermanentUntapped",
   "StackPushed",
   "StackResolved",
+  // CR 714.2: same class as StackResolved — the chapter ability's own effects
+  // are what the player sees; this event exists for meta-triggers.
+  "SagaChapterAbilityResolved",
   "ReplacementApplied",
   "Regenerated",
   "AttackersDeclared",

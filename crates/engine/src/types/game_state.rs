@@ -18420,6 +18420,24 @@ impl GameState {
         })
     }
 
+    /// CR 400.7: Capture the exact incarnation-bound snapshot of an object, for
+    /// an event whose subject must survive that object leaving and re-entering
+    /// the battlefield at the same storage id.
+    ///
+    /// This is the general entry point; the capture body lives in
+    /// [`Self::capture_connive_subject`], which was the first caller to need it
+    /// (CR 701.50b/f) and remains a thin typed wrapper over the same snapshot.
+    /// There is deliberately no raw-`ObjectId` variant: a bare id cannot
+    /// distinguish the original incarnation from a re-entered one, which is the
+    /// whole reason this exists.
+    pub fn capture_event_object_snapshot(
+        &self,
+        object_id: ObjectId,
+    ) -> Option<EventObjectSnapshot> {
+        self.capture_connive_subject(object_id)
+            .map(|subject| subject.snapshot)
+    }
+
     /// Builds the exact paused-delivery key from the replacement record before
     /// that record is consumed. Only a `ZoneChange` can belong to either
     /// logical zone-change owner.

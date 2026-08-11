@@ -5813,6 +5813,23 @@ where
 /// CR 202.3: Resolve an object's mana value through the same ObjectScope axis
 /// used for power/toughness. Source scope falls back to LKI for objects that
 /// moved during resolution; target scope reads the selected object target.
+/// CR 400.7 + CR 202.3: The mana value an event supplies for its OWN pinned
+/// subject incarnation, when the current trigger event carries one.
+///
+/// Only `SagaChapterAbilityResolved` pins a subject today. Its Saga is routinely
+/// gone by the time an observer resolves — CR 714.4 sacrifices it the moment the
+/// final chapter ability leaves the stack — and a re-entered Saga can occupy the
+/// same storage id, so neither live state nor the id-keyed LKI cache can be
+/// trusted to answer for the original.
+fn event_source_mana_value_override(state: &GameState) -> Option<i32> {
+    match current_or_detection_trigger_event(state)? {
+        GameEvent::SagaChapterAbilityResolved { saga, .. } => {
+            Some(u32_to_i32_saturating(saga.lki.mana_value))
+        }
+        _ => None,
+    }
+}
+
 fn resolve_object_mana_value(
     state: &GameState,
     scope: ObjectScope,
@@ -5843,6 +5860,15 @@ fn resolve_object_mana_value(
             .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
             .unwrap_or(0),
         ObjectScope::EventSource => {
+            // CR 400.7 + CR 202.3: an event that pins its own subject incarnation
+            // answers for that incarnation directly. Reading live state (or the
+            // id-keyed LKI cache) would let a re-entered permanent at the same
+            // storage id supply the value instead — Narci draining for the NEW
+            // Saga's mana value after a blink. Checked first, so the id-based
+            // fallback below only runs for events with no pinned subject.
+            if let Some(mana_value) = event_source_mana_value_override(state) {
+                return mana_value;
+            }
             let Some(object_id) =
                 object_id_for_scope(state, ObjectScope::EventSource, ctx, targets)
             else {
