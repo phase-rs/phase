@@ -71,7 +71,8 @@ pub struct SpellslingerProwessFeature {
     /// with a valid_card filter that permits Instant/Sorcery (or unset).
     /// CR 601.2i + CR 603.1. Includes magecraft-shaped triggers.
     pub cast_payoff_count: u32,
-    /// Cast triggers with `TriggerConstraint::NthSpellThisTurn`. CR 603.4.
+    /// Cast triggers with the fire-time `TriggerConstraint::NthSpellThisTurn`.
+    /// CR 603.2.
     pub nth_spell_payoff_count: u32,
     /// `AbilityKind::Spell` abilities whose chain contains `Effect::CopySpell`.
     /// CR 707.10: to copy a spell means to put a copy onto the stack.
@@ -600,7 +601,7 @@ mod tests {
 
     #[test]
     fn detects_nth_spell_payoff() {
-        // SpellCast + NthSpellThisTurn. CR 603.4.
+        // SpellCast + fire-time NthSpellThisTurn. CR 603.2.
         let mut c = creature_face("Spectral Sailor Shape");
         let mut t = TriggerDefinition::new(TriggerMode::SpellCast);
         t.constraint = Some(TriggerConstraint::NthSpellThisTurn {
