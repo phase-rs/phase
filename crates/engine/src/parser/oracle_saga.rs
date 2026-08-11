@@ -196,6 +196,11 @@ pub(crate) fn parse_saga_chapters(lines: &[&str], _card_name: &str) -> SagaChapt
                     counter_type: crate::types::counter::CounterType::Lore,
                     threshold: Some(n),
                 })
+                // CR 714.2: this trigger came from an actual chapter symbol, so
+                // record the numeral. Consumers that need "is this a chapter
+                // ability, and which one" read this rather than inferring it
+                // from the lore threshold above.
+                .saga_chapter(n)
                 .execute(execute)
                 .trigger_zones(vec![Zone::Battlefield])
                 .description(format!("Chapter {n}"));

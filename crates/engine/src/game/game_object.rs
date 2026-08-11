@@ -2911,19 +2911,19 @@ impl GameObject {
         self.owner == player && self.zone == Zone::Graveyard && self.is_represented_by_a_card()
     }
 
-    /// CR 714.2 + CR 714.2b: Every chapter number this Saga's chapter abilities
-    /// are keyed to. A chapter ability is not a distinct AST concept — CR 714.2b
-    /// defines a chapter symbol as "When one or more lore counters are put onto
-    /// this Saga, if the number of lore counters on it was less than N and
-    /// became at least N, [effect]", and `parser::oracle_saga` emits exactly
-    /// that: a lore-counter threshold trigger on the Saga itself. So the chapter
-    /// numbers are exactly those thresholds. Empty for a non-Saga.
+    /// CR 714.2: Every chapter number this Saga's chapter abilities are keyed
+    /// to, read from the chapter-symbol provenance the Saga parser records
+    /// (`TriggerDefinition::saga_chapter`).
     ///
-    /// Lore-scoped per CR 714.2b: a Saga may also carry a thresholded trigger on
-    /// some OTHER counter type, and that trigger is not a chapter ability.
+    /// Deliberately NOT inferred from lore-counter thresholds. CR 714.2b gives a
+    /// chapter symbol the shape of a lore threshold trigger, but the converse
+    /// does not hold: a lore threshold trigger a Saga acquired some other way is
+    /// not a chapter ability, and counting it would corrupt the final chapter
+    /// number that CR 714.2d defines and CR 714.4's sacrifice depends on.
     ///
-    /// Structural scan of the Saga's own triggers — intrinsic to the card, not
-    /// subject to functioning gates. `iter_all` is pub(crate).
+    /// Empty for a non-Saga. Structural scan of the Saga's own triggers —
+    /// intrinsic to the card, not subject to functioning gates. `iter_all` is
+    /// pub(crate).
     pub fn saga_chapter_numbers(&self) -> impl Iterator<Item = u32> + '_ {
         self.card_types
             .subtypes
@@ -2932,9 +2932,7 @@ impl GameObject {
             .then(|| self.trigger_definitions.iter_all())
             .into_iter()
             .flatten()
-            .filter_map(|entry| entry.definition.counter_filter.as_ref())
-            .filter(|filter| filter.counter_type == CounterType::Lore)
-            .filter_map(|filter| filter.threshold)
+            .filter_map(|entry| entry.definition.saga_chapter)
     }
 
     /// CR 714.2d: "A Saga's final chapter number is the greatest value among
@@ -2953,14 +2951,15 @@ impl GameObject {
     /// by the exact trigger occurrence that produced it, returning
     /// `(chapter_number, final_chapter_number)`.
     ///
-    /// This is the single authority that maps a fired trigger occurrence back to
-    /// its printed chapter number, so callers never have to re-derive it from
-    /// the lore count (wrong under Read Ahead, and wrong for a multi-counter
-    /// addition, which per CR 714.2b crosses several thresholds at once) or from
-    /// the `"Chapter {n}"` description string.
+    /// Keyed on the occurrence, so CR 714.2c's two chapter abilities printed on
+    /// one line stay distinguishable even though they share that line. The
+    /// chapter number comes from the recorded chapter symbol, never re-derived
+    /// from the lore count (wrong under Read Ahead, and wrong for a
+    /// multi-counter addition, which per CR 714.2b crosses several thresholds at
+    /// once) nor from the `"Chapter {n}"` description string.
     ///
     /// Returns `None` for a non-Saga, or for an occurrence that is not one of
-    /// this permanent's lore-threshold triggers.
+    /// this permanent's chapter abilities.
     pub fn saga_chapter_for_occurrence(
         &self,
         occurrence: &TriggerDefinitionOccurrenceRef,
@@ -2970,9 +2969,7 @@ impl GameObject {
             .trigger_definitions
             .iter_all()
             .find(|entry| &entry.occurrence == occurrence)
-            .and_then(|entry| entry.definition.counter_filter.as_ref())
-            .filter(|filter| filter.counter_type == CounterType::Lore)
-            .and_then(|filter| filter.threshold)?;
+            .and_then(|entry| entry.definition.saga_chapter)?;
         Some((chapter, final_chapter))
     }
 
@@ -3692,24 +3689,24 @@ mod tests {
         );
         obj.card_types.subtypes.push("Saga".to_string());
         obj.trigger_definitions = vec![
-            TriggerDefinition::new(TriggerMode::CounterAdded).counter_filter(
-                CounterTriggerFilter {
+            TriggerDefinition::new(TriggerMode::CounterAdded)
+                .counter_filter(CounterTriggerFilter {
                     counter_type: CounterType::Lore,
                     threshold: Some(1),
-                },
-            ),
-            TriggerDefinition::new(TriggerMode::CounterAdded).counter_filter(
-                CounterTriggerFilter {
+                })
+                .saga_chapter(1),
+            TriggerDefinition::new(TriggerMode::CounterAdded)
+                .counter_filter(CounterTriggerFilter {
                     counter_type: CounterType::Lore,
                     threshold: Some(2),
-                },
-            ),
-            TriggerDefinition::new(TriggerMode::CounterAdded).counter_filter(
-                CounterTriggerFilter {
+                })
+                .saga_chapter(2),
+            TriggerDefinition::new(TriggerMode::CounterAdded)
+                .counter_filter(CounterTriggerFilter {
                     counter_type: CounterType::Lore,
                     threshold: Some(3),
-                },
-            ),
+                })
+                .saga_chapter(3),
         ]
         .into();
         assert_eq!(obj.final_chapter_number(), Some(3));

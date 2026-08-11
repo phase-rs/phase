@@ -21716,6 +21716,17 @@ pub struct TriggerDefinition {
     /// Optional filter for counter-related trigger modes (CR 714.2b).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub counter_filter: Option<CounterTriggerFilter>,
+    /// CR 714.2 + CR 714.2a: The chapter symbol's Roman numeral, when this
+    /// trigger IS a Saga chapter ability. Provenance, not a second encoding of
+    /// the threshold: only the Saga parser sets it, and it is what distinguishes
+    /// a chapter ability from any other lore-counter threshold trigger a Saga
+    /// might carry. `None` for every non-chapter trigger.
+    ///
+    /// CR 714.2c ("{rN1}, {rN2}—[Effect]") yields one trigger per numeral, each
+    /// carrying its own chapter number, so two chapter abilities sharing a
+    /// printed line stay distinct here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saga_chapter: Option<u32>,
     /// CR 118.12: "Effect unless [player] pays {cost}" — tax trigger modifier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unless_pay: Option<UnlessPayModifier>,
@@ -22242,6 +22253,7 @@ impl TriggerDefinition {
             constraint: None,
             condition: None,
             counter_filter: None,
+            saga_chapter: None,
             unless_pay: None,
             batched: false,
             die_sides: None,
@@ -22337,6 +22349,14 @@ impl TriggerDefinition {
 
     pub fn counter_filter(mut self, filter: CounterTriggerFilter) -> Self {
         self.counter_filter = Some(filter);
+        self
+    }
+
+    /// CR 714.2: Mark this trigger as the Saga chapter ability for `chapter`.
+    /// Only `parser::oracle_saga` may call this — it is the one place that has
+    /// read an actual chapter symbol.
+    pub fn saga_chapter(mut self, chapter: u32) -> Self {
+        self.saga_chapter = Some(chapter);
         self
     }
 
@@ -26904,6 +26924,7 @@ mod tests {
             constraint: None,
             condition: None,
             counter_filter: None,
+            saga_chapter: None,
             unless_pay: None,
             batched: false,
             die_sides: None,

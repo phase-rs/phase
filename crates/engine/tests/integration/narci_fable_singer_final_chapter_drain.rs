@@ -208,6 +208,91 @@ III — Create a 1/1 white Soldier creature token.",
     );
 }
 
+/// CR 608.2c: a final chapter ability that PAUSES mid-resolution for a choice
+/// must not fire its observers until that resolution has actually finished.
+///
+/// The chapter-resolution event is published next to the engine's own
+/// `StackResolved`, before the settlement guard, so this pins the ordering
+/// empirically rather than by assertion: the drain must not have landed while
+/// the optional-effect prompt is still open, and must land exactly once after it
+/// is answered.
+#[test]
+fn narci_does_not_drain_until_a_paused_final_chapter_finishes_resolving() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest", "Forest"]);
+    scenario.with_library_top(P1, &["Forest", "Forest", "Forest", "Forest"]);
+
+    scenario
+        .add_creature(P0, "Narci, Fable Singer", 3, 3)
+        .as_legendary()
+        .from_oracle_text(NARCI_ORACLE);
+
+    // Chapter II is the final chapter and pauses for an optional-effect choice
+    // during its own resolution.
+    let saga_id = scenario
+        .add_creature(P0, "Paused Test Saga", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Saga"])
+        .with_mana_cost(ManaCost::generic(3))
+        .from_oracle_text(
+            "I — Create a 1/1 white Soldier creature token.\n\
+II — You may draw a card.",
+        )
+        .id();
+    scenario.with_counter(saga_id, CounterType::Lore, 1);
+
+    let mut runner = scenario.build();
+    let p1_life_before = runner.state().players[P1.0 as usize].life;
+
+    park_for_next_p0_precombat_main(&mut runner);
+    runner.advance_to_phase(Phase::PreCombatMain);
+    runner.pass_both_players();
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert_eq!(lore_count(&runner, saga_id), 2);
+
+    // Walk the stack until the chapter ability's own optional choice is offered.
+    let mut saw_optional = false;
+    for _ in 0..64 {
+        if matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }) {
+            drain_order_triggers_with_identity(runner.state_mut());
+            continue;
+        }
+        if let WaitingFor::OptionalEffectChoice { .. } = runner.state().waiting_for {
+            saw_optional = true;
+            assert_eq!(
+                runner.state().players[P1.0 as usize].life,
+                p1_life_before,
+                "the drain must not land while the final chapter ability is still resolving"
+            );
+            runner
+                .act(GameAction::DecideOptionalEffect { accept: true })
+                .expect("answer the chapter ability's optional draw");
+            continue;
+        }
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            let _ = runner.act(GameAction::PassPriority);
+            let _ = runner.act(GameAction::PassPriority);
+        } else {
+            break;
+        }
+    }
+
+    assert!(
+        saw_optional,
+        "reach guard: chapter II's optional draw must actually be offered, \
+         otherwise this test never exercises a paused resolution"
+    );
+    assert_eq!(
+        runner.state().players[P1.0 as usize].life - p1_life_before,
+        -3,
+        "after the paused chapter ability finishes, the drain lands exactly once"
+    );
+}
+
 /// CR 603.2: the other end of the lifecycle axis — Historian's Boon observes the
 /// final chapter ability *triggering*, which is the Saga's own lore-counter
 /// threshold crossing, not a resolution. Narci's clause is identical except for
