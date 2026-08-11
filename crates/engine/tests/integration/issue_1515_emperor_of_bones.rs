@@ -207,6 +207,15 @@ fn emperor_of_bones_counter_trigger_uses_returned_creature_in_cast_pipeline() {
         "the counter trigger must return the linked creature through apply()"
     );
     assert_eq!(
+        state.objects[&returned]
+            .counters
+            .get(&CounterType::Finality)
+            .copied()
+            .unwrap_or(0),
+        1,
+        "the returned creature must receive Emperor's finality entry modifier"
+    );
+    assert_eq!(
         state.objects[&emperor].zone,
         Zone::Battlefield,
         "the counter trigger must not sacrifice Emperor while resolving"
