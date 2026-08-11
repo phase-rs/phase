@@ -33,6 +33,8 @@ fn true_name_protection_uses_the_protected_objects_chosen_player() {
     let other_player_source = add_source(&mut scenario, P0, "Friendly Spell");
     let mut runner = scenario.build();
 
+    runner.auto_advance_to_main_phase();
+
     let card_id = runner.state().objects[&true_name].card_id;
     runner
         .act(GameAction::CastSpell {
