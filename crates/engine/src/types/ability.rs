@@ -21465,6 +21465,16 @@ pub enum ReplacementCondition {
     Unrecognized { text: String },
 }
 
+/// The historical wire shape of `NthSpellThisTurn` represented an exact ordinal.
+/// Keep that meaning when a persisted export has no comparator field.
+fn default_nth_spell_comparator() -> Comparator {
+    Comparator::EQ
+}
+
+fn is_default_nth_spell_comparator(comparator: &Comparator) -> bool {
+    *comparator == Comparator::EQ
+}
+
 /// Rate-limiting constraint for triggered abilities.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -21476,11 +21486,18 @@ pub enum TriggerConstraint {
     /// "This ability triggers only during your turn."
     OnlyDuringYourTurn,
     /// "Whenever you/an opponent casts your/their Nth [qualifier] spell each turn" —
-    /// fires exactly when the caster's per-player spell count equals `n`.
+    /// fires when the caster's per-player spell count satisfies `comparator`
+    /// against `n`. `EQ` preserves the existing exact-ordinal behavior; `GT`
+    /// represents "other than the first ... spell" fire-time qualifiers.
     /// When `filter` is `Some`, only spells matching the filter are counted
     /// (e.g., `TypeFilter::Non(Creature)` for "noncreature spell").
     NthSpellThisTurn {
         n: u32,
+        #[serde(
+            default = "default_nth_spell_comparator",
+            skip_serializing_if = "is_default_nth_spell_comparator"
+        )]
+        comparator: Comparator,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<TargetFilter>,
     },

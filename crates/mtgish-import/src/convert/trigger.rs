@@ -6,7 +6,9 @@
 //! the highest-frequency are mapped here; the long tail fails strict and
 //! shows up in the report.
 
-use engine::types::ability::{CounterTriggerFilter, DamageKindFilter, TriggerConstraint};
+use engine::types::ability::{
+    Comparator, CounterTriggerFilter, DamageKindFilter, TriggerConstraint,
+};
 use engine::types::triggers::{AttackTargetFilter, PlaneswalkRole, TriggerMode};
 use engine::types::{Phase, TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter, Zone};
 
@@ -654,7 +656,7 @@ pub fn convert(t: &Trigger) -> ConvResult<TriggerDefinition> {
             def.valid_target = Some(TargetFilter::Typed(
                 TypedFilter::default().controller(controller),
             ));
-            def.constraint = Some(TriggerConstraint::NthSpellThisTurn { n, filter });
+            def.constraint = Some(TriggerConstraint::NthSpellThisTurn { n, comparator: Comparator::EQ, filter });
             def
         }
 

@@ -8,8 +8,10 @@
 //! - `Keyword::Prowess` at `keywords.rs:311`. CR 702.108a: prowess triggered ability.
 //! - `TriggerMode::SpellCast` / `SpellCastOrCopy` / `SpellAbilityCast` /
 //!   `SpellAbilityCopy` at `triggers.rs:50-57`. CR 601.2i (cast) + CR 707.10 (copy).
-//! - `TriggerConstraint::NthSpellThisTurn { n, filter }` at `ability.rs:4484`.
-//!   CR 603.4: intervening-if clause. CR 603.1: triggered abilities.
+//! - `TriggerConstraint::NthSpellThisTurn { n, comparator, filter }` at
+//!   `ability.rs`. This is a CR 603.2 fire-time trigger-event constraint;
+//!   `Comparator::EQ` represents an exact ordinal and `GT` represents the
+//!   non-first-spell class. It is not a CR 603.4 intervening-if clause.
 //! - `TriggerDefinition.valid_card: Option<TargetFilter>` at `ability.rs:4522`.
 //! - `TriggerDefinition.valid_target: Option<TargetFilter>` at `ability.rs:4539`.
 //! - `TriggerDefinition.constraint: Option<TriggerConstraint>` at `ability.rs:4545`.
@@ -69,7 +71,8 @@ pub struct SpellslingerProwessFeature {
     /// with a valid_card filter that permits Instant/Sorcery (or unset).
     /// CR 601.2i + CR 603.1. Includes magecraft-shaped triggers.
     pub cast_payoff_count: u32,
-    /// Cast triggers with `TriggerConstraint::NthSpellThisTurn`. CR 603.4.
+    /// Cast triggers with the fire-time `TriggerConstraint::NthSpellThisTurn`.
+    /// CR 603.2.
     pub nth_spell_payoff_count: u32,
     /// `AbilityKind::Spell` abilities whose chain contains `Effect::CopySpell`.
     /// CR 707.10: to copy a spell means to put a copy onto the stack.
@@ -598,10 +601,14 @@ mod tests {
 
     #[test]
     fn detects_nth_spell_payoff() {
-        // SpellCast + NthSpellThisTurn. CR 603.4.
+        // SpellCast + fire-time NthSpellThisTurn. CR 603.2.
         let mut c = creature_face("Spectral Sailor Shape");
         let mut t = TriggerDefinition::new(TriggerMode::SpellCast);
-        t.constraint = Some(TriggerConstraint::NthSpellThisTurn { n: 2, filter: None });
+        t.constraint = Some(TriggerConstraint::NthSpellThisTurn {
+            n: 2,
+            comparator: engine::types::ability::Comparator::EQ,
+            filter: None,
+        });
         c.triggers.push(t);
         let f = detect(&[entry(c, 2)]);
         assert_eq!(f.nth_spell_payoff_count, 2);

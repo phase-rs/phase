@@ -277,7 +277,7 @@ fn lady_loki_parses_nested_payoff_chain() {
 
     // Trigger constraint: first instant/sorcery/Villain spell each turn.
     match trigger.constraint.as_ref() {
-        Some(TriggerConstraint::NthSpellThisTurn { n, filter }) => {
+        Some(TriggerConstraint::NthSpellThisTurn { n, filter, .. }) => {
             assert_eq!(*n, 1, "fires on the FIRST matching spell each turn");
             let Some(TargetFilter::Or { filters }) = filter else {
                 panic!("expected an Or filter, got {filter:?}");

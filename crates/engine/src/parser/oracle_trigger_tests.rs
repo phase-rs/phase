@@ -11213,7 +11213,189 @@ fn trigger_nth_spell_second() {
     assert_eq!(def.mode, TriggerMode::SpellCast);
     assert_eq!(
         def.constraint,
-        Some(TriggerConstraint::NthSpellThisTurn { n: 2, filter: None })
+        Some(TriggerConstraint::NthSpellThisTurn {
+            n: 2,
+            comparator: Comparator::EQ,
+            filter: None
+        })
+    );
+}
+
+#[test]
+fn trigger_other_than_first_instant_spell_is_a_fire_time_constraint() {
+    let def = parse_trigger_line(
+        "Whenever an opponent casts an instant spell other than the first instant spell that player casts each turn, this creature deals 4 damage to that player.",
+        "Ichneumon Druid",
+    );
+    let instant = TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant));
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    assert_eq!(
+        def.valid_target,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent)
+        ))
+    );
+    assert_eq!(def.valid_card, Some(instant.clone()));
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::NthSpellThisTurn {
+            n: 1,
+            comparator: Comparator::GT,
+            filter: Some(instant),
+        })
+    );
+    assert_eq!(
+        def.condition, None,
+        "a fire-time qualifier is not intervening-if"
+    );
+    assert!(def.execute.is_some(), "the payoff must remain reachable");
+}
+
+#[test]
+fn trigger_ordinary_opponent_spell_cast_remains_generic_spellcast() {
+    let def = parse_trigger_line(
+        "Whenever an opponent casts an instant spell, draw a card.",
+        "Ordinary opponent fixture",
+    );
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    assert_eq!(
+        def.constraint, None,
+        "no nonfirst marker means no constraint"
+    );
+    assert_eq!(
+        def.valid_target,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent)
+        ))
+    );
+    assert_eq!(
+        def.valid_card,
+        Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)))
+    );
+}
+
+#[test]
+fn other_than_first_classifier_preserves_not_candidate_and_rejected_states() {
+    assert!(matches!(
+        parse_other_than_first_spell_trigger("an opponent casts an instant spell"),
+        OtherThanFirstSpellParse::NotCandidate
+    ));
+    assert!(matches!(
+        parse_other_than_first_spell_trigger(
+            "enchanted player casts a spell other than the first spell they cast each turn or copies a spell"
+        ),
+        OtherThanFirstSpellParse::Rejected
+    ));
+}
+
+#[test]
+fn trigger_other_than_first_supports_you_and_any_player_actors() {
+    let you = parse_trigger_line(
+        "Whenever you cast an instant spell other than the first instant spell you cast each turn, draw a card.",
+        "Self nonfirst fixture",
+    );
+    assert_eq!(you.mode, TriggerMode::SpellCast);
+    assert_eq!(
+        you.valid_target,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You)
+        ))
+    );
+    assert!(matches!(
+        you.constraint,
+        Some(TriggerConstraint::NthSpellThisTurn {
+            n: 1,
+            comparator: Comparator::GT,
+            ..
+        })
+    ));
+
+    let any = parse_trigger_line(
+        "Whenever a player casts a creature spell other than the first creature spell that player casts each turn, draw a card.",
+        "Any player nonfirst fixture",
+    );
+    assert_eq!(any.mode, TriggerMode::SpellCast);
+    assert_eq!(any.valid_target, None);
+    assert!(matches!(
+        any.constraint,
+        Some(TriggerConstraint::NthSpellThisTurn {
+            n: 1,
+            comparator: Comparator::GT,
+            filter: Some(TargetFilter::Typed(TypedFilter { ref type_filters, .. })),
+        }) if type_filters == &vec![TypeFilter::Creature]
+    ));
+
+    let untyped = parse_trigger_line(
+        "Whenever a player casts a spell other than the first spell that player casts each turn, draw a card.",
+        "Untyped nonfirst fixture",
+    );
+    assert_eq!(untyped.mode, TriggerMode::SpellCast);
+    assert_eq!(untyped.valid_target, None);
+    assert_eq!(
+        untyped.constraint,
+        Some(TriggerConstraint::NthSpellThisTurn {
+            n: 1,
+            comparator: Comparator::GT,
+            filter: None,
+        })
+    );
+}
+
+#[test]
+fn trigger_nonfirst_curse_with_or_copies_tail_fails_closed() {
+    let def = parse_trigger_line(
+        "Whenever enchanted player casts a spell other than the first spell they cast each turn or copies a spell, Curse of Shaken Faith deals 2 damage to that player.",
+        "Curse of Shaken Faith",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "a marker-present unsupported disjunction must not become SpellCast: {def:?}"
+    );
+}
+
+#[test]
+fn trigger_other_than_first_mismatched_spell_filter_is_unknown() {
+    let def = parse_trigger_line(
+        "Whenever an opponent casts an instant spell other than the first sorcery spell that player casts each turn, draw a card.",
+        "Malformed nonfirst fixture",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "mismatched filters must not reach generic SpellCast parsing: {def:?}"
+    );
+}
+
+#[test]
+fn nth_spell_constraint_serde_defaults_and_omits_exact_comparator() {
+    let old = r#"{"type":"NthSpellThisTurn","n":2}"#;
+    let decoded: TriggerConstraint = serde_json::from_str(old).expect("legacy export loads");
+    assert_eq!(
+        decoded,
+        TriggerConstraint::NthSpellThisTurn {
+            n: 2,
+            comparator: Comparator::EQ,
+            filter: None
+        }
+    );
+    let json = serde_json::to_string(&decoded).expect("exact ordinal serializes");
+    assert!(
+        !json.contains("comparator"),
+        "default must preserve export shape: {json}"
+    );
+
+    let gt = TriggerConstraint::NthSpellThisTurn {
+        n: 1,
+        comparator: Comparator::GT,
+        filter: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant))),
+    };
+    let gt_json = serde_json::to_string(&gt).expect("GT ordinal serializes");
+    assert!(
+        gt_json.contains("\"comparator\":\"GT\""),
+        "non-default comparator must be explicit: {gt_json}"
+    );
+    assert_eq!(
+        serde_json::from_str::<TriggerConstraint>(&gt_json).expect("GT round-trips"),
+        gt
     );
 }
 
@@ -11230,6 +11412,7 @@ fn trigger_nth_spell_with_filter_constrains_triggering_spell() {
         def.constraint,
         Some(TriggerConstraint::NthSpellThisTurn {
             n: 2,
+            comparator: Comparator::EQ,
             filter: Some(filter),
         })
     );
@@ -11248,6 +11431,7 @@ fn trigger_vengevine_intervening_if_maps_to_nth_creature_spell_constraint() {
         def.constraint,
         Some(TriggerConstraint::NthSpellThisTurn {
             n: 2,
+            comparator: Comparator::EQ,
             filter: Some(filter),
         })
     );
@@ -11409,7 +11593,11 @@ fn trigger_nth_spell_third() {
     assert_eq!(def.mode, TriggerMode::SpellCast);
     assert_eq!(
         def.constraint,
-        Some(TriggerConstraint::NthSpellThisTurn { n: 3, filter: None })
+        Some(TriggerConstraint::NthSpellThisTurn {
+            n: 3,
+            comparator: Comparator::EQ,
+            filter: None
+        })
     );
 }
 
@@ -11544,7 +11732,11 @@ fn trigger_nth_spell_any_player_during_their_turn() {
     assert_eq!(def.valid_target, None);
     assert_eq!(
         def.constraint,
-        Some(TriggerConstraint::NthSpellThisTurn { n: 2, filter: None })
+        Some(TriggerConstraint::NthSpellThisTurn {
+            n: 2,
+            comparator: Comparator::EQ,
+            filter: None
+        })
     );
     assert_eq!(
         def.condition,
@@ -11567,7 +11759,11 @@ fn trigger_nth_spell_any_player_each_turn_no_condition() {
     assert_eq!(def.mode, TriggerMode::SpellCast);
     assert_eq!(
         def.constraint,
-        Some(TriggerConstraint::NthSpellThisTurn { n: 2, filter: None })
+        Some(TriggerConstraint::NthSpellThisTurn {
+            n: 2,
+            comparator: Comparator::EQ,
+            filter: None
+        })
     );
     assert_eq!(def.condition, None);
 }
@@ -11755,6 +11951,7 @@ fn trigger_nth_spell_opponent_noncreature() {
         def.constraint,
         Some(TriggerConstraint::NthSpellThisTurn {
             n: 1,
+            comparator: Comparator::EQ,
             filter: Some(TargetFilter::Typed(TypedFilter {
                 type_filters: vec![TypeFilter::Non(Box::new(TypeFilter::Creature))],
                 controller: None,
@@ -18431,7 +18628,11 @@ fn trigger_first_spell_opponents_turn() {
     assert_eq!(def.mode, TriggerMode::SpellCast);
     assert_eq!(
         def.constraint,
-        Some(TriggerConstraint::NthSpellThisTurn { n: 1, filter: None })
+        Some(TriggerConstraint::NthSpellThisTurn {
+            n: 1,
+            comparator: Comparator::EQ,
+            filter: None
+        })
     );
     assert_eq!(
         def.condition,
@@ -18453,7 +18654,11 @@ fn trigger_first_spell_during_each_of_your_turns() {
     assert_eq!(def.mode, TriggerMode::SpellCast);
     assert_eq!(
         def.constraint,
-        Some(TriggerConstraint::NthSpellThisTurn { n: 1, filter: None })
+        Some(TriggerConstraint::NthSpellThisTurn {
+            n: 1,
+            comparator: Comparator::EQ,
+            filter: None
+        })
     );
     assert_eq!(
         def.condition,
@@ -18494,6 +18699,7 @@ fn trigger_first_spell_with_x_in_cost() {
         def.constraint,
         Some(TriggerConstraint::NthSpellThisTurn {
             n: 1,
+            comparator: Comparator::EQ,
             filter: Some(expected_filter),
         }),
         "first-spell-with-X trigger must carry HasXInManaCost filter"
@@ -18512,7 +18718,12 @@ fn trigger_first_creature_spell_with_x_in_cost() {
             "Hypothetical",
         );
     assert_eq!(def.mode, TriggerMode::SpellCast);
-    let TriggerConstraint::NthSpellThisTurn { n, ref filter } = def.constraint.unwrap() else {
+    let TriggerConstraint::NthSpellThisTurn {
+        n,
+        comparator: Comparator::EQ,
+        ref filter,
+    } = def.constraint.unwrap()
+    else {
         panic!("expected NthSpellThisTurn");
     };
     assert_eq!(n, 1);
@@ -18551,7 +18762,11 @@ fn trigger_first_spell_no_qualifier_remains_none() {
     assert_eq!(def.mode, TriggerMode::SpellCast);
     assert_eq!(
         def.constraint,
-        Some(TriggerConstraint::NthSpellThisTurn { n: 1, filter: None })
+        Some(TriggerConstraint::NthSpellThisTurn {
+            n: 1,
+            comparator: Comparator::EQ,
+            filter: None
+        })
     );
 }
 
