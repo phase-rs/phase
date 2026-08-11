@@ -2860,7 +2860,8 @@ fn strip_self_reference(lower: &str) -> Option<&str> {
 
 /// CR 609.4b: Parse the activation-source-filtered any-color-mana spend static —
 /// "You may spend mana as though it were mana of any color to activate abilities
-/// of <subject>." (Agatha's Soul Cauldron / Joiner Adept). Lowers to
+/// of <subject>." or "... to pay the activation costs of <subject>'s abilities."
+/// (Agatha's Soul Cauldron / Joiner Adept / Manascape Refractor). Lowers to
 /// `StaticMode::SpendManaAsAnyColor { spell_filter: None,
 /// activation_source_filter: Some(filter) }`, scoping the any-color concession to
 /// activated abilities whose source permanent matches the subject filter (CR
@@ -2869,24 +2870,24 @@ fn strip_self_reference(lower: &str) -> Option<&str> {
 /// The unfiltered board-wide form ("you may spend mana as though it were mana of
 /// any color", Chromatic Orrery) and the spell-class-filtered form ("to cast
 /// creature spells", Vizier) are handled separately and must not be swallowed
-/// here — this handler requires the explicit "to activate abilities of <subject>"
-/// scope.
+/// here — this handler requires an explicit activation-source scope.
 pub(crate) fn try_parse_spend_any_color_to_activate_abilities(
     text: &str,
     tp: &TextPair<'_>,
 ) -> Option<StaticDefinition> {
     let rest = nom_tag_tp(
         tp,
-        "you may spend mana as though it were mana of any color to activate abilities of ",
+        "you may spend mana as though it were mana of any color to ",
     )
-    .or_else(|| {
-        nom_tag_tp(
-            tp,
-            "spend mana as though it were mana of any color to activate abilities of ",
-        )
-    })?;
+    .or_else(|| nom_tag_tp(tp, "spend mana as though it were mana of any color to "))?;
 
-    let subject = rest.trim_end().trim_end_matches('.');
+    let subject = nom_tag_tp(&rest, "activate abilities of ").or_else(|| {
+        nom_tag_tp(&rest, "pay the activation costs of ")?
+            .trim_end()
+            .trim_end_matches('.')
+            .strip_suffix("'s abilities") // allow-noncombinator: strips the possessive qualifier after the fixed activation-cost prefix.
+    })?;
+    let subject = subject.trim_end().trim_end_matches('.');
     let activation_source_filter = parse_continuous_subject_filter(subject.original)?;
 
     Some(
@@ -3373,6 +3374,24 @@ mod spend_any_color_to_activate_abilities_tests {
                 "expected SpendManaAsAnyColor {{ activation_source_filter: Some(creatures you control) }}, got {other:?}"
             ),
         }
+    }
+
+    #[test]
+    fn parses_self_activation_cost_scope() {
+        // The production static router normalizes Manascape Refractor's
+        // "this artifact" self-reference to `~` before static parsing.
+        let text = "You may spend mana as though it were mana of any color to pay the activation costs of ~'s abilities.";
+        let def = crate::parser::oracle_static::parse_static_line(text)
+            .expect("self-scoped activation-cost spend line must parse as a static");
+
+        assert_eq!(def.affected, Some(TargetFilter::Player));
+        assert!(matches!(
+            def.mode,
+            StaticMode::SpendManaAsAnyColor {
+                spell_filter: None,
+                activation_source_filter: Some(TargetFilter::SelfRef),
+            }
+        ));
     }
 }
 
