@@ -22,7 +22,7 @@ fn nadu_granted_trigger_has_independent_max_times_caps_per_target() {
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_mana_pool(
         P0,
-        (0..6)
+        (0..9)
             .map(|_| {
                 ManaUnit::new(
                     ManaType::Colorless,
@@ -35,7 +35,10 @@ fn nadu_granted_trigger_has_independent_max_times_caps_per_target() {
     );
     scenario.with_library_top(
         P0,
-        &["Forest", "Island", "Mountain", "Plains", "Swamp", "Forest"],
+        &[
+            "Forest", "Island", "Mountain", "Plains", "Swamp", "Forest", "Island", "Mountain",
+            "Plains",
+        ],
     );
 
     let nadu = scenario
@@ -110,6 +113,9 @@ fn nadu_granted_trigger_has_independent_max_times_caps_per_target() {
         "a blinked recipient must receive a fresh grant generation"
     );
     for target in [
+        first_target,
+        second_target,
+        third_target,
         first_target,
         second_target,
         third_target,
