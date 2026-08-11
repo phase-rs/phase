@@ -15971,10 +15971,13 @@ fn parse_other_than_first_spell_trigger(input: &str) -> OtherThanFirstSpellParse
     let Ok((after_actor, actor)) = actor_parser.parse(input) else {
         return OtherThanFirstSpellParse::NotCandidate;
     };
-    let Ok((after_marker, first_qualifier)) = terminated(
-        take_until(" spell other than the first "),
-        tag::<_, _, OracleError<'_>>(" spell other than the first "),
-    )
+    let Ok((after_marker, first_qualifier)) = alt((
+        terminated(
+            take_until(" spell other than the first "),
+            tag::<_, _, OracleError<'_>>(" spell other than the first "),
+        ),
+        value("", tag("spell other than the first ")),
+    ))
     .parse(after_actor) else {
         return OtherThanFirstSpellParse::NotCandidate;
     };
