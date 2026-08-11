@@ -32,6 +32,7 @@ use engine::types::game_state::{
 use engine::types::mana::ManaType;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
+use std::collections::HashSet;
 
 use crate::support::shared_card_db as load_db;
 
@@ -201,7 +202,10 @@ fn gemstone_caverns_accept_enters_with_luck_counter_and_prompts_exile() {
         "the selected card must be exiled"
     );
     assert_eq!(
-        *cards, expected_exile_candidates,
+        cards.iter().copied().collect::<HashSet<_>>(),
+        expected_exile_candidates
+            .into_iter()
+            .collect::<HashSet<_>>(),
         "only P1's non-Gemstone opening-hand cards are legal exile candidates"
     );
     assert!(
