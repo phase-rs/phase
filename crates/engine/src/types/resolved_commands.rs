@@ -769,11 +769,7 @@ pub enum ResolvedTriggerLedgerEdit {
     /// CR 603.2c: This trigger occurrence has used this opponent's per-turn fact.
     OncePerOpponentPerTurn { opponent: PlayerId },
     /// Increment from the captured prior count for MaxTimesPerTurn.
-    MaxTimesPerTurn {
-        expected_old: u32,
-        #[serde(default)]
-        ledger_key: Option<super::ability::TriggerFireLedgerKey>,
-    },
+    MaxTimesPerTurn { expected_old: u32 },
 }
 
 /// A named once-per-turn permission slot consumed by a completed play or cast.

@@ -128,8 +128,6 @@ mod trigger_occurrence_tests {
             ])
             .unwrap();
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].grant_producer, Some(first_producer.clone()));
-        assert_eq!(entries[1].grant_producer, Some(second_producer.clone()));
         assert_ne!(entries[0].occurrence, entries[1].occurrence);
     }
 
@@ -21880,16 +21878,6 @@ pub enum TriggerGrantProducerKey {
     },
 }
 
-/// Identity used by the MaxTimesPerTurn ledger.
-///
-/// The recipient-local occurrence is part of the identity because each granted
-/// ability functions independently on its recipient (CR 113.2c).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data")]
-pub enum TriggerFireLedgerKey {
-    Definition(TriggerDefinitionRef),
-}
-
 /// The immutable occurrence component of a live trigger definition identity.
 ///
 /// It is intentionally a closed typed representation rather than a definition
@@ -21948,8 +21936,6 @@ pub struct TriggerDefinitionRef {
 pub struct TriggerEntry {
     pub occurrence: TriggerDefinitionOccurrenceRef,
     pub definition: TriggerDefinition,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub grant_producer: Option<TriggerGrantProducerKey>,
 }
 
 impl TriggerEntry {
@@ -21957,19 +21943,6 @@ impl TriggerEntry {
         Self {
             occurrence,
             definition,
-            grant_producer: None,
-        }
-    }
-
-    pub fn with_grant_producer(
-        occurrence: TriggerDefinitionOccurrenceRef,
-        definition: TriggerDefinition,
-        grant_producer: TriggerGrantProducerKey,
-    ) -> Self {
-        Self {
-            occurrence,
-            definition,
-            grant_producer: Some(grant_producer),
         }
     }
 
@@ -22000,8 +21973,6 @@ enum TriggerEntryWire {
     IdentityBearing {
         occurrence: TriggerDefinitionOccurrenceRef,
         definition: TriggerDefinition,
-        #[serde(default)]
-        grant_producer: Option<TriggerGrantProducerKey>,
     },
     LegacyPayload(TriggerDefinition),
 }
@@ -22015,11 +21986,9 @@ impl<'de> Deserialize<'de> for TriggerEntry {
             TriggerEntryWire::IdentityBearing {
                 occurrence,
                 definition,
-                grant_producer,
             } => Ok(Self {
                 occurrence,
                 definition,
-                grant_producer,
             }),
             // A later GameState normalization validates this only for a
             // provable printed/base slot. Keeping the marker here preserves the
@@ -22136,10 +22105,9 @@ impl TriggerOccurrenceState {
                         .iter()
                         .find(|active| active.instance == grant_instance)
                         .expect("reconciled grant instance must remain active");
-                    TriggerEntry::with_grant_producer(
+                    TriggerEntry::new(
                         occurrence_for_grant(&producer.producer, grant_instance),
                         definition,
-                        producer.producer.clone(),
                     )
                 })
                 .collect()
@@ -22167,10 +22135,9 @@ impl TriggerOccurrenceState {
                             .iter()
                             .find(|active| active.instance == grant_instance)
                             .expect("reconciled grant instance must remain active");
-                        TriggerEntry::with_grant_producer(
+                        TriggerEntry::new(
                             occurrence_for_grant(&producer.producer, grant_instance),
                             definition,
-                            producer.producer.clone(),
                         )
                     })
                     .collect()

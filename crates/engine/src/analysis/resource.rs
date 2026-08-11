@@ -5288,7 +5288,7 @@ fn ability_has_per_game_activation_gate(state: &GameState, key: &(ObjectId, usiz
 mod tests {
     use super::*;
     use crate::game::game_object::GameObject;
-    use crate::types::ability::{TriggerDefinitionRef, TriggerFireLedgerKey};
+    use crate::types::ability::TriggerDefinitionRef;
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
     };
@@ -6238,15 +6238,11 @@ mod tests {
     fn trigger_max_times_per_turn_gate_breaks_modulo_equality() {
         let mut a = GameState::new_two_player(7);
         let oid = battlefield_creature(&mut a, 730, 0);
-        a.trigger_fire_counts_this_turn.insert(
-            TriggerFireLedgerKey::Definition(test_trigger_ref(&a, oid)),
-            1,
-        );
+        a.trigger_fire_counts_this_turn
+            .insert(test_trigger_ref(&a, oid), 1);
         let mut b = a.clone();
-        b.trigger_fire_counts_this_turn.insert(
-            TriggerFireLedgerKey::Definition(test_trigger_ref(&b, oid)),
-            2,
-        ); // limit progressed
+        b.trigger_fire_counts_this_turn
+            .insert(test_trigger_ref(&b, oid), 2); // limit progressed
         b.players[1].life -= 1;
         assert!(
             !loop_states_equal_modulo_resources(&a, &b),

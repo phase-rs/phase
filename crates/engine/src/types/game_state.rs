@@ -16,7 +16,6 @@ use super::ability::{
     PermanentEntryMode, PileSource, QuantityExpr, ResolvedAbility, SearchDestinationSplit,
     SearchSelectionConstraint, StaticCondition, TapCreaturesAggregate, TargetFilter, TargetRef,
     ThisWayCause, TriggerCondition, TriggerDefinition, TriggerDefinitionRef, TriggerEntry,
-    TriggerFireLedgerKey,
 };
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, PrintedCardRef, TokenImageRef};
@@ -254,13 +253,12 @@ mod legacy_trigger_definition_ref_map {
 
 /// Serde adapter for trigger occurrence ledgers. JSON object keys must be
 /// strings, while a `TriggerDefinitionRef` is structured identity; encode the
-/// map as an explicit entry list. The untagged wire adapter accepts both the
-/// current keyed representation and legacy definition-only entries.
+/// map as an explicit entry list rather than flattening or guessing a key.
 mod trigger_definition_ref_map {
     use super::*;
 
     pub fn serialize<S, H>(
-        map: &HashMap<TriggerFireLedgerKey, u32, H>,
+        map: &HashMap<TriggerDefinitionRef, u32, H>,
         serializer: S,
     ) -> Result<S::Ok, S::Error>
     where
@@ -273,24 +271,12 @@ mod trigger_definition_ref_map {
 
     pub fn deserialize<'de, D>(
         deserializer: D,
-    ) -> Result<HashMap<TriggerFireLedgerKey, u32>, D::Error>
+    ) -> Result<HashMap<TriggerDefinitionRef, u32>, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Wire {
-            Current(Vec<(TriggerFireLedgerKey, u32)>),
-            Legacy(Vec<(TriggerDefinitionRef, u32)>),
-        }
-
-        Wire::deserialize(deserializer).map(|wire| match wire {
-            Wire::Current(entries) => entries.into_iter().collect(),
-            Wire::Legacy(entries) => entries
-                .into_iter()
-                .map(|(key, count)| (TriggerFireLedgerKey::Definition(key), count))
-                .collect(),
-        })
+        Vec::<(TriggerDefinitionRef, u32)>::deserialize(deserializer)
+            .map(|entries| entries.into_iter().collect())
     }
 }
 
@@ -14790,7 +14776,7 @@ declare_game_state! {
         skip_serializing_if = "HashMap::is_empty",
         with = "trigger_definition_ref_map"
     )]
-    pub trigger_fire_counts_this_turn: HashMap<TriggerFireLedgerKey, u32>,
+    pub trigger_fire_counts_this_turn: HashMap<TriggerDefinitionRef, u32>,
     /// CR 603.2: Tracks per-opponent-per-turn firing for
     /// OncePerOpponentPerTurn. Keyed by exact occurrence and opponent.
     #[serde(default)]
@@ -22520,7 +22506,7 @@ mod tests {
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, Effect, PostReplacementContinuation, QuantityExpr,
         ResolvedAbility, TargetFilter, TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef,
-        TriggerEntry, TriggerGrantProducerKey, TriggerProducerOrigin,
+        TriggerEntry, TriggerGrantInstanceRef,
     };
     use crate::types::deterministic_serde::test_support::ReverseBuildHasher;
     use crate::types::identifiers::{
@@ -28457,29 +28443,18 @@ mod tests {
             "Legacy granted trigger".to_string(),
             Zone::Battlefield,
         );
-        let producer = TriggerGrantProducerKey::Granted {
-            origin: TriggerProducerOrigin::Static {
-                source: ObjectIncarnationRef::from_object(&object),
-                definition_index: 0,
-                modification_index: 0,
+        let entry = TriggerEntry::new(
+            TriggerDefinitionOccurrenceRef::Granted {
+                grant_instance: TriggerGrantInstanceRef(1),
             },
-            output_index: 0,
-        };
-        let grant_instance = object
-            .trigger_occurrence_state
-            .grant_instance_for(producer.clone())
-            .expect("grant instance allocates");
-        let entry = TriggerEntry::with_grant_producer(
-            TriggerDefinitionOccurrenceRef::Granted { grant_instance },
             TriggerDefinition::new(crate::types::triggers::TriggerMode::Attacks),
-            producer.clone(),
         );
         let definition = object.trigger_definition_ref(&entry);
         object.trigger_definitions.push(entry);
         state.objects.insert(object_id, object);
         state
             .trigger_fire_counts_this_turn
-            .insert(TriggerFireLedgerKey::Definition(definition.clone()), 2);
+            .insert(definition.clone(), 2);
 
         let mut second_object = GameObject::new(
             second_object_id,
@@ -28488,43 +28463,25 @@ mod tests {
             "Second legacy granted trigger".to_string(),
             Zone::Battlefield,
         );
-        let second_grant_instance = second_object
-            .trigger_occurrence_state
-            .grant_instance_for(producer.clone())
-            .expect("second grant instance allocates");
-        let second_entry = TriggerEntry::with_grant_producer(
+        let second_entry = TriggerEntry::new(
             TriggerDefinitionOccurrenceRef::Granted {
-                grant_instance: second_grant_instance,
+                grant_instance: TriggerGrantInstanceRef(1),
             },
             TriggerDefinition::new(crate::types::triggers::TriggerMode::Attacks),
-            producer.clone(),
         );
         let second_definition = second_object.trigger_definition_ref(&second_entry);
         second_object.trigger_definitions.push(second_entry);
         state.objects.insert(second_object_id, second_object);
-        state.trigger_fire_counts_this_turn.insert(
-            TriggerFireLedgerKey::Definition(second_definition.clone()),
-            3,
-        );
+        state
+            .trigger_fire_counts_this_turn
+            .insert(second_definition.clone(), 3);
 
-        let mut snapshot = serde_json::to_value(state).expect("serialize fixture state");
-        snapshot["objects"][object_id.0.to_string()]["trigger_definitions"][0]
-            .as_object_mut()
-            .expect("identity-bearing trigger serializes as an object")
-            .remove("grant_producer");
-        snapshot["objects"][second_object_id.0.to_string()]["trigger_definitions"][0]
-            .as_object_mut()
-            .expect("second identity-bearing trigger serializes as an object")
-            .remove("grant_producer");
-
-        let restored: GameState = serde_json::from_value(snapshot)
-            .expect("legacy grant provenance and combined ledger count restore");
+        let snapshot = serde_json::to_value(state).expect("serialize fixture state");
+        let restored: GameState =
+            serde_json::from_value(snapshot).expect("recipient-specific ledger counts restore");
         assert_eq!(
             restored.trigger_fire_counts_this_turn,
-            HashMap::from([
-                (TriggerFireLedgerKey::Definition(definition), 2),
-                (TriggerFireLedgerKey::Definition(second_definition), 3),
-            ])
+            HashMap::from([(definition, 2), (second_definition, 3),])
         );
     }
 

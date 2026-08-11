@@ -7007,8 +7007,8 @@ fn install_trigger_candidate(
         return;
     }
     obj.trigger_definitions
-        .push(crate::types::ability::TriggerEntry::with_grant_producer(
-            occurrence, definition, producer,
+        .push(crate::types::ability::TriggerEntry::new(
+            occurrence, definition,
         ));
 }
 

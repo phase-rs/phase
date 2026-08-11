@@ -1,6 +1,6 @@
 //! Final authority for composable per-event ledger facts.
 
-use crate::types::ability::{TriggerDefinitionRef, TriggerFireLedgerKey};
+use crate::types::ability::TriggerDefinitionRef;
 use crate::types::game_state::{GameState, SpellCastRecord};
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -453,14 +453,10 @@ pub fn apply_resolved_ledger_edit(
                     return Err(ResolvedLedgerEditReplayInvariantError::TriggerAlreadyRecorded);
                 }
             }
-            ResolvedTriggerLedgerEdit::MaxTimesPerTurn {
-                expected_old,
-                ledger_key,
-            } => {
-                let key = trigger_fire_ledger_key_for_replay(state, trigger, ledger_key.as_ref());
+            ResolvedTriggerLedgerEdit::MaxTimesPerTurn { expected_old } => {
                 let found = state
                     .trigger_fire_counts_this_turn
-                    .get(&key)
+                    .get(trigger)
                     .copied()
                     .unwrap_or(0);
                 if found != *expected_old {
@@ -474,7 +470,9 @@ pub fn apply_resolved_ledger_edit(
                 let next = expected_old
                     .checked_add(1)
                     .ok_or(ResolvedLedgerEditReplayInvariantError::CounterOverflow)?;
-                state.trigger_fire_counts_this_turn.insert(key, next);
+                state
+                    .trigger_fire_counts_this_turn
+                    .insert(trigger.clone(), next);
             }
         },
         ResolvedLedgerEdit::OncePerTurnPermission { source, permission } => {
@@ -513,17 +511,6 @@ pub fn apply_resolved_ledger_edit(
     Ok(())
 }
 
-fn trigger_fire_ledger_key_for_replay(
-    _state: &GameState,
-    trigger: &TriggerDefinitionRef,
-    ledger_key: Option<&TriggerFireLedgerKey>,
-) -> TriggerFireLedgerKey {
-    if let Some(ledger_key) = ledger_key {
-        return ledger_key.clone();
-    }
-    TriggerFireLedgerKey::Definition(trigger.clone())
-}
-
 fn history_len(len: usize) -> Result<u32, ResolvedLedgerEditReplayInvariantError> {
     u32::try_from(len).map_err(|_| ResolvedLedgerEditReplayInvariantError::CounterOverflow)
 }
@@ -532,11 +519,8 @@ fn history_len(len: usize) -> Result<u32, ResolvedLedgerEditReplayInvariantError
 mod tests {
     use super::*;
     use crate::game::game_object::GameObject;
-    use crate::types::ability::{
-        TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerEntry, TriggerGrantProducerKey,
-        TriggerProducerOrigin,
-    };
-    use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+    use crate::types::ability::{TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerEntry};
+    use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
     use crate::types::resolved_commands::{ResolvedCommandOrdinal, RulesExecutionNodeRef};
     use crate::types::triggers::TriggerMode;
@@ -554,47 +538,31 @@ mod tests {
             "Granted trigger".to_string(),
             Zone::Battlefield,
         );
-        let producer = TriggerGrantProducerKey::Granted {
-            origin: TriggerProducerOrigin::Static {
-                source: ObjectIncarnationRef::from_object(&object),
-                definition_index: 0,
-                modification_index: 0,
+        let entry = TriggerEntry::new(
+            TriggerDefinitionOccurrenceRef::Printed {
+                base_set: object.trigger_base_set_instance,
+                printed_index: 0,
             },
-            output_index: 0,
-        };
-        let grant_instance = object
-            .trigger_occurrence_state
-            .grant_instance_for(producer.clone())
-            .expect("grant instance allocates");
-        let entry = TriggerEntry::with_grant_producer(
-            TriggerDefinitionOccurrenceRef::Granted { grant_instance },
             TriggerDefinition::new(TriggerMode::Attacks),
-            producer.clone(),
         );
         let trigger = object.trigger_definition_ref(&entry);
         object.trigger_definitions.push(entry);
         state.objects.insert(object_id, object);
         state
             .trigger_fire_counts_this_turn
-            .insert(TriggerFireLedgerKey::Definition(trigger.clone()), 2);
+            .insert(trigger.clone(), 2);
 
         let command = ResolvedLedgerEditCommand {
             edit: ResolvedLedgerEdit::TriggerFired {
                 trigger: trigger.clone(),
-                edit: ResolvedTriggerLedgerEdit::MaxTimesPerTurn {
-                    expected_old: 2,
-                    ledger_key: None,
-                },
+                edit: ResolvedTriggerLedgerEdit::MaxTimesPerTurn { expected_old: 2 },
             },
             cause: RulesExecutionNodeRef::Proposal(ResolvedCommandOrdinal(0)),
         };
 
         apply_resolved_ledger_edit(&mut state, &command).expect("legacy replay resolves grant key");
         assert_eq!(
-            state
-                .trigger_fire_counts_this_turn
-                .get(&TriggerFireLedgerKey::Definition(trigger))
-                .copied(),
+            state.trigger_fire_counts_this_turn.get(&trigger).copied(),
             Some(3)
         );
         assert_eq!(state.trigger_fire_counts_this_turn.len(), 1);

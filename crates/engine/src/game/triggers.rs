@@ -9588,10 +9588,9 @@ fn check_trigger_constraint_with_ref(
             .is_some_and(|current| current == *level),
         // CR 603.4: "This ability triggers only the first N times each turn."
         TriggerConstraint::MaxTimesPerTurn { max } => definition_ref.is_none_or(|key| {
-            let ledger_key = trigger_fire_ledger_key(key, source_context);
             state
                 .trigger_fire_counts_this_turn
-                .get(&ledger_key)
+                .get(key)
                 .copied()
                 .unwrap_or(0)
                 < *max
@@ -11267,13 +11266,6 @@ fn player_field(state: &GameState, controller: PlayerId, f: impl Fn(&Player) -> 
         .unwrap_or(false)
 }
 
-fn trigger_fire_ledger_key(
-    definition_ref: &TriggerDefinitionRef,
-    _source_context: Option<&TriggerSourceContext>,
-) -> crate::types::ability::TriggerFireLedgerKey {
-    crate::types::ability::TriggerFireLedgerKey::Definition(definition_ref.clone())
-}
-
 /// Record that a constrained trigger has fired.
 fn record_trigger_fired_with_ref(
     state: &mut GameState,
@@ -11345,10 +11337,9 @@ fn record_trigger_fired_with_ref(
         }
         // Increment the captured fire count for MaxTimesPerTurn tracking.
         TriggerConstraint::MaxTimesPerTurn { .. } => {
-            let ledger_key = trigger_fire_ledger_key(key, source_context);
             let expected_old = state
                 .trigger_fire_counts_this_turn
-                .get(&ledger_key)
+                .get(key)
                 .copied()
                 .unwrap_or(0);
             crate::game::ledger::record_trigger_fired(
@@ -11356,7 +11347,6 @@ fn record_trigger_fired_with_ref(
                 key.clone(),
                 crate::types::resolved_commands::ResolvedTriggerLedgerEdit::MaxTimesPerTurn {
                     expected_old,
-                    ledger_key: Some(ledger_key),
                 },
             )
             .expect("max-times trigger must have a valid ledger prefix");
