@@ -1,5 +1,6 @@
 use engine::ai_support::{AiDecisionContext, CandidateAction};
 use engine::game::game_object::GameObject;
+use engine::game::players::is_opponent;
 use engine::game::targeting::find_legal_targets;
 use engine::types::ability::{AbilityDefinition, Effect, ResolvedAbility, TargetFilter, TargetRef};
 use engine::types::actions::GameAction;
@@ -230,7 +231,7 @@ impl<'a> PolicyContext<'a> {
             .into_iter()
             .any(|target| match target {
                 TargetRef::Object(id) => self.state.objects.get(&id).is_some_and(|object| {
-                    object.controller != self.ai_player
+                    is_opponent(self.state, self.ai_player, object.controller)
                         && object.card_types.core_types.contains(&CoreType::Creature)
                         && is_relevant(id)
                 }),
@@ -280,7 +281,9 @@ mod tests {
     use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityDefinition, AbilityKind, EffectKind, PtValue, QuantityExpr, TargetFilter,
+        TypedFilter,
     };
+    use engine::types::format::FormatConfig;
     use engine::types::game_state::{PendingCast, TargetEffectDetail, TargetSelectionSlot};
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::mana::ManaCost;
@@ -539,6 +542,98 @@ mod tests {
         let facts = ctx.cast_facts().expect("cast facts");
         assert_eq!(facts.immediate_etb_triggers.len(), 1);
         assert!(facts.has_direct_removal_text());
+    }
+
+    #[test]
+    fn legal_opponent_creature_target_is_team_aware() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        let source_id = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Test Spell".to_string(),
+            Zone::Hand,
+        );
+        let teammate_id = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(1),
+            "Teammate Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&teammate_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let config = AiConfig::default();
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: source_id,
+                card_id: CardId(10),
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
+        };
+        let ai_context = crate::context::AiContext::empty(&config.weights);
+        let creature_filter = TargetFilter::Typed(TypedFilter::creature());
+
+        {
+            let ctx = PolicyContext {
+                state: &state,
+                decision: &decision,
+                candidate: &candidate,
+                ai_player: PlayerId(0),
+                config: &config,
+                context: &ai_context,
+                cast_facts: None,
+                search_depth: SearchDepth::Root,
+            };
+            assert!(
+                !ctx.has_legal_opponent_creature_target(&creature_filter, source_id, |_| true),
+                "P1's legal creature target is P0's teammate in 2HG, not an opponent"
+            );
+        }
+
+        let opponent_id = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(2),
+            "Opponent Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&opponent_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &ai_context,
+            cast_facts: None,
+            search_depth: SearchDepth::Root,
+        };
+        assert!(
+            ctx.has_legal_opponent_creature_target(&creature_filter, source_id, |_| true),
+            "P2's legal creature target is P0's opponent in 2HG"
+        );
     }
 
     fn deadline_test_ctx<'a>(
