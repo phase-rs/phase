@@ -3384,16 +3384,16 @@ mod tests {
         // order would red this `ai_support` row on a no-op reordering of
         // `TriggerMode` — a failure that says nothing about either module.
         const UNCONSTRUCTIBLE: [&str; 7] = [
-            "Copied",                  // no `FromStr` arm
-            "Explored",                // no `FromStr` arm
+            "Copied",   // no `FromStr` arm
+            "Explored", // no `FromStr` arm
+            // Payload, and deliberately without a `FromStr` arm: Forge has no
+            // final-chapter meta-trigger type, so there is no Forge string to
+            // decode from. Inventing one would fabricate a mapping.
+            "FinalSagaChapterAbility", // payload
             "HauntedCreatureDies",     // no `FromStr` arm
             "KeywordAbilityActivated", // payload
             "Planeswalked",            // payload
-            // Payload, and deliberately without a `FromStr` arm: Forge has no
-            // Saga-chapter meta-trigger type, so there is no Forge string to
-            // decode from. Inventing one would fabricate a mapping.
-            "SagaChapterAbility", // payload
-            "Unknown",            // payload
+            "Unknown",                 // payload
         ];
         let mut undecodable = Vec::new();
 

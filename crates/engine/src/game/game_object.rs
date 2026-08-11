@@ -2911,13 +2911,15 @@ impl GameObject {
         self.owner == player && self.zone == Zone::Graveyard && self.is_represented_by_a_card()
     }
 
-    /// CR 714.2a: Every chapter number this Saga's chapter abilities are keyed
-    /// to. A chapter ability is not a distinct AST concept — it is a
-    /// lore-counter threshold trigger on the Saga itself (see
-    /// `parser::oracle_saga`), so the chapter numbers are exactly those
-    /// thresholds. Empty for a non-Saga.
+    /// CR 714.2 + CR 714.2b: Every chapter number this Saga's chapter abilities
+    /// are keyed to. A chapter ability is not a distinct AST concept — CR 714.2b
+    /// defines a chapter symbol as "When one or more lore counters are put onto
+    /// this Saga, if the number of lore counters on it was less than N and
+    /// became at least N, [effect]", and `parser::oracle_saga` emits exactly
+    /// that: a lore-counter threshold trigger on the Saga itself. So the chapter
+    /// numbers are exactly those thresholds. Empty for a non-Saga.
     ///
-    /// Lore-scoped per CR 714.2a: a Saga may also carry a thresholded trigger on
+    /// Lore-scoped per CR 714.2b: a Saga may also carry a thresholded trigger on
     /// some OTHER counter type, and that trigger is not a chapter ability.
     ///
     /// Structural scan of the Saga's own triggers — intrinsic to the card, not
@@ -2935,22 +2937,27 @@ impl GameObject {
             .filter_map(|filter| filter.threshold)
     }
 
-    /// CR 714.1: Returns the final chapter number for a Saga, or None if not a Saga.
+    /// CR 714.2d: "A Saga's final chapter number is the greatest value among
+    /// chapter abilities it has." Returns `None` for a non-Saga.
+    ///
+    /// CR 714.2d also assigns a final chapter number of 0 to a Saga with no
+    /// chapter abilities; this returns `None` there too, because every caller
+    /// uses `None` to mean "not a Saga to begin with" and CR 714.3c / CR 714.4
+    /// both exempt a Saga with no chapter abilities from the lore turn-based
+    /// action and the sacrifice.
     pub fn final_chapter_number(&self) -> Option<u32> {
         self.saga_chapter_numbers().max()
     }
 
-    /// CR 714.2a + CR 714.4: Identify one of this Saga's own chapter abilities
+    /// CR 714.2 + CR 714.2d: Identify one of this Saga's own chapter abilities
     /// by the exact trigger occurrence that produced it, returning
     /// `(chapter_number, final_chapter_number)`.
     ///
-    /// A chapter ability is not a distinct AST concept — it is a lore-counter
-    /// threshold trigger on the Saga itself (see `parser::oracle_saga`). This is
-    /// the single authority that maps a fired trigger occurrence back to its
-    /// printed chapter number, so callers never have to re-derive it from the
-    /// lore count (wrong under Read Ahead and multi-counter additions, which
-    /// cross several thresholds at once) or from the `"Chapter {n}"` description
-    /// string.
+    /// This is the single authority that maps a fired trigger occurrence back to
+    /// its printed chapter number, so callers never have to re-derive it from
+    /// the lore count (wrong under Read Ahead, and wrong for a multi-counter
+    /// addition, which per CR 714.2b crosses several thresholds at once) or from
+    /// the `"Chapter {n}"` description string.
     ///
     /// Returns `None` for a non-Saga, or for an occurrence that is not one of
     /// this permanent's lore-threshold triggers.

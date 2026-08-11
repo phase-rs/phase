@@ -1,4 +1,4 @@
-//! CR 714.2a + CR 714.4 + CR 608.2k — Narci, Fable Singer's final-chapter
+//! CR 714.2e + CR 714.4 + CR 608.2k — Narci, Fable Singer's final-chapter
 //! drain, driven end-to-end through the production Saga pipeline.
 //!
 //! Oracle: `Whenever the final chapter ability of a Saga you control resolves,
@@ -144,7 +144,7 @@ fn narci_drains_for_the_sagas_mana_value_when_its_final_chapter_resolves() {
     );
 }
 
-/// CR 714.4: a NON-final chapter ability resolving must not fire the trigger.
+/// CR 714.2e: a NON-final chapter ability resolving must not fire the trigger.
 /// Without the chapter/final-chapter comparison this test drains on chapter I
 /// as well, which would double Narci's output on every multi-chapter Saga.
 #[test]

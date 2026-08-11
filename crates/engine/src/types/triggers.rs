@@ -218,19 +218,6 @@ pub enum PlaneswalkRole {
     Any,
 }
 
-/// CR 714.2a + CR 714.4: which chapter ability of a Saga a meta-trigger listens
-/// for. A Saga's chapter abilities are its lore-counter threshold triggers
-/// (CR 714.2a); the *final* chapter ability is the one whose chapter number is
-/// the greatest among them (CR 714.4 — reaching it is what makes the Saga's
-/// controller sacrifice it).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum SagaChapterScope {
-    /// Any chapter ability of the Saga.
-    Any,
-    /// CR 714.4: only the final (highest-numbered) chapter ability.
-    Final,
-}
-
 /// CR 603.2 + CR 608.2: the point in another ability's lifecycle that a
 /// meta-trigger observes. The two points are distinct events with distinct
 /// timing consequences: an ability that triggers may still be countered
@@ -624,18 +611,27 @@ pub enum TriggerMode {
     /// `game::haunt::match_haunted_creature_dies`.
     HauntedCreatureDies,
 
-    /// CR 714.2a + CR 714.4: a meta-trigger on another permanent's Saga chapter
-    /// abilities — "whenever the final chapter ability of a Saga you control
-    /// resolves" (Narci, Fable Singer; Tom Bombadil) / "… triggers"
-    /// (Historian's Boon). Parameterized on the two independent axes the class
-    /// varies over: WHICH chapter ability is observed (`chapter`) and WHICH
-    /// point of that ability's lifecycle fires this trigger (`lifecycle`).
+    /// CR 714.2e: a meta-trigger on another permanent's FINAL chapter ability —
+    /// "whenever the final chapter ability of a Saga you control resolves"
+    /// (Narci, Fable Singer; Tom Bombadil) / "… triggers" (Historian's Boon).
+    /// CR 714.2e defines a Saga's final chapter ability as the chapter ability
+    /// whose chapter symbol carries its final chapter number (CR 714.2d).
+    ///
+    /// `lifecycle` is the one axis the printed class actually varies over. It is
+    /// deliberately NOT parameterized on *which* chapter ability is observed:
+    /// all three printed cards say "the final chapter ability", and an
+    /// unqualified "a chapter ability" observer could not be modeled correctly
+    /// here anyway. CR 714.2b makes each chapter symbol its own triggered
+    /// ability, so one lore-counter addition that crosses several chapter
+    /// numbers triggers that many chapter abilities — an observer of all of them
+    /// must fire once per crossed ability, which an event-keyed matcher reading
+    /// a single `CounterAdded` cannot express. Adding that scope needs an
+    /// occurrence-level chapter event first, not a wider enum.
     ///
     /// The Saga itself is constrained by the trigger's ordinary `valid_card`
     /// filter ("a Saga you control"), so no Saga-specific filter axis is needed
     /// here.
-    SagaChapterAbility {
-        chapter: SagaChapterScope,
+    FinalSagaChapterAbility {
         lifecycle: AbilityLifecyclePoint,
     },
 

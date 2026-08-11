@@ -21593,7 +21593,7 @@ pub struct CounterTriggerFilter {
     pub counter_type: crate::types::counter::CounterType,
     /// If set, only fire when the count crosses this threshold:
     /// previous_count < threshold <= new_count.
-    /// Used by Saga chapter triggers (CR 714.2a).
+    /// Used by Saga chapter triggers (CR 714.2b).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threshold: Option<u32>,
 }
@@ -21713,7 +21713,7 @@ pub struct TriggerDefinition {
     pub constraint: Option<TriggerConstraint>,
     #[serde(default)]
     pub condition: Option<TriggerCondition>,
-    /// Optional filter for counter-related trigger modes (CR 714.2a).
+    /// Optional filter for counter-related trigger modes (CR 714.2b).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub counter_filter: Option<CounterTriggerFilter>,
     /// CR 118.12: "Effect unless [player] pays {cost}" — tax trigger modifier.

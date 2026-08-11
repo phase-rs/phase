@@ -1053,27 +1053,30 @@ pub enum GameEvent {
         #[serde(default)]
         actor: PlayerId,
     },
-    /// CR 714.2a + CR 608.2: A Saga's chapter ability finished resolving.
+    /// CR 714.2 + CR 608.2: A Saga's chapter ability finished resolving.
     ///
-    /// A chapter ability is not a distinct AST concept — it is the Saga's own
-    /// lore-counter threshold trigger (CR 714.2a). This event is the resolution
-    /// half of that lifecycle, which nothing else on the bus reports:
-    /// `StackResolved` is emitted for fizzles and failed intervening-ifs too,
-    /// and carries the stack entry id rather than the Saga.
+    /// A chapter ability is not a distinct AST concept — CR 714.2b defines a
+    /// chapter symbol as a lore-counter threshold trigger on the Saga itself.
+    /// This event is the resolution half of that ability's lifecycle, which
+    /// nothing else on the bus reports: `StackResolved` is emitted for fizzles
+    /// and failed intervening-ifs too, and carries the stack entry id rather
+    /// than the Saga.
     ///
     /// `chapter` and `final_chapter` are captured BEFORE the chapter ability
     /// executes, because a chapter ability may remove its own Saga from the
-    /// battlefield as its effect (CR 714.4 / Fable of the Mirror-Breaker III),
-    /// after which neither number could be re-derived.
+    /// battlefield as its effect (Fable of the Mirror-Breaker III), and CR 714.4
+    /// sacrifices it as soon as the ability leaves the stack — after which
+    /// neither number could be re-derived.
     SagaChapterAbilityResolved {
         /// The Saga permanent whose chapter ability resolved.
         saga_id: ObjectId,
         /// CR 109.5: controller of the resolved chapter ability.
         controller: PlayerId,
-        /// CR 714.2a: the chapter number (lore threshold) that resolved.
+        /// CR 714.2b: the chapter number (lore threshold) that resolved.
         chapter: u32,
-        /// CR 714.4: the Saga's greatest chapter number. `chapter ==
-        /// final_chapter` is what makes this the *final* chapter ability.
+        /// CR 714.2d: the greatest chapter number among this Saga's chapter
+        /// abilities. Per CR 714.2e, `chapter == final_chapter` is exactly what
+        /// makes this the Saga's *final* chapter ability.
         final_chapter: u32,
     },
     /// Digital-only Alchemy (no CR entry): a card's intensity increased by

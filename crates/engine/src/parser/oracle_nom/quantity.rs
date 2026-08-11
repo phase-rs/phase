@@ -4700,7 +4700,7 @@ fn parse_object_possessive_scope(input: &str) -> OracleResult<'_, ObjectScope> {
         value(ObjectScope::Target, tag("target creature's")),
         value(ObjectScope::Target, tag("target permanent's")),
         value(ObjectScope::EventSource, tag("that spell's")),
-        // CR 608.2k + CR 714.2a: "that Saga's mana value" (Narci, Fable Singer).
+        // CR 608.2k + CR 714.2e: "that Saga's mana value" (Narci, Fable Singer).
         // Same shape as the "that spell's" arm above and bound the same way: an
         // untargeted back-reference to the object the TRIGGER CONDITION named,
         // not a threaded target. The "that <core type>'s" arms below bind to

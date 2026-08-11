@@ -1565,7 +1565,7 @@ pub(crate) fn extract_source_from_event(
         // trigger fires from; `source_id` is the permanent tapped for mana.
         GameEvent::TappedForMana { source_id, .. } => Some(*source_id),
         GameEvent::CounterAdded { object_id, .. } => Some(*object_id),
-        // CR 608.2k + CR 714.2a: "that Saga" in "each opponent loses X life …
+        // CR 608.2k + CR 714.2e: "that Saga" in "each opponent loses X life …
         // where X is that Saga's mana value" (Narci, Fable Singer) is an
         // untargeted back-reference to the object the trigger condition named —
         // the Saga whose chapter ability resolved.

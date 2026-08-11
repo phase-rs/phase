@@ -2460,7 +2460,7 @@ export type GameEvent =
   | { type: "LandPlayed"; data: { object_id: ObjectId; player_id: PlayerId; from_zone: Zone } }
   | { type: "StackPushed"; data: { object_id: ObjectId } }
   | { type: "StackResolved"; data: { object_id: ObjectId } }
-  // CR 714.2a: a Saga's chapter ability finished resolving. Bookkeeping the
+  // CR 714.2: a Saga's chapter ability finished resolving. Bookkeeping the
   // engine publishes for meta-triggers (Narci, Fable Singer); non-visual, since
   // the chapter ability's own effects already animate.
   | { type: "SagaChapterAbilityResolved"; data: { saga_id: ObjectId; controller: PlayerId; chapter: number; final_chapter: number } }

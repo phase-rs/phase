@@ -65,7 +65,7 @@ use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ManaColor, ManaType};
 use crate::types::phase::Phase;
 use crate::types::triggers::{
-    AbilityLifecyclePoint, AttackTargetFilter, PlaneswalkRole, SagaChapterScope, TriggerMode,
+    AbilityLifecyclePoint, AttackTargetFilter, PlaneswalkRole, TriggerMode,
 };
 use crate::types::zones::Zone;
 use std::str::FromStr;
@@ -9225,7 +9225,7 @@ pub(crate) fn parse_trigger_condition(
         return result;
     }
 
-    // CR 714.2a: "whenever the final chapter ability of a Saga you control
+    // CR 714.2e: "whenever the final chapter ability of a Saga you control
     // resolves". Dispatched before subject decomposition — the grammatical
     // subject of this clause is an ABILITY, not a permanent, so the generic
     // subject/event-verb path would mis-bind "chapter ability" as the object
@@ -17717,16 +17717,23 @@ fn try_parse_discard_trigger(
 /// "Another" self-exclusion (e.g., Mazirek's "another permanent") is carried by
 /// `FilterProp::Another` from `parse_trigger_subject`; the runtime matcher enforces
 /// it via `FilterProp::Another` → `object_id != source.id` in `filter.rs`.
-/// CR 714.2a + CR 714.4: "Whenever [the final] chapter ability of \<saga\>
+/// CR 714.2e: "Whenever the final chapter ability of \<saga\>
 /// triggers/resolves" — Historian's Boon, Narci Fable Singer, Tom Bombadil.
 ///
-/// The class varies over two independent axes, so each is one `alt()` composed
-/// in sequence rather than an enumeration of phrasings: WHICH chapter ability is
-/// observed (`the final chapter ability` / `a chapter ability`) and WHICH point
-/// of its lifecycle fires the trigger (`triggers` / `resolves`). The observed
-/// Saga flows through the shared `parse_trigger_subject` building block, so
-/// "a Saga you control", a bare "a Saga", and an opponent-scoped subject all
-/// work without any Saga-specific subject grammar here.
+/// The one axis the printed class varies over is WHICH point of the observed
+/// ability's lifecycle fires the trigger (`triggers` / `resolves`), so that is a
+/// single `alt()`. The observed Saga flows through the shared
+/// `parse_trigger_subject` building block, so "a Saga you control", a bare
+/// "a Saga", and an opponent-scoped subject all work without any Saga-specific
+/// subject grammar here.
+///
+/// Deliberately requires "final": an unqualified "a chapter ability of …"
+/// observer is NOT accepted, because CR 714.2b makes each chapter symbol its own
+/// triggered ability and a single lore-counter addition can cross several
+/// chapter numbers at once. Such an observer must fire once per crossed ability,
+/// which the event-keyed matcher cannot express from one `CounterAdded`.
+/// Accepting the grammar would mint a silently under-firing trigger; no printed
+/// card needs it.
 fn try_parse_saga_chapter_ability_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     let (event, ()) = alt((
         value((), tag::<_, _, OracleError<'_>>("whenever ")),
@@ -17735,18 +17742,9 @@ fn try_parse_saga_chapter_ability_trigger(lower: &str) -> Option<(TriggerMode, T
     .parse(lower)
     .ok()?;
 
-    // "the final chapter ability of " / "a chapter ability of ". The article is
-    // optional because it is not part of the chapter-scope distinction.
-    let (subject_text, (_, chapter, _)) = (
-        opt(alt((
-            tag::<_, _, OracleError<'_>>("the "),
-            tag("a "),
-            tag("an "),
-        ))),
-        alt((
-            value(SagaChapterScope::Final, tag("final chapter ability")),
-            value(SagaChapterScope::Any, tag("chapter ability")),
-        )),
+    let (subject_text, _) = (
+        opt(tag::<_, _, OracleError<'_>>("the ")),
+        tag("final chapter ability"),
         tag(" of "),
     )
         .parse(event)
@@ -17769,11 +17767,11 @@ fn try_parse_saga_chapter_ability_trigger(lower: &str) -> Option<(TriggerMode, T
         return None;
     }
 
-    let mode = TriggerMode::SagaChapterAbility { chapter, lifecycle };
+    let mode = TriggerMode::FinalSagaChapterAbility { lifecycle };
     let mut def = make_base();
     def.mode = mode.clone();
-    // CR 714.1: the observed Saga is an ordinary trigger subject — the runtime
-    // matcher applies this filter to the Saga carried by the event.
+    // The observed Saga is an ordinary trigger subject — the runtime matcher
+    // applies this filter to the Saga carried by the event.
     def.valid_card = Some(filter);
     Some((mode, def))
 }
@@ -18827,11 +18825,12 @@ mod cost_x_totality_guard_tests {
     }
 }
 
-/// CR 714.2a + CR 714.4: the Saga-chapter meta-trigger building block —
+/// CR 714.2e: the final-chapter meta-trigger building block —
 /// "whenever [the final] chapter ability of \<saga\> triggers/resolves".
 ///
-/// These exercise the two axes the combinator composes (chapter scope ×
-/// lifecycle point) and the shared subject grammar, not one card's printed line.
+/// These exercise the lifecycle axis the combinator composes, the shared
+/// subject grammar, and the deliberate refusal of an unqualified
+/// chapter-ability clause — not one card's printed line.
 #[cfg(test)]
 mod saga_chapter_ability_trigger_tests {
     use super::parse_trigger_line;
@@ -18839,7 +18838,7 @@ mod saga_chapter_ability_trigger_tests {
     use crate::types::ability::{
         ControllerRef, ObjectScope, QuantityRef, TargetFilter, TypeFilter,
     };
-    use crate::types::triggers::{AbilityLifecyclePoint, SagaChapterScope, TriggerMode};
+    use crate::types::triggers::{AbilityLifecyclePoint, TriggerMode};
 
     fn saga_filter(filter: Option<&TargetFilter>) -> (Vec<TypeFilter>, Option<ControllerRef>) {
         let Some(TargetFilter::Typed(typed)) = filter else {
@@ -18857,8 +18856,7 @@ mod saga_chapter_ability_trigger_tests {
         );
         assert_eq!(
             def.mode,
-            TriggerMode::SagaChapterAbility {
-                chapter: SagaChapterScope::Final,
+            TriggerMode::FinalSagaChapterAbility {
                 lifecycle: AbilityLifecyclePoint::Resolved,
             }
         );
@@ -18881,8 +18879,7 @@ mod saga_chapter_ability_trigger_tests {
         );
         assert_eq!(
             def.mode,
-            TriggerMode::SagaChapterAbility {
-                chapter: SagaChapterScope::Final,
+            TriggerMode::FinalSagaChapterAbility {
                 lifecycle: AbilityLifecyclePoint::Triggered,
             }
         );
@@ -18895,21 +18892,24 @@ mod saga_chapter_ability_trigger_tests {
         );
     }
 
-    /// The chapter axis is a real parameter, not a hardcoded "final": an
-    /// unqualified chapter ability parses rather than falling out of the
-    /// grammar.
+    /// CR 714.2b: an UNQUALIFIED chapter-ability observer must be refused, not
+    /// silently accepted as if it were the final-chapter one. Each chapter
+    /// symbol is its own triggered ability, so one lore-counter addition
+    /// crossing several chapter numbers triggers that many abilities; an
+    /// observer of all of them owes one firing per crossed ability, which this
+    /// event-keyed trigger family cannot express. Falling back to `Unknown`
+    /// keeps the clause honestly coverage-red instead of minting a trigger that
+    /// under-fires.
     #[test]
-    fn any_chapter_resolves() {
+    fn unqualified_chapter_ability_is_refused() {
         let def = parse_trigger_line(
             "Whenever a chapter ability of a Saga you control resolves, draw a card.",
             "Test",
         );
-        assert_eq!(
-            def.mode,
-            TriggerMode::SagaChapterAbility {
-                chapter: SagaChapterScope::Any,
-                lifecycle: AbilityLifecyclePoint::Resolved,
-            }
+        assert!(
+            matches!(def.mode, TriggerMode::Unknown(_)),
+            "an unqualified chapter-ability clause must not mint a final-chapter trigger, got {:?}",
+            def.mode
         );
     }
 
@@ -18924,8 +18924,7 @@ mod saga_chapter_ability_trigger_tests {
         );
         assert_eq!(
             def.mode,
-            TriggerMode::SagaChapterAbility {
-                chapter: SagaChapterScope::Final,
+            TriggerMode::FinalSagaChapterAbility {
                 lifecycle: AbilityLifecyclePoint::Resolved,
             }
         );
