@@ -15940,7 +15940,7 @@ enum OtherThanFirstSpellActor {
 /// intervening-if condition. The recognizer owns the predicate only after it
 /// reaches the marker, so a malformed repeated qualifier fails closed.
 fn parse_other_than_first_spell_trigger(input: &str) -> OtherThanFirstSpellParse {
-    let actor_parser = alt((
+    let mut actor_parser = alt((
         value(OtherThanFirstSpellActor::You, tag("you cast an ")),
         value(OtherThanFirstSpellActor::You, tag("you cast a ")),
         value(

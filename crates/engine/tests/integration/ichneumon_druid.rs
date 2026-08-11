@@ -39,10 +39,12 @@ fn ichneumon_druid_damages_only_after_opponents_first_instant() {
     runner.state_mut().priority_player = P1;
     runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
 
-    let initial_life = runner.life(P1);
     let controller_life = runner.life(P0);
+    let initial_life = runner.life(P1);
     // Source/controller and caster deliberately diverge: the source's own
     // instant is not an opponent event and must not damage its controller.
+    runner.state_mut().priority_player = P0;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
     runner.cast(own_instant).target_object(own_target).resolve();
     assert_eq!(
         runner.life(P0),
@@ -54,6 +56,8 @@ fn ichneumon_druid_damages_only_after_opponents_first_instant() {
         initial_life,
         "own instant must not damage opponent either"
     );
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
     runner.cast(first_instant).target_object(target_a).resolve();
     assert_eq!(
         runner.life(P1),
