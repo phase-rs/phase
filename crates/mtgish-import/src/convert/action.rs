@@ -245,11 +245,20 @@ impl VariableBindings {
     /// typed constraint from the outer `Actions::Targeted` wrapper. This
     /// preserves the typed target slot so the engine can prompt for targets
     /// at cast/activation time (CR 601.2c).
+    ///
+    /// Selection continuations (`is_selection_continuation`) are skipped: their
+    /// `TargetFilter::Any` is bound by the preceding effect's choice, not a
+    /// target slot the outer wrapper may constrain.
     fn rewrite_target_filters(&self, effects: &mut [Effect]) {
         let Some(typed) = &self.target_filter else {
             return;
         };
-        for effect in effects.iter_mut() {
+        for idx in 0..effects.len() {
+            let (preceding, from_here) = effects.split_at_mut(idx);
+            let effect = &mut from_here[0];
+            if is_selection_continuation(preceding.last(), effect) {
+                continue;
+            }
             rewrite_any_target_filter_in_effect(effect, typed);
         }
     }
@@ -5644,19 +5653,34 @@ fn apply_player_target_chain(
 ) -> ConvResult<Vec<Effect>> {
     let mut out = Vec::with_capacity(effects.len());
     for effect in effects {
-        let hand_selection_continuation = matches!(out.last(), Some(Effect::RevealHand { .. }))
-            && is_selected_hand_exile_continuation(&effect);
-        let library_selection_continuation =
-            matches!(out.last(), Some(Effect::SearchLibrary { .. }))
-                && is_search_library_change_zone_continuation(&effect);
-
-        if hand_selection_continuation || library_selection_continuation {
+        if is_selection_continuation(out.last(), &effect) {
             out.push(effect);
         } else {
             out.push(apply_player_target(effect, target_filter.clone())?);
         }
     }
     Ok(out)
+}
+
+/// CR 115.1 + CR 601.2c: Does `effect` consume a selection already bound by the
+/// immediately preceding effect — the card found by `Effect::SearchLibrary`, the
+/// card chosen by `Effect::RevealHand` — rather than declare a target slot of
+/// its own?
+///
+/// Such an effect's `TargetFilter::Any` is structural: the engine resolves it
+/// from the continuation the previous effect installed, so no player or typed
+/// constraint from an enclosing wrapper may overwrite it. Both rebinding passes
+/// (`apply_player_target_chain` for the `SearchPlayersLibrary` player axis and
+/// `VariableBindings::rewrite_target_filters` for the outer `Actions::Targeted`
+/// typed axis) route through this single predicate — an outer wrapper that
+/// clobbered the slot would retarget the move at an arbitrary permanent the
+/// bound player controls instead of the card the search selected.
+fn is_selection_continuation(preceding: Option<&Effect>, effect: &Effect) -> bool {
+    match preceding {
+        Some(Effect::RevealHand { .. }) => is_selected_hand_exile_continuation(effect),
+        Some(Effect::SearchLibrary { .. }) => is_search_library_change_zone_continuation(effect),
+        _ => false,
+    }
 }
 
 fn is_selected_hand_exile_continuation(effect: &Effect) -> bool {
