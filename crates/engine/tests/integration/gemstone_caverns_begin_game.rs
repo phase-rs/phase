@@ -22,6 +22,8 @@
 use engine::database::card_db::CardDatabase;
 use engine::game::deck_loading::create_object_from_card_face;
 use engine::game::mana_abilities::is_mana_ability;
+use engine::game::scenario::{GameScenario, P0};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::{apply, start_game_with_starting_player};
 use engine::types::ability::AbilityKind;
 use engine::types::actions::{GameAction, MulliganChoice};
@@ -35,6 +37,7 @@ use engine::types::zones::Zone;
 use std::collections::HashSet;
 
 use crate::support::shared_card_db as load_db;
+use crate::support::shared_card_export_json as load_export;
 
 /// Build a 2-player game where the non-starting player (P1) has a 7-card
 /// library consisting of Gemstone Caverns plus six basic lands. After the
@@ -126,6 +129,102 @@ fn gemstone_in_player_hand(
         .iter()
         .find(|id| state.objects[id].name == "Gemstone Caverns")
         .expect("Gemstone Caverns must be in the player's opening hand")
+}
+
+/// The integration fixture is intentionally small and can lag the production
+/// export. Pin the serialized contract in the full export, where a dropped
+/// condition or a widened counter scope would otherwise be invisible.
+#[test]
+fn gemstone_caverns_full_export_retains_luck_counter_mana_contract() {
+    let Some(export) = load_export() else {
+        return;
+    };
+    let card = export
+        .get("gemstone caverns")
+        .expect("Gemstone Caverns must be in the full card-data export");
+    let abilities = card
+        .get("abilities")
+        .and_then(|value| value.as_array())
+        .expect("Gemstone Caverns abilities must be an array");
+
+    assert_eq!(
+        abilities.len(),
+        2,
+        "the full export must retain exactly Gemstone Caverns' BeginGame and mana abilities"
+    );
+    assert_eq!(
+        abilities[0].get("kind").and_then(|value| value.as_str()),
+        Some("BeginGame"),
+        "the first exported ability must remain the opening-hand ability"
+    );
+
+    let mana = &abilities[1];
+    assert_eq!(
+        mana.get("kind").and_then(|value| value.as_str()),
+        Some("Activated"),
+        "the second exported ability must remain Gemstone Caverns' activated mana ability"
+    );
+    assert_eq!(
+        mana.get("effect")
+            .and_then(|effect| effect.get("type"))
+            .and_then(|value| value.as_str()),
+        Some("Mana"),
+        "the base branch must produce mana"
+    );
+    assert_eq!(
+        mana.get("effect")
+            .and_then(|effect| effect.get("produced"))
+            .and_then(|produced| produced.get("type"))
+            .and_then(|value| value.as_str()),
+        Some("Colorless"),
+        "the base branch must produce colorless mana"
+    );
+
+    let conditional = mana
+        .get("sub_ability")
+        .expect("the exported mana ability must retain its conditional replacement branch");
+    assert_eq!(
+        conditional
+            .get("effect")
+            .and_then(|effect| effect.get("type"))
+            .and_then(|value| value.as_str()),
+        Some("Mana"),
+        "the luck-counter replacement branch must also produce mana"
+    );
+    let quantity = conditional
+        .get("condition")
+        .and_then(|condition| condition.get("inner"))
+        .and_then(|inner| inner.get("lhs"))
+        .and_then(|lhs| lhs.get("qty"))
+        .expect("the replacement branch must compare counters on Gemstone Caverns");
+    assert_eq!(
+        conditional
+            .get("condition")
+            .and_then(|condition| condition.get("type"))
+            .and_then(|value| value.as_str()),
+        Some("ConditionInstead"),
+        "the luck-counter branch must replace, rather than supplement, colorless mana"
+    );
+    assert_eq!(
+        quantity.get("type").and_then(|value| value.as_str()),
+        Some("CountersOn"),
+        "the replacement condition must inspect a counter quantity"
+    );
+    assert_eq!(
+        quantity
+            .get("scope")
+            .and_then(|scope| scope.get("type"))
+            .and_then(|value| value.as_str()),
+        Some("Source"),
+        "the counter condition must inspect Gemstone Caverns itself"
+    );
+    assert_eq!(
+        quantity
+            .get("counter_type")
+            .and_then(|value| value.as_str()),
+        Some("luck"),
+        "the counter condition must inspect Generic(luck), not every counter"
+    );
 }
 
 #[test]
@@ -313,6 +412,78 @@ fn gemstone_caverns_accept_enters_with_luck_counter_and_prompts_exile() {
     assert_eq!(mana_pool.count_color(ManaType::Colorless), 0);
     assert_eq!(mana_pool.total(), 1);
     assert!(state.objects[&gemstone_id].tapped);
+}
+
+#[test]
+fn gemstone_caverns_without_luck_makes_colorless_despite_controller_luck_elsewhere() {
+    let Some(db) = load_db() else {
+        return;
+    };
+
+    let luck = CounterType::Generic("luck".to_string());
+    let mut scenario = GameScenario::new();
+    let gemstone = scenario.add_real_card(P0, "Gemstone Caverns", Zone::Battlefield, db);
+    let other_permanent = scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
+    scenario.with_counter(other_permanent, luck.clone(), 1);
+    let mut runner = scenario.build();
+
+    // Production path: objects are rehydrated from card-data after deck loading.
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    let mana_ability_index = runner.state().objects[&gemstone]
+        .abilities
+        .iter()
+        .position(|ability| ability.kind == AbilityKind::Activated && is_mana_ability(ability))
+        .expect("exported Gemstone Caverns must include an activated mana ability");
+    assert!(
+        !runner.state().objects[&gemstone]
+            .counters
+            .contains_key(&luck),
+        "Gemstone Caverns must begin this scenario without a luck counter"
+    );
+    assert_eq!(
+        runner.state().objects[&other_permanent]
+            .counters
+            .get(&luck)
+            .copied(),
+        Some(1),
+        "the same controller's other permanent supplies the scope-regression witness"
+    );
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: gemstone,
+            ability_index: mana_ability_index,
+        })
+        .expect("the public activation action must activate Gemstone Caverns");
+
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseManaColor { .. }
+        ),
+        "without a luck counter on Gemstone Caverns, its mana ability must not prompt for color"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "the colorless mana ability must resolve immediately, got {:?}",
+        runner.state().waiting_for
+    );
+    let mana_pool = &runner.state().players[P0.0 as usize].mana_pool;
+    assert_eq!(
+        mana_pool.count_color(ManaType::Colorless),
+        1,
+        "without its own luck counter, Gemstone Caverns must add exactly {{C}}"
+    );
+    assert_eq!(
+        mana_pool.total(),
+        1,
+        "the activation must add exactly one mana"
+    );
+    assert!(
+        runner.state().objects[&gemstone].tapped,
+        "the public activation must pay Gemstone Caverns' tap cost"
+    );
 }
 
 #[test]
