@@ -790,6 +790,7 @@ mod mauhur_swarming_of_moria;
 mod maze_of_ith_untap_bidirectional_prevent;
 mod mazemind_tome_existential_counter_state_trigger;
 mod mechtitan_core_return_exiled;
+mod memory_jar_delayed_end_step;
 mod memory_plunder_free_cast_2884;
 mod mercenaries_any_player_activate_prevention_scope;
 mod merieke_ri_berit_cant_regenerate;

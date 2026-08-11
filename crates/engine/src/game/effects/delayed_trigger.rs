@@ -993,15 +993,10 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
         Effect::ChangeZoneAll {
             origin: _, target, ..
         } => {
-            // Resolve target filter
-            match target {
-                TargetFilter::TrackedSet {
-                    id: TrackedSetId(0),
-                }
-                | TargetFilter::Any => {
-                    *target = TargetFilter::TrackedSet { id: real_id };
-                }
-                _ => {}
+            if matches!(target, TargetFilter::Any) {
+                *target = TargetFilter::TrackedSet { id: real_id };
+            } else {
+                target.rebind_tracked_set_sentinel(real_id);
             }
         }
         // CR 603.7c + CR 608.2c: Pin the tracked-set sentinel `TrackedSetId(0)` to
@@ -1012,8 +1007,7 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
         // Maddening Imp cross-resolution collision). Reuses the existing
         // `TargetFilter::rebind_tracked_set_sentinel` (types/ability.rs) — the
         // single authority for rewriting `TrackedSet{0}`/`TrackedSetFiltered{0}` →
-        // concrete inside a filter (recursing And/Or/Not) — rather than open-coding
-        // the two-variant rewrite the `ChangeZoneAll` arm above does inline.
+        // concrete inside a filter (recursing And/Or/Not).
         Effect::DestroyAll { target, .. } => target.rebind_tracked_set_sentinel(real_id),
         // Upgrade ChangeZone → ChangeZoneAll: ChangeZone uses ability.targets (empty for
         // delayed triggers), so it would move nothing. ChangeZoneAll scans by filter.
@@ -1051,8 +1045,24 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
     }
 }
 
+fn bind_tracked_set_to_ability_definition(ability: &mut AbilityDefinition, real_id: TrackedSetId) {
+    bind_tracked_set_to_effect(&mut ability.effect, real_id);
+    if let Effect::CreateDelayedTrigger { effect, .. } = &mut *ability.effect {
+        bind_tracked_set_to_ability_definition(effect, real_id);
+    }
+    if let Some(sub_ability) = ability.sub_ability.as_mut() {
+        bind_tracked_set_to_ability_definition(sub_ability, real_id);
+    }
+    if let Some(else_ability) = ability.else_ability.as_mut() {
+        bind_tracked_set_to_ability_definition(else_ability, real_id);
+    }
+}
+
 fn bind_tracked_set_to_ability_chain(ability: &mut ResolvedAbility, real_id: TrackedSetId) {
     bind_tracked_set_to_effect(&mut ability.effect, real_id);
+    if let Effect::CreateDelayedTrigger { effect, .. } = &mut ability.effect {
+        bind_tracked_set_to_ability_definition(effect, real_id);
+    }
     if let Some(sub_ability) = ability.sub_ability.as_mut() {
         bind_tracked_set_to_ability_chain(sub_ability, real_id);
     }
@@ -2144,6 +2154,58 @@ mod tests {
     }
 
     #[test]
+    fn uses_tracked_set_rebinds_filtered_change_zone_all() {
+        let mut state = GameState::new_two_player(42);
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(1), vec![ObjectId(10)]);
+        state.next_tracked_set_id = 2;
+
+        let effect_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Exile),
+                destination: Zone::Hand,
+                target: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(TargetFilter::Any),
+                    caused_by: None,
+                },
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                random_order: false,
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(effect_def),
+                uses_tracked_set: true,
+            },
+            vec![],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).expect("resolve must succeed");
+
+        let Effect::ChangeZoneAll { target, .. } = &state.delayed_triggers[0].ability.effect else {
+            panic!("expected delayed ChangeZoneAll effect");
+        };
+        assert!(matches!(
+            target,
+            TargetFilter::TrackedSetFiltered {
+                id: TrackedSetId(1),
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn uses_tracked_set_binds_sub_ability_effects() {
         let mut state = GameState::new_two_player(42);
         state
@@ -2207,6 +2269,70 @@ mod tests {
             }
             other => panic!("Expected sub ChangeZoneAll, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn uses_tracked_set_binds_nested_delayed_effects() {
+        let mut state = GameState::new_two_player(42);
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(1), vec![ObjectId(10)]);
+        state.next_tracked_set_id = 2;
+
+        let nested_payload = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Exile),
+                destination: Zone::Hand,
+                target: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(TargetFilter::Any),
+                    caused_by: None,
+                },
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                random_order: false,
+            },
+        );
+        let nested_delayed = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(nested_payload),
+                uses_tracked_set: true,
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(nested_delayed),
+                uses_tracked_set: true,
+            },
+            vec![],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).expect("resolve must succeed");
+
+        let Effect::CreateDelayedTrigger { effect, .. } = &state.delayed_triggers[0].ability.effect
+        else {
+            panic!("expected nested delayed effect");
+        };
+        let Effect::ChangeZoneAll { target, .. } = &*effect.effect else {
+            panic!("expected nested delayed ChangeZoneAll effect");
+        };
+        assert!(matches!(
+            target,
+            TargetFilter::TrackedSetFiltered {
+                id: TrackedSetId(1),
+                ..
+            }
+        ));
     }
 
     #[test]

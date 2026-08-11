@@ -40,7 +40,8 @@ use crate::types::ability::{
     GrantedAbilityScope, LibraryPosition, MultiTargetSpec, OutsideGameSourcePool, PlayerScope,
     PreventionAmount, PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef,
     ReassembleControlMode, SearchSelectionConstraint, StaticDefinition, StickerTicketCostPayment,
-    TapStateChange, TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter, ZoneOwner,
+    TapStateChange, TargetFilter, TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter,
+    ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::Phase;
@@ -1994,7 +1995,16 @@ pub(super) fn parse_targeted_action_ast(
             BounceSelection::Targeted
         };
         let is_mass = is_mass || count.is_some();
-        let origin = super::infer_origin_zone(rest_lower);
+        let origin = super::infer_origin_zone(rest_lower).or_else(|| {
+            matches!(
+                target,
+                TargetFilter::TrackedSetFiltered {
+                    caused_by: Some(ThisWayCause::Exiled),
+                    ..
+                }
+            )
+            .then_some(crate::types::zones::Zone::Exile)
+        });
         // CR 400.7: A returned card's target filter must be scoped to its origin
         // zone. Without this, "return target ... card from your graveyard to the
         // battlefield" enumerates legal targets on the battlefield (the default

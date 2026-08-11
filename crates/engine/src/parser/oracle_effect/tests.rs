@@ -9725,6 +9725,23 @@ fn return_leading_their_hand_all_exiled_with_source() {
     ));
 }
 
+#[test]
+fn return_each_card_they_exiled_this_way_uses_exiled_tracked_set() {
+    let e = parse_effect("returns to their hand each card they exiled this way");
+    assert!(matches!(
+        e,
+        Effect::ChangeZoneAll {
+            origin: Some(Zone::Exile),
+            destination: Zone::Hand,
+            target: TargetFilter::TrackedSetFiltered {
+                caused_by: Some(ThisWayCause::Exiled),
+                ..
+            },
+            ..
+        }
+    ));
+}
+
 /// CR 406.6 + CR 607.1/607.2a (#5577): Watcher for Tomorrow's Hideaway
 /// leaves-the-battlefield trigger — "put the exiled card into its owner's hand"
 /// — references the card THIS source exiled in a SEPARATE, earlier resolution
@@ -17863,6 +17880,48 @@ fn temporal_prefix_in_effect_chain() {
             effect.effect
         );
     }
+}
+
+#[test]
+fn temporal_prefix_preserves_full_delayed_effect_chain() {
+    let def = parse_effect_chain(
+        "At the beginning of the next end step, each player discards their hand and returns to their hand each card they exiled this way.",
+        AbilityKind::Spell,
+    );
+    let Effect::CreateDelayedTrigger {
+        effect,
+        uses_tracked_set: true,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected a tracked delayed trigger, got {:?}", def.effect);
+    };
+    assert!(matches!(
+        effect.effect.as_ref(),
+        Effect::Discard {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::ScopedPlayer
+                }
+            },
+            ..
+        }
+    ));
+    assert!(matches!(
+        effect
+            .sub_ability
+            .as_deref()
+            .map(|ability| ability.effect.as_ref()),
+        Some(Effect::ChangeZoneAll {
+            origin: Some(Zone::Exile),
+            destination: Zone::Hand,
+            target: TargetFilter::TrackedSetFiltered {
+                caused_by: Some(ThisWayCause::Exiled),
+                ..
+            },
+            ..
+        })
+    ));
 }
 
 #[test]
