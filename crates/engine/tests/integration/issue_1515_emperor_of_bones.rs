@@ -23,6 +23,13 @@ use engine::types::zones::Zone;
 const EMPEROR_COUNTER_TRIGGER_EFFECT: &str = "put a creature card exiled with this creature onto \
 the battlefield under your control with a finality counter on it. it gains haste. sacrifice it at \
 the beginning of the next end step.";
+const EMPEROR_ORACLE: &str =
+    "At the beginning of combat on your turn, exile up to one target card from a graveyard.\n\
+{1}{B}: Adapt 2.\n\
+Whenever one or more +1/+1 counters are put on this creature, put a creature card exiled with this \
+creature onto the battlefield under your control with a finality counter on it. It gains haste. \
+Sacrifice it at the beginning of the next end step.";
+const PUT_COUNTER_ORACLE: &str = "Put a +1/+1 counter on target creature.";
 
 const ANOINTED_PEACEKEEPER: &str = "Vigilance\n\
 As this creature enters, look at an opponent's hand, then choose any card name.\n\
@@ -164,6 +171,59 @@ fn issue_1515_emperor_of_bones_binds_haste_and_delayed_sacrifice_to_returned_cre
         runner.state().objects[&emperor].zone,
         Zone::Battlefield,
         "the delayed sacrifice must not sacrifice Emperor"
+    );
+}
+
+/// CR 122.1 + CR 603.2 + CR 608.2c: Drive the printed counter trigger through
+/// the reducer so the returned creature, rather than the trigger source, owns
+/// both anaphoric riders.
+#[test]
+fn emperor_of_bones_counter_trigger_uses_returned_creature_in_cast_pipeline() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let emperor = scenario
+        .add_creature_from_oracle(P0, "Emperor of Bones", 2, 2, EMPEROR_ORACLE)
+        .id();
+    let returned = scenario
+        .add_creature_to_exile(P0, "Linked Gravebeast", 3, 3)
+        .id();
+    let counter_spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Counter Placement", false, PUT_COUNTER_ORACLE)
+        .id();
+
+    let mut runner = scenario.build();
+    runner.state_mut().exile_links.push(ExileLink {
+        exiled_id: returned,
+        source_id: emperor,
+        kind: ExileLinkKind::TrackedBySource,
+    });
+
+    runner.cast(counter_spell).target_object(emperor).resolve();
+
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&returned].zone,
+        Zone::Battlefield,
+        "the counter trigger must return the linked creature through apply()"
+    );
+    assert_eq!(
+        state.objects[&emperor].zone,
+        Zone::Battlefield,
+        "the counter trigger must not sacrifice Emperor while resolving"
+    );
+    assert!(
+        creature_has_haste_from_transient_effects(state, returned),
+        "the printed haste rider must bind to the returned creature"
+    );
+    assert!(
+        !creature_has_haste_from_transient_effects(state, emperor),
+        "the printed haste rider must not bind to Emperor"
+    );
+    assert_eq!(state.delayed_triggers.len(), 1);
+    assert_eq!(
+        state.delayed_triggers[0].ability.targets,
+        vec![engine::types::ability::TargetRef::Object(returned)],
+        "the delayed sacrifice must snapshot the returned creature"
     );
 }
 
