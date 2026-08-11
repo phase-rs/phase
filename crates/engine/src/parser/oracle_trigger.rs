@@ -15945,7 +15945,9 @@ fn parse_other_than_first_spell_trigger(input: &str) -> OtherThanFirstSpellParse
     // `parse_trigger_condition` passes the complete trigger head (including
     // "whenever"), while direct classifier tests pass its payload. Normalize
     // both callers before matching the actor phrase.
-    let input = input.strip_prefix("whenever ").unwrap_or(input);
+    let Ok((input, _)) = opt(tag::<_, _, OracleError<'_>>("whenever ")).parse(input) else {
+        return OtherThanFirstSpellParse::NotCandidate;
+    };
     let mut actor_parser = alt((
         value(
             OtherThanFirstSpellActor::You,
