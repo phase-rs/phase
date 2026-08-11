@@ -5813,6 +5813,23 @@ where
 /// CR 202.3: Resolve an object's mana value through the same ObjectScope axis
 /// used for power/toughness. Source scope falls back to LKI for objects that
 /// moved during resolution; target scope reads the selected object target.
+/// CR 400.7 + CR 202.3: The mana value an event supplies for its OWN pinned
+/// subject incarnation, when the current trigger event carries one.
+///
+/// Only `SagaChapterAbilityResolved` pins a subject today. Its Saga is routinely
+/// gone by the time an observer resolves — CR 714.4 sacrifices it the moment the
+/// final chapter ability leaves the stack — and a re-entered Saga can occupy the
+/// same storage id, so neither live state nor the id-keyed LKI cache can be
+/// trusted to answer for the original.
+fn event_source_mana_value_override(state: &GameState) -> Option<i32> {
+    match current_or_detection_trigger_event(state)? {
+        GameEvent::SagaChapterAbilityResolved { saga, .. } => {
+            Some(u32_to_i32_saturating(saga.lki.mana_value))
+        }
+        _ => None,
+    }
+}
+
 fn resolve_object_mana_value(
     state: &GameState,
     scope: ObjectScope,
@@ -5843,6 +5860,15 @@ fn resolve_object_mana_value(
             .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
             .unwrap_or(0),
         ObjectScope::EventSource => {
+            // CR 400.7 + CR 202.3: an event that pins its own subject incarnation
+            // answers for that incarnation directly. Reading live state (or the
+            // id-keyed LKI cache) would let a re-entered permanent at the same
+            // storage id supply the value instead — Narci draining for the NEW
+            // Saga's mana value after a blink. Checked first, so the id-based
+            // fallback below only runs for events with no pinned subject.
+            if let Some(mana_value) = event_source_mana_value_override(state) {
+                return mana_value;
+            }
             let Some(object_id) =
                 object_id_for_scope(state, ObjectScope::EventSource, ctx, targets)
             else {
@@ -12579,6 +12605,84 @@ mod tests {
         };
 
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 3);
+    }
+
+    /// `ZoneCardCount::filter` is evaluated against the card object rather than
+    /// reduced to its type list. This is the runtime half of the parser's
+    /// `there are no nonbasic land cards in your library` condition: a basic
+    /// land must not make the count nonzero, while a nonbasic land must.
+    #[test]
+    fn resolve_zone_card_count_preserves_nonbasic_land_filter() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(800),
+            PlayerId(0),
+            "Magmatic Scorchwing".to_string(),
+            Zone::Battlefield,
+        );
+        let basic = create_object(
+            &mut state,
+            CardId(801),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Library,
+        );
+        let basic_obj = state.objects.get_mut(&basic).unwrap();
+        basic_obj.card_types.core_types.push(CoreType::Land);
+        basic_obj.card_types.supertypes.push(Supertype::Basic);
+
+        let nonbasic_land =
+            TargetFilter::Typed(
+                TypedFilter::land().properties(vec![FilterProp::NotSupertype {
+                    value: Supertype::Basic,
+                }]),
+            );
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Library,
+                card_types: Vec::new(),
+                filter: Some(nonbasic_land),
+                scope: CountScope::Controller,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 0);
+
+        let opponent_nonbasic = create_object(
+            &mut state,
+            CardId(802),
+            PlayerId(1),
+            "Opponent's Karplusan Forest".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&opponent_nonbasic)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), source),
+            0,
+            "your library must not count an opponent's nonbasic land"
+        );
+
+        let nonbasic = create_object(
+            &mut state,
+            CardId(803),
+            PlayerId(0),
+            "Karplusan Forest".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&nonbasic)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 1);
     }
 
     #[test]

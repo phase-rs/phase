@@ -1977,6 +1977,23 @@ fn resolve_defined_or_targets(
             .collect();
     }
 
+    // CR 608.2c: A `ParentTarget` in a chained counter effect refers to the
+    // object chosen by the parent instruction. Prefer that propagated object
+    // target over the triggering event context; for a landfall trigger, the
+    // latter is the entering land rather than the creature chosen by the
+    // player. The object guard deliberately excludes the chooser-only target
+    // bookkeeping used by `ChooseOneOf` branches above.
+    if matches!(target_spec, Some(TargetFilter::ParentTarget)) && has_object_target {
+        return ability
+            .live_object_targets(state)
+            .into_iter()
+            .filter_map(|target| match target {
+                TargetRef::Object(id) => Some(id),
+                TargetRef::Player(_) => None,
+            })
+            .collect();
+    }
+
     if let Some(filter) = target_spec {
         let event_targets =
             crate::game::targeting::resolve_event_context_targets(state, filter, ability.source_id);

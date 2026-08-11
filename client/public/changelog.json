@@ -1,6 +1,20 @@
 {
   "entries": [
     {
+      "id": 190,
+      "date": "2026-08-10",
+      "title": "Magmatic Scorchwing takes flight",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Magmatic Scorchwing now deals its 3 damage on entry when your library has no nonbasic land cards, and Exuberant Wolfbear can turn a Human you control into a copy of its current power and toughness for the turn\n\n🛠️ Cards That Now Work Right\n• Emperor of Bones now finishes returning its exiled creature with its finality counter, haste, and next-end-step sacrifice even when that creature makes an enters-the-battlefield choice\n• Scythecat Cub doubles the counters from its second landfall trigger each turn as printed\n• Shared-subject triggers now keep both halves together, restoring attack, damage, zone-change, and targeting triggers on cards including Ironsoul Enforcer\n\n⚔️ Combat & Gameplay\n• Draft packs now honor each set’s published booster collation, including fixed sheets and sheets that allow duplicate cards\n\n🖥️ Interface\n• Resolve All now works reliably in native AI games and clearly reports a transport error instead of silently stopping\n\n🤖 AI\n• AI no longer spends priority windows on loop-shortcut responses that cannot affect the game, while still recognizing mana and other actions that can create a real answer",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1536540057731735555"
+    },
+    {
       "id": 189,
       "date": "2026-08-09",
       "title": "Sealed packs and Marvel heroes",
