@@ -640,14 +640,34 @@ fn mass_effect_has_opposing_population(
     }))
 }
 
-/// Does the filter's controller scope require a player target/attribute NOT
-/// bound at cast-commit? Only `ControllerRef::You` / `ControllerRef::Opponent`
-/// resolve from the casting source alone (CR 108.4 / CR 102.2-102.3); every
-/// other scope (`TargetPlayer`/`TargetOpponent`, `ScopedPlayer`,
-/// `ParentTarget*`, `Chosen*`, `TriggeringPlayer`, ...) needs an announced
-/// target or resolution context (CR 109.4 / CR 115.1 / CR 608.2c), so the mass
-/// population is UNKNOWABLE at cast-commit. Conservative by construction: any
-/// future `ControllerRef` variant falls to `true` (unknown → fail open).
+/// Does the filter's controller scope resolve from the casting source alone at
+/// cast-commit? Only `ControllerRef::You` / `ControllerRef::Opponent` are
+/// statically derivable from the pending spell object. Every other scope —
+/// `TargetPlayer`/`TargetOpponent` companion wipes, `ScopedPlayer`,
+/// `ParentTarget*`, `Chosen*`, `TriggeringPlayer` — depends on an announced
+/// target or resolution context (CR 109.4 / CR 115.1 / CR 608.2c) that does not
+/// exist yet, so we can never provably empty the population now. The remaining
+/// source/global-state-readable variants (`ActivePlayer`, resolved from
+/// `state.active_player` in `filter.rs`; `EnchantedPlayer`, from
+/// `source.attached_to`; `SourceChosenPlayer`, from `source.chosen_attributes`)
+/// would resolve at cast-commit in isolation, but a pending spell object carries
+/// no `attached_to` / `chosen_attributes`, and coupling their resolution here
+/// would beg the very scope question — so for the purpose of this guard they are
+/// classified UNBOUND BY CONSERVATIVE DESIGN (an over-approximation: a wipe of
+/// such a scope is treated as possibly-non-empty unless its scope is statically
+/// derivable, so a conservative wipe is never vetoed at cast-commit).
+///
+/// Boundary: the unbound check covers only the controller-scope positions the
+/// parser emits for wipe populations — `TypedFilter.controller`, including
+/// nested `Or`/`And`/`Not` filters. It does NOT recurse into `FilterProp`
+/// payloads that themselves embed `ControllerRef`s (`Owned { controller }`,
+/// `Attacking { defender }`, `ProtectorMatches { controller }`,
+/// `HasAttachment { controller }`, `HasAnyAttachmentOf { controller }`,
+/// `MostPrevalentCreatureTypeIn { scope }`, or the nested `TargetFilter` inside
+/// `CanEnchant`). No parser-emittable wipe population uses these today, so the
+/// gap is latent; if one ever appeared it would be conservatively non-fail-open
+/// and would need revisiting. Conservative by construction: any future
+/// `ControllerRef` variant falls to `true` (unknown → fail open).
 fn filter_has_unbound_player_controller(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(typed) => typed
