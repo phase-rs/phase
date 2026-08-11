@@ -17201,6 +17201,17 @@ impl GameState {
         Ok(self.take_active_ability_continuation()?.is_some())
     }
 
+    /// Clears the reveal choice's continuation while allowing an exact active
+    /// batch-delivery child to retain its own pending zone-change work.
+    pub fn clear_active_ability_continuation_or_batch_delivery_child(
+        &mut self,
+    ) -> Result<bool, ResolutionStackError> {
+        Ok(self
+            .resolution_stack
+            .take_active_ability_continuation_or_batch_delivery_child()?
+            .is_some())
+    }
+
     /// Returns the complete ChangeZone owner only when it owns the stack top.
     pub fn active_change_zone_frame(&self) -> Option<&ChangeZoneFrame> {
         self.resolution_stack.active_change_zone()
