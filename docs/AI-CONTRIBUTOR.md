@@ -27,7 +27,7 @@ Skill references in this section use the `$skill` / `/skill` convention defined 
 
 | Tier     | Models | Procedure |
 |----------|--------|-----------|
-| Frontier | **Anthropic:** `claude-opus-4-8`+, `claude-sonnet-5`+ · **OpenAI:** `gpt-5-5`+ · **Cursor/Codex:** `codex-5-5`+ | Full pipeline per §4 onward. |
+| Frontier | **Anthropic:** `claude-opus-4-8`+ (including `claude-opus-5`+), `claude-sonnet-5`+ · **OpenAI:** `gpt-5-5`+ (including the `gpt-5.6` family) · **Cursor/Codex:** `codex-5-5`+ | Full pipeline per §4 onward. |
 
 **Frontier-tier models only.** There is no longer a Standard tier. The floor is per-vendor and is stated by exact model, not by family wildcard — `claude-sonnet-5` is accepted while `claude-sonnet-4-6` is not, so a `claude-sonnet-*` reading of this table is wrong (but a *newer* version than the one named does qualify — see the reading rule below). **Not accepted:** `claude-opus-4-7` and below, `claude-sonnet-4-6` and below, every `claude-haiku-*` including `claude-haiku-4-5`, every `composer-*`, `gpt-5-4` and below including `gpt-5-3`, and `codex-5-4` and below. If that is your model, abort per §0 rather than opening a PR. A PR declaring a non-Frontier model, or whose commits show one, will be closed as out-of-policy without an implementation review. This is not a judgement about those models generally; it reflects that review capacity here is the scarce resource, and sub-Frontier runs have consistently consumed several maintainer rounds per PR to reach a standard a Frontier run reaches on the first pass.
 
@@ -35,7 +35,7 @@ Skill references in this section use the `$skill` / `/skill` convention defined 
 
 A trailer that names a *harness* rather than a model — `Copilot`, `Cursor`, and similar — neither corroborates nor contradicts the declaration, because those harnesses never expose the underlying model to the trailer. Its silence is not evidence of misreporting and is not grounds for a close; ask which model did the work if it matters. Only a trailer naming an actual sub-floor model can contradict a declaration.
 
-**Reading the table — `+` means that version or anything later.** `claude-sonnet-5`+ admits `claude-sonnet-5` and every later version in that same family from that vendor, so a model that postdates the last edit of this table qualifies without being enumerated. Compare versions after normalizing separators — `gpt-5.6` and `gpt-5-6` are the same version — and treat a vendor variant suffix (`-sol`, `-thinking`, `-preview`, a date stamp) as still inside its family: `gpt-5.6-sol` sits above the `gpt-5-5` floor and qualifies. The "not a family wildcard" rule points *downward* only: it forbids reading `claude-sonnet-*` as admitting `claude-sonnet-4-6`, which sits below the floor. Do not abort merely because your exact identifier is not printed above — normalize it and check it against the floor for your family instead.
+**Reading the table — `+` means that version or anything later.** `claude-sonnet-5`+ admits `claude-sonnet-5` and every later version in that same family from that vendor, so a model that postdates the last edit of this table qualifies without being enumerated. That includes `claude-opus-5` under the `claude-opus-4-8`+ floor. Compare versions after normalizing separators — `gpt-5.6` and `gpt-5-6` are the same version — and treat a vendor variant suffix (`-sol`, `-thinking`, `-preview`, a date stamp) as still inside its family: the `gpt-5.6` family, including `gpt-5.6-sol`, sits above the `gpt-5-5` floor and qualifies. The "not a family wildcard" rule points *downward* only: it forbids reading `claude-sonnet-*` as admitting `claude-sonnet-4-6`, which sits below the floor. Do not abort merely because your exact identifier is not printed above — normalize it and check it against the floor for your family instead.
 
 **If your harness does not expose an exact model identifier.** The gate is on capability, not on your ability to emit a canonical id string. Several harnesses — GitHub Copilot, IDE assistants, and hosted chat UIs with a model picker — never hand the running model its own identifier. That is not a disqualification. Route as follows:
 
@@ -471,11 +471,12 @@ appointment or a linked issue labeled `accepted`, stop instead of opening a PR.
 You are going to implement one Magic: The Gathering card in the phase-rs/phase
 repository end-to-end and open a pull request. Do not pause to ask me anything.
 
-Requirements: Frontier-tier model REQUIRED — Claude Opus 4.8+, Claude Sonnet 5+,
-GPT-5.5+, or Codex 5.5+ at high+ thinking. "+" means that version or anything
-later, so a newer model than the ones named here qualifies; compare versions
-ignoring separator style ("5.6" == "5-6"), and a variant suffix like "-sol" or
-"-thinking" stays in its family (gpt-5.6-sol qualifies). If your runtime is
+Requirements: Frontier-tier model REQUIRED — Claude Opus 4.8+ (including Claude
+Opus 5+), Claude Sonnet 5+, GPT-5.5+ (including the GPT-5.6 family), or Codex
+5.5+ at high+ thinking. "+" means that version or anything later, so a newer
+model than the ones named here qualifies; compare versions ignoring separator
+style ("5.6" == "5-6"), and a variant suffix like "-sol" or "-thinking" stays
+in its family (gpt-5.6-sol qualifies). If your runtime is
 below that floor (Claude Sonnet 4.6 or older, any Haiku, any Composer, GPT-5.4
 or older, Codex 5.4 or older), STOP and tell me rather than opening a PR; it
 will be closed as out-of-policy. Report your actual model on a single canonical
