@@ -208,14 +208,17 @@ III — Create a 1/1 white Soldier creature token.",
     );
 }
 
-/// CR 608.2c: a final chapter ability that PAUSES mid-resolution for a choice
-/// must not fire its observers until that resolution has actually finished.
+/// CR 608.2d + CR 608.2p: a final chapter ability that PAUSES mid-resolution for
+/// a choice must not fire its observers until that resolution has finished.
 ///
-/// The chapter-resolution event is published next to the engine's own
-/// `StackResolved`, before the settlement guard, so this pins the ordering
-/// empirically rather than by assertion: the drain must not have landed while
-/// the optional-effect prompt is still open, and must land exactly once after it
-/// is answered.
+/// CR 608.2d is the pause — a choice the effect offers is announced while
+/// applying the effect, not earlier. CR 608.2p is the ordering this pins: "Once
+/// all possible steps described in 608.2c–n are completed, any abilities that
+/// trigger when that spell or ability resolves trigger." The chapter-resolution
+/// event is published next to the engine's own `StackResolved`, before the
+/// settlement guard, so this test establishes the rule empirically rather than by
+/// assertion: the drain must not have landed while the optional-effect prompt is
+/// still open, and must land exactly once after it is answered.
 #[test]
 fn narci_does_not_drain_until_a_paused_final_chapter_finishes_resolving() {
     let mut scenario = GameScenario::new();
@@ -290,6 +293,80 @@ II — You may draw a card.",
         runner.state().players[P1.0 as usize].life - p1_life_before,
         -3,
         "after the paused chapter ability finishes, the drain lands exactly once"
+    );
+}
+
+/// CR 400.7 + CR 113.7a: the Saga leaves and RE-ENTERS at the same storage id
+/// before its already-triggered final chapter ability resolves.
+///
+/// CR 113.7a lets that ability resolve anyway, so the observer owes exactly one
+/// firing — and CR 608.2k binds "that Saga" to the object the trigger condition
+/// named, so X must be the ORIGINAL Saga's mana value. Both plausible shortcuts
+/// fail this test: reading live state by storage id drains for the re-entered
+/// Saga's mana value, and guarding on an incarnation mismatch drops the firing
+/// altogether.
+///
+/// The re-entry is simulated by bumping the incarnation and swapping the mana
+/// cost in place, which is exactly the state a blink produces at this seam: same
+/// `ObjectId`, new incarnation, different characteristics.
+#[test]
+fn narci_drains_for_the_original_saga_after_it_blinks_mid_resolution() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest", "Forest"]);
+    scenario.with_library_top(P1, &["Forest", "Forest", "Forest", "Forest"]);
+
+    scenario
+        .add_creature(P0, "Narci, Fable Singer", 3, 3)
+        .as_legendary()
+        .from_oracle_text(NARCI_ORACLE);
+
+    let saga_id = scenario
+        .add_creature(P0, "Test Saga", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Saga"])
+        .with_mana_cost(ManaCost::generic(3))
+        .from_oracle_text(SAGA_ORACLE)
+        .id();
+    scenario.with_counter(saga_id, CounterType::Lore, 1);
+
+    let mut runner = scenario.build();
+    let p0_life_before = runner.state().players[P0.0 as usize].life;
+    let p1_life_before = runner.state().players[P1.0 as usize].life;
+
+    park_for_next_p0_precombat_main(&mut runner);
+    runner.advance_to_phase(Phase::PreCombatMain);
+    runner.pass_both_players();
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert_eq!(lore_count(&runner, saga_id), 2);
+
+    // The final chapter ability has triggered and is on the stack. Re-enter the
+    // Saga at the same id with a DIFFERENT mana value before it resolves; if the
+    // drain reads 7 instead of 3, it bound to the wrong incarnation.
+    assert!(
+        !runner.state().stack.is_empty(),
+        "reach guard: the final chapter ability must be on the stack before the blink"
+    );
+    {
+        let saga = runner
+            .state_mut()
+            .objects
+            .get_mut(&saga_id)
+            .expect("Saga still present");
+        saga.bump_incarnation();
+        saga.mana_cost = ManaCost::generic(7);
+    }
+
+    drain_stack(&mut runner);
+
+    assert_eq!(
+        (
+            runner.state().players[P0.0 as usize].life - p0_life_before,
+            runner.state().players[P1.0 as usize].life - p1_life_before,
+        ),
+        (3, -3),
+        "the drain must use the ORIGINAL Saga's mana value (3), not the re-entered one (7), \
+         and must fire exactly once"
     );
 }
 

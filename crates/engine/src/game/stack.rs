@@ -10,7 +10,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, CastingVariant, ExileLink, ExileLinkKind, GameState,
     MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingCounterPostAction, PendingSpellResolution,
-    StackEntry, StackEntryKind, StackPaidSnapshot, WaitingFor,
+    StackEntry, StackEntryKind, StackPaidSnapshot, TriggerSourceContext, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, TriggerFiring};
 use crate::types::player::PlayerId;
@@ -992,44 +992,53 @@ pub(crate) fn bind_resolution_scope(
 
 /// CR 714.2 + CR 714.2d: The Saga-chapter identity of a stack entry that is
 /// about to resolve, or `None` if the entry is not a Saga chapter ability.
-///
-/// Captured BEFORE the ability executes: a chapter ability may move its own
-/// Saga off the battlefield as its effect (Fable of the Mirror-Breaker III
-/// exiles and returns it transformed), and CR 714.4 sacrifices the Saga once its
-/// final chapter ability has left the stack. Neither the chapter number nor the
-/// final chapter number can be re-derived once the permanent is gone.
 struct ResolvingSagaChapter {
-    saga_id: ObjectId,
+    saga: TriggerSourceContext,
     controller: PlayerId,
     chapter: u32,
     final_chapter: u32,
 }
 
-/// CR 714.2: Classify an about-to-resolve stack entry as a Saga chapter
-/// ability, via the exact trigger occurrence that fired rather than any
-/// re-derivation from the Saga's current lore count.
-fn resolving_saga_chapter(state: &GameState, entry: &StackEntry) -> Option<ResolvingSagaChapter> {
-    let StackEntryKind::TriggeredAbility {
-        source_id, ability, ..
-    } = &entry.kind
-    else {
+/// CR 714.2 + CR 400.7: Classify an about-to-resolve stack entry as a Saga
+/// chapter ability, reading everything from the trigger's own source context.
+///
+/// Deliberately does NOT consult live state by `source_id`. `source_id` is
+/// storage identity: a Saga that left and re-entered occupies the same id as a
+/// different object, whose chapter abilities — and mana value — are not the ones
+/// this ability triggered from. CR 113.7a lets that already-triggered chapter
+/// ability resolve anyway, so reading live state would either report the wrong
+/// Saga's numbers or (if guarded on incarnation) drop an occurrence that really
+/// did resolve.
+///
+/// `TriggerSourceContext` is the engine's existing answer to exactly this: it
+/// was captured when the chapter ability triggered, pins the incarnation in
+/// `identity.reference`, and carries that incarnation's `trigger_entries` and
+/// `lki`. Both the chapter numbers below and every characteristic an observer
+/// can later ask about therefore come from the right object by construction.
+fn resolving_saga_chapter(entry: &StackEntry) -> Option<ResolvingSagaChapter> {
+    let StackEntryKind::TriggeredAbility { ability, .. } = &entry.kind else {
         return None;
     };
-    let definition_ref = ability.trigger_definition_ref.as_ref()?;
-    let saga = state.objects.get(source_id)?;
-    // CR 400.7: `source_id` is storage identity, not object identity. A Saga
-    // that left and re-entered can occupy the same id as a NEW object whose
-    // chapter abilities — and therefore whose chapter and final chapter numbers
-    // — are not the ones this ability triggered from. Fail closed on an
-    // incarnation mismatch: publishing numbers read off the wrong incarnation
-    // could misclassify a non-final chapter as final, or drain for the wrong
-    // mana value. Not firing in that exotic case is the recoverable error.
-    if !definition_ref.source.is_current(state) {
-        return None;
-    }
-    let (chapter, final_chapter) = saga.saga_chapter_for_occurrence(&definition_ref.occurrence)?;
+    let occurrence = &ability.trigger_definition_ref.as_ref()?.occurrence;
+    let saga = ability.trigger_source.as_ref()?;
+
+    // CR 714.2: chapter numbers come from the chapter-symbol provenance on the
+    // source incarnation's own trigger entries, never from a live lore count.
+    let chapter = saga
+        .trigger_entries
+        .iter()
+        .find(|entry| &entry.occurrence == occurrence)
+        .and_then(|entry| entry.definition.saga_chapter)?;
+    // CR 714.2d: greatest chapter number among that same incarnation's chapter
+    // abilities.
+    let final_chapter = saga
+        .trigger_entries
+        .iter()
+        .filter_map(|entry| entry.definition.saga_chapter)
+        .max()?;
+
     Some(ResolvingSagaChapter {
-        saga_id: *source_id,
+        saga: saga.clone(),
         controller: entry.controller,
         chapter,
         final_chapter,
@@ -1139,7 +1148,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // reachable — the chapter ability's own effect may remove it. Only the
     // success path below publishes it; a fizzle (CR 608.2b) or a failed
     // intervening-if (CR 603.4) leaves the stack without resolving.
-    let saga_chapter = resolving_saga_chapter(state, &entry);
+    let saga_chapter = resolving_saga_chapter(&entry);
 
     // Extract the resolved ability from the stack entry. `KeywordAction` is
     // handled by the early return above and never reaches this match.
@@ -2546,15 +2555,17 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     events.push(GameEvent::StackResolved {
         object_id: entry.id,
     });
-    // CR 714.2 + CR 608.2: This is the only exit from `resolve_top` on which a
-    // triggered ability actually RESOLVED — the fizzle, no-legal-target and
-    // failed-intervening-if paths returned earlier, each pushing their own
-    // `StackResolved`. Publishing the chapter-resolution event only here is what
-    // keeps "whenever the final chapter ability of a Saga you control resolves"
-    // (Narci, Fable Singer) from firing on a chapter ability that never did.
+    // CR 608.2p: "Once all possible steps described in 608.2c–n are completed,
+    // any abilities that trigger when that spell or ability resolves trigger."
+    // This is the only exit from `resolve_top` on which a triggered ability
+    // actually RESOLVED — the fizzle, no-legal-target and failed-intervening-if
+    // paths returned earlier, each pushing their own `StackResolved`. Publishing
+    // the chapter-resolution event only here is what keeps "whenever the final
+    // chapter ability of a Saga you control resolves" (Narci, Fable Singer) from
+    // firing on a chapter ability that never did.
     if let Some(chapter) = saga_chapter {
         events.push(GameEvent::SagaChapterAbilityResolved {
-            saga_id: chapter.saga_id,
+            saga: Box::new(chapter.saga),
             controller: chapter.controller,
             chapter: chapter.chapter,
             final_chapter: chapter.final_chapter,

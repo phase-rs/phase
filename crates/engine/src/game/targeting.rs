@@ -1568,8 +1568,13 @@ pub(crate) fn extract_source_from_event(
         // CR 608.2k + CR 714.2e: "that Saga" in "each opponent loses X life …
         // where X is that Saga's mana value" (Narci, Fable Singer) is an
         // untargeted back-reference to the object the trigger condition named —
-        // the Saga whose chapter ability resolved.
-        GameEvent::SagaChapterAbilityResolved { saga_id, .. } => Some(*saga_id),
+        // the Saga whose chapter ability resolved. CR 400.7: this yields the id
+        // of the EXACT incarnation; callers that read a characteristic off it
+        // must prefer the event's own snapshot, because a re-entered Saga can
+        // occupy this same id (see `event_source_mana_value_override`).
+        GameEvent::SagaChapterAbilityResolved { saga, .. } => {
+            Some(saga.identity.reference.object_id)
+        }
         GameEvent::Evolved { object_id } => Some(*object_id),
         GameEvent::CounterRemoved { object_id, .. } => Some(*object_id),
         GameEvent::TokenCreated { object_id, .. } => Some(*object_id),

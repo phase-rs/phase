@@ -2259,16 +2259,29 @@ pub(super) fn match_saga_chapter_ability(
         (
             AbilityLifecyclePoint::Resolved,
             GameEvent::SagaChapterAbilityResolved {
-                saga_id,
+                saga,
                 chapter: resolved_chapter,
                 final_chapter,
                 ..
             },
         ) => {
-            valid_card_matches_with_lki(trigger, state, *saga_id, source_context)
-                // CR 714.2e: the final chapter ability is the one whose chapter
-                // symbol carries the Saga's final chapter number (CR 714.2d).
-                && resolved_chapter == final_chapter
+            // CR 400.7: match "a Saga you control" against the SOURCE
+            // incarnation's own last-known characteristics, not against whatever
+            // now occupies its storage id. The Saga is routinely gone by now —
+            // CR 714.4 sacrifices it as soon as the final chapter ability leaves
+            // the stack — and may have been replaced by a re-entered copy.
+            let subject_matches = trigger.valid_card.as_ref().is_none_or(|filter| {
+                super::filter::matches_target_filter_on_lki_snapshot(
+                    state,
+                    saga.identity.reference.object_id,
+                    &saga.lki,
+                    filter,
+                    &super::filter::FilterContext::from_trigger_source(source_context),
+                )
+            });
+            // CR 714.2e: the final chapter ability is the one whose chapter
+            // symbol carries the Saga's final chapter number (CR 714.2d).
+            subject_matches && resolved_chapter == final_chapter
         }
         (
             AbilityLifecyclePoint::Triggered,

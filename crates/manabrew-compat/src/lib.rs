@@ -6750,6 +6750,16 @@ mod tests {
                     threshold: Some(3),
                 })
                 .saga_chapter(3),
+            // CR 714.2: a lore threshold WITHOUT chapter-symbol provenance is not
+            // a chapter ability. Its threshold is deliberately higher than the
+            // real final chapter, so this fixture fails if `final_chapter_number`
+            // ever regresses to inferring chapters from thresholds.
+            TriggerDefinition::new(TriggerMode::CounterAdded).counter_filter(
+                CounterTriggerFilter {
+                    counter_type: CounterType::Lore,
+                    threshold: Some(99),
+                },
+            ),
         ]
         .into();
 
