@@ -922,7 +922,6 @@ pub fn apply_resolved_zone_change(
         .get_mut(&command.object.object_id)
         .expect("validated zone command object remains live");
     object.zone = command.to;
-    object.trigger_occurrence_state.retire_all_grants();
     if command.to == Zone::Battlefield {
         object.reset_for_battlefield_entry(
             turn_number,
@@ -1194,7 +1193,6 @@ pub fn move_to_zone(
                 zone_change_record.entered_incarnation = Some(obj_mut.incarnation);
             } else if from != to {
                 // CR 400.7: a move between zones creates a new object.
-                obj_mut.trigger_occurrence_state.retire_all_grants();
                 obj_mut.bump_incarnation();
             }
             (pre_bump_incarnation, obj_mut.incarnation, false)
@@ -1829,7 +1827,6 @@ pub fn move_to_library_at_index(
         // A within-Library reposition (reveal / scry bottom placement / look-at-top-N,
         // CR 701.20b) is zero moves — `from == Library` here — and must NOT bump.
         if from != Zone::Library {
-            obj_mut.trigger_occurrence_state.retire_all_grants();
             obj_mut.bump_incarnation();
             bump = Some((pre_bump_incarnation, obj_mut.incarnation));
         }
@@ -2086,7 +2083,6 @@ pub(crate) fn route_component(state: &mut GameState, component_id: ObjectId, to:
         // CR 730.3 + CR 400.7: the component becomes a new object in its
         // owner's destination zone. Keep this beside the raw delivery so
         // `apply_zone_exit_cleanup` cannot double-bump normal moves.
-        component.trigger_occurrence_state.retire_all_grants();
         component.bump_incarnation();
     }
     // CR 700.11: a nontoken permanent card put into its owner's graveyard from
@@ -2413,7 +2409,7 @@ mod tests {
     use super::*;
     use crate::types::ability::{
         ContinuousModification, ControllerRef, FilterProp, StaticDefinition, TargetFilter,
-        TriggerGrantProducerKey, TriggerProducerOrigin, TypeFilter, TypedFilter,
+        TypeFilter, TypedFilter,
     };
     use crate::types::game_state::GameState;
     use crate::types::keywords::Keyword;
@@ -2421,25 +2417,6 @@ mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
-    }
-
-    fn install_test_grant(state: &mut GameState, object_id: ObjectId) {
-        let source = ObjectIncarnationRef::from_object(&state.objects[&object_id]);
-        let producer = TriggerGrantProducerKey::Granted {
-            origin: TriggerProducerOrigin::Static {
-                source,
-                definition_index: 0,
-                modification_index: 0,
-            },
-            output_index: 0,
-        };
-        state
-            .objects
-            .get_mut(&object_id)
-            .unwrap()
-            .trigger_occurrence_state
-            .reconcile_grant_instances(vec![(producer, ())])
-            .expect("test grant producer is unique");
     }
 
     #[test]
@@ -3271,69 +3248,6 @@ mod tests {
 
         assert_eq!(state.players[0].library[0], id1); // stays at top
         assert_eq!(state.players[0].library[1], id2); // goes to bottom
-    }
-
-    #[test]
-    fn move_to_library_retires_active_grants_before_new_incarnation() {
-        let mut state = setup();
-        let id = create_object(
-            &mut state,
-            CardId(1),
-            PlayerId(0),
-            "Granted permanent".to_string(),
-            Zone::Battlefield,
-        );
-        install_test_grant(&mut state, id);
-        assert_eq!(
-            state.objects[&id]
-                .trigger_occurrence_state
-                .active_grants()
-                .count(),
-            1
-        );
-
-        let mut events = Vec::new();
-        move_to_library_at_index(&mut state, id, Some(0), &mut events);
-
-        assert_eq!(
-            state.objects[&id]
-                .trigger_occurrence_state
-                .active_grants()
-                .count(),
-            0,
-            "a library move must retire grants before the object incarnation changes"
-        );
-    }
-
-    #[test]
-    fn route_component_retires_active_grants_before_new_incarnation() {
-        let mut state = setup();
-        let id = create_object(
-            &mut state,
-            CardId(1),
-            PlayerId(0),
-            "Merged component".to_string(),
-            Zone::Battlefield,
-        );
-        install_test_grant(&mut state, id);
-        assert_eq!(
-            state.objects[&id]
-                .trigger_occurrence_state
-                .active_grants()
-                .count(),
-            1
-        );
-
-        route_component(&mut state, id, Zone::Graveyard);
-
-        assert_eq!(
-            state.objects[&id]
-                .trigger_occurrence_state
-                .active_grants()
-                .count(),
-            0,
-            "routing an absorbed component must retire its old grants"
-        );
     }
 
     #[test]

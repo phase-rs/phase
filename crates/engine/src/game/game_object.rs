@@ -2391,7 +2391,6 @@ impl GameObject {
         // Bump the incarnation so self-references captured by abilities created
         // for the previous incarnation no longer match this permanent.
         self.bump_incarnation();
-        self.trigger_occurrence_state.retire_all_grants();
         // CR 613.7d: an object receives a timestamp when it enters a zone. Stage 2
         // stamps battlefield entries only; all-zone entry stamping (graveyard/exile-
         // functioning statics) is a deferred hook (see scope boundary).

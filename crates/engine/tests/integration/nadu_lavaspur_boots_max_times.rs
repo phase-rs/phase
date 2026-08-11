@@ -9,7 +9,6 @@ use engine::game::scenario::{GameScenario, P0};
 use engine::types::ability::{ContinuousModification, TriggerConstraint};
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
-use engine::types::zones::Zone;
 use std::sync::Arc;
 
 const NADU_ORACLE: &str = "Flying\nCreatures you control have \"Whenever this creature becomes the target of a spell or ability, reveal the top card of your library. If it's a land card, put it onto the battlefield. Otherwise, put it into your hand. This ability triggers only twice each turn.\"";
@@ -85,33 +84,6 @@ fn nadu_granted_trigger_has_independent_max_times_caps_per_target() {
             "Nadu must grant its targeting trigger with MaxTimesPerTurn=2"
         );
     }
-    let first_generation = runner.state().objects[&third_target]
-        .trigger_occurrence_state
-        .active_grants()
-        .map(|(_, instance)| instance)
-        .collect::<Vec<_>>();
-    engine::game::zones::move_to_zone(
-        runner.state_mut(),
-        third_target,
-        Zone::Exile,
-        &mut Vec::new(),
-    );
-    engine::game::zones::move_to_zone(
-        runner.state_mut(),
-        third_target,
-        Zone::Battlefield,
-        &mut Vec::new(),
-    );
-    evaluate_layers(runner.state_mut());
-    let second_generation = runner.state().objects[&third_target]
-        .trigger_occurrence_state
-        .active_grants()
-        .map(|(_, instance)| instance)
-        .collect::<Vec<_>>();
-    assert_ne!(
-        first_generation, second_generation,
-        "a blinked recipient must receive a fresh grant generation"
-    );
     for target in [
         first_target,
         second_target,
