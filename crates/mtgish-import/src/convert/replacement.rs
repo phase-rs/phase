@@ -339,6 +339,16 @@ fn event_to_damage_filters(
         },
         // Combat-only / noncombat-only restrictors set `combat_scope` per
         // CR 614.1a.
+        //
+        // CR 510.1a: The unqualified "combat damage would be dealt" event names
+        // neither a source nor a recipient, so both filter slots stay `None`
+        // and only the combat scope narrows the replacement. Mirrors the same
+        // variant's handling in `damage_event_to_prevent_params`.
+        E::CombatDamageWouldBeDealt => DamageEventFilters {
+            source_filter: None,
+            target_filter: None,
+            combat_scope: Some(CombatDamageScope::CombatOnly),
+        },
         E::CombatDamageWouldBeDealtByACreatureToRecipient(_perm, recipient) => DamageEventFilters {
             source_filter: None,
             target_filter: recipient_to_damage_target_filter(recipient),
