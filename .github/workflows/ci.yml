@@ -298,6 +298,9 @@ jobs:
         run: |
           cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
 
+      - name: Verify Gemstone Caverns production-export drift guard
+        run: cargo nextest run -p phase-engine gemstone_caverns_full_export_retains_luck_counter_mana_contract
+
       - name: Card export must not mutate the tracked parser vocabulary
         # Regression guard: the export is a PURE READ of the tracked tree.
         #
