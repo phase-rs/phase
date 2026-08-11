@@ -4173,14 +4173,14 @@ fn fmt_trigger_constraint(c: &crate::types::ability::TriggerConstraint) -> Strin
             comparator,
             filter,
         } => {
-            let ordinal = match comparator {
-                Comparator::EQ => format!("your {n}th"),
+            let timing = match comparator {
+                Comparator::EQ => format!("on your {n}th"),
                 Comparator::GT if *n == 1 => "after your first".to_string(),
                 _ => format!("when your spell count {} {n}", fmt_comparator(comparator)),
             };
             match filter {
-                Some(f) => format!("on {ordinal} {} spell this turn", fmt_target(f)),
-                None => format!("on {ordinal} spell this turn"),
+                Some(f) => format!("{timing} {} spell this turn", fmt_target(f)),
+                None => format!("{timing} spell this turn"),
             }
         }
         TC::NthDrawThisTurn { n } => format!("on your {n}th draw this turn"),
@@ -11325,10 +11325,10 @@ mod tests {
     use crate::database::legality::{legalities_to_export_map, LegalityStatus};
     use crate::parser::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
     use crate::types::ability::{
-        AbilityCondition, AbilityKind, ContinuousModification, ControllerRef, CounterTransferMode,
-        DieResultBranch, Effect, PileSource, PlayerFilter, PlayerScope, PreventionAmount,
-        PreventionScope, ReplacementCondition, StaticDefinition, TargetFilter, VoteTally,
-        VoteVisibility, VoterScope,
+        AbilityCondition, AbilityKind, Comparator, ContinuousModification, ControllerRef,
+        CounterTransferMode, DieResultBranch, Effect, PileSource, PlayerFilter, PlayerScope,
+        PreventionAmount, PreventionScope, ReplacementCondition, StaticDefinition, TargetFilter,
+        TriggerConstraint, VoteTally, VoteVisibility, VoterScope,
     };
     use crate::types::card_type::CardType;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -11337,6 +11337,26 @@ mod tests {
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::{BlockExceptionKind, ProhibitionScope};
     use crate::types::zones::{EtbTapState, Zone};
+
+    #[test]
+    fn nonfirst_spell_constraint_has_grammatical_coverage_detail() {
+        assert_eq!(
+            fmt_trigger_constraint(&TriggerConstraint::NthSpellThisTurn {
+                n: 1,
+                comparator: Comparator::GT,
+                filter: None,
+            }),
+            "after your first spell this turn"
+        );
+        assert_eq!(
+            fmt_trigger_constraint(&TriggerConstraint::NthSpellThisTurn {
+                n: 2,
+                comparator: Comparator::EQ,
+                filter: None,
+            }),
+            "on your 2th spell this turn"
+        );
+    }
 
     #[test]
     fn change_zone_signature_exposes_enters_attacking() {
