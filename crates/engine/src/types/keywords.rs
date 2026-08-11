@@ -3090,8 +3090,10 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
             count: 0,
             cost: ManaCost::default(),
         }),
-        "Gift" => Ok(Keyword::Gift(GiftKind::Card)),
-        "Discover" => Ok(Keyword::Discover(0)),
+        "Gift" => serde_json::from_value(data.clone())
+            .map(Keyword::Gift)
+            .map_err(|error| format!("GiftKind: {error}")),
+        "Discover" => Ok(Keyword::Discover(uint(data))),
         "Spree" => Ok(Keyword::Spree),
         "Ravenous" => Ok(Keyword::Ravenous),
         "Daybound" => Ok(Keyword::Daybound),
@@ -3117,19 +3119,19 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Cumulative" => Ok(Keyword::CumulativeUpkeep(AbilityCost::Mana {
             cost: ManaCost::zero(),
         })),
-        // CR 702.24a: Legacy serialized data had `Keyword::CumulativeUpkeep`
-        // carry a raw `String` cost (e.g. "{1}"). Task 3 changed the field
-        // to a typed `AbilityCost`, but parsing the legacy string requires
-        // the Oracle parser, which doesn't live in this deserialization
-        // path. Card-data.json is regenerated from MTGJSON+Oracle text by
-        // the pipeline (`./scripts/gen-card-data.sh`), so the practical
-        // fix is to re-run that pipeline rather than recover legacy data
-        // here. The zero-cost sentinel is a well-formed placeholder until
-        // the pipeline rebuilds the typed cost.
-        "CumulativeUpkeep" => Ok(Keyword::CumulativeUpkeep(AbilityCost::Mana {
-            cost: ManaCost::zero(),
-        })),
-        "Ripple" => Ok(Keyword::Ripple(1)),
+        // CR 702.24a: Legacy snapshots stored this cost as raw Oracle text,
+        // which cannot be interpreted at this serde boundary. Current
+        // card-data and snapshots carry the typed AbilityCost and must retain
+        // it exactly.
+        "CumulativeUpkeep" => match data {
+            serde_json::Value::String(_) => Ok(Keyword::CumulativeUpkeep(AbilityCost::Mana {
+                cost: ManaCost::zero(),
+            })),
+            _ => serde_json::from_value(data.clone())
+                .map(Keyword::CumulativeUpkeep)
+                .map_err(|error| format!("CumulativeUpkeep: {error}")),
+        },
+        "Ripple" => Ok(Keyword::Ripple(uint(data))),
         "Totem" => Ok(Keyword::Totem),
         // Parameterized: ManaCost (new keywords)
         "Warp" => Ok(Keyword::Warp(mana(data)?)),
@@ -4667,6 +4669,30 @@ mod tests {
         let json = serde_json::to_string(&keywords).unwrap();
         let deserialized: Vec<Keyword> = serde_json::from_str(&json).unwrap();
         assert_eq!(keywords, deserialized);
+    }
+
+    #[test]
+    fn tagged_keyword_payloads_deserialize_without_substitution() {
+        let gift: Keyword = serde_json::from_str(r#"{"Gift":{"type":"TappedFish"}}"#)
+            .expect("Gift payload deserializes");
+        assert_eq!(gift, Keyword::Gift(GiftKind::TappedFish));
+
+        let discover: Keyword =
+            serde_json::from_str(r#"{"Discover": 7}"#).expect("Discover payload deserializes");
+        assert_eq!(discover, Keyword::Discover(7));
+
+        let ripple: Keyword =
+            serde_json::from_str(r#"{"Ripple": 4}"#).expect("Ripple payload deserializes");
+        assert_eq!(ripple, Keyword::Ripple(4));
+
+        let cumulative_upkeep: Keyword = serde_json::from_str(
+            r#"{"CumulativeUpkeep":{"type":"EffectCost","effect":{"type":"PutCounter","counter_type":"M1M1","count":{"type":"Fixed","value":1},"target":{"type":"SelfRef"}}}}"#,
+        )
+        .expect("Cumulative upkeep payload deserializes");
+        assert!(matches!(
+            cumulative_upkeep,
+            Keyword::CumulativeUpkeep(AbilityCost::EffectCost { .. })
+        ));
     }
 
     #[test]
