@@ -692,6 +692,7 @@ mod issue_7063_library_reorder;
 mod issue_7087_recruit_discard_provenance;
 mod issue_709_regression;
 mod issue_718_dina_sacrifice_draw;
+mod issue_7221_forage_trigger;
 mod issue_7232_expend_auto_land_payment;
 mod issue_735_amalia_power_threshold;
 mod issue_735_cost_paid_object_non_regression;

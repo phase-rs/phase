@@ -145,6 +145,9 @@ pub enum PlayerActionKind {
     Proliferate,
     /// CR 701.16a: A player investigated (created a Clue token).
     Investigate,
+    /// CR 701.61a: A player foraged by exiling three cards from their graveyard
+    /// or sacrificing a Food.
+    Forage,
     /// A player completed a draw instruction that delivered at least
     /// one card. Emitted once per settled draw INSTRUCTION (at draw-sequence
     /// completion), not once per card — so a multi-card draw records a single
