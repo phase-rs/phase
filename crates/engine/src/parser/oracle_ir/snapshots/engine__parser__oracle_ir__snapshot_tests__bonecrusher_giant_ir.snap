@@ -105,7 +105,6 @@ expression: "&ir"
                     "prefix_delayed_condition": null,
                     "multi_target": null,
                     "where_x_expression": null,
-                    "where_x_scope": "TriggeringPlayer",
                     "unless_pay": null
                   }
                 ],
