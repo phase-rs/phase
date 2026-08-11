@@ -51,7 +51,7 @@ use engine::game::players::is_opponent;
 use engine::game::quantity::{resolve_quantity, resolve_quantity_with_targets_slice};
 use engine::game::targeting::find_legal_targets;
 use engine::types::ability::{
-    DamageSource, Effect, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    ControllerRef, DamageSource, Effect, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use engine::types::card_type::CoreType;
 use engine::types::game_state::WaitingFor;
@@ -516,6 +516,13 @@ pub(crate) fn can_kill_any_legal_target(ctx: &PolicyContext<'_>) -> bool {
 /// `anti_self_harm::score_pre_cast` BEFORE the `has_targetable_opponent_creature`
 /// gate so a useful wipe line rescues a mixed spell whose only opposing
 /// creatures are hexproof/protected (un-targetable, but wiped).
+/// Returns `true` for an UNKNOWN population too (an unbound player-relative
+/// wipe, e.g. a companion `TargetOpponent` controller scope — CR 109.4 /
+/// CR 115.1): only a provably-empty population (`Some(false)`) reads false.
+/// This threads the fail-open to BOTH `anti_self_harm::score_pre_cast`'s
+/// rescue and `tactical_gate::is_redundant_creature_only_removal`'s
+/// suppression, so an unresolvable-at-commit wipe can never apply a whiff
+/// penalty or hard-reject the cast.
 pub(crate) fn has_opposing_mass_population(ctx: &PolicyContext<'_>) -> bool {
     let Some(source) = ctx.source_object() else {
         return false;
@@ -524,7 +531,7 @@ pub(crate) fn has_opposing_mass_population(ctx: &PolicyContext<'_>) -> bool {
         matches!(
             effect,
             Effect::DestroyAll { target, .. }
-                if mass_effect_has_opposing_population(ctx, source, target)
+                if mass_effect_has_opposing_population(ctx, source, target) != Some(false)
         )
     })
 }
@@ -553,7 +560,10 @@ fn effect_has_legal_opposing_line(ctx: &PolicyContext<'_>, effect: &Effect) -> b
     // `find_legal_targets` would wrongly apply hexproof/shroud/protection and
     // read `None` as an empty set.
     if let Effect::DestroyAll { target, .. } = effect {
-        return mass_effect_has_opposing_population(ctx, source, target);
+        // `None` (unbound player-relative controller, e.g. a companion
+        // `TargetOpponent` wipe) is UNKNOWN — FAIL OPEN as useful, only a
+        // provably-empty population (`Some(false)`) is not worth a line.
+        return mass_effect_has_opposing_population(ctx, source, target) != Some(false);
     }
     let Some(filter) = extract_target_filter(effect) else {
         return false;
@@ -581,11 +591,25 @@ fn effect_has_legal_opposing_line(ctx: &PolicyContext<'_>, effect: &Effect) -> b
 /// creatures). Unlike `find_legal_targets`, NO hexproof / shroud / protection
 /// targets-exemption applies: those gate targeting only (CR 115.10a) and
 /// never a wipe's population.
+///
+/// Tri-state result, conservative by construction:
+/// * `Some(true)` — an opposing population exists (the wipe is useful);
+/// * `Some(false)` — the opposing population is provably empty;
+/// * `None` — UNKNOWN: the population filter carries a player-RELATIVE
+///   controller scope (`TargetPlayer` / `TargetOpponent`, `ScopedPlayer`,
+///   `ParentTarget*`, `Chosen*`, `TriggeringPlayer`, ...) whose companion
+///   player target is not bound at cast-commit. The engine reads the
+///   companion from `ability.targets` (filter.rs
+///   `ControllerRef::TargetPlayer|TargetOpponent` arm) and FAILS CLOSED
+///   without it, while `destroy::resolve_all` resolves it later via
+///   `FilterContext::from_ability` AFTER the companion player is announced
+///   (CR 601.2c / CR 603.3d). We cannot know the population now, so consumers
+///   must FAIL OPEN on `None` (treat `!= Some(false)` as useful).
 fn mass_effect_has_opposing_population(
     ctx: &PolicyContext<'_>,
     source: &GameObject,
     target: &TargetFilter,
-) -> bool {
+) -> Option<bool> {
     // Mirror destroy.rs `resolve_all`'s `None` -> default creature population.
     let default_population = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature));
     let effective = if matches!(target, TargetFilter::None) {
@@ -593,15 +617,49 @@ fn mass_effect_has_opposing_population(
     } else {
         target
     };
+    // CR 109.4 + CR 115.1: a player-RELATIVE population filter — `TargetPlayer` /
+    // `TargetOpponent` companion wipes ("destroy all creatures target player
+    // controls"), or any other context-bound controller scope — is NOT resolvable at
+    // cast-commit: the engine reads the companion from `ability.targets`
+    // (filter.rs `ControllerRef::TargetPlayer|TargetOpponent` arm) and FAILS CLOSED
+    // without it, while `destroy::resolve_all` resolves it later via
+    // `FilterContext::from_ability` AFTER the companion player is announced
+    // (CR 601.2c / CR 603.3d). We cannot know the population now → `None`
+    // (UNKNOWN = explicit fail-open); consumers treat `!= Some(false)` as useful.
+    if filter_has_unbound_player_controller(effective) {
+        return None;
+    }
     let filter_ctx = FilterContext::from_source_with_controller(source.id, source.controller);
-    ctx.state.battlefield.iter().any(|&id| {
+    Some(ctx.state.battlefield.iter().any(|&id| {
         let Some(obj) = ctx.state.objects.get(&id) else {
             return false;
         };
         is_opponent(ctx.state, ctx.ai_player, obj.controller)
             && !obj.has_keyword(&Keyword::Indestructible)
             && matches_target_filter(ctx.state, id, effective, &filter_ctx)
-    })
+    }))
+}
+
+/// Does the filter's controller scope require a player target/attribute NOT
+/// bound at cast-commit? Only `ControllerRef::You` / `ControllerRef::Opponent`
+/// resolve from the casting source alone (CR 108.4 / CR 102.2-102.3); every
+/// other scope (`TargetPlayer`/`TargetOpponent`, `ScopedPlayer`,
+/// `ParentTarget*`, `Chosen*`, `TriggeringPlayer`, ...) needs an announced
+/// target or resolution context (CR 109.4 / CR 115.1 / CR 608.2c), so the mass
+/// population is UNKNOWABLE at cast-commit. Conservative by construction: any
+/// future `ControllerRef` variant falls to `true` (unknown → fail open).
+fn filter_has_unbound_player_controller(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed
+            .controller
+            .as_ref()
+            .is_some_and(|ctrl| !matches!(ctrl, ControllerRef::You | ControllerRef::Opponent)),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(filter_has_unbound_player_controller)
+        }
+        TargetFilter::Not { filter: inner } => filter_has_unbound_player_controller(inner),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -1012,6 +1070,103 @@ mod tests {
         );
     }
 
+    /// A mixed damage + wipe spell whose `DestroyAll` population carries a
+    /// player-RELATIVE controller scope (`ControllerRef::TargetOpponent`, a
+    /// companion "destroy all creatures target opponent controls" wipe) with
+    /// the companion player target NOT bound at cast-commit. The engine
+    /// resolves that scope by reading the first `TargetRef::Player` from
+    /// `ability.targets` and FAILS CLOSED without it (CR 109.4 / CR 115.1),
+    /// while `destroy::resolve_all` resolves it later via
+    /// `FilterContext::from_ability` after the companion is announced
+    /// (CR 601.2c). The population is therefore UNKNOWABLE at cast-commit:
+    /// `mass_effect_has_opposing_population` must report `None` (unknown),
+    /// the seam must fail open (`has_opposing_mass_population == true`), and
+    /// the mixed spell must not be vetoed. Pre-fix the population read as
+    /// empty → the 1-damage half vetoed the whole cast.
+    #[test]
+    fn mass_population_unknown_for_unbound_player_controller() {
+        let mut state = make_state();
+        add_creature(&mut state, PlayerId(1), "Opponent Bear", 3, 3);
+
+        let wipe_filter =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::TargetOpponent));
+
+        let spell_id = create_object(
+            &mut state,
+            CardId(90_020),
+            PlayerId(0),
+            "Player-targeted Cataclysm".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&spell_id).unwrap();
+        obj.abilities = Arc::new(vec![
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    damage_source: None,
+                    excess: None,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DestroyAll {
+                    target: wipe_filter.clone(),
+                    cant_regenerate: false,
+                },
+            ),
+        ]);
+
+        let config = AiConfig::default();
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: spell_id,
+                card_id: CardId(90_020),
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
+        };
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+
+        let source = ctx.source_object().unwrap();
+        // (a) The helper's own discriminating seam: unbound player-relative
+        // controller → UNKNOWN (`None`), not a provable empty (`Some(false)`).
+        assert_eq!(
+            mass_effect_has_opposing_population(&ctx, source, &wipe_filter),
+            None,
+            "an unbound player-relative controller scope (TargetOpponent) must read UNKNOWN"
+        );
+        // (b) The seam threads the fail-open: an UNKNOWN population is useful.
+        assert!(
+            has_opposing_mass_population(&ctx),
+            "an unknown (unbound player-relative) mass population must fail open through the seam"
+        );
+        // (c) The mixed spell is not vetoed (the unknown wipe rescues the
+        // non-lethal damage half).
+        assert!(
+            can_kill_any_legal_target(&ctx),
+            "mixed deal-1 + player-relative wipe must not be vetoed when the \
+             population is unknown at cast-commit"
+        );
+    }
+
     /// Mixed removal spell with a DEFAULT-population wipe line: "deal 1 damage
     /// to target creature; destroy all permanents" where the `DestroyAll` half
     /// declares `TargetFilter::None`. The engine resolver (`destroy.rs`
@@ -1164,7 +1319,8 @@ mod tests {
         // for this hexproof-only board (target legality), so the wipe half
         // credited nothing even though the resolver destroys the hexproof bear.
         assert!(
-            mass_effect_has_opposing_population(&ctx, ctx.source_object().unwrap(), &filter),
+            mass_effect_has_opposing_population(&ctx, ctx.source_object().unwrap(), &filter)
+                == Some(true),
             "the wipe's resolver-mirroring population must count hexproof \
              opponent creatures: hexproof gates targeting only (CR 115.10a), \
              and the resolver (destroy.rs `resolve_all`) matches the population \
@@ -1650,11 +1806,11 @@ mod tests {
                      legal target but not an opponent (CR 102.2/102.3 + 2HG topology)"
                 );
                 assert!(
-                    !mass_effect_has_opposing_population(
+                    mass_effect_has_opposing_population(
                         ctx,
                         ctx.source_object().unwrap(),
                         &TargetFilter::Typed(TypedFilter::creature())
-                    ),
+                    ) == Some(false),
                     "a teammate's creature must NOT be an opposing wipe population \
                      (CR 102.2/102.3 + 2HG topology)"
                 );
@@ -1680,7 +1836,7 @@ mod tests {
                         ctx,
                         ctx.source_object().unwrap(),
                         &TargetFilter::Typed(TypedFilter::creature())
-                    ),
+                    ) == Some(true),
                     "an enemy (P2) creature must be an opposing wipe population \
                      (CR 102.2/102.3 + 2HG topology)"
                 );

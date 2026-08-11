@@ -934,6 +934,233 @@ fn mixed_destroy_all_not_penalized_when_only_population_is_hexproof() {
     );
 }
 
+/// Production-pipeline differential pinning the player-relative-wipe fix for
+/// the **anti_self_harm** thread: a mixed spell whose `DestroyAll` population
+/// carries a companion `ControllerRef::TargetOpponent` scope ("destroy all
+/// creatures target opponent controls") with a LIVE opponent creature on board
+/// and the companion player target LEFT UNBOUND, exactly as at cast-commit.
+///
+/// * **Why UNKNOWN.** The engine resolves `ControllerRef::TargetOpponent` by
+///   reading the first `TargetRef::Player` from `ability.targets` (filter.rs
+///   `ControllerRef::TargetPlayer|TargetOpponent` arm) and FAILS CLOSED without
+///   it, while `destroy::resolve_all` resolves the same population later via
+///   `FilterContext::from_ability` AFTER the companion player is announced
+///   (CR 601.2c). At cast-commit the companion slot is not yet bound, so the
+///   population is UNKNOWABLE — the mass helper must fail open (`None`), NOT
+///   read it as empty (CR 109.4 / CR 115.1).
+/// * **The wipe is non-targeted** (CR 115.10a): population members are not
+///   "targets" (CR 701.8), so the unbound companion player is a
+///   target-declaration bookkeeping gap, not a legality problem for the wipe.
+/// * **Reference R** is the identical target-player wipe ALONE — the
+///   reviewer's apples-to-apples baseline: both M and R carry the same
+///   `TargetOpponent` wipe; only M adds the non-lethal damage half. So M must
+///   score ≈ R (within the half-penalty margin). Pre-fix the mass population
+///   read as empty → `can_kill_any_legal_target` did not credit the wipe → M's
+///   1-damage half was vetoed as a whiff (`wasted_cast_penalty`,
+///   anti_self_harm) → M ≈ R − 8, failing this assert.
+#[test]
+fn mixed_target_opponent_wipe_is_not_penalized_when_player_unbound() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // AI's 2/1 also lets the dynamic ObjectCount amount resolve to 1; the
+    // opponent's LIVE 3/3 is both a legal target for the damage half and a
+    // member of the TargetOpponent wipe population (CR 115.10a).
+    scenario.add_creature(P0, "My Bear", 2, 1);
+    scenario.add_creature(P1, "Opponent Bear", 3, 3);
+
+    let mut my_filter = TypedFilter::creature();
+    my_filter.controller = Some(ControllerRef::You);
+    let amount = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(my_filter),
+        },
+    };
+
+    // Companion `TargetPlayer`/`TargetOpponent` wipe filter — its player target
+    // slot is left unbound, as it is at cast-commit.
+    let opponent_wipe =
+        || TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::TargetOpponent));
+
+    // Mixed "deal 1 damage to target creature + destroy all creatures target
+    // opponent controls".
+    let mixed = scenario
+        .add_spell_to_hand(P0, "Targeted Cataclysm", true)
+        .with_ability(Effect::DealDamage {
+            amount: amount.clone(),
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            damage_source: None,
+            excess: None,
+        })
+        .with_ability(Effect::DestroyAll {
+            target: opponent_wipe(),
+            cant_regenerate: false,
+        })
+        .id();
+
+    // Reference: the SAME TargetOpponent wipe alone (the reviewer's
+    // target-player wipe baseline).
+    let reference = scenario
+        .add_spell_to_hand(P0, "Pure Player Wipe", true)
+        .with_ability(Effect::DestroyAll {
+            target: opponent_wipe(),
+            cant_regenerate: false,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+
+    let config = create_config(AiDifficulty::Easy, Platform::Native);
+    let scored = phase_ai::score_candidates(runner.state(), P0, &config);
+
+    // Reach-guard: BOTH must be offered as CastSpell.
+    let mixed_score = scored
+        .iter()
+        .find(|(a, _)| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == mixed))
+        .map(|(_, s)| *s)
+        .unwrap_or_else(|| {
+            panic!("mixed spell {mixed:?} must be offered as CastSpell, got {scored:?}")
+        });
+    let ref_score = scored
+        .iter()
+        .find(|(a, _)| {
+            matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == reference)
+        })
+        .map(|(_, s)| *s)
+        .unwrap_or_else(|| {
+            panic!(
+                "reference target-player wipe {reference:?} must be offered as CastSpell, \
+                    got {scored:?}"
+            )
+        });
+
+    assert!(
+        mixed_score > ref_score - config.policy_penalties.wasted_cast_penalty.abs() * 0.5,
+        "mixed deal-1 + target-opponent wipe ({mixed_score:.3}) must not be penalized below \
+         the target-player wipe baseline ({ref_score:.3}): the wipe's population is UNKNOWN \
+         (companion player unbound at cast-commit, CR 109.4 / CR 115.1), so it must fail open \
+         (CR 115.10a non-targeted; CR 701.8) and rescue the non-lethal damage half"
+    );
+}
+
+/// Production-pipeline differential pinning the player-relative-wipe fix for
+/// the **tactical-gate** thread on a board whose only opposing creature is
+/// HEXPROOF. Pre-fix, an unbound player-relative wipe read as an EMPTY
+/// population, so `is_redundant_creature_only_removal` (consulting
+/// `has_opposing_mass_population`) saw no useful wipe and HARD-REJECTED the
+/// mixed spell — only `PassPriority` was offered, so the M reach-guard below
+/// panics. Post-fix the seam is UNKNOWN → not redundant → M is offered.
+///
+/// * The hexproof 3/3 (CR 702.11b) is an illegal TARGET for the damage half,
+///   but the wipe's `TargetOpponent` population is NON-targeted (CR 115.10a)
+///   and UNKNOWABLE at cast-commit (companion player unbound, CR 109.4 /
+///   CR 115.1; resolved later via `FilterContext::from_ability`, CR 601.2c).
+/// * The AI's own 2/1 gives the damage half a legal ANNOUNCE target so the
+///   pending spell is valid (CR 601.2c).
+/// * R is the same TargetOpponent wipe alone — the honest baseline: both M and
+///   R carry the unknown-population wipe, so M must score ≈ R (half-penalty
+///   margin), with the M-offered reach-guard as the DISCRIMINATING assert.
+#[test]
+fn target_opponent_wipe_offered_when_only_population_is_hexproof() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // The AI's 2/1 resolves the ObjectCount amount to 1 and gives the damage
+    // half a legal announce target; the opponent's only creature is hexproof.
+    scenario.add_creature(P0, "My Bear", 2, 1);
+    scenario
+        .add_creature(P1, "Hexproof Bear", 3, 3)
+        .with_keyword(Keyword::Hexproof);
+
+    let mut my_filter = TypedFilter::creature();
+    my_filter.controller = Some(ControllerRef::You);
+    let amount = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(my_filter),
+        },
+    };
+
+    let opponent_wipe =
+        || TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::TargetOpponent));
+
+    // Mixed "deal 1 damage to target creature + destroy all creatures target
+    // opponent controls" (companion player unbound).
+    let mixed = scenario
+        .add_spell_to_hand(P0, "Targeted Hexproof Cataclysm", true)
+        .with_ability(Effect::DealDamage {
+            amount: amount.clone(),
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            damage_source: None,
+            excess: None,
+        })
+        .with_ability(Effect::DestroyAll {
+            target: opponent_wipe(),
+            cant_regenerate: false,
+        })
+        .id();
+
+    // Reference: the SAME TargetOpponent wipe alone.
+    let reference = scenario
+        .add_spell_to_hand(P0, "Pure Player Wipe Hexproof", true)
+        .with_ability(Effect::DestroyAll {
+            target: opponent_wipe(),
+            cant_regenerate: false,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+
+    let config = create_config(AiDifficulty::Easy, Platform::Native);
+    let scored = phase_ai::score_candidates(runner.state(), P0, &config);
+
+    // DISCRIMINATING reach-guard: M must be offered. Pre-fix
+    // `is_redundant_creature_only_removal` hard-rejected M (empty population
+    // read → not a useful wipe) so only PassPriority was offered — this panics.
+    let mixed_score = scored
+        .iter()
+        .find(|(a, _)| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == mixed))
+        .map(|(_, s)| *s)
+        .unwrap_or_else(|| {
+            panic!(
+                "mixed spell {mixed:?} must be offered as CastSpell (the TargetOpponent wipe \
+                    must be UNKNOWN, not empty, so the tactical gate must not hard-reject), \
+                    got {scored:?}"
+            )
+        });
+    let ref_score = scored
+        .iter()
+        .find(|(a, _)| {
+            matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == reference)
+        })
+        .map(|(_, s)| *s)
+        .unwrap_or_else(|| {
+            panic!(
+                "reference pure wipe {reference:?} must be offered as CastSpell, got {scored:?}"
+            )
+        });
+
+    assert!(
+        mixed_score > ref_score - config.policy_penalties.wasted_cast_penalty.abs() * 0.5,
+        "mixed deal-1 + target-opponent wipe on a hexproof-only board ({mixed_score:.3}) must \
+         not be penalized below the pure wipe ({ref_score:.3}): the TargetOpponent population \
+         is UNKNOWN at cast-commit (CR 109.4 / CR 115.1) and the wipe is NON-targeted \
+         (CR 115.10a), so the seam must rescue the spell from both the tactical gate and the \
+         whiff penalty"
+    );
+}
+
 // ── Full Game Completion ─────────────────────────────────────────────────
 
 #[test]
