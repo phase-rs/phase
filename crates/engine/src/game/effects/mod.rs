@@ -1184,14 +1184,12 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                 )
                 .expect("replacement-resumed ChangeZone delivery retains its exact segment");
             }
-            if let Some(terminal_completion) = paused_current.terminal_completion {
-                logical_zone_change_group
-                    .record_delivery_completion(
-                        paused_current.member.object_id,
-                        terminal_completion,
-                    )
-                    .expect("resumed ChangeZone member records its exact terminal outcome");
-            }
+            logical_zone_change_group
+                .record_delivery_completion(
+                    paused_current.member.object_id,
+                    paused_current.terminal_completion_after_resume(),
+                )
+                .expect("resumed ChangeZone member records its exact terminal outcome");
             if matches!(
                 paused_current.count,
                 crate::types::game_state::PausedZoneChangeDeliveryCount::NeedsCount
