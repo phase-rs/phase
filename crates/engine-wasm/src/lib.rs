@@ -1962,6 +1962,9 @@ fn decode_and_rehydrate_restored_game_state(
 ) -> Result<DecodedRestoredGameState, String> {
     let mut restored = decode_restored_game_state(json_str)?;
     rehydrate_restored_state_from_card_db(&mut restored.state)?;
+    // Combat declaration snapshots are display data derived from the rehydrated
+    // live board. Rebuild them before this external state becomes interactive.
+    engine::game::combat::refresh_combat_declaration_waiting_for(&mut restored.state);
     Ok(restored)
 }
 
@@ -2132,6 +2135,151 @@ mod restored_card_db_requirements_tests {
         assert!(error.contains("card database"));
         assert!(GAME_STATE.with(|cell| cell.replace(None).is_none()));
         assert!(!is_multiplayer_mode());
+    }
+}
+
+#[cfg(test)]
+mod combat_prompt_restore_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    use engine::game::combat::{build_declare_attackers_waiting_for, AttackTarget};
+    use engine::game::scenario::{GameScenario, P0, P1};
+    use engine::types::game_state::WaitingFor;
+    use engine::types::phase::Phase;
+
+    #[test]
+    fn restore_rebuilds_an_empty_declare_attackers_target_snapshot() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        scenario.at_phase(Phase::DeclareAttackers);
+        let pyrogoyf = scenario.add_creature(P0, "Pyrogoyf", 2, 3).id();
+        let guide_of_souls = scenario.add_creature(P0, "Guide of Souls", 2, 2).id();
+        let mut runner = scenario.build();
+        runner.state_mut().waiting_for = build_declare_attackers_waiting_for(runner.state());
+        let WaitingFor::DeclareAttackers {
+            valid_attack_targets,
+            valid_attack_targets_by_attacker,
+            ..
+        } = &mut runner.state_mut().waiting_for
+        else {
+            panic!("scenario must enter DeclareAttackers");
+        };
+        valid_attack_targets.clear();
+        *valid_attack_targets_by_attacker = Some(std::collections::HashMap::from([
+            (pyrogoyf, Vec::new()),
+            (guide_of_souls, Vec::new()),
+        ]));
+
+        let json = serde_json::to_string(runner.state())
+            .expect("stale externally exported prompt serializes");
+        restore_game_state(&json).expect("external restore succeeds");
+
+        with_state(|state| match &state.waiting_for {
+            WaitingFor::DeclareAttackers {
+                valid_attack_targets,
+                valid_attack_targets_by_attacker: Some(by_attacker),
+                ..
+            } => {
+                assert_eq!(valid_attack_targets, &vec![AttackTarget::Player(P1)]);
+                assert_eq!(
+                    valid_attack_targets.iter().copied().collect::<HashSet<_>>(),
+                    by_attacker.values().flatten().copied().collect(),
+                    "aggregate targets remain the union of per-attacker support"
+                );
+                assert_eq!(
+                    by_attacker.get(&pyrogoyf),
+                    Some(&vec![AttackTarget::Player(P1)]),
+                    "Pyrogoyf regains its engine-authored attack target after restore"
+                );
+                assert_eq!(
+                    by_attacker.get(&guide_of_souls),
+                    Some(&vec![AttackTarget::Player(P1)]),
+                    "the restored prompt rebuilds every selected attacker's target support"
+                );
+            }
+            waiting_for => panic!("expected DeclareAttackers after restore, got {waiting_for:?}"),
+        })
+        .expect("restored state remains available");
+        with_state_mut(|state| {
+            apply(
+                state,
+                P0,
+                GameAction::DeclareAttackers {
+                    attacks: vec![
+                        (pyrogoyf, AttackTarget::Player(P1)),
+                        (guide_of_souls, AttackTarget::Player(P1)),
+                    ],
+                    bands: vec![],
+                },
+            )
+        })
+        .expect("restored state remains available")
+        .expect("restored target choices reach the declaration reducer");
+        clear_game_state();
+    }
+
+    #[test]
+    fn restore_rebuilds_an_empty_declare_blockers_target_snapshot() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        scenario.at_phase(Phase::DeclareAttackers);
+        let attacker = scenario.add_creature(P0, "Attacker", 2, 2).id();
+        let blocker = scenario.add_creature(P1, "Blocker", 2, 2).id();
+        let mut runner = scenario.build();
+        runner.state_mut().waiting_for = build_declare_attackers_waiting_for(runner.state());
+        runner
+            .act(GameAction::DeclareAttackers {
+                attacks: vec![(attacker, AttackTarget::Player(P1))],
+                bands: vec![],
+            })
+            .expect("attacker enters combat before the blocker prompt");
+        runner.pass_both_players();
+        let WaitingFor::DeclareBlockers {
+            valid_blocker_ids,
+            valid_block_targets,
+            ..
+        } = &mut runner.state_mut().waiting_for
+        else {
+            panic!("combat must enter DeclareBlockers");
+        };
+        valid_blocker_ids.clear();
+        valid_block_targets.clear();
+
+        let json = serde_json::to_string(runner.state())
+            .expect("stale externally exported blocker prompt serializes");
+        restore_game_state(&json).expect("external restore succeeds");
+
+        with_state(|state| match &state.waiting_for {
+            WaitingFor::DeclareBlockers {
+                valid_blocker_ids,
+                valid_block_targets,
+                ..
+            } => {
+                assert_eq!(valid_blocker_ids, &vec![blocker]);
+                assert_eq!(valid_block_targets.get(&blocker), Some(&vec![attacker]));
+            }
+            waiting_for => panic!("expected DeclareBlockers after restore, got {waiting_for:?}"),
+        })
+        .expect("restored state remains available");
+        with_state_mut(|state| {
+            apply(
+                state,
+                P1,
+                GameAction::DeclareBlockers {
+                    assignments: vec![(blocker, attacker)],
+                },
+            )
+        })
+        .expect("restored state remains available")
+        .expect("restored blocker choices reach the declaration reducer");
+        clear_game_state();
     }
 }
 
