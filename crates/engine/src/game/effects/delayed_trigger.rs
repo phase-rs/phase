@@ -651,53 +651,7 @@ fn concrete_parent_target_filter(
     filter: &TargetFilter,
     parent_targets: &[TargetRef],
 ) -> TargetFilter {
-    let filter = crate::game::filter::normalize_contextual_filter(filter, parent_targets);
-    match filter {
-        TargetFilter::ParentTarget => parent_targets_filter(parent_targets),
-        // CR 603.7c + CR 608.2c: bind a `ParentTargetSlot { index }` delayed
-        // condition filter to the concrete parent object at that declared slot
-        // (single-slot analogue of the `ParentTarget` arm). Out-of-range/empty
-        // slots fall back to `Any`, matching `parent_targets_filter`'s empty case.
-        TargetFilter::ParentTargetSlot { index } => parent_targets
-            .get(index)
-            .map(|target| match target {
-                TargetRef::Object(id) => TargetFilter::SpecificObject { id: *id },
-                TargetRef::Player(id) => TargetFilter::SpecificPlayer { id: *id },
-            })
-            .unwrap_or(TargetFilter::Any),
-        TargetFilter::Not { filter } => TargetFilter::Not {
-            filter: Box::new(concrete_parent_target_filter(&filter, parent_targets)),
-        },
-        TargetFilter::Or { filters } => TargetFilter::Or {
-            filters: filters
-                .iter()
-                .map(|filter| concrete_parent_target_filter(filter, parent_targets))
-                .collect(),
-        },
-        TargetFilter::And { filters } => TargetFilter::And {
-            filters: filters
-                .iter()
-                .map(|filter| concrete_parent_target_filter(filter, parent_targets))
-                .collect(),
-        },
-        other => other,
-    }
-}
-
-fn parent_targets_filter(parent_targets: &[TargetRef]) -> TargetFilter {
-    let targets: Vec<_> = parent_targets
-        .iter()
-        .map(|target| match target {
-            TargetRef::Object(id) => TargetFilter::SpecificObject { id: *id },
-            TargetRef::Player(id) => TargetFilter::SpecificPlayer { id: *id },
-        })
-        .collect();
-
-    match targets.as_slice() {
-        [] => TargetFilter::Any,
-        [target] => target.clone(),
-        _ => TargetFilter::Or { filters: targets },
-    }
+    crate::game::filter::normalize_contextual_filter(filter, parent_targets)
 }
 
 fn bind_tracked_set_to_condition(condition: &mut DelayedTriggerCondition, real_id: TrackedSetId) {
@@ -1033,6 +987,13 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
                 }
                 | TargetFilter::Any => TargetFilter::TrackedSet { id: real_id },
                 TargetFilter::TrackedSet { id } => TargetFilter::TrackedSet { id: *id },
+                TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => {
+                    TargetFilter::TrackedSetFiltered {
+                        id: real_id,
+                        filter: Box::new(target.clone()),
+                        caused_by: None,
+                    }
+                }
                 _ => TargetFilter::TrackedSet { id: real_id },
             };
             *effect = Effect::ChangeZoneAll {
@@ -1105,6 +1066,9 @@ fn filter_refs_parent_object_anaphor(filter: &TargetFilter) -> bool {
             filters.iter().any(filter_refs_parent_object_anaphor)
         }
         TargetFilter::Not { filter } => filter_refs_parent_object_anaphor(filter),
+        TargetFilter::TrackedSetFiltered { filter, .. } => {
+            filter_refs_parent_object_anaphor(filter)
+        }
         _ => false,
     }
 }
@@ -3515,6 +3479,103 @@ mod tests {
             state.objects[&second_token].zone,
             Zone::Exile,
             "the remaining tracked-set token on the battlefield must be exiled"
+        );
+    }
+
+    /// CR 400.7 + CR 603.7c (issue #7100): an end-step return referring to
+    /// the parent-selected tracked-set member must retain that anaphor through
+    /// the ChangeZoneAll upgrade. A later zone change makes the same object id
+    /// a new object, which the creation-time incarnation pin excludes.
+    #[test]
+    fn tracked_set_delayed_change_zone_preserves_parent_pin_across_reentry() {
+        let mut state = GameState::new_two_player(42);
+        let creature = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Eerie Interlude target".to_string(),
+            Zone::Battlefield,
+        );
+        let set_id = TrackedSetId(1);
+        state.tracked_object_sets.insert(set_id, vec![creature]);
+        state.chain_tracked_set_id = Some(set_id);
+        state.next_tracked_set_id = 2;
+
+        let effect = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        );
+        let create = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(effect),
+                uses_tracked_set: true,
+            },
+            vec![TargetRef::Object(creature)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &create, &mut events).expect("delayed trigger installs");
+
+        let delayed = &state.delayed_triggers[0].ability;
+        assert!(delayed.target_pin_is_current(creature, &state));
+        assert_eq!(delayed.targets, vec![TargetRef::Object(creature)]);
+        assert!(matches!(
+            &delayed.effect,
+            Effect::ChangeZoneAll {
+                target: TargetFilter::TrackedSetFiltered {
+                    id,
+                    filter,
+                    caused_by: None,
+                },
+                ..
+            } if *id == set_id && matches!(filter.as_ref(), TargetFilter::ParentTarget)
+        ));
+
+        let mut current_state = state.clone();
+        let current_delayed = current_state.delayed_triggers[0].ability.clone();
+        crate::game::effects::resolve_ability_chain(
+            &mut current_state,
+            &current_delayed,
+            &mut Vec::new(),
+            0,
+        )
+        .expect("current delayed trigger resolves");
+        assert_eq!(
+            current_state.objects[&creature].zone,
+            Zone::Exile,
+            "the still-current tracked-set member must be affected"
+        );
+
+        crate::game::zones::move_to_zone(&mut state, creature, Zone::Graveyard, &mut Vec::new());
+        crate::game::zones::move_to_zone(&mut state, creature, Zone::Battlefield, &mut Vec::new());
+        let delayed = state.delayed_triggers[0].ability.clone();
+        assert!(
+            !delayed.target_pin_is_current(creature, &state),
+            "the returned object is a new incarnation"
+        );
+
+        crate::game::effects::resolve_ability_chain(&mut state, &delayed, &mut events, 0)
+            .expect("delayed trigger resolves");
+        assert_eq!(
+            state.objects[&creature].zone,
+            Zone::Battlefield,
+            "the stale tracked-set member must not be exiled"
         );
     }
 
