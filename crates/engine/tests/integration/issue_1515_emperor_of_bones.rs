@@ -236,6 +236,54 @@ fn emperor_of_bones_counter_trigger_uses_returned_creature_in_cast_pipeline() {
     );
 }
 
+#[test]
+fn emperor_of_bones_adapt_pipeline_binds_delayed_sacrifice_to_returned_creature() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let emperor = scenario
+        .add_creature_from_oracle(P0, "Emperor of Bones", 2, 2, EMPEROR_ORACLE)
+        .id();
+    let returned = scenario
+        .add_creature_to_exile(P0, "Linked Gravebeast", 3, 3)
+        .id();
+    let swamp_a = scenario.add_basic_land(P0, engine::types::mana::ManaColor::Black);
+    let swamp_b = scenario.add_basic_land(P0, engine::types::mana::ManaColor::Black);
+
+    let mut runner = scenario.build();
+    runner.state_mut().exile_links.push(ExileLink {
+        exiled_id: returned,
+        source_id: emperor,
+        kind: ExileLinkKind::TrackedBySource,
+    });
+
+    runner
+        .activate(emperor, 0)
+        .pay_with(&[swamp_a, swamp_b])
+        .resolve();
+
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&returned].zone,
+        Zone::Battlefield,
+        "Adapt must resolve Emperor's counter trigger and return the linked creature"
+    );
+    assert_eq!(
+        state.delayed_triggers.len(),
+        1,
+        "the counter trigger must install one delayed sacrifice"
+    );
+    assert_eq!(
+        state.delayed_triggers[0].ability.targets,
+        vec![engine::types::ability::TargetRef::Object(returned)],
+        "the Adapt-triggered delayed sacrifice must snapshot the returned creature"
+    );
+    assert_eq!(
+        state.objects[&emperor].zone,
+        Zone::Battlefield,
+        "Emperor must remain on the battlefield until its own ability is removed"
+    );
+}
+
 /// CR 614.12a + CR 400.7j: An as-enters choice on the returned permanent must
 /// complete without losing later instructions that refer to that permanent.
 #[test]
