@@ -4487,10 +4487,10 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityKind, AbilityTag, ActivationRestriction, Comparator,
         ContinuousModification, ControllerRef, CopyRetargetPermission, DelayedTriggerCondition,
-        DevotionColors, Duration, Effect, FilterProp, LinkedExileScope, ManaContribution,
-        ManaProduction, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, QuantityExpr,
-        QuantityRef, SacrificeCost, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter,
-        TypedFilter, REMOVE_COUNTER_COST_ANY_NUMBER,
+        DevotionColors, Duration, Effect, EffectKind, FilterProp, LinkedExileScope,
+        ManaContribution, ManaProduction, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope,
+        QuantityExpr, QuantityRef, SacrificeCost, StaticDefinition, TargetFilter,
+        TriggerDefinition, TypeFilter, TypedFilter, REMOVE_COUNTER_COST_ANY_NUMBER,
     };
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
@@ -4546,6 +4546,10 @@ mod tests {
             count: 1,
             cards: Vec::new(),
             source_id: ObjectId(7),
+            effect_kind: EffectKind::Discard,
+            up_to: false,
+            unless_filter: None,
+            discard_frame: None,
         };
         state.waiting_for = live_prompt.clone();
 
