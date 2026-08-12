@@ -1,13 +1,16 @@
 //! Regression for issue #6979: land-mana amplification triggers must observe a
 //! mana ability's aggregate output once, with the printed source restrictions.
 
+use engine::game::mana_abilities::activate_mana_ability;
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::triggers::process_triggers;
 use engine::game::zones::create_object;
-use engine::types::ability::ChosenAttribute;
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, ChosenAttribute, Effect, ManaContribution, ManaProduction,
+};
 use engine::types::card_type::CoreType;
-use engine::types::events::{GameEvent, ManaAbilityTriggerState, ManaTapState};
-use engine::types::game_state::{ExileLink, ExileLinkKind};
+use engine::types::events::{GameEvent, ManaTapState};
+use engine::types::game_state::{ExileLink, ExileLinkKind, ManaAbilityResume};
 use engine::types::identifiers::CardId;
 use engine::types::mana::{ManaColor, ManaType};
 use engine::types::zones::Zone;
@@ -23,6 +26,22 @@ fn caged_sun_triggers_once_from_a_non_tap_land_mana_ability() {
         .as_artifact()
         .from_oracle_text(CAGED_SUN_ORACLE)
         .id();
+    let land = scenario
+        .add_creature(P0, "Red Land", 0, 0)
+        .with_ability_definition(AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![ManaColor::Red],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        ))
+        .id();
     let mut runner = scenario.build();
     runner
         .state_mut()
@@ -32,15 +51,8 @@ fn caged_sun_triggers_once_from_a_non_tap_land_mana_ability() {
         .chosen_attributes
         .push(ChosenAttribute::Color(ManaColor::Red));
 
-    let state = runner.state_mut();
-    let land = create_object(
-        state,
-        CardId(6979),
-        P0,
-        "Red land".to_string(),
-        Zone::Battlefield,
-    );
-    state
+    runner
+        .state_mut()
         .objects
         .get_mut(&land)
         .expect("land")
@@ -48,22 +60,27 @@ fn caged_sun_triggers_once_from_a_non_tap_land_mana_ability() {
         .core_types
         .push(CoreType::Land);
 
-    process_triggers(
+    let ability = runner.state().objects[&land].abilities[0].clone();
+    let mut events = Vec::new();
+    activate_mana_ability(
         runner.state_mut(),
-        &[GameEvent::ManaAbilityProduced {
-            player_id: P0,
-            source_id: land,
-            produced: vec![ManaType::Red, ManaType::Red],
-            trigger_state: ManaAbilityTriggerState::Pending,
-        }],
-    );
+        land,
+        P0,
+        0,
+        &ability,
+        &mut events,
+        ManaAbilityResume::Priority,
+        None,
+    )
+    .expect("non-tap land mana ability must resolve");
+    process_triggers(runner.state_mut(), &events);
 
     assert_eq!(
         runner.state().players[P0.0 as usize]
             .mana_pool
             .count_color(ManaType::Red),
-        1,
-        "Caged Sun adds exactly one chosen-color mana per qualifying ability resolution"
+        2,
+        "Caged Sun adds exactly one chosen-color mana beyond the land's produced mana"
     );
 }
 
