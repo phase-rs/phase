@@ -15249,7 +15249,15 @@ fn feasibly_payable_with_tap_payment_mode_in_context(
         player_can_spend_as_any_color_for_payment(simulated, player, Some(source_id), ctx);
     let permissions =
         super::static_abilities::build_cost_permission_context(simulated, player, any_color);
-    can_pay_with_tap_payment_mode(simulated, player, tap_payment_mode, cost, ctx, permissions)
+    can_pay_with_tap_payment_mode(
+        simulated,
+        player,
+        tap_payment_mode,
+        spell_has_delve_payment_for(simulated, player, source_id, false),
+        cost,
+        ctx,
+        permissions,
+    )
 }
 
 /// Castability-gate feasibility predicate. Returns true if `player` could pay

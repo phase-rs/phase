@@ -11,9 +11,9 @@ use crate::types::actions::{
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState, PlayerActionKind};
 use crate::types::game_state::{
     ActionResult, AssistState, AutoMayChoice, AutoPassMode, AutoPassRequest, CastOfferKind,
-    ConvokeMode, CostResume, GameState, LandPlayRecord, LoopDetectionMode, ManaAbilityResume,
-    MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveResume, RetargetScope, StackEntry,
-    StackEntryKind, WaitingFor,
+    CastingVariant, ConvokeMode, CostResume, GameState, LandPlayRecord, LoopDetectionMode,
+    ManaAbilityResume, MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveResume, RetargetScope,
+    StackEntry, StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIncarnationRef};
 use crate::types::match_config::MatchType;

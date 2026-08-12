@@ -16,7 +16,7 @@ use crate::types::card::LayoutKind;
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterMatch;
 use crate::types::game_state::{
-    CastOfferKind, CastPaymentMode, CompanionDeclaration, ConvokeMode, CostResume,
+    CastOfferKind, CastPaymentMode, CastingVariant, CompanionDeclaration, ConvokeMode, CostResume,
     CounterCostChoice, CounterMoveChoice, CounterRemoveChoice, GameState, MulliganDecisionPhase,
     PayCostKind, PayableResource, PendingMulliganAction, TargetSelectionSlot, WaitingFor,
 };
