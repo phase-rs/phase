@@ -17674,6 +17674,9 @@ pub(crate) fn find_eligible_discard_targets(
     find_eligible_hand_cost_targets(state, player, source, filter)
 }
 
+/// CR 118.3 + CR 602.2b: Select the hand cards that can pay an activated
+/// ability's discard cost by excluding the source and applying its optional
+/// filter against the announced ability context.
 pub(crate) fn find_eligible_discard_targets_for_ability(
     state: &GameState,
     player: PlayerId,

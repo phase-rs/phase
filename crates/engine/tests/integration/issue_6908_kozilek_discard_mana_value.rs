@@ -3,6 +3,7 @@
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zones::move_to_zone;
+use engine::types::actions::GameAction;
 use engine::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
 use engine::types::mana::ManaCost;
 use engine::types::zones::Zone;
@@ -61,4 +62,38 @@ fn kozilek_discards_a_card_matching_announced_x_to_counter_a_spell() {
         .resolve();
 
     outcome.assert_zone(&[discard, target], Zone::Graveyard);
+}
+
+/// CR 107.3a + CR 602.2b: every activated X choice, including a no-target
+/// ability, must bind the discard filter before the activation can proceed.
+#[test]
+fn kozilek_rejects_an_announced_x_without_a_matching_discard() {
+    let mut scenario = GameScenario::new();
+    let kozilek = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Kozilek, the Great Distortion",
+            12,
+            12,
+            "Discard a card with mana value X: Draw a card.",
+        )
+        .id();
+    scenario
+        .add_spell_to_hand(P0, "Mana Value Three Discard", false)
+        .with_mana_cost(ManaCost::generic(3));
+    scenario
+        .add_spell_to_hand(P0, "Mana Value Five Discard", false)
+        .with_mana_cost(ManaCost::generic(5));
+    let mut runner = scenario.build();
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: kozilek,
+            ability_index: 0,
+        })
+        .expect("activation must reach X announcement");
+    assert!(
+        runner.act(GameAction::ChooseX { value: 4 }).is_err(),
+        "X=4 must not combine cards with mana values 3 and 5 into one legal discard cost"
+    );
 }

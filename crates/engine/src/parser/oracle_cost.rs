@@ -840,7 +840,10 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
             };
         }
-        if rest_lower == "a card" {
+        if all_consuming(tag("a card"))
+            .parse(rest_lower.as_str())
+            .is_ok()
+        {
             return AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
