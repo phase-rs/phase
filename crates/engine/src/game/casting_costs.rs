@@ -4431,7 +4431,13 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
     // helper returns `Ok(None)` so we FALL THROUGH to the next unpaid leg (the sacrifice arm
     // below) rather than surfacing a dead `PayCost { count: 0 }`.
     if let Some((count, eligible)) =
-        super::casting::resolve_non_self_discard_requirement(state, player, source_id, cost)?
+        super::casting::resolve_non_self_discard_requirement_with_ability(
+            state,
+            player,
+            source_id,
+            cost,
+            Some(&pending.ability),
+        )?
     {
         return Ok(Some(WaitingFor::PayCost {
             player,
@@ -4607,7 +4613,7 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
 
     if let Some((count, exile_filter)) = super::casting::find_battlefield_exile_cost(cost) {
         let effective_filter =
-            super::cost_payability::exile_cost_effective_filter(Some(exile_filter));
+            super::cost_payability::cost_filter_before_x_announcement(Some(exile_filter));
         let eligible = super::cost_payability::eligible_exile_cost_objects(
             state,
             player,
@@ -7425,7 +7431,7 @@ fn pay_additional_cost_with_source(
             == Zone::Battlefield =>
         {
             let effective_filter =
-                super::cost_payability::exile_cost_effective_filter(filter.as_ref());
+                super::cost_payability::cost_filter_before_x_announcement(filter.as_ref());
             let eligible = super::cost_payability::eligible_exile_cost_objects(
                 state,
                 player,
@@ -7817,6 +7823,17 @@ fn additional_cost_x_max(
         AbilityCost::PayEnergy { amount } if amount.contains_x() => {
             Some(state.players[player.0 as usize].energy)
         }
+        AbilityCost::Discard {
+            filter: Some(filter),
+            ..
+        } if super::cost_payability::target_filter_has_x_mana_value_constraint(filter) => Some(
+            super::casting::find_eligible_discard_targets(state, player, source_id, Some(filter))
+                .into_iter()
+                .filter_map(|object_id| state.objects.get(&object_id))
+                .map(|object| object.effective_mana_value())
+                .max()
+                .unwrap_or(0),
+        ),
         AbilityCost::Sacrifice(cost)
             if cost.requirement == SacrificeRequirement::Count { count: u32::MAX } =>
         {
@@ -7931,8 +7948,55 @@ fn cost_needs_activation_x_announcement(cost: &AbilityCost) -> bool {
     match cost {
         AbilityCost::RemoveCounter { count, .. } => is_chosen_remove_counter_cost_count(*count),
         AbilityCost::PayEnergy { amount } => amount.contains_x(),
+        AbilityCost::Discard {
+            filter: Some(filter),
+            ..
+        } => super::cost_payability::target_filter_has_x_mana_value_constraint(filter),
         AbilityCost::Composite { costs } => costs.iter().any(cost_needs_activation_x_announcement),
         _ => false,
+    }
+}
+
+/// CR 107.3a + CR 601.2b: Once X is announced, a discard cost whose card
+/// filter references X must have enough matching cards before target selection
+/// can proceed. This preserves the all-or-nothing cast proposal when the
+/// chosen value is within the numeric maximum but absent from the hand.
+pub(crate) fn activation_cost_is_payable_after_x_choice(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+    ability: &ResolvedAbility,
+) -> bool {
+    match cost {
+        AbilityCost::Discard {
+            count,
+            filter,
+            self_scope,
+            ..
+        } if !self_scope.is_source_card() => {
+            let count = super::quantity::resolve_quantity_with_targets(state, count, ability).max(0)
+                as usize;
+            super::casting::find_eligible_discard_targets_for_ability(
+                state,
+                player,
+                source_id,
+                filter.as_ref(),
+                ability,
+            )
+            .len()
+                >= count
+        }
+        AbilityCost::Composite { costs } => costs.iter().all(|cost| {
+            activation_cost_is_payable_after_x_choice(state, player, source_id, cost, ability)
+        }),
+        AbilityCost::OneOf { costs } => costs.iter().any(|cost| {
+            activation_cost_is_payable_after_x_choice(state, player, source_id, cost, ability)
+        }),
+        AbilityCost::PerCounter { base, .. } => {
+            activation_cost_is_payable_after_x_choice(state, player, source_id, base, ability)
+        }
+        _ => true,
     }
 }
 

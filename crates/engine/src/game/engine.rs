@@ -8958,14 +8958,32 @@ fn apply_action(
             let player = *player;
             let convoke_mode = *convoke_mode;
             if let Some(pending) = state.pending_cast.as_ref() {
+                // CR 602.2b + CR 601.2b/h: An activation's announced X must
+                // make its full cost payable before the announcement commits,
+                // whether or not the ability has deferred targets.
+                let mut trial = pending.as_ref().clone();
+                trial.ability.set_chosen_x_recursive(value);
+                trial.cost.concretize_x(value);
+                if trial.activation_ability_index.is_some()
+                    && trial.activation_cost.as_ref().is_some_and(|cost| {
+                        !casting_costs::activation_cost_is_payable_after_x_choice(
+                            state,
+                            player,
+                            trial.object_id,
+                            cost,
+                            &trial.ability,
+                        )
+                    })
+                {
+                    return Err(EngineError::InvalidAction(format!(
+                        "X={value} cannot pay the activation cost"
+                    )));
+                }
                 if pending.deferred_target_selection {
                     // CR 601.2c: A chosen X that determines target count must
                     // have a legal target assignment before it is locked into
                     // the pending cast.
                     // CR 601.2f: The same X value then determines the total cost.
-                    let mut trial = pending.as_ref().clone();
-                    trial.ability.set_chosen_x_recursive(value);
-                    trial.cost.concretize_x(value);
                     let mut target_slots = build_target_slots(state, &trial.ability)?;
                     // CR 601.2c + CR 601.2d: clamp a divided spell's slots to the
                     // (now-known) pool so the legal-assignment probe matches what
@@ -16410,7 +16428,7 @@ mod stage2_injector_tests {
                 //
                 // SET PRESERVATION: unchanged. Upstream adds no line matching the needle to this file and
                 // neither does this branch — total still 37, partition still 5/7/25.
-                "game/engine.rs:11988".to_string(),
+                "game/engine.rs:12006".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \
