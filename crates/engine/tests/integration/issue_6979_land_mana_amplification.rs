@@ -8,7 +8,6 @@ use engine::game::zones::create_object;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, ChosenAttribute, Effect, ManaContribution, ManaProduction,
 };
-use engine::types::card_type::CoreType;
 use engine::types::game_state::{ExileLink, ExileLinkKind, ManaAbilityResume};
 use engine::types::identifiers::CardId;
 use engine::types::mana::{ManaColor, ManaType};
@@ -27,6 +26,7 @@ fn caged_sun_triggers_once_from_a_non_tap_land_mana_ability() {
         .id();
     let land = scenario
         .add_creature(P0, "Red Land", 0, 0)
+        .as_land()
         .with_ability_definition(AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Mana {
@@ -49,15 +49,6 @@ fn caged_sun_triggers_once_from_a_non_tap_land_mana_ability() {
         .expect("Caged Sun")
         .chosen_attributes
         .push(ChosenAttribute::Color(ManaColor::Red));
-
-    runner
-        .state_mut()
-        .objects
-        .get_mut(&land)
-        .expect("land")
-        .card_types
-        .core_types
-        .push(CoreType::Land);
 
     let ability = runner.state().objects[&land].abilities[0].clone();
     let mut events = Vec::new();
