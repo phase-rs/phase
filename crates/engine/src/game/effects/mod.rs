@@ -11213,8 +11213,28 @@ fn resolve_chain_body(
             // moved by the preceding instruction. If no object moved, that
             // instruction has no referent for dependent riders such as "it gains
             // haste" or "sacrifice it"; do not let ParentTarget fall back to the
-            // original ability source. Independent sequential siblings continue
-            // through the ordinary chain walker below.
+            // original ability source. Walk past dependent sequential siblings
+            // and resume at the first independent sibling instead of terminating
+            // the entire printed instruction chain.
+            let mut current = sub.sub_ability.as_deref();
+            while let Some(sibling) = current {
+                if sibling.sub_link == SubAbilityLink::SequentialSibling {
+                    if ability_chain_refs_parent_target(sibling) {
+                        current = sibling.sub_ability.as_deref();
+                        continue;
+                    }
+                    let mut sibling_resolved = sibling.clone();
+                    apply_parent_chain_context(
+                        &mut sibling_resolved,
+                        ability,
+                        effect_context_object.as_ref(),
+                        state,
+                    );
+                    resolve_ability_chain(state, &sibling_resolved, events, depth + 1)?;
+                    break;
+                }
+                current = sibling.sub_ability.as_deref();
+            }
             return Ok(());
         } else if !forwarded_objects.is_empty() {
             let mut sub_with_context = sub.as_ref().clone();
