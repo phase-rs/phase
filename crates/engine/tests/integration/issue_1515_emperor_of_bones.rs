@@ -12,7 +12,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
-use engine::types::game_state::{ExileLink, ExileLinkKind, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, ExileLink, ExileLinkKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::phase::Phase;
@@ -30,6 +30,7 @@ Whenever one or more +1/+1 counters are put on this creature, put a creature car
 creature onto the battlefield under your control with a finality counter on it. It gains haste. \
 Sacrifice it at the beginning of the next end step.";
 const PUT_COUNTER_ORACLE: &str = "Put a +1/+1 counter on target creature.";
+const YAWGMOTHS_VILE_OFFERING_ORACLE: &str = "Put up to one target creature or planeswalker card from a graveyard onto the battlefield under your control. Destroy up to one target creature or planeswalker. Exile Yawgmoth's Vile Offering.";
 
 const ANOINTED_PEACEKEEPER: &str = "Vigilance\n\
 As this creature enters, look at an opponent's hand, then choose any card name.\n\
@@ -315,10 +316,89 @@ fn emperor_of_bones_adapt_without_linked_exile_has_no_riders_to_apply() {
         0,
         "no returned creature means Emperor's haste and delayed Sacrifice riders must not run"
     );
+    assert!(
+        !creature_has_haste_from_transient_effects(state, emperor),
+        "Emperor must not receive the returned creature's haste rider"
+    );
     assert_eq!(
         state.objects[&emperor].zone,
         Zone::Battlefield,
         "Emperor must remain on the battlefield when no linked creature was exiled"
+    );
+}
+
+#[test]
+fn empty_forward_result_preserves_independent_sequential_siblings() {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let graveyard_creature = scenario
+        .add_creature_to_graveyard(P0, "Unreturned Creature", 2, 2)
+        .id();
+    let destroy_target = scenario.add_creature(P1, "Destroy Target", 2, 2).id();
+    let offering = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Yawgmoth's Vile Offering",
+            true,
+            YAWGMOTHS_VILE_OFFERING_ORACLE,
+        )
+        .with_mana_cost(engine::types::mana::ManaCost::zero())
+        .id();
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&offering].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: offering,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Yawgmoth's Vile Offering must be castable for the regression");
+
+    for _ in 0..16 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TargetSelection { selection, .. } => {
+                let target = if selection.current_slot == 0 {
+                    Some(engine::types::ability::TargetRef::Object(
+                        graveyard_creature,
+                    ))
+                } else {
+                    Some(engine::types::ability::TargetRef::Object(destroy_target))
+                };
+                runner
+                    .act(GameAction::ChooseTarget { target })
+                    .expect("target choice must be accepted");
+            }
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                runner.pass_both_players();
+            }
+            _ => break,
+        }
+    }
+
+    engine::game::zones::move_to_zone(
+        runner.state_mut(),
+        graveyard_creature,
+        Zone::Battlefield,
+        &mut Vec::new(),
+    );
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().objects[&graveyard_creature].zone,
+        Zone::Battlefield,
+        "the pre-resolution move must invalidate the selected reanimation target"
+    );
+    assert_ne!(
+        runner.state().objects[&destroy_target].zone,
+        Zone::Battlefield,
+        "the independent Destroy sibling must still resolve"
+    );
+    assert_eq!(
+        runner.state().objects[&offering].zone,
+        Zone::Exile,
+        "the later self-exile sibling must still resolve"
     );
 }
 

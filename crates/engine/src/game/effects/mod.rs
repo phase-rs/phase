@@ -11205,12 +11205,16 @@ fn resolve_chain_body(
                 );
                 resolve_ability_chain(state, &trailing_resolved, events, depth + 1)?;
             }
-        } else if ability.forward_result && forwarded_objects.is_empty() {
+        } else if ability.forward_result
+            && forwarded_objects.is_empty()
+            && effect_refs_parent_target(&sub.effect)
+        {
             // CR 608.2c: A forward-result continuation is anchored to the object
             // moved by the preceding instruction. If no object moved, that
             // instruction has no referent for dependent riders such as "it gains
             // haste" or "sacrifice it"; do not let ParentTarget fall back to the
-            // original ability source.
+            // original ability source. Independent sequential siblings continue
+            // through the ordinary chain walker below.
             return Ok(());
         } else if !forwarded_objects.is_empty() {
             let mut sub_with_context = sub.as_ref().clone();
