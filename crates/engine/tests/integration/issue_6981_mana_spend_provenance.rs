@@ -20,8 +20,13 @@ fn mana_grants(oracle: &str, name: &str) -> Vec<ManaSpellGrant> {
     let ability = parsed
         .abilities
         .iter()
-        .find(|ability| matches!(*ability.effect, Effect::Mana { .. }))
-        .expect("card must parse an activated mana ability");
+        .find(|ability| {
+            matches!(
+                &*ability.effect,
+                Effect::Mana { grants, .. } if !grants.is_empty()
+            )
+        })
+        .expect("card must parse a mana ability with a conditional spell grant");
     let Effect::Mana { grants, .. } = &*ability.effect else {
         unreachable!("mana ability search must produce a Mana effect");
     };

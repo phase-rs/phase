@@ -16972,9 +16972,9 @@ fn mana_grant_matches_spell(
     crate::game::filter::matches_target_filter(state, spell_id, filter, &filter_ctx)
 }
 
-/// CR 106.6a + CR 903.8: Resolve an entry-counter grant while a commander
-/// spell is still being paid for. The cast record is committed after payment,
-/// so its current command-zone cast is included here exactly once.
+/// CR 106.6a + CR 601.2g-i + CR 903.8: Resolve an entry-counter grant while
+/// a commander spell is still being paid for. The cast record is committed
+/// after payment, so include its current command-zone cast exactly once.
 fn resolve_mana_entry_counter_count(
     state: &GameState,
     count: &QuantityExpr,
@@ -16984,12 +16984,18 @@ fn resolve_mana_entry_counter_count(
 ) -> u32 {
     let resolved =
         u32::try_from(resolve_quantity(state, count, caster, source_id)).unwrap_or_default();
+    let cast_origin = spell_cast_origin(state, spell_id).or_else(|| {
+        state
+            .objects
+            .get(&spell_id)
+            .map(|object| object.cast_from_zone.unwrap_or(object.zone))
+    });
     if matches!(
         count,
         QuantityExpr::Ref {
             qty: QuantityRef::CommanderCastFromCommandZoneCount
         }
-    ) && pending_cast_origin_zone_for(state, spell_id) == Some(Zone::Command)
+    ) && cast_origin == Some(Zone::Command)
     {
         resolved.saturating_add(1)
     } else {

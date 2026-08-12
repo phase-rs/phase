@@ -2524,17 +2524,20 @@ fn parse_conditional_enters_with_counters_grant(lower: &str) -> Option<ManaSpell
     let filter = parse_spend_trigger_filter(filter_text.trim())?;
     let (rest, counter_type) = terminated(
         nom_primitives::parse_counter_type_typed,
-        tag(" counters on it equal to "),
+        tag::<_, _, OracleError<'_>>(" counters on it equal to "),
     )
     .parse(rest)
     .ok()?;
-    let (_, count) = all_consuming(value(
-        QuantityExpr::Ref {
-            qty: QuantityRef::CommanderCastFromCommandZoneCount,
-        },
-        tag::<_, _, OracleError<'_>>(
-            "the number of times it's been cast from the command zone this game",
+    let (_, count) = all_consuming(terminated(
+        value(
+            QuantityExpr::Ref {
+                qty: QuantityRef::CommanderCastFromCommandZoneCount,
+            },
+            tag::<_, _, OracleError<'_>>(
+                "the number of times it's been cast from the command zone this game",
+            ),
         ),
+        opt(char('.')),
     ))
     .parse(rest)
     .ok()?;
@@ -2978,6 +2981,7 @@ fn try_parse_amount_equal_to_with_context(
 mod tests {
     use super::*;
     use crate::types::ability::{ControllerRef, TypeFilter};
+    use crate::types::counter::CounterType;
 
     #[test]
     fn shares_type_with_it_in_trigger_context_uses_triggering_source() {
@@ -3965,6 +3969,24 @@ mod tests {
                 duration: Box::new(Duration::UntilEndOfTurn),
             }]
         );
+    }
+
+    #[test]
+    fn parses_commander_mana_entry_counter_grant() {
+        let grants = parse_mana_spell_grant(
+            "if you spend this mana to cast your commander, it enters with a number of additional +1/+1 counters on it equal to the number of times it's been cast from the command zone this game.",
+        )
+        .expect("Opal Palace mana rider must parse");
+        assert!(matches!(
+            grants.as_slice(),
+            [ManaSpellGrant::EntersWithCounters {
+                filter: TargetFilter::Typed(TypedFilter { properties, .. }),
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::CommanderCastFromCommandZoneCount,
+                },
+            }] if properties == &[FilterProp::IsCommander]
+        ));
     }
 
     /// CR 106.6 + CR 702.10a: Hall of the Bandit Lord — any creature spell,
