@@ -651,14 +651,25 @@ pub(crate) fn pay_ability_cost_for_resolution(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<PaymentOutcome, EngineError> {
-    pay_ability_cost_for_resolution_with_cost_move_root(
+    let outcome = pay_ability_cost_for_resolution_with_cost_move_root(
         state,
         payer,
         cost,
         ability,
         ResolutionCostMoveRoot::EffectPayCost,
         events,
-    )
+    )?;
+    // CR 118.1 + CR 119.4b: `effects::pay` records a concrete life component
+    // on its continuation-owned ability before this authority can pause. Stamp
+    // it only after the entire cost finishes, including a mana-root resume.
+    // `None` is deliberately distinct from `Some(0)`: mana-only costs retain
+    // their preceding amount, while a completed zero-life cost reports zero.
+    if outcome == PaymentOutcome::Paid {
+        if let Some(amount) = ability.context.pay_cost_paid_life_amount {
+            state.last_effect_amount = Some(amount as i32);
+        }
+    }
+    Ok(outcome)
 }
 
 /// Pays a replacement's MayCost. Its dedicated root owns the outer

@@ -7255,14 +7255,10 @@ fn amount_channel(effect: &Effect) -> Option<AmountChannel> {
         // CR 118.1: `PayCost`'s `cost` is an arbitrary `AbilityCost`, and only a
         // life payment emits the negative `LifeChanged` events this channel sums;
         // a mana / sacrifice / discard payment owns no amount here at all.
-        // CR 119.4b makes paying 0 life a real, always-legal payment whose result
-        // is zero, so a life payment SHOULD report it — but `pay::resolve` pushes
-        // no events whatsoever, so it emits no `EffectResolved` terminal marker
-        // and the completion half of the zero rule cannot be established for it.
-        // Closing this arm means first giving cost payment a terminal marker,
-        // which is its own change with its own blast radius (the per-player
-        // counts helper, the trigger matchers and the game log all read that
-        // event class).
+        // CR 118.1 + CR 119.4b: `PayCost` has no life-loss event of its own;
+        // the cost authority therefore stamps its completed life-payment result
+        // directly. Keep this event channel indistinguishable so mana-only
+        // costs still preserve the preceding amount.
         Effect::PayCost { .. } => (AmountEvents::LifeLost, ZeroSemantics::Indistinguishable),
         // CR 119.3 + CR 119.9: gaining zero life is not a life-GAIN EVENT, so
         // "whenever you gain life" correctly does not trigger — but CR 119.9
@@ -29116,16 +29112,10 @@ mod tests {
         );
     }
 
-    /// NOT CLOSED (#6956): CR 118.1 + CR 119.4b say paying 0 life is a real,
-    /// always-legal payment whose result is zero, so this SHOULD read 0 — but
-    /// `pay::resolve` emits no `EffectResolved` terminal marker, so the
-    /// completion half of the zero rule cannot be established for
-    /// `Effect::PayCost`. Pinned at the PREDECESSOR behaviour
-    /// (the preceding step's 7 survives) so the arm's status is a visible,
-    /// asserted fact rather than an untested assumption. Flipping this
-    /// expectation to 0 is the acceptance test for the follow-up.
+    /// CR 118.1 + CR 119.4b: Paying 0 life is a real, always-legal payment,
+    /// so its completed result overwrites the preceding amount with zero.
     #[test]
-    fn zero_life_pay_cost_is_not_yet_distinguished_from_an_absent_producer() {
+    fn zero_life_pay_cost_overwrites_the_preceding_amount() {
         let (mut state, source) = state_for_previous_amount_probe();
         let drawn = previous_effect_amount_seen_by_next_clause(
             &mut state,
@@ -29140,9 +29130,8 @@ mod tests {
             vec![],
         );
         assert_eq!(
-            drawn, 7,
-            "PayCost has no terminal marker, so its zero cannot yet be told apart \
-             from an absent producer; see `amount_channel`'s PayCost arm"
+            drawn, 0,
+            "a completed zero-life PayCost must not leave the preceding amount in place"
         );
     }
 
