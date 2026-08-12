@@ -2094,12 +2094,16 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
         // (the spell lives on the STACK). Re-validate against the source leaf
         // (`InZone Stack`-aware) instead, preserving the spell target.
         validate_pinned_targets(state, &validated.targets, &src_leaf, &validated)
-    } else if matches!(validated.effect, Effect::ChangeZoneAll { .. }) {
+    } else if matches!(
+        &validated.effect,
+        Effect::ChangeZoneAll { target, .. } if crate::game::effects::filter_refs_parent_target(target)
+    ) {
         // CR 115.1 + CR 608.2b: `ChangeZoneAll` is a resolution-time mass
-        // instruction, never a player-chosen target. Its filter can carry a
-        // delayed `ParentTarget` snapshot inside a tracked set; treating that
-        // internal filter as a target would fizzle a valid Exile -> Battlefield
-        // return before the mass resolver can inspect the tracked member.
+        // instruction when its filter carries a delayed `ParentTarget` snapshot
+        // inside a tracked set. Treating that internal filter as a target would
+        // fizzle a valid Exile -> Battlefield return before the mass resolver
+        // can inspect the tracked member. Ordinary ChangeZoneAll player filters
+        // remain declared targets and follow the generic validation below.
         validated.targets.clone()
     } else {
         match triggers::extract_target_filter_from_effect(&validated.effect) {
@@ -13347,6 +13351,44 @@ mod tests {
         assert!(slots[0]
             .legal_targets
             .contains(&TargetRef::Player(PlayerId(1))));
+    }
+
+    /// CR 115.1 + CR 608.2b: a ChangeZoneAll player filter is a declared
+    /// player target, unlike an internal delayed ParentTarget filter. It must
+    /// be revalidated and cannot keep an eliminated player alive as a target.
+    #[test]
+    fn validate_targets_in_chain_drops_eliminated_change_zone_all_player_target() {
+        let mut state = GameState::new_two_player(42);
+        state.players[1].is_eliminated = true;
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Exile,
+                target: TargetFilter::Player,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                random_order: false,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(900),
+            PlayerId(0),
+        );
+
+        let validated = validate_targets_in_chain(&state, &ability);
+        assert!(
+            validated.targets.is_empty(),
+            "an eliminated player must not survive ChangeZoneAll target revalidation"
+        );
+        assert!(
+            crate::game::targeting::check_fizzle(
+                &flatten_targets_in_chain(&ability),
+                &flatten_targets_in_chain(&validated),
+            ),
+            "a ChangeZoneAll ability whose sole player target is gone must fizzle"
+        );
     }
 
     /// CR 109.4 + CR 115.1 + CR 506.2: Karazikar regression guard.

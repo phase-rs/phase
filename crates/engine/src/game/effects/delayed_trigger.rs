@@ -647,7 +647,7 @@ fn bind_parent_target_filter(filter: &mut TargetFilter, parent_targets: &[Target
     *filter = concrete_parent_target_filter(filter, parent_targets);
 }
 
-fn concrete_parent_target_filter(
+pub(crate) fn concrete_parent_target_filter(
     filter: &TargetFilter,
     parent_targets: &[TargetRef],
 ) -> TargetFilter {

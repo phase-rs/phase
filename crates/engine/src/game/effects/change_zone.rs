@@ -215,29 +215,10 @@ fn bind_delayed_parent_target_filter(
     filter: &TargetFilter,
     parent_targets: &[TargetRef],
 ) -> TargetFilter {
-    let parent_target_filter = || match parent_targets {
-        [] => TargetFilter::None,
-        [TargetRef::Object(id)] => TargetFilter::SpecificObject { id: *id },
-        [TargetRef::Player(id)] => TargetFilter::SpecificPlayer { id: *id },
-        targets => TargetFilter::Or {
-            filters: targets
-                .iter()
-                .map(|target| match target {
-                    TargetRef::Object(id) => TargetFilter::SpecificObject { id: *id },
-                    TargetRef::Player(id) => TargetFilter::SpecificPlayer { id: *id },
-                })
-                .collect(),
-        },
-    };
     match filter {
-        TargetFilter::ParentTarget => parent_target_filter(),
-        TargetFilter::ParentTargetSlot { index } => parent_targets
-            .get(*index)
-            .map(|target| match target {
-                TargetRef::Object(id) => TargetFilter::SpecificObject { id: *id },
-                TargetRef::Player(id) => TargetFilter::SpecificPlayer { id: *id },
-            })
-            .unwrap_or(TargetFilter::None),
+        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => {
+            super::delayed_trigger::concrete_parent_target_filter(filter, parent_targets)
+        }
         TargetFilter::TrackedSetFiltered {
             id,
             filter,

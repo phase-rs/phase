@@ -5790,7 +5790,7 @@ fn effect_iterates_over_parent_target(effect: &Effect) -> bool {
 
 /// Recurse into compound filters so a wrapped `ParentTargetController` is
 /// detected wherever it appears (`Or { filters: [..., ParentTargetController, ...] }`).
-fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
+pub(crate) fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
     match filter {
         // CR 603.7c + CR 608.2c: a `ParentTargetSlot { index }` delayed effect
         // must snapshot the parent targets at creation, exactly like the broad
