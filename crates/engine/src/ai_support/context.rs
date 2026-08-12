@@ -103,20 +103,12 @@ impl AiDecisionContract {
 }
 
 pub(crate) fn target_selection_requires_reducer_validation(state: &GameState) -> bool {
-    let WaitingFor::TargetSelection {
-        target_slots,
-        selection,
-        ..
-    } = &state.waiting_for
-    else {
-        return false;
-    };
-
-    // CR 601.2c + CR 601.2e-h + CR 602.2b: completing the final target
-    // selection can immediately check legality and pay the proposed spell or
-    // activation cost. Earlier selections cannot complete that transition, but
-    // every final candidate must be reducer-validated before the AI receives it.
-    selection.current_slot.checked_add(1) == Some(target_slots.len())
+    // CR 601.2c + CR 601.2e-h + CR 602.2b: selecting a target can complete
+    // target declaration and immediately check legality and pay the proposed
+    // spell or activation cost. A later optional slot can become auto-skippable
+    // only after this target is chosen, so the reducer is the sole authority for
+    // whether a particular candidate completes the transition.
+    matches!(&state.waiting_for, WaitingFor::TargetSelection { .. })
 }
 
 /// Whether a decision can alter the target requirements of an in-progress cast.

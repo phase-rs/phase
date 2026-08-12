@@ -4,8 +4,8 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zones::create_object;
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
-    AdditionalCostRepeatability, Effect, QuantityExpr, TargetFilter, TargetRef, TypeFilter,
-    TypedFilter,
+    AdditionalCostRepeatability, Effect, MultiTargetSpec, QuantityExpr, TargetFilter, TargetRef,
+    TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -19,7 +19,10 @@ use std::sync::Arc;
 
 const ROUSING_REFRAIN_ORACLE: &str = "Add {R} for each card in target opponent's hand. Until end of turn, you don't lose this mana as steps and phases end. Exile Rousing Refrain with three time counters on it.";
 
-fn rousing_refrain_final_target_state(payable: bool) -> (GameState, Vec<TargetRef>) {
+fn rousing_refrain_target_state(
+    payable: bool,
+    target_max: Option<usize>,
+) -> (GameState, Vec<TargetRef>) {
     let p3 = PlayerId(3);
     let mut scenario = GameScenario::new_n_player(4, 7114);
     scenario.at_phase(Phase::PreCombatMain);
@@ -43,6 +46,18 @@ fn rousing_refrain_final_target_state(payable: bool) -> (GameState, Vec<TargetRe
     }
 
     let mut state = scenario.build().state().clone();
+    if let Some(target_max) = target_max {
+        Arc::make_mut(
+            &mut state
+                .objects
+                .get_mut(&spell)
+                .expect("Rousing Refrain must exist")
+                .abilities,
+        )[0]
+        .multi_target = Some(MultiTargetSpec::up_to(QuantityExpr::Fixed {
+            value: target_max as i32,
+        }));
+    }
     state.active_player = p3;
     state.priority_player = p3;
     state.waiting_for = WaitingFor::Priority { player: p3 };
@@ -65,8 +80,10 @@ fn rousing_refrain_final_target_state(payable: bool) -> (GameState, Vec<TargetRe
     else {
         panic!("Rousing Refrain must require a target opponent");
     };
-    assert_eq!(target_slots.len(), 1, "the target prompt must be final");
-    assert_eq!(selection.current_slot, 0, "the only target must be pending");
+    assert_eq!(
+        selection.current_slot, 0,
+        "the first target must be pending"
+    );
     let targets = selection.current_legal_targets.clone();
     assert_eq!(
         targets,
@@ -77,6 +94,15 @@ fn rousing_refrain_final_target_state(payable: bool) -> (GameState, Vec<TargetRe
         ],
         "reach guard: every opponent is a legal visible target"
     );
+    (state, targets)
+}
+
+fn rousing_refrain_final_target_state(payable: bool) -> (GameState, Vec<TargetRef>) {
+    let (state, targets) = rousing_refrain_target_state(payable, None);
+    let WaitingFor::TargetSelection { target_slots, .. } = &state.waiting_for else {
+        panic!("Rousing Refrain must remain in target selection");
+    };
+    assert_eq!(target_slots.len(), 1, "the target prompt must be final");
     (state, targets)
 }
 
@@ -121,6 +147,70 @@ fn decision_contract_filters_final_targets_that_cannot_complete_payment() {
             "a final target remains issued when the same spell can pay its cost"
         );
     }
+}
+
+#[test]
+fn decision_contract_validates_a_target_before_a_dynamically_empty_optional_tail() {
+    let p3 = PlayerId(3);
+    let (mut state, _) = rousing_refrain_target_state(false, Some(4));
+
+    for player in [PlayerId(0), PlayerId(1)] {
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(player)),
+            },
+        )
+        .expect("the first two distinct opponent targets must be accepted");
+    }
+
+    let WaitingFor::TargetSelection {
+        target_slots,
+        selection,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!("Rousing Refrain must remain in target selection");
+    };
+    assert_eq!(
+        selection.current_slot, 2,
+        "the third target must be pending"
+    );
+    assert_eq!(
+        target_slots[3].legal_targets,
+        vec![
+            TargetRef::Player(PlayerId(0)),
+            TargetRef::Player(PlayerId(1)),
+            TargetRef::Player(PlayerId(2)),
+        ],
+        "the trailing slot starts with targets and only becomes empty after prior choices"
+    );
+    assert_eq!(
+        selection.current_legal_targets,
+        vec![TargetRef::Player(PlayerId(2))],
+        "the final remaining target must be selected before the exhausted tail auto-skips"
+    );
+
+    let action = GameAction::ChooseTarget {
+        target: Some(TargetRef::Player(PlayerId(2))),
+    };
+    let error = apply_as_current(&mut state.clone(), action.clone())
+        .expect_err("the dynamically empty tail is auto-skipped before payment");
+    assert!(
+        error.to_string().contains("Cannot pay mana cost"),
+        "the auto-skipped tail must still reach payment, got {error}"
+    );
+
+    let contract = AiDecisionContract::issue(&state, p3);
+    assert_eq!(
+        contract
+            .candidates
+            .iter()
+            .map(|candidate| &candidate.action)
+            .collect::<Vec<_>>(),
+        vec![&GameAction::CancelCast],
+        "a target that completes through a dynamically auto-skipped tail must not be issued"
+    );
 }
 
 #[test]

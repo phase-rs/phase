@@ -6171,7 +6171,7 @@ mod tests {
     }
 
     #[test]
-    fn earlier_target_selection_legal_actions_use_current_targets_without_simulation() {
+    fn target_selection_legal_actions_use_current_targets_with_reducer_validation() {
         let mut state = setup_priority();
         let targets: Vec<TargetRef> = (0..25)
             .map(|i| {
@@ -6207,7 +6207,7 @@ mod tests {
                     effect_detail: TargetEffectDetail::None,
                 },
                 crate::types::game_state::TargetSelectionSlot {
-                    legal_targets: Vec::new(),
+                    legal_targets: vec![targets[0].clone()],
                     optional: true,
                     chooser: None,
                     effect_kind: EffectKind::NoOp,
@@ -6222,12 +6222,8 @@ mod tests {
             },
         };
 
-        crate::game::perf_counters::reset();
         let (actions, spell_costs, grouped) = legal_actions_full(&state);
-        let counters = crate::game::perf_counters::snapshot();
 
-        assert_eq!(counters.state_clone_for_legality, 0);
-        assert_eq!(counters.priority_cast_probe_builds, 0);
         assert_eq!(
             actions
                 .iter()
@@ -6619,7 +6615,7 @@ mod tests {
                     effect_detail: TargetEffectDetail::None,
                 },
                 crate::types::game_state::TargetSelectionSlot {
-                    legal_targets: Vec::new(),
+                    legal_targets: vec![target.clone()],
                     optional: true,
                     chooser: None,
                     effect_kind: EffectKind::NoOp,
@@ -6634,13 +6630,8 @@ mod tests {
             },
         };
 
-        crate::game::perf_counters::reset();
         let (actions, _spell_costs, _grouped) = legal_actions_full(&state);
 
-        assert_eq!(
-            crate::game::perf_counters::snapshot().state_clone_for_legality,
-            0
-        );
         assert_eq!(actions, vec![GameAction::ChooseTarget { target: None }]);
     }
 

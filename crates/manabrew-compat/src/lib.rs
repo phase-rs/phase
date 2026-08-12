@@ -5289,7 +5289,7 @@ mod tests {
                     effect_detail,
                 },
                 TargetSelectionSlot {
-                    legal_targets: Vec::new(),
+                    legal_targets: legal.clone(),
                     optional: true,
                     chooser: None,
                     effect_kind: EffectKind::NoOp,
