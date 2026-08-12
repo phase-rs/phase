@@ -48,14 +48,12 @@ fn commander_combat_damage_enables_eagle_vision_freerunning() {
     );
 
     runner.advance_to_phase(Phase::PostCombatMain);
-    let _ = runner.state_mut().add_mana_to_pool(
-        P0,
-        ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
-    );
-    let _ = runner.state_mut().add_mana_to_pool(
-        P0,
-        ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
-    );
+    for _ in 0..2 {
+        let _ = runner.state_mut().add_mana_to_pool(
+            P0,
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+        );
+    }
     let committed = runner
         .cast(eagle_vision)
         .casting_variant(CastingVariant::Freerunning)
