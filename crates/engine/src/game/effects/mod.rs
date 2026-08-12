@@ -9473,18 +9473,22 @@ fn resolve_chain_body(
                 .collect();
             if let Some(first) = opponent_order.first().copied() {
                 let remaining = opponent_order.split_off(1);
-                state.push_optional_effect_frame(OptionalEffectFrame {
-                    ability: Box::new(ability_with_event_context_targets(state, ability)),
-                    trigger_event: state.current_trigger_event.clone(),
-                    trigger_events: state.current_trigger_events.clone(),
-                    trigger_match_count: state.current_trigger_match_count,
-                });
-                state.waiting_for = WaitingFor::OpponentMayChoice {
-                    player: first,
-                    source_id: ability.source_id,
-                    description,
-                    remaining,
-                };
+                state
+                    .install_direct_choice_frame(
+                        ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+                            ability: Box::new(ability_with_event_context_targets(state, ability)),
+                            trigger_event: state.current_trigger_event.clone(),
+                            trigger_events: state.current_trigger_events.clone(),
+                            trigger_match_count: state.current_trigger_match_count,
+                        }),
+                        WaitingFor::OpponentMayChoice {
+                            player: first,
+                            source_id: ability.source_id,
+                            description,
+                            remaining,
+                        },
+                    )
+                    .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
             }
             return Ok(());
         }
@@ -9549,30 +9553,34 @@ fn resolve_chain_body(
                 return Ok(());
             }
         }
-        state.push_optional_effect_frame(OptionalEffectFrame {
-            ability: Box::new(ability_with_event_context_targets(state, ability)),
-            // CR 608.2: capture the triggering event in lockstep with the stashed
-            // ability while `current_trigger_event` is still live (we are inside
-            // `execute_effect`). Restored when the optional decision resumes so an
-            // optional ("may") trigger's effect resolves `TriggeringPlayer` and
-            // other event-context refs exactly as a non-optional trigger would.
-            trigger_event: state.current_trigger_event.clone(),
-            // CR 603.2c + CR 608.2: capture the PLURAL event batch in lockstep so
-            // a "you may" reproduction (Captain Marvel, Apex Avenger) folds every
-            // `CounterAdded` occurrence when the decision resumes.
-            trigger_events: state.current_trigger_events.clone(),
-            // CR 603.2c + CR 608.2: mirror the batched-trigger subject count so a
-            // "you may" sub-ability of a batched trigger (Ur-Dragon's optional
-            // permanent-from-hand sub-effect) resumes with the same
-            // `EventContextAmount` the pre-pause resolution observed.
-            trigger_match_count: state.current_trigger_match_count,
-        });
-        state.waiting_for = WaitingFor::OptionalEffectChoice {
-            player: prompt_player,
-            source_id: ability.source_id,
-            description,
-            may_trigger_key,
-        };
+        state
+            .install_direct_choice_frame(
+                ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+                    ability: Box::new(ability_with_event_context_targets(state, ability)),
+                    // CR 608.2: capture the triggering event in lockstep with the stashed
+                    // ability while `current_trigger_event` is still live (we are inside
+                    // `execute_effect`). Restored when the optional decision resumes so an
+                    // optional ("may") trigger's effect resolves `TriggeringPlayer` and
+                    // other event-context refs exactly as a non-optional trigger would.
+                    trigger_event: state.current_trigger_event.clone(),
+                    // CR 603.2c + CR 608.2: capture the PLURAL event batch in lockstep so a
+                    // "you may" reproduction (Captain Marvel, Apex Avenger) folds every
+                    // `CounterAdded` occurrence when the decision resumes.
+                    trigger_events: state.current_trigger_events.clone(),
+                    // CR 603.2c + CR 608.2: mirror the batched-trigger subject count so a
+                    // "you may" sub-ability of a batched trigger (Ur-Dragon's optional
+                    // permanent-from-hand sub-effect) resumes with the same
+                    // `EventContextAmount` the pre-pause resolution observed.
+                    trigger_match_count: state.current_trigger_match_count,
+                }),
+                WaitingFor::OptionalEffectChoice {
+                    player: prompt_player,
+                    source_id: ability.source_id,
+                    description,
+                    may_trigger_key,
+                },
+            )
+            .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
         return Ok(());
     }
 

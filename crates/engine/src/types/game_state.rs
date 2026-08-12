@@ -45,7 +45,7 @@ use super::replacements::ReplacementEvent;
 #[cfg(debug_assertions)]
 use super::resolution::debug_assert_runtime_resolution_invariants;
 use super::resolution::{
-    AbilityContinuationFrame, ChangeZoneFrame, MultiDrawFrame, OptionalEffectFrame,
+    AbilityContinuationFrame, ChangeZoneFrame, FrameGate, MultiDrawFrame, OptionalEffectFrame,
     PendingCoinFlip, PendingMutateMerge, PendingProliferateActions, RepeatedOptionalPaymentFrame,
     ResolutionFrame, ResolutionStack, ResolutionStackError, ResolutionStateWire,
 };
@@ -18765,6 +18765,38 @@ impl GameState {
             .record_frame_transition(command.clone())
             .expect("resolved frame transition must have a live journal cause");
         Ok(command)
+    }
+
+    /// Atomically installs a direct-choice owner and the prompt it is allowed to
+    /// consume. A direct-choice frame may never be visible with an unrelated
+    /// `WaitingFor`, nor may it be buried below another direct-choice owner.
+    pub fn install_direct_choice_frame(
+        &mut self,
+        frame: ResolutionFrame,
+        waiting_for: WaitingFor,
+    ) -> Result<(), ResolutionStackError> {
+        if !matches!(frame.gate(), FrameGate::DirectChoice(_)) {
+            return Err(ResolutionStackError::InvalidPayload {
+                frame: frame.kind(),
+                message: "direct-choice installation requires a direct-choice frame".to_string(),
+            });
+        }
+
+        let transition = ResolvedFrameTransition::Push {
+            frame: frame.clone(),
+        };
+        let mut candidate = (*self.resolution_stack).clone();
+        candidate.push_inner(frame);
+        candidate.validate(&waiting_for)?;
+
+        let previous_waiting_for = std::mem::replace(&mut self.waiting_for, waiting_for);
+        if let Err(error) = self.resolve_and_apply_frame_transition(transition) {
+            self.waiting_for = previous_waiting_for;
+            return Err(match error {
+                ResolvedFrameTransitionReplayInvariantError::Stack(error) => error,
+            });
+        }
+        Ok(())
     }
 
     /// Applies and journals one already-resolved player resource edit.

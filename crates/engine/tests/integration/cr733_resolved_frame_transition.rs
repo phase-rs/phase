@@ -50,6 +50,15 @@ fn coin_flip_frame() -> ResolutionFrame {
     })
 }
 
+fn optional_effect_frame(state: &GameState) -> ResolutionFrame {
+    ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+        ability: pending_continuation(state).chain,
+        trigger_event: None,
+        trigger_events: Vec::new(),
+        trigger_match_count: None,
+    })
+}
+
 fn frames(state: &GameState) -> Vec<ResolutionFrame> {
     state.resolution_stack.iter().cloned().collect()
 }
@@ -177,6 +186,42 @@ fn optional_effect_frame_cannot_survive_into_search_choice_parent_insertion() {
         })
     );
     assert_eq!(state.resolution_stack, before);
+}
+
+/// Regression for #6867: direct-choice ownership and its live prompt are one
+/// atomic state transition. A second optional owner is rejected at installation
+/// and leaves the first player-facing prompt untouched.
+#[test]
+fn direct_choice_install_rejects_a_second_optional_owner_atomically() {
+    let mut state = GameState::new_two_player(98);
+    let first_prompt = WaitingFor::OptionalEffectChoice {
+        player: PlayerId(0),
+        source_id: ObjectId(100),
+        description: None,
+        may_trigger_key: None,
+    };
+    let first_frame = optional_effect_frame(&state);
+    state
+        .install_direct_choice_frame(first_frame, first_prompt.clone())
+        .expect("first optional prompt installs");
+    let before_stack = state.resolution_stack.clone();
+    let before_waiting_for = state.waiting_for.clone();
+
+    let second_frame = optional_effect_frame(&state);
+    assert_eq!(
+        state.install_direct_choice_frame(
+            second_frame,
+            WaitingFor::OptionalEffectChoice {
+                player: PlayerId(1),
+                source_id: ObjectId(101),
+                description: None,
+                may_trigger_key: None,
+            },
+        ),
+        Err(ResolutionStackError::MultipleDirectChoiceOwners)
+    );
+    assert_eq!(state.resolution_stack, before_stack);
+    assert_eq!(state.waiting_for, before_waiting_for);
 }
 
 /// Missing parents and wrong active kinds are typed failures; neither failure
