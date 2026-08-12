@@ -38,6 +38,14 @@ fn true_name_protection_uses_the_protected_objects_chosen_player() {
     let other_player_owned_source = scenario
         .add_creature_to_graveyard(P0, "Other Player's Corpse", 2, 2)
         .id();
+    let chosen_player_owned_command_source = scenario
+        .add_creature_to_graveyard(P1, "Chosen Player's Commander", 2, 2)
+        .id();
+    scenario.with_commander(chosen_player_owned_command_source);
+    let other_player_owned_command_source = scenario
+        .add_creature_to_graveyard(P0, "Other Player's Commander", 2, 2)
+        .id();
+    scenario.with_commander(other_player_owned_command_source);
     let mut runner = scenario.build();
 
     runner
@@ -52,6 +60,32 @@ fn true_name_protection_uses_the_protected_objects_chosen_player() {
         .get_mut(&other_player_owned_source)
         .unwrap()
         .controller = P1;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&chosen_player_owned_command_source)
+        .unwrap()
+        .controller = P0;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&other_player_owned_command_source)
+        .unwrap()
+        .controller = P1;
+
+    let emblem_source = engine::game::effects::create_emblem::grant_emblem(
+        runner.state_mut(),
+        P1,
+        vec![],
+        vec![],
+        vec![],
+    );
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&emblem_source)
+        .unwrap()
+        .controller = P0;
 
     runner.auto_advance_to_main_phase();
 
@@ -123,5 +157,37 @@ fn true_name_protection_uses_the_protected_objects_chosen_player() {
         targets_from_other_player_owned_source
             .contains(&engine::types::ability::TargetRef::Object(true_name)),
         "a stale controller must not make another player's uncontrolled source match, got {targets_from_other_player_owned_source:?}"
+    );
+
+    let targets_from_chosen_player_owned_command_source = find_legal_targets(
+        runner.state(),
+        &TargetFilter::Any,
+        P1,
+        chosen_player_owned_command_source,
+    );
+    assert!(
+        !targets_from_chosen_player_owned_command_source
+            .contains(&engine::types::ability::TargetRef::Object(true_name)),
+        "True-Name must not be targetable by an ordinary command-zone card the chosen player owns, got {targets_from_chosen_player_owned_command_source:?}"
+    );
+
+    let targets_from_other_player_owned_command_source = find_legal_targets(
+        runner.state(),
+        &TargetFilter::Any,
+        P0,
+        other_player_owned_command_source,
+    );
+    assert!(
+        targets_from_other_player_owned_command_source
+            .contains(&engine::types::ability::TargetRef::Object(true_name)),
+        "a stale command-zone controller must not make another player's card match, got {targets_from_other_player_owned_command_source:?}"
+    );
+
+    let targets_from_emblem_source =
+        find_legal_targets(runner.state(), &TargetFilter::Any, P0, emblem_source);
+    assert!(
+        targets_from_emblem_source
+            .contains(&engine::types::ability::TargetRef::Object(true_name)),
+        "an emblem's explicit controller must remain authoritative in the command zone, got {targets_from_emblem_source:?}"
     );
 }
