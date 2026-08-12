@@ -19175,8 +19175,9 @@ impl GameState {
             .get(&source_id)
             .map(ObjectIncarnationRef::from_object)
             .expect("mana ability activation source must exist");
+        let parent = self.live_active_rules_execution_node();
         self.resolved_rules_journal
-            .begin_activated_mana(source, self.live_active_rules_execution_node())
+            .begin_activated_mana(source, parent)
             .expect("resolved-rules journal settlement ordinal overflow")
     }
 
@@ -19189,14 +19190,11 @@ impl GameState {
         trigger: Option<TriggerDefinitionRef>,
         caused_by: Option<RulesExecutionNodeRef>,
     ) -> RulesExecutionNodeRef {
+        let parent = caused_by
+            .filter(|node| self.rules_execution_node_is_live(*node))
+            .or_else(|| self.live_active_rules_execution_node());
         self.resolved_rules_journal
-            .begin_triggered_mana(
-                source,
-                trigger,
-                caused_by
-                    .filter(|node| self.rules_execution_node_is_live(*node))
-                    .or_else(|| self.live_active_rules_execution_node()),
-            )
+            .begin_triggered_mana(source, trigger, parent)
             .expect("resolved-rules journal settlement ordinal overflow")
     }
 
