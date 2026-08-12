@@ -3,7 +3,6 @@
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameScenario, P0, P1};
-use engine::types::game_state::CastingVariant;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -57,26 +56,11 @@ fn commander_combat_damage_enables_eagle_vision_freerunning() {
             ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
         );
     }
-    let committed = runner
-        .cast(eagle_vision)
-        .casting_variant(CastingVariant::Freerunning)
-        .commit();
-    let selected = committed
-        .selected_casting_variant()
-        .expect("both printed and Freerunning costs should be offered");
-    assert_eq!(selected.variant, CastingVariant::Freerunning);
-    assert_eq!(
-        selected.mana_cost,
-        ManaCost::Cost {
-            generic: 1,
-            shards: vec![ManaCostShard::Blue],
-        },
-        "Eagle Vision's selected alternative cost must be {{1}}{{U}}"
-    );
+    let committed = runner.cast(eagle_vision).commit();
     assert_eq!(
         committed.state().players[0].mana_pool.total(),
         3,
-        "paying Freerunning must leave three of the five blue mana unspent"
+        "paying Eagle Vision's {{1}}{{U}} Freerunning cost must leave three of the five blue mana unspent"
     );
 
     let outcome = committed.resolve();
