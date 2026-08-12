@@ -687,6 +687,7 @@ mod issue_680_shalai_upkeep_move;
 mod issue_6858_draw_that_many_discard;
 mod issue_688_mind_into_matter;
 mod issue_689_resonating_lute_hand_size;
+mod issue_6908_kozilek_discard_mana_value;
 mod issue_691_sheoldred_saga_lore;
 mod issue_6943_faerie_slumber_party;
 mod issue_6979_land_mana_amplification;

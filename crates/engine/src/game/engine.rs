@@ -8966,6 +8966,21 @@ fn apply_action(
                     let mut trial = pending.as_ref().clone();
                     trial.ability.set_chosen_x_recursive(value);
                     trial.cost.concretize_x(value);
+                    if trial.activation_ability_index.is_some()
+                        && trial.activation_cost.as_ref().is_some_and(|cost| {
+                            !casting_costs::activation_cost_is_payable_after_x_choice(
+                                state,
+                                player,
+                                trial.object_id,
+                                cost,
+                                &trial.ability,
+                            )
+                        })
+                    {
+                        return Err(EngineError::InvalidAction(format!(
+                            "X={value} cannot pay the activation cost"
+                        )));
+                    }
                     let mut target_slots = build_target_slots(state, &trial.ability)?;
                     // CR 601.2c + CR 601.2d: clamp a divided spell's slots to the
                     // (now-known) pool so the legal-assignment probe matches what
