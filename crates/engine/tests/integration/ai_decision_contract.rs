@@ -4,8 +4,8 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zones::create_object;
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
-    AdditionalCostRepeatability, Effect, EffectKind, QuantityExpr, TargetEffectDetail,
-    TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    AdditionalCostRepeatability, Effect, EffectKind, QuantityExpr, ResolvedAbility,
+    TargetEffectDetail, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -155,6 +155,16 @@ fn decision_contract_validates_a_target_before_a_dynamically_empty_optional_tail
         "the first target must be pending"
     );
     pending_cast.target_constraints = vec![TargetSelectionConstraint::DifferentTargetPlayers];
+    let mut trailing_ability = ResolvedAbility::new(
+        Effect::TargetOnly {
+            target: TargetFilter::SpecificPlayer { id: PlayerId(0) },
+        },
+        Vec::new(),
+        pending_cast.ability.source_id,
+        p3,
+    );
+    trailing_ability.optional_targeting = true;
+    pending_cast.ability.sub_ability = Some(Box::new(trailing_ability));
     target_slots.push(TargetSelectionSlot {
         legal_targets: vec![TargetRef::Player(PlayerId(0))],
         optional: true,
