@@ -11570,6 +11570,7 @@ fn quantity_ref_refs_cost_paid_object(qty: &QuantityRef) -> bool {
         QuantityRef::ZoneCardCount { filter, .. }
         | QuantityRef::AttackedThisTurn { filter, .. }
         | QuantityRef::SpellsCastThisTurn { filter, .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
         | QuantityRef::SpellsCastThisGame { filter, .. } => filter
             .as_ref()
             .is_some_and(TargetFilter::references_cost_paid_object),

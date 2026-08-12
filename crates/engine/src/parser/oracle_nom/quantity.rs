@@ -574,6 +574,10 @@ fn parse_number_of_cards_drawn_this_turn(input: &str) -> OracleResult<'_, Quanti
             },
             tag("your opponents have drawn this turn"),
         ),
+        // CR 121.1: A bare past-participle clause inherits the ability
+        // controller: "cards drawn this turn" (Fists of Flame) omits an
+        // explicit possessive but still counts that controller's draws.
+        value(PlayerScope::Controller, tag("drawn this turn")),
         // CR 121.1: the caster's own draws this turn.
         value(PlayerScope::Controller, tag("you've drawn this turn")),
         value(PlayerScope::Controller, tag("you have drawn this turn")),
@@ -3879,6 +3883,64 @@ fn parse_for_each_card_drawn_this_way(input: &str) -> OracleResult<'_, QuantityR
     Ok((rest, QuantityRef::EventContextAmount))
 }
 
+/// CR 508.1a + CR 613.4c: "for each time it/they have attacked this turn"
+/// counts the recipient creature's own attack declarations. `Not(Another)` is
+/// the existing recipient-relative identity primitive: with the affected
+/// creature bound as the filter recipient, it admits precisely that creature's
+/// declaration record. `All` keeps this quantity composable for statics that
+/// affect creatures beyond their controller's battlefield.
+fn parse_for_each_recipient_attack_count(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = alt((tag("time "), tag("times "))).parse(input)?;
+    let (rest, _) = alt((
+        tag("it has attacked this turn"),
+        tag("they have attacked this turn"),
+    ))
+    .parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::AttackedThisTurn {
+            scope: CountScope::All,
+            filter: Some(TargetFilter::Typed(TypedFilter::creature().properties(
+                vec![FilterProp::Not {
+                    prop: Box::new(FilterProp::Another),
+                }],
+            ))),
+        },
+    ))
+}
+
+/// CR 603.2 + CR 603.3: "for each other <type> spell you've cast before it
+/// this turn" retains the trigger event's spell as a history boundary. The
+/// printed "other" is already entailed by counting strictly earlier cast
+/// records, so it does not use `FilterProp::Another`'s unrelated live-object
+/// meaning.
+fn parse_for_each_spells_before_triggering_spell(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("other ").parse(input)?;
+    let (rest, first_type) = parse_type_filter_word(rest)?;
+    let (rest, second_type) = opt(preceded(
+        alt((tag(" and "), tag(" or "))),
+        parse_type_filter_word,
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag(" spell").parse(rest)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    let (rest, _) = tag(" you've cast before it this turn").parse(rest)?;
+    let first = TargetFilter::Typed(TypedFilter::new(first_type));
+    let filter = match second_type {
+        Some(second_type) => TargetFilter::Or {
+            filters: vec![first, TargetFilter::Typed(TypedFilter::new(second_type))],
+        },
+        None => first,
+    };
+    Ok((
+        rest,
+        QuantityRef::SpellsCastBeforeTriggeringSpell {
+            scope: CountScope::Controller,
+            filter: Some(filter),
+        },
+    ))
+}
+
 /// CR 120.1 + CR 603.2c + CR 608.2c: "opponent(s) dealt damage [this way]"
 /// inside a trigger effect counts the distinct damaged opponents carried by the
 /// current trigger event batch. This is not `EventContextAmount`: the scalar
@@ -3914,6 +3976,8 @@ fn parse_for_each_clause_ref_with_they_controller(
     alt((
         parse_event_context_opponent_dealt_damage,
         parse_for_each_card_drawn_this_way,
+        parse_for_each_recipient_attack_count,
+        parse_for_each_spells_before_triggering_spell,
         alt((
             parse_for_each_one_life_changed,
             alt((
@@ -6424,6 +6488,7 @@ mod tests {
 
         // Controller forms (bare + the-number-of) still resolve to Controller.
         for text in [
+            "cards drawn this turn",
             "cards you've drawn this turn",
             "cards you have drawn this turn",
             "the number of cards you've drawn this turn",
@@ -6439,6 +6504,57 @@ mod tests {
                 "{text:?} must remain Controller-scoped"
             );
         }
+    }
+
+    /// CR 508.1a + CR 613.4c: the distributive attack-history phrase must
+    /// retain its recipient identity instead of counting every attack made by
+    /// the ability controller (Moraug's static clause).
+    #[test]
+    fn parse_for_each_recipient_attack_count_is_recipient_relative() {
+        for text in [
+            "time it has attacked this turn",
+            "times they have attacked this turn",
+        ] {
+            let (rest, quantity) = parse_for_each_clause_ref_complete(text)
+                .unwrap_or_else(|_| panic!("{text:?} should parse"));
+            assert_eq!(rest, "", "{text:?} should fully consume");
+            assert_eq!(
+                quantity,
+                QuantityRef::AttackedThisTurn {
+                    scope: CountScope::All,
+                    filter: Some(TargetFilter::Typed(TypedFilter::creature().properties(
+                        vec![FilterProp::Not {
+                            prop: Box::new(FilterProp::Another),
+                        }]
+                    ),)),
+                },
+                "{text:?} must retain recipient-relative identity"
+            );
+        }
+    }
+
+    /// CR 603.2 + CR 603.3: the repeat count is bounded by the triggering
+    /// spell, not by whatever was cast later while its trigger waited on the
+    /// stack (Thousand-Year Storm).
+    #[test]
+    fn parse_for_each_spells_before_triggering_spell_keeps_history_boundary() {
+        let (rest, quantity) = parse_for_each_clause_ref_complete(
+            "other instant and sorcery spells you've cast before it this turn",
+        )
+        .expect("trigger-bound spell history should parse");
+        assert_eq!(rest, "");
+        assert_eq!(
+            quantity,
+            QuantityRef::SpellsCastBeforeTriggeringSpell {
+                scope: CountScope::Controller,
+                filter: Some(TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                    ],
+                }),
+            }
+        );
     }
 
     /// CR 109.5 + CR 121.1: "that player" in a per-player effect is a
