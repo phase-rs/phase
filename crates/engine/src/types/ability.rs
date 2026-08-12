@@ -20511,6 +20511,11 @@ pub struct SpellContext {
     /// discard's direct child and clears it on every other hand-off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_discard_result: Option<DiscardedCardResult>,
+    /// CR 701.20e + CR 608.2c: Exact parent-produced cards forwarded to one
+    /// immediate "for each" child. The child uses this snapshot as its
+    /// iteration universe instead of an unqualified battlefield census.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_target_iteration_members: Option<Vec<ObjectId>>,
     /// CR 601.2c + CR 115.1: For a target slot announced by "an opponent's
     /// choice", the opponent the spell's controller chose to make that choice.
     /// In a multiplayer game the controller picks which opponent announces;

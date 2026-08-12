@@ -2561,7 +2561,31 @@ pub(crate) fn object_count_matching_ids(
     filter_ctx: &FilterContext<'_>,
     source_id: ObjectId,
 ) -> Vec<ObjectId> {
-    let mut ids = matching_object_ids_in_filter_universe(state, filter, filter_ctx);
+    object_count_matching_candidate_ids(
+        state,
+        matching_object_ids_in_filter_universe(state, filter, filter_ctx),
+        filter,
+        filter_ctx,
+        source_id,
+    )
+}
+
+/// Filters an ordered object snapshot with the same semantics as
+/// [`object_count_matching_ids`]. Callers choose the candidate universe; this
+/// helper owns membership checks, stable de-duplication, and "other than the
+/// triggering object" exclusion.
+pub(crate) fn object_count_matching_candidate_ids(
+    state: &GameState,
+    candidate_ids: Vec<ObjectId>,
+    filter: &TargetFilter,
+    filter_ctx: &FilterContext<'_>,
+    source_id: ObjectId,
+) -> Vec<ObjectId> {
+    let mut seen = HashSet::new();
+    let mut ids: Vec<ObjectId> = candidate_ids
+        .into_iter()
+        .filter(|id| seen.insert(*id) && matches_target_filter(state, *id, filter, filter_ctx))
+        .collect();
     // Drop the triggering object for an "other than" filter (Valakut's "five
     // other Mountains" — the newly-entered Mountain matches the per-object filter
     // as a pass-through and is removed here). The exclusion is the Oracle-text
@@ -9362,6 +9386,53 @@ mod tests {
         let ctx = FilterContext::from_source(&state, ObjectId(0));
         let ids = object_count_matching_ids(&state, &filter, &ctx, ObjectId(0));
         assert_eq!(ids, vec![red_a, red_b]);
+    }
+
+    #[test]
+    fn object_count_matching_candidate_ids_filters_and_stably_deduplicates_snapshot() {
+        let mut state = GameState::new_two_player(46);
+        let red_a = create_object(
+            &mut state,
+            CardId(408),
+            PlayerId(0),
+            "Red A".to_string(),
+            Zone::Graveyard,
+        );
+        let green = create_object(
+            &mut state,
+            CardId(409),
+            PlayerId(0),
+            "Green".to_string(),
+            Zone::Graveyard,
+        );
+        let red_b = create_object(
+            &mut state,
+            CardId(410),
+            PlayerId(0),
+            "Red B".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&red_a).unwrap().color = vec![ManaColor::Red];
+        state.objects.get_mut(&green).unwrap().color = vec![ManaColor::Green];
+        state.objects.get_mut(&red_b).unwrap().color = vec![ManaColor::Red];
+
+        let filter =
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::HasColor {
+                color: ManaColor::Red,
+            }]));
+        let ctx = FilterContext::from_source(&state, ObjectId(0));
+        assert_eq!(
+            object_count_matching_candidate_ids(
+                &state,
+                vec![red_b, red_a, red_b, green],
+                &filter,
+                &ctx,
+                ObjectId(0),
+            ),
+            vec![red_b, red_a],
+            "candidate membership preserves its supplied order, rejects nonmatches, and \
+             retains only the first occurrence"
+        );
     }
 
     #[test]
