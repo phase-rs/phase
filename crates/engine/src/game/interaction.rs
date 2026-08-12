@@ -1893,15 +1893,15 @@ fn mana_payment_direct_actions(
             .try_fold(0usize, |count, choices| count.checked_add(choices))
             .ok_or(InteractionReasonCode::PayloadTooLarge)?,
     };
-    let delve_upper_bound = has_delve
-        .then(|| {
-            state
-                .objects
-                .values()
-                .filter(|object| object.is_delve_eligible(player))
-                .count()
-        })
-        .unwrap_or(0);
+    let delve_upper_bound = if has_delve {
+        state
+            .objects
+            .values()
+            .filter(|object| object.is_delve_eligible(player))
+            .count()
+    } else {
+        0
+    };
     let total_upper_bound = actions
         .len()
         .checked_add(tapped_for_mana.len())
