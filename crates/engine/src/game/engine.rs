@@ -16110,7 +16110,7 @@ mod stage2_injector_tests {
                 // `OptionalEffect` prompt. Re-pinned against the merged source.
                 "game/effects/mod.rs:6300".to_string(),
                 "game/effects/mod.rs:6377".to_string(),
-                "game/effects/mod.rs:9576".to_string(),
+                "game/effects/mod.rs:9572".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
