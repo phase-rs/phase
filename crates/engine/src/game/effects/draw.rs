@@ -696,8 +696,8 @@ fn resume_pending_draw_delivery(
                     };
                     pending.current_settled = true;
                     state
-                        .active_draw_sequence_if(frame_id)
-                        .expect("the parked draw delivery must retain its active frame")
+                        .draw_sequence_frame_mut(frame_id)
+                        .expect("the parked draw delivery's frame must remain live")
                         .pending_delivery = Some(pending);
                     return None;
                 }
