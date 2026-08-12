@@ -1112,7 +1112,7 @@ fn bind_tracked_set_to_ability_chain(ability: &mut ResolvedAbility, real_id: Tra
 ///
 /// `_ => false` IS CORRECT HERE. `TargetFilter` is a broad, open enum and the
 /// shipped template ends the same way. Do NOT try to exhaust it.
-fn filter_refs_parent_object_anaphor(filter: &TargetFilter) -> bool {
+pub(super) fn filter_refs_parent_object_anaphor(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => true,
         // CR 608.2h + CR 108.3: these derive a PLAYER, not an object.
