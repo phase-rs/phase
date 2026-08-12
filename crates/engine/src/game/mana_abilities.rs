@@ -932,18 +932,24 @@ fn complete_mana_ability_activation(
 /// `Some(ManaChoicePrompt::AnyCombination)` when each produced mana unit has
 /// an independent color choice. Returns `None` when production is fully
 /// determined (Fixed, Colorless, single-option AnyOneColor).
+/// `color_ability` retains the original target context for dynamic color
+/// discovery; `count_ability` may be scoped to the count-source target for
+/// quantity resolution.
 pub(crate) fn mana_choice_prompt(
     effect: &Effect,
     state: &GameState,
     source_id: ObjectId,
-    ability: Option<&ResolvedAbility>,
+    color_ability: Option<&ResolvedAbility>,
+    count_ability: Option<&ResolvedAbility>,
 ) -> Option<ManaChoicePrompt> {
     let Effect::Mana { produced, .. } = effect else {
         return None;
     };
     match produced {
         ManaProduction::AnyOneColor { color_options, .. } if color_options.len() > 1 => {
-            let produces_mana = ability
+            // CR 106.5: An ability that would produce mana of an undefined type
+            // produces no mana, so it needs no color choice.
+            let produces_mana = count_ability
                 .map(|ability| {
                     !super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
                         .is_empty()
@@ -954,7 +960,7 @@ pub(crate) fn mana_choice_prompt(
             })
         }
         ManaProduction::AnyCombination { color_options, .. } if color_options.len() > 1 => {
-            let ability = ability?;
+            let ability = count_ability?;
             let count =
                 super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
                     .len();
@@ -979,12 +985,17 @@ pub(crate) fn mana_choice_prompt(
             // CR 106.1: Player chooses one of the colors among matching permanents they
             // control.
             let options = super::effects::mana::distinct_colors_among_permanents(
-                state, ability, source_id, filter,
+                state,
+                color_ability,
+                source_id,
+                filter,
             )
             .into_iter()
             .map(|color| mana_color_to_type(&color))
             .collect::<Vec<_>>();
-            let produces_mana = ability
+            // CR 106.5: An ability that would produce mana of an undefined type
+            // produces no mana, so it needs no color choice.
+            let produces_mana = count_ability
                 .map(|ability| {
                     !super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
                         .is_empty()
@@ -1050,7 +1061,9 @@ pub(crate) fn mana_choice_prompt(
                 owner,
                 source_id,
             );
-            let produces_mana = ability
+            // CR 106.5: An ability that would produce mana of an undefined type
+            // produces no mana, so it needs no color choice.
+            let produces_mana = count_ability
                 .map(|ability| {
                     !super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
                         .is_empty()
@@ -1069,7 +1082,9 @@ pub(crate) fn mana_choice_prompt(
         ManaProduction::AnyInCommandersColorIdentity { .. } => {
             let owner = state.objects.get(&source_id).map(|obj| obj.controller)?;
             let identity = super::commander::commander_color_identity(state, owner);
-            let produces_mana = ability
+            // CR 106.5: An ability that would produce mana of an undefined type
+            // produces no mana, so it needs no color choice.
+            let produces_mana = count_ability
                 .map(|ability| {
                     !super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
                         .is_empty()
@@ -1091,7 +1106,9 @@ pub(crate) fn mana_choice_prompt(
         ManaProduction::OpponentLandColors { .. } => {
             let owner = state.objects.get(&source_id).map(|obj| obj.controller)?;
             let options = super::mana_sources::opponent_land_color_options(state, owner);
-            let produces_mana = ability
+            // CR 106.5: An ability that would produce mana of an undefined type
+            // produces no mana, so it needs no color choice.
+            let produces_mana = count_ability
                 .map(|ability| {
                     !super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
                         .is_empty()
@@ -1109,14 +1126,15 @@ pub(crate) fn mana_choice_prompt(
         // AnyCombination prompt only when the object has more than one color; 0 or
         // 1 color needs no prompt (CR 106.5 empty → no mana; single auto-picks).
         ManaProduction::AnyCombinationOfObjectColors { scope, .. } => {
-            let options = super::effects::mana::object_colors_for_scope(state, ability, *scope)
-                .iter()
-                .map(mana_color_to_type)
-                .collect::<Vec<_>>();
+            let options =
+                super::effects::mana::object_colors_for_scope(state, color_ability, *scope)
+                    .iter()
+                    .map(mana_color_to_type)
+                    .collect::<Vec<_>>();
             if options.len() <= 1 {
                 return None;
             }
-            let ability = ability?;
+            let ability = count_ability?;
             let count =
                 super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
                     .len();
@@ -2703,6 +2721,7 @@ fn finish_mana_ability_cost_payment(
             &resolved_for_prompt.effect,
             state,
             pending.source_id,
+            Some(&resolved_for_prompt),
             Some(&resolved_for_prompt),
         ) {
             if matches!(choice, ManaChoicePrompt::SingleColor { .. })
@@ -10750,7 +10769,7 @@ mod tests {
         Arc::make_mut(&mut state.objects.get_mut(&nykthos).unwrap().abilities)
             .push(ability.clone());
 
-        let prompt = mana_choice_prompt(&ability.effect, &state, nykthos, None)
+        let prompt = mana_choice_prompt(&ability.effect, &state, nykthos, None, None)
             .expect("chosen-color mana should prompt for a color");
         assert!(matches!(prompt, ManaChoicePrompt::SingleColor { .. }));
 
