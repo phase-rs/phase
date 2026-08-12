@@ -73,7 +73,7 @@ fn rousing_refrain_target_state(
     .expect("Rousing Refrain must reach its final target prompt");
 
     let WaitingFor::TargetSelection {
-        target_slots,
+        target_slots: _,
         selection,
         ..
     } = &state.waiting_for
