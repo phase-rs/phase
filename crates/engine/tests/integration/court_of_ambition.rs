@@ -238,6 +238,31 @@ fn court_of_ambition_monarch_branch_demands_two_cards_and_drains_six() {
     );
 }
 
+/// CR 109.5 + CR 725.1: "you're the monarch" on this ability means its
+/// controller, not merely that any player is monarch.
+#[test]
+fn court_of_ambition_opponent_monarch_uses_non_monarch_branch() {
+    let mut runner = build_runner(2, Some(P1), 3);
+    fire_upkeep(&mut runner);
+    expect_discard_prompt(&runner, P1, 1);
+
+    runner
+        .act(GameAction::PayUnlessCost { pay: false })
+        .expect("declining must be accepted");
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        life(&runner, P1),
+        17,
+        "only the controller's monarch status applies"
+    );
+    assert_eq!(
+        hand_size(&runner, P1),
+        3,
+        "a declined cost discards nothing"
+    );
+}
+
 /// CR 614.15 + CR 701.9: paying the monarch branch costs exactly two cards.
 #[test]
 fn court_of_ambition_monarch_branch_paid_with_two_discards_keeps_life() {

@@ -3325,7 +3325,7 @@ fn parse_unless_life_cost(rest: &str) -> Option<AbilityCost> {
 /// Grammar — two independent axes over one noun:
 ///
 /// ```text
-/// discard_phrase := [<count> | "a" | "an"] [<type phrase>] ("card" | "cards") ["at random"]
+/// discard_phrase := [<count> | "a" | "an"] [<type phrase>] ("card" | "cards")
 /// ```
 ///
 /// Both unless-payer forms route here: the controller form ("unless **you**
@@ -3343,12 +3343,10 @@ fn parse_unless_life_cost(rest: &str) -> Option<AbilityCost> {
 /// at `unless_branch_boundary` so a chained " or …" branch survives, while the
 /// `you` form owns the rest of the clause.
 ///
-/// CR 701.9b ("some effects … require a random discard") is accepted as an "at
-/// random" tail but deliberately does NOT set
-/// `CardSelectionMode::Random`: the resolution-time unless-payment path
-/// (`engine_payment_choices.rs`) discards `selection` and always prompts, so
-/// emitting `Random` would claim a behavior the engine does not implement.
-/// Preserves the pre-existing mapping of both mirrors exactly.
+/// CR 701.9b ("some effects … require a random discard") stays unsupported:
+/// the resolution-time unless-payment path (`engine_payment_choices.rs`)
+/// ignores `selection` and always prompts, so accepting an "at random" tail
+/// would falsely lower a player-chosen discard as a random discard.
 fn parse_unless_discard_cost_phrase(branch_text: &str) -> Option<AbilityCost> {
     let trimmed = branch_text.trim().trim_end_matches('.').trim();
     if trimmed.is_empty() {
@@ -3372,10 +3370,9 @@ fn parse_unless_discard_cost_phrase(branch_text: &str) -> Option<AbilityCost> {
         return None;
     }
 
+    let count = i32::try_from(count).ok()?;
     let discard = |filter| AbilityCost::Discard {
-        count: QuantityExpr::Fixed {
-            value: count as i32,
-        },
+        count: QuantityExpr::Fixed { value: count },
         filter,
         selection: crate::types::ability::CardSelectionMode::Chosen,
         self_scope: crate::types::ability::DiscardSelfScope::FromHand,
@@ -3387,11 +3384,7 @@ fn parse_unless_discard_cost_phrase(branch_text: &str) -> Option<AbilityCost> {
         alt((tag::<_, _, OracleError<'_>>("cards"), tag("card"))).parse(after_count)
     {
         let rest = rest.trim().trim_end_matches('.').trim();
-        if rest.is_empty()
-            || tag::<_, _, OracleError<'_>>("at random")
-                .parse(rest)
-                .is_ok()
-        {
+        if rest.is_empty() {
             return Some(discard(None));
         }
     }
@@ -3408,7 +3401,7 @@ fn parse_unless_discard_cost_phrase(branch_text: &str) -> Option<AbilityCost> {
 /// text immediately after `" unless "`.
 ///
 /// Patterns recognized:
-/// - `you discard [N] card(s)[ at random][.]` → `AbilityCost::Discard { count, .. }`
+/// - `you discard [N] card(s)[.]` → `AbilityCost::Discard { count, .. }`
 /// - `you sacrifice [N] [filter][.]`          → `AbilityCost::Sacrifice { count, filter }`
 /// - `you pay N life[.]`                      → `AbilityCost::PayLife { amount }`
 /// - `you mill [N] card(s)[.]`  → `AbilityCost::Mill { count }`
@@ -3417,11 +3410,10 @@ fn parse_unless_discard_cost_phrase(branch_text: &str) -> Option<AbilityCost> {
 /// Returns `None` for any other shape (mana costs and unknown forms fall
 /// through to the existing mana-cost path in `extract_unless_pay_modifier`).
 ///
-/// FIDELITY NOTE: `UnlessCost::DiscardCard` does not currently model "at random"
-/// — the engine resolves via `WaitingFor::WardDiscardChoice` (player-chosen).
-/// This is a known sub-fidelity gap (Balduvian Horde class). Post the
-/// 2026-05-09 fold, the `random: bool` field on `AbilityCost::Discard` is
-/// the natural home for this; wiring it into the runtime is future work.
+/// FIDELITY NOTE: `UnlessCost::DiscardCard` does not currently implement "at
+/// random" — the engine resolves via `WaitingFor::WardDiscardChoice`
+/// (player-chosen). Those phrases stay unimplemented (Balduvian Horde class)
+/// until the unless-payment path preserves `CardSelectionMode::Random`.
 pub(crate) fn parse_unless_alt_cost(after_unless: &str) -> Option<AbilityCost> {
     // CR 118.12 + CR 202.1: "you pay its mana cost" / "you pay ~'s mana cost" —
     // the unless cost is the ability source's OWN printed mana cost, which is

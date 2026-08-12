@@ -13365,12 +13365,11 @@ fn unless_discard_cost_phrase_spans_count_and_type_axes_for_both_payers() {
             .expect("the shared filter authority types 'nonland cards'");
 
     // (phrase, expected cost) — the count axis (article / numeral) crossed with
-    // the type axis (bare noun / type phrase), plus the CR 701.9b random tail.
-    let cases: [(&str, AbilityCost); 5] = [
+    // the type axis (bare noun / type phrase).
+    let cases: [(&str, AbilityCost); 4] = [
         ("a card", discard(1, None)),
         ("two cards", discard(2, None)),
         ("three cards", discard(3, None)),
-        ("a card at random", discard(1, None)),
         ("two nonland cards", discard(2, Some(nonland))),
     ];
 
@@ -13397,6 +13396,11 @@ fn unless_discard_cost_phrase_spans_count_and_type_axes_for_both_payers() {
 /// coverage reports it honestly instead.
 #[test]
 fn unless_discard_cost_phrase_rejects_zero_count() {
+    assert_eq!(
+        parse_number("x cards"),
+        Some((0, "cards")),
+        "the zero-count guard is reached only when parse_number folds X to zero"
+    );
     assert!(
         parse_unless_they_discard_cost("x cards").is_none(),
         "an X-count unless-discard must not lower to a free cost"
@@ -13404,6 +13408,21 @@ fn unless_discard_cost_phrase_rejects_zero_count() {
     assert!(
         parse_unless_alt_cost("you discard x cards").is_none(),
         "the controller form must fail closed on the same input"
+    );
+}
+
+/// CR 701.9b: random discard is distinct from a player-selected discard. Until
+/// the unless-payment resolver preserves `CardSelectionMode::Random`, this
+/// phrase must remain unsupported rather than being lowered dishonestly.
+#[test]
+fn unless_discard_cost_phrase_rejects_random_discard() {
+    assert!(
+        parse_unless_they_discard_cost("a card at random").is_none(),
+        "the anaphoric-payer form must not lower random discard as chosen"
+    );
+    assert!(
+        parse_unless_alt_cost("you discard a card at random").is_none(),
+        "the controller form must not lower random discard as chosen"
     );
 }
 
