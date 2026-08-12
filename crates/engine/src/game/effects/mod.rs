@@ -10083,9 +10083,13 @@ fn resolve_chain_body(
             // exiled cards…" — Disorder in the Court) and runs exactly once AFTER
             // the loop — it falls through to the generic sub tail below.
             let repeated_full_chain = ability.repeat_for.is_some()
-                && effective.sub_ability.as_deref().is_some_and(|sub| {
+                && (effective.sub_ability.as_deref().is_some_and(|sub| {
                     member_driven || kind_driven || sub.sub_link == SubAbilityLink::ContinuationStep
-                });
+                })
+                    // CR 118.12a: a per-member/per-kind unless payment must run
+                    // through resolve_ability_chain so its individual bound
+                    // target reaches the payment gate before the effect resolves.
+                    || ((member_driven || kind_driven) && effective.unless_pay.is_some()));
             while iteration < iterations {
                 // Snapshot per-iteration ability with parent-target rebinding when
                 // applicable. CR 109.5: the rebind is SINGLE-slot — every reachable
@@ -10120,7 +10124,7 @@ fn resolve_chain_body(
                         // so each iteration fires its own `OptionalEffectChoice`.
                         // Clear `repeat_for` on the clone so the inner chain does
                         // not re-enter this outer loop.
-                        if kind_driven || (member_driven && iter_ability.optional) {
+                        if kind_driven || member_driven {
                             iter_ability.repeat_for = None;
                         }
                         if let (true, Effect::CopySpell { retarget, .. }) =
@@ -12942,6 +12946,91 @@ mod tests {
             vec![TargetRef::Object(ObjectId(4)), TargetRef::Player(PlayerId(2))],
             "a carried collection replaces all of its object members but retains an independent selected player target"
         );
+    }
+
+    /// CR 608.2c + CR 118.12a: Every member-driven iteration must re-enter the
+    /// unless-payment gate with exactly one bound parent target. In particular,
+    /// a non-optional loop with no sub-ability must re-enter
+    /// `resolve_ability_chain`, because that chain owns the unless-payment gate.
+    #[test]
+    fn member_driven_unless_loop_prompts_for_its_first_bound_member() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Loop source".to_string(),
+            Zone::Battlefield,
+        );
+        let first = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "First creature".to_string(),
+            Zone::Battlefield,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Second creature".to_string(),
+            Zone::Battlefield,
+        );
+        for object_id in [first, second] {
+            state
+                .objects
+                .get_mut(&object_id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let creature_filter = TargetFilter::Typed(TypedFilter::creature());
+        let mut ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::ParentTarget,
+                cant_regenerate: false,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: creature_filter,
+            },
+        });
+        ability.unless_pay = Some(UnlessPayModifier {
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+            },
+            payer: TargetFilter::Controller,
+        });
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("member-driven unless loop should arm its first payment prompt");
+
+        let WaitingFor::UnlessPayment { pending_effect, .. } = &state.waiting_for else {
+            panic!(
+                "expected an unless-payment prompt, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert!(
+            pending_effect.repeat_for.is_none(),
+            "the bound iteration must not re-enter the outer repeat loop"
+        );
+        assert_eq!(
+            pending_effect.targets.len(),
+            1,
+            "the prompt must be bound to one loop member"
+        );
+        assert!(matches!(
+            pending_effect.targets.as_slice(),
+            [TargetRef::Object(id)] if *id == first || *id == second
+        ));
     }
 
     #[test]
