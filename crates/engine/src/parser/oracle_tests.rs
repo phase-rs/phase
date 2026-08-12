@@ -6910,7 +6910,11 @@ fn mechanized_production_win_requires_eight_artifacts_sharing_a_name() {
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::ObjectCountBySharedQuality {
                     filter: TargetFilter::Typed(
-                        TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You)
+                        TypedFilter::new(TypeFilter::Artifact)
+                            .controller(ControllerRef::You)
+                            .properties(vec![FilterProp::InZone {
+                                zone: Zone::Battlefield,
+                            }])
                     ),
                     quality: SharedQuality::Name,
                     aggregate: AggregateFunction::Max,
