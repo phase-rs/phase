@@ -2094,6 +2094,13 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
         // (the spell lives on the STACK). Re-validate against the source leaf
         // (`InZone Stack`-aware) instead, preserving the spell target.
         validate_pinned_targets(state, &validated.targets, &src_leaf, &validated)
+    } else if matches!(validated.effect, Effect::ChangeZoneAll { .. }) {
+        // CR 115.1 + CR 608.2b: `ChangeZoneAll` is a resolution-time mass
+        // instruction, never a player-chosen target. Its filter can carry a
+        // delayed `ParentTarget` snapshot inside a tracked set; treating that
+        // internal filter as a target would fizzle a valid Exile -> Battlefield
+        // return before the mass resolver can inspect the tracked member.
+        validated.targets.clone()
     } else {
         match triggers::extract_target_filter_from_effect(&validated.effect) {
             Some(filter) if matches!(validated.effect, Effect::PairWith { .. }) => {
@@ -8658,6 +8665,55 @@ mod tests {
             ),
             "a delayed-return ParentTarget ability must not fizzle when its \
              snapshotted object is off the battlefield"
+        );
+    }
+
+    /// CR 115.1 + CR 603.7c: delayed plural returns become `ChangeZoneAll`
+    /// with a tracked-set filter, but their snapshotted referent is still not a
+    /// chosen target. It must survive validation while it is in exile.
+    #[test]
+    fn validate_targets_in_chain_preserves_delayed_tracked_set_snapshot_off_battlefield() {
+        let format = FormatConfig::duel_commander();
+        let mut state = GameState::new(format, 2, 2);
+        let victim = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Exile,
+        );
+        let set_id = TrackedSetId(1);
+        state.tracked_object_sets.insert(set_id, vec![victim]);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Exile),
+                destination: Zone::Battlefield,
+                target: TargetFilter::TrackedSetFiltered {
+                    id: set_id,
+                    filter: Box::new(TargetFilter::ParentTarget),
+                    caused_by: None,
+                },
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                random_order: false,
+            },
+            vec![TargetRef::Object(victim)],
+            ObjectId(99),
+            PlayerId(0),
+        );
+
+        let validated = validate_targets_in_chain(&state, &ability);
+        assert_eq!(validated.targets, ability.targets);
+        assert!(
+            !crate::game::targeting::check_fizzle(
+                &flatten_targets_in_chain(&ability),
+                &flatten_targets_in_chain(&validated),
+            ),
+            "a delayed tracked-set return must not fizzle before its mass resolver runs"
         );
     }
 
