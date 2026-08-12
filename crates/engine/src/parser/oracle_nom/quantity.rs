@@ -828,7 +828,9 @@ fn parse_chosen_number_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     value(QuantityRef::ChosenNumber, tag("the chosen number")).parse(input)
 }
 
-/// The amount of energy paid in the immediately preceding resolution-time payment.
+/// CR 608.2c: The amount of energy paid in the immediately preceding
+/// resolution-time payment, because resolving instructions follow their written
+/// order.
 /// `PayAmountChoice` records this value in `last_effect_count` before it resumes
 /// the chained effect, which is the runtime carrier for `EventContextAmount`.
 fn parse_paid_energy_this_way_ref(input: &str) -> OracleResult<'_, QuantityRef> {

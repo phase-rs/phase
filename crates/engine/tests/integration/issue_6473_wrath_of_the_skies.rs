@@ -1,5 +1,7 @@
 //! Regression for issue #6473: Wrath of the Skies must use the energy actually
 //! paid during resolution, rather than the X chosen while casting.
+//! CR 608.2c: Resolving instructions follow their written order, so "paid this
+//! way" reads the immediately preceding resolution-time payment.
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::actions::GameAction;
@@ -28,11 +30,11 @@ fn wrath_uses_energy_paid_not_announced_x_for_destroy_threshold() {
             generic: 0,
         })
         .id();
-    let thought_knot_seer = scenario
-        .add_creature(P1, "Thought-Knot Seer", 4, 4)
+    let two_mana_creature = scenario
+        .add_creature(P1, "Two-Mana Creature", 2, 2)
         .with_mana_cost(ManaCost::Cost {
             shards: vec![],
-            generic: 4,
+            generic: 2,
         })
         .id();
     let wrath = scenario
@@ -74,8 +76,8 @@ fn wrath_uses_energy_paid_not_announced_x_for_destroy_threshold() {
         "the zero-mana artifact is within the paid-energy threshold"
     );
     assert_eq!(
-        runner.state().objects[&thought_knot_seer].zone,
+        runner.state().objects[&two_mana_creature].zone,
         Zone::Battlefield,
-        "the four-mana creature must survive after paying zero energy"
+        "the two-mana creature must survive after paying zero energy, not the announced X"
     );
 }
