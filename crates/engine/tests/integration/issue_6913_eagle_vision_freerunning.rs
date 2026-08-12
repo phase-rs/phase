@@ -67,7 +67,7 @@ fn commander_combat_damage_enables_eagle_vision_freerunning() {
                 .map(|option| &option.variant),
             Some(CastingVariant::Freerunning)
         ),
-        "the available {1}{U} pool must select Eagle Vision's Freerunning cost"
+        "the available {{1}}{{U}} pool must select Eagle Vision's Freerunning cost"
     );
 
     let outcome = committed.resolve();
