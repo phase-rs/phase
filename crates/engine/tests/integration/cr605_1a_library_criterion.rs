@@ -23,7 +23,7 @@
 //! fixture that never reached the seam cannot pass vacuously.
 
 use engine::game::mana_sources::activatable_mana_actions_for_player;
-use engine::game::scenario::{GameScenario, P0};
+use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::identifiers::ObjectId;
@@ -40,6 +40,7 @@ const LLANOWAR_ELVES: &str = "{T}: Add {G}.";
 const RAGGADRAGGA: &str = "Each creature you control with a mana ability gets +2/+2.";
 const BURNING_TREE_SHAMAN: &str = "Whenever a player activates an ability that isn't a mana \
                                    ability, this creature deals 1 damage to that player.";
+const HARSH_MENTOR: &str = "Whenever an opponent activates an ability of an artifact, creature, or land on the battlefield, if it isn't a mana ability, this creature deals 2 damage to that player.";
 
 fn generic_unit() -> ManaUnit {
     ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![])
@@ -266,5 +267,41 @@ fn burning_tree_shaman_now_sees_a_chromatic_sphere_activation() {
         0,
         "Llanowar Elves is still a mana ability — CR 605.3b keeps it off the \
          stack, so no AbilityActivated event and no trigger"
+    );
+}
+
+/// Harsh Mentor's source filter admits each listed permanent type, while the
+/// nonmana condition excludes a mana ability before it can trigger.
+#[test]
+fn harsh_mentor_punishes_opponent_nonmana_permanent_abilities_only() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P1, &["Forest", "Library Bottom"]);
+    scenario
+        .add_creature(P0, "Harsh Mentor", 2, 2)
+        .from_oracle_text(HARSH_MENTOR);
+    let artifact = scenario
+        .add_creature(P1, "Opponent Artifact", 0, 0)
+        .as_artifact()
+        .from_oracle_text("{T}: Draw a card.")
+        .id();
+    let mana_creature = scenario
+        .add_creature(P1, "Llanowar Elves", 1, 1)
+        .from_oracle_text(LLANOWAR_ELVES)
+        .id();
+
+    let mut runner = scenario.build();
+    let nonmana_outcome = runner.activate(artifact, 0).resolve();
+    assert_eq!(
+        nonmana_outcome.life_delta(P1),
+        -2,
+        "the opponent's artifact nonmana ability must trigger Harsh Mentor"
+    );
+
+    let mana_outcome = runner.activate(mana_creature, 0).resolve();
+    assert_eq!(
+        mana_outcome.life_delta(P1),
+        0,
+        "a mana ability must not trigger Harsh Mentor"
     );
 }

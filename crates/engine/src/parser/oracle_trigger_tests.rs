@@ -17240,6 +17240,43 @@ fn ability_activation_trigger_accepts_activated_modifier() {
     );
 }
 
+#[test]
+fn harsh_mentor_ability_activation_trigger_accepts_oxford_type_list() {
+    let def = parse_trigger_line(
+        "Whenever an opponent activates an ability of an artifact, creature, or land on the battlefield, if it isn't a mana ability, this creature deals 2 damage to that player.",
+        "Harsh Mentor",
+    );
+    assert_eq!(def.mode, TriggerMode::AbilityActivated);
+    assert_eq!(
+        def.valid_target,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        ))
+    );
+    assert_eq!(
+        def.valid_card,
+        Some(TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::AnyOf(vec![
+                TypeFilter::Artifact,
+                TypeFilter::Creature,
+                TypeFilter::Land,
+            ])],
+            properties: vec![FilterProp::InZone {
+                zone: Zone::Battlefield,
+            }],
+            ..TypedFilter::default()
+        }))
+    );
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::ActivatedAbilityIsNonMana)
+    );
+    assert_eq!(
+        count_unimplemented_in_chain(def.execute.as_deref().unwrap()),
+        0
+    );
+}
+
 // --- CR 606.2: "Whenever you activate a loyalty ability of [pw]" ---
 
 /// CR 606.2 + CR 205.3j: Chandra's Regulator — "a Chandra planeswalker"
