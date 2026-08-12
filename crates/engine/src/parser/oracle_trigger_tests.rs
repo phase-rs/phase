@@ -27916,12 +27916,8 @@ fn count_unimplemented_in_chain(ability: &AbilityDefinition) -> usize {
 /// intervening-if is hoisted to the trigger condition (CR 603.4), the swept
 /// plural anaphor binds to the linked-exile pool as a mass move
 /// (CR 406.6 + CR 607.2a), and the conjoined ", then ~ deals that
-/// much damage to each opponent" clause is caught by the coverage-honesty
-/// gate (issue #7046): it parses to a NAMED, fragment-carrying
-/// `Effect::Unimplemented` marker rather than a raw `DamageEachPlayer` node,
-/// because the runtime cannot yet supply that consumer with the completed
-/// sweep's TOTAL (CR 608.2c) — only each recipient's OWN swept-card count
-/// (Trace D, `install_previous_effect_counts_by_player`).
+/// much damage to each opponent" clause binds to the prior sweep's scalar
+/// result (CR 608.2c), rather than a per-recipient event context.
 #[test]
 fn valakut_exploration_end_step_trigger_hoists_gate_and_keeps_damage_shape() {
     let parsed = parse_oracle_text(
@@ -27964,38 +27960,30 @@ fn valakut_exploration_end_step_trigger_hoists_gate_and_keeps_damage_shape() {
         }
     }
 
-    // Coverage-honesty gate (issue #7046): the trailing damage clause is
-    // still chained (`, then` -> ContinuationStep, same link Whirlpool
-    // Drake's ", then draw that many cards" chain carries), but its effect
-    // is the strict-failure marker, not `DamageEachPlayer`.
+    // CR 608.2c: the trailing damage clause remains chained (`, then` ->
+    // ContinuationStep) and reads the completed sweep's scalar result.
     let damage = execute
         .sub_ability
         .as_ref()
         .expect("damage clause must chain after the sweep");
     assert_eq!(damage.sub_link, SubAbilityLink::ContinuationStep);
     match &*damage.effect {
-        Effect::Unimplemented { name, description } => {
-            assert_eq!(
-                name,
-                crate::parser::oracle_effect::assembly::MASS_MOVE_TOTAL_DAMAGE_GAP,
-                "the damage rider must carry the mass-move-total-damage marker name"
-            );
-            assert!(
-                description
-                    .as_deref()
-                    .is_some_and(|d| d.contains("deals that much damage to each opponent")),
-                "the marker's description must carry the verbatim clause, got {description:?}"
-            );
-        }
-        other => {
-            panic!("expected the strict-failure Unimplemented marker (issue #7046), got {other:?}")
-        }
+        Effect::DamageEachPlayer {
+            amount:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::PreviousEffectAmount {
+                            channel: DamageChannel::Total,
+                        },
+                },
+            player_filter: PlayerFilter::Opponent,
+        } => {}
+        other => panic!(
+            "expected DamageEachPlayer(PreviousEffectAmount::Total, Opponent), got {other:?}"
+        ),
     }
 
-    // Reach-guard (Trace C, Mysterious Sphere, generalized to an exact
-    // count): EXACTLY one Unimplemented across the whole parse, and it is
-    // trigger 2's execute.sub_ability — the marker assertion above cannot
-    // pass vacuously via a failed/over-gated parse elsewhere in the chain.
+    // Reach guard: the full parse has no residual unsupported node.
     let total_unimplemented: usize = parsed
         .triggers
         .iter()
@@ -28008,12 +27996,8 @@ fn valakut_exploration_end_step_trigger_hoists_gate_and_keeps_damage_shape() {
             .map(count_unimplemented_in_chain)
             .sum::<usize>();
     assert_eq!(
-        total_unimplemented, 1,
-        "expected exactly one Unimplemented node across the whole parse"
-    );
-    assert!(
-        matches!(&*damage.effect, Effect::Unimplemented { .. }),
-        "the sole Unimplemented node must be trigger 2's execute.sub_ability"
+        total_unimplemented, 0,
+        "Valakut's completed-sweep scalar damage must leave no unsupported node"
     );
     // Trigger 1 (landfall) must carry zero — the sweep/condition negatives
     // above cannot pass vacuously via an unrelated gap on the OTHER trigger.
@@ -28271,19 +28255,15 @@ fn river_songs_diary_singular_it_keeps_parent_target_chain() {
 }
 
 // ---------------------------------------------------------------------------
-// F1 gate hostile fixtures (P8-P11) — each shares SOME axis with Valakut
-// Exploration's ChangeZoneAll -> DamageEachPlayer{EventContextAmount}
-// pairing (same producer, same consumer, or same amount-reading shape) but
-// must NOT gate, so the F1 scoping (immediate chain + exact consumer +
-// EventContextAmount-reading amount) is proven precise, not merely present.
-// Each carries a positive shape reach-guard plus a zero-Unimplemented guard.
+// Prior-effect amount-binding hostile fixtures (P8-P11) — each shares some
+// axis with Valakut's mass-move damage pairing but must retain its original
+// event-context or fixed quantity semantics.
 // ---------------------------------------------------------------------------
 
 /// SHAPE (P8) — Shadowheart, Cleric of War: same CONSUMER shape
-/// (`DamageEachPlayer{EventContextAmount, Opponent}`) as Valakut's gated
+/// (`DamageEachPlayer{EventContextAmount, Opponent}`) as Valakut's bound
 /// rider, but EVENT-fed ("whenever you lose life during your turn") — there
-/// is no `ChangeZoneAll` predecessor at all, so the gate's `defs.last()`
-/// match arm cannot fire. Must stay ungated.
+/// is no `ChangeZoneAll` predecessor, so it must stay event-context-bound.
 #[test]
 fn shadowheart_cleric_of_war_event_fed_damage_stays_ungated() {
     let parsed = parse_oracle_text(
@@ -28314,7 +28294,7 @@ fn shadowheart_cleric_of_war_event_fed_damage_stays_ungated() {
             assert_eq!(
                 count_unimplemented_in_chain(execute),
                 0,
-                "event-fed DamageEachPlayer{{ECA}} must never gate: {execute:?}"
+                "event-fed DamageEachPlayer{{ECA}} must stay supported: {execute:?}"
             );
         }
     }
@@ -28322,10 +28302,8 @@ fn shadowheart_cleric_of_war_event_fed_damage_stays_ungated() {
 
 /// SHAPE (P9) — Whirlpool Drake: same PRODUCER shape (a mass move immediately
 /// followed by an `EventContextAmount`-reading consumer chain), but the
-/// consumer is `Draw`, not `DamageEachPlayer`, AND an intervening `Shuffle`
-/// sits between the `ChangeZoneAll` and the `Draw{ECA}` — so `defs.last()` at
-/// the `Draw` clause's build time is the `Shuffle` def, never the
-/// `ChangeZoneAll`. Must stay ungated.
+/// consumer is `Draw`, not `DamageEachPlayer`, and an intervening `Shuffle`
+/// separates it from the mass move. It must stay event-context-bound.
 #[test]
 fn whirlpool_drake_mass_move_fed_draw_chain_stays_ungated() {
     let parsed = parse_oracle_text(
@@ -28378,11 +28356,8 @@ fn whirlpool_drake_mass_move_fed_draw_chain_stays_ungated() {
 
 /// SHAPE (P10) — Caldera Breaker: same PRODUCER shape, and the consumer
 /// IMMEDIATELY follows the mass move (no intervening step) and DOES read
-/// `EventContextAmount` — but the consumer is `DealDamage` (an
-/// object-targeted scalar resolve), not `DamageEachPlayer`, so the gate's
-/// consumer-shape match arm cannot fire. Correct today by construction: the
-/// library pool is single-owner (CR 400.3), so max-over-owners equals the
-/// total. Must stay ungated (verified zero-Unimplemented at head).
+/// `EventContextAmount` — but the consumer is `DealDamage`, not
+/// `DamageEachPlayer`, so it remains event-context-bound.
 #[test]
 fn caldera_breaker_mass_move_fed_deal_damage_stays_ungated() {
     let parsed = parse_oracle_text(
@@ -28428,9 +28403,7 @@ fn caldera_breaker_mass_move_fed_deal_damage_stays_ungated() {
 /// of a printed card, unlike P8-P10 and P2): the EXACT same
 /// `ChangeZoneAll` -> `DamageEachPlayer` pairing as Valakut, immediately
 /// chained, but with a FIXED amount ("deals 2 damage") instead of "that
-/// much" — the gate's honesty concern is specific to a per-recipient
-/// consumer reading the per-OWNER table via `EventContextAmount`; a literal
-/// fixed amount never touches that channel. Must stay ungated.
+/// much" — a literal fixed amount never reads a prior-effect channel.
 #[test]
 fn synthetic_fixed_amount_damage_rider_after_mass_move_stays_ungated() {
     let def = parse_trigger_line(
@@ -28459,4 +28432,31 @@ fn synthetic_fixed_amount_damage_rider_after_mass_move_stays_ungated() {
         0,
         "a fixed-amount damage rider must never gate: {execute:?}"
     );
+}
+
+/// SHAPE (P12) — a sentence-separated damage instruction has no explicit
+/// continuation relation to the prior move, so its event-context amount must
+/// not be rebound merely because the lowered definitions are adjacent.
+#[test]
+fn synthetic_sentence_separated_mass_move_damage_keeps_event_context_amount() {
+    let def = parse_trigger_line(
+        "At the beginning of your end step, exile all cards from your graveyard. This permanent deals that much damage to each opponent.",
+        "Synthetic Sweeper",
+    );
+    let execute = def.execute.as_ref().expect("execute ability");
+    let damage = execute
+        .sub_ability
+        .as_ref()
+        .expect("damage instruction must follow the mass move");
+    assert_eq!(damage.sub_link, SubAbilityLink::SequentialSibling);
+    match &*damage.effect {
+        Effect::DamageEachPlayer {
+            amount:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+            player_filter: PlayerFilter::Opponent,
+        } => {}
+        other => panic!("expected DamageEachPlayer(EventContextAmount, Opponent), got {other:?}"),
+    }
 }

@@ -7487,6 +7487,45 @@ impl QuantityExpr {
             QuantityExpr::Fixed { .. } => false,
         }
     }
+
+    /// CR 608.2c: Rebind a later clause's generic event-context amount to the
+    /// scalar result of the immediately preceding resolved instruction.
+    ///
+    /// Parser chain assembly uses this only when grammar proves that the
+    /// antecedent is the prior effect, rather than a triggering event or a
+    /// per-player iteration. The recursive walk preserves arithmetic wrappers
+    /// such as "twice that much".
+    pub fn rebind_event_context_amount_to_previous_effect(&mut self) {
+        match self {
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            } => {
+                *self = QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount {
+                        channel: DamageChannel::Total,
+                    },
+                };
+            }
+            QuantityExpr::Offset { inner, .. }
+            | QuantityExpr::ClampMin { inner, .. }
+            | QuantityExpr::Multiply { inner, .. }
+            | QuantityExpr::DivideRounded { inner, .. }
+            | QuantityExpr::UpTo { max: inner }
+            | QuantityExpr::Power {
+                exponent: inner, ..
+            } => inner.rebind_event_context_amount_to_previous_effect(),
+            QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+                for expr in exprs {
+                    expr.rebind_event_context_amount_to_previous_effect();
+                }
+            }
+            QuantityExpr::Difference { left, right } => {
+                left.rebind_event_context_amount_to_previous_effect();
+                right.rebind_event_context_amount_to_previous_effect();
+            }
+            QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => {}
+        }
+    }
 }
 
 /// Comparison operator used in static conditions.

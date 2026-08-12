@@ -7557,7 +7557,7 @@ fn install_previous_effect_counts_by_player(
 ) -> bool {
     match counts_by_player {
         Some(counts_by_player) => {
-            let amount = counts_by_player.values().copied().max().unwrap_or(0);
+            let amount = counts_by_player.values().copied().sum();
             state.last_effect_count = Some(amount);
             state.last_effect_amount = Some(amount);
             state.last_effect_counts_by_player = counts_by_player;
@@ -28150,6 +28150,23 @@ mod tests {
             ),
             Some(HashMap::new()),
             "a completed no-move ChangeZoneAll must replace stale counts with an empty map"
+        );
+    }
+
+    #[test]
+    fn count_producer_installs_total_scalar_alongside_per_player_counts() {
+        let mut state = GameState::new_two_player(42);
+        install_previous_effect_counts_by_player(
+            &mut state,
+            Some(HashMap::from([(PlayerId(0), 1), (PlayerId(1), 1)])),
+            false,
+        );
+
+        assert_eq!(state.last_effect_count, Some(2));
+        assert_eq!(state.last_effect_amount, Some(2));
+        assert_eq!(
+            state.last_effect_counts_by_player,
+            HashMap::from([(PlayerId(0), 1), (PlayerId(1), 1)])
         );
     }
 
