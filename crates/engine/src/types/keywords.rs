@@ -502,8 +502,10 @@ pub enum ProtectionTarget {
     /// resolved at runtime from the source permanent's `chosen_attributes`
     /// (the `CardType` chosen as the permanent entered). Parallels `ChosenColor`.
     ChosenCardType,
-    /// CR 702.16: "Protection from the chosen player" — resolved
-    /// at runtime from the protected permanent's persisted player choice.
+    /// CR 702.16k: "Protection from the chosen player" — resolved at runtime
+    /// from the protected permanent's persisted player choice. Covers objects
+    /// the chosen player controls and objects they own that no other player
+    /// controls.
     ChosenPlayer,
     /// CR 702.16j: "Protection from everything" — protection from each object
     /// regardless of that object's characteristic values. Matches every source

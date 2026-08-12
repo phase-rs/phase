@@ -29,9 +29,29 @@ fn true_name_protection_uses_the_protected_objects_chosen_player() {
         .add_creature_to_hand_from_oracle(P0, "True-Name Nemesis", 3, 1, TRUE_NAME_ORACLE)
         .with_mana_cost(ManaCost::generic(0))
         .id();
+    scenario.add_card_to_library_top(P0, "Draw Step Filler");
     let chosen_player_source = add_source(&mut scenario, P1, "Song of the Dryads");
     let other_player_source = add_source(&mut scenario, P0, "Friendly Spell");
+    let chosen_player_owned_source = scenario
+        .add_creature_to_graveyard(P1, "Chosen Player's Corpse", 2, 2)
+        .id();
+    let other_player_owned_source = scenario
+        .add_creature_to_graveyard(P0, "Other Player's Corpse", 2, 2)
+        .id();
     let mut runner = scenario.build();
+
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&chosen_player_owned_source)
+        .unwrap()
+        .controller = P0;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&other_player_owned_source)
+        .unwrap()
+        .controller = P1;
 
     runner.auto_advance_to_main_phase();
 
@@ -79,5 +99,29 @@ fn true_name_protection_uses_the_protected_objects_chosen_player() {
     assert!(
         targets_from_other_player.contains(&engine::types::ability::TargetRef::Object(true_name)),
         "True-Name must remain targetable by another player's source, got {targets_from_other_player:?}"
+    );
+
+    let targets_from_chosen_player_owned_source = find_legal_targets(
+        runner.state(),
+        &TargetFilter::Any,
+        P0,
+        chosen_player_owned_source,
+    );
+    assert!(
+        !targets_from_chosen_player_owned_source
+            .contains(&engine::types::ability::TargetRef::Object(true_name)),
+        "True-Name must not be targetable by an uncontrolled source the chosen player owns, got {targets_from_chosen_player_owned_source:?}"
+    );
+
+    let targets_from_other_player_owned_source = find_legal_targets(
+        runner.state(),
+        &TargetFilter::Any,
+        P1,
+        other_player_owned_source,
+    );
+    assert!(
+        targets_from_other_player_owned_source
+            .contains(&engine::types::ability::TargetRef::Object(true_name)),
+        "a stale controller must not make another player's uncontrolled source match, got {targets_from_other_player_owned_source:?}"
     );
 }
