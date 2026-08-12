@@ -298,6 +298,11 @@ fn harsh_mentor_punishes_opponent_nonmana_permanent_abilities_only() {
         "the opponent's artifact nonmana ability must trigger Harsh Mentor"
     );
 
+    // Resolving the stack gives priority to the active player (P0). Pass once
+    // so P1, the controller of Llanowar Elves, can take the next action.
+    runner
+        .act(GameAction::PassPriority)
+        .expect("the active player must be able to pass priority to P1");
     let mana_outcome = runner.activate(mana_creature, 0).resolve();
     assert_eq!(
         mana_outcome.life_delta(P1),
