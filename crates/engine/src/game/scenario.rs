@@ -2483,6 +2483,7 @@ impl<'a> SpellCast<'a> {
                 // the pool can't cover it, `PassPriority` errors and the `.expect`
                 // below fails loudly — fund the pool in the scenario.
                 WaitingFor::ManaPayment { convoke_mode, .. } => {
+                    let only_delve = matches!(convoke_mode, Some(ConvokeMode::Delve));
                     for &card in &delve_with {
                         act_collect(
                             runner,
@@ -2493,7 +2494,7 @@ impl<'a> SpellCast<'a> {
                             &mut events,
                         )?;
                     }
-                    if !matches!(convoke_mode, Some(ConvokeMode::Delve)) {
+                    if !only_delve {
                         for &creature in &convoke_with {
                             // CR 702.51b: pay one mana of the creature's color, or
                             // colorless toward the generic portion of the cost.
