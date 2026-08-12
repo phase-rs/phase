@@ -10785,43 +10785,6 @@ fn parse_land_ability_adds_chosen_color(i: &str) -> OracleResult<'_, ()> {
     .parse(i)
 }
 
-fn add_same_name_as_exiled_by_source(filter: TargetFilter) -> TargetFilter {
-    match filter {
-        TargetFilter::Typed(TypedFilter {
-            type_filters,
-            controller,
-            mut properties,
-        }) => {
-            properties.push(FilterProp::SameNameAsExiledBySource);
-            TargetFilter::Typed(TypedFilter {
-                type_filters,
-                controller,
-                properties,
-            })
-        }
-        TargetFilter::Or { filters } => TargetFilter::Or {
-            filters: filters
-                .into_iter()
-                .map(add_same_name_as_exiled_by_source)
-                .collect(),
-        },
-        TargetFilter::And { filters } => TargetFilter::And {
-            filters: filters
-                .into_iter()
-                .map(add_same_name_as_exiled_by_source)
-                .collect(),
-        },
-        other => TargetFilter::And {
-            filters: vec![
-                other,
-                TargetFilter::Typed(
-                    TypedFilter::default().properties(vec![FilterProp::SameNameAsExiledBySource]),
-                ),
-            ],
-        },
-    }
-}
-
 /// CR 603.2 + CR 605.1a: Returns true when `cond_lower` is a taps-for-mana trigger
 /// condition ("Whenever [you / an opponent / a player] taps … for mana").
 fn condition_matches_taps_for_mana_event(cond_lower: &str) -> bool {
@@ -15084,11 +15047,15 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             terminated(take_until::<_, _, OracleError<'_>>(suffix), tag(suffix))
                 .parse(subject_text.as_str())
         {
-            let (filter, remainder) = parse_trigger_subject(subject, &mut ParseContext::default());
-            if remainder.trim().is_empty() {
+            if all_consuming(tag::<_, _, OracleError<'_>>("a land"))
+                .parse(subject)
+                .is_ok()
+            {
                 let mut def = make_base();
                 def.mode = TriggerMode::TapsForMana;
-                def.valid_card = Some(add_same_name_as_exiled_by_source(filter));
+                def.valid_card = Some(TargetFilter::Typed(
+                    TypedFilter::land().properties(vec![FilterProp::SameNameAsExiledBySource]),
+                ));
                 return Some((TriggerMode::TapsForMana, def));
             }
         }
