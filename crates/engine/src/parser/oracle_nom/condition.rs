@@ -3879,7 +3879,8 @@ fn parse_control_count_ge_distinct_quality(input: &str) -> OracleResult<'_, Stat
     ))
 }
 
-/// CR 201.2 + CR 109.3: Parse "you control N or more [type] with the same name"
+/// CR 201.2 + CR 109.3: Parse "you control N or more [type] with the same name
+/// as one another"
 /// → `QuantityComparison(ObjectCountBySharedQuality[Name, Max] >= N)`.
 ///
 /// The same-quality mirror of `parse_control_count_ge_distinct_quality`. Both read
@@ -3907,7 +3908,10 @@ fn parse_control_count_ge_shared_quality(input: &str) -> OracleResult<'_, Static
     let trimmed = remainder.trim_start();
     let (after_suffix, quality) = preceded(
         tag("with the same "),
-        alt((value(SharedQuality::Name, tag("name")),)),
+        terminated(
+            alt((value(SharedQuality::Name, tag("name")),)),
+            opt(tag(" as one another")),
+        ),
     )
     .parse(trimmed)?;
     let filter = inject_controller_you(filter);

@@ -6883,6 +6883,47 @@ fn thassas_oracle_win_condition_gated_by_devotion_vs_library() {
 }
 
 #[test]
+fn mechanized_production_win_requires_eight_artifacts_sharing_a_name() {
+    let r = parse(
+        "Enchant artifact you control\nAt the beginning of your upkeep, create a token that's a copy of enchanted artifact. Then if you control eight or more artifacts with the same name as one another, you win the game.",
+        "Mechanized Production",
+        &[],
+        &["Enchantment"],
+        &["Aura"],
+    );
+    let trigger = r
+        .triggers
+        .first()
+        .expect("Mechanized Production must parse its upkeep trigger");
+    let copy = trigger
+        .execute
+        .as_deref()
+        .expect("the upkeep trigger must create the token copy");
+    let win = copy
+        .sub_ability
+        .as_deref()
+        .expect("the conditional win must follow the token copy");
+    assert!(matches!(*win.effect, Effect::WinTheGame { .. }));
+    assert_eq!(
+        win.condition,
+        Some(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCountBySharedQuality {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::artifact().controller(ControllerRef::You)
+                    ),
+                    quality: SharedQuality::Name,
+                    aggregate: AggregateFunction::Max,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 8 },
+        }),
+        "the win must be gated by one shared artifact name, not the total artifact count"
+    );
+}
+
+#[test]
 fn incubate_parses_as_effect() {
     let r = parse(
         "When this creature enters, incubate 3.",
