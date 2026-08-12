@@ -16105,11 +16105,10 @@ mod stage2_injector_tests {
                 // three producers: `:6212/:6289/:9477 => :6228/:6305/:9493`.
                 // shifts combine with #6958's paid-cast outcome exclusion and
                 // #6976's conditional-branch exclusions. None creates an
-                // `OptionalEffect` prompt. #7268 removes two lines above all three,
-                // preserving the same producers at `:6298/:6375/:9570`.
-                "game/effects/mod.rs:6298".to_string(),
-                "game/effects/mod.rs:6375".to_string(),
-                "game/effects/mod.rs:9570".to_string(),
+                // `OptionalEffect` prompt. Re-pinned against the merged source.
+                "game/effects/mod.rs:6306".to_string(),
+                "game/effects/mod.rs:6383".to_string(),
+                "game/effects/mod.rs:9582".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
