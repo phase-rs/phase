@@ -20535,6 +20535,12 @@ pub struct DiscardedCardResult {
 /// Conditions in the sub_ability chain are evaluated against this context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SpellContext {
+    /// CR 118.1 + CR 119.4b: A completed resolution-time `PayCost` that paid
+    /// life reports this amount to the immediate following "that much" clause.
+    /// `Some(0)` is distinct from no life-payment channel at all, and the value
+    /// stays with a paused payment's continuation until that cost completes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pay_cost_paid_life_amount: Option<u32>,
     /// CR 701.9a + CR 608.2c: The result of the immediately preceding discard
     /// instruction. `apply_parent_chain_context` copies this only to that
     /// discard's direct child and clears it on every other hand-off.
