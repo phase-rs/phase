@@ -14,7 +14,6 @@ use crate::types::ability::{
     ManaContribution, ManaProduction, ManaSpendRestriction, ManaTargetRole, ObjectScope,
     QuantityExpr, QuantityRef, TypeFilter, TypedFilter,
 };
-use crate::types::counter::CounterType;
 use crate::types::keywords::KeywordKind;
 use crate::types::mana::{
     AbilityActivationScope, ManaColor, ManaRestriction, ManaSpellGrant, SpellCostCriterion,
@@ -2533,7 +2532,9 @@ fn parse_conditional_enters_with_counters_grant(lower: &str) -> Option<ManaSpell
         QuantityExpr::Ref {
             qty: QuantityRef::CommanderCastFromCommandZoneCount,
         },
-        tag("the number of times it's been cast from the command zone this game"),
+        tag::<_, _, OracleError<'_>>(
+            "the number of times it's been cast from the command zone this game",
+        ),
     ))
     .parse(rest)
     .ok()?;
