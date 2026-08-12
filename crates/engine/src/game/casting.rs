@@ -14646,6 +14646,21 @@ pub(super) fn spell_tap_payment_mode_for(
     }
 }
 
+/// CR 702.66a: Delve is an independent generic-payment permission. It composes
+/// with a spell's primary tap-payment mode (for example, Hogaak's Convoke), so
+/// callers must query it separately rather than treating `ConvokeMode` as a
+/// mutually exclusive keyword selection.
+pub(crate) fn spell_has_delve_payment_for(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    fused: bool,
+) -> bool {
+    effective_spell_keywords_for(state, player, source_id, fused)
+        .iter()
+        .any(|keyword| matches!(keyword, Keyword::Delve))
+}
+
 /// CR 601.2c + CR 601.2f: Target selection may precede locking the final
 /// mana obligation. Return true only when none of the production cost axes can
 /// still change the amount or the sources available before payment.
@@ -14799,13 +14814,22 @@ fn can_pay_with_spell_tap_payments(
     else {
         return false;
     };
-    can_pay_with_tap_payment_mode(state, player, mode, cost, ctx, permissions)
+    can_pay_with_tap_payment_mode(
+        state,
+        player,
+        mode,
+        spell_has_delve_payment_for(state, player, source_id, false),
+        cost,
+        ctx,
+        permissions,
+    )
 }
 
 fn can_pay_with_tap_payment_mode(
     state: &GameState,
     player: PlayerId,
     mode: ConvokeMode,
+    has_delve: bool,
     cost: &crate::types::mana::ManaCost,
     ctx: Option<&PaymentContext<'_>>,
     permissions: crate::types::mana::CostPermissionContext,
@@ -14814,12 +14838,26 @@ fn can_pay_with_tap_payment_mode(
         return false;
     };
 
+    let mut payment_pool = player_data.mana_pool.clone();
+    if has_delve && mode != ConvokeMode::Delve {
+        // CR 702.66a: Delve's generic-only contributions compose with the
+        // primary Convoke/Improvise/Waterbend payment channel.
+        for (&object_id, obj) in &state.objects {
+            if obj.is_delve_eligible(player) {
+                payment_pool.add(crate::types::mana::ManaUnit::convoke_payment(
+                    crate::types::mana::ManaType::Colorless,
+                    object_id,
+                ));
+            }
+        }
+    }
+
     // CR 601.2h: This is an affordability preview only. The real payment still
     // flows through ManaPayment and the shared mana-payment algorithm.
     match mode {
         ConvokeMode::Improvise => {
             // CR 702.126a: Improvise lets players tap untapped artifacts to pay generic mana.
-            let mut pool = player_data.mana_pool.clone();
+            let mut pool = payment_pool;
             for (&object_id, obj) in &state.objects {
                 if obj.is_improvise_eligible(player) {
                     pool.add(crate::types::mana::ManaUnit::convoke_payment(
@@ -14831,7 +14869,7 @@ fn can_pay_with_tap_payment_mode(
             mana_payment::can_pay_for_spell(&pool, cost, ctx, permissions)
         }
         ConvokeMode::Waterbend => {
-            let mut pool = player_data.mana_pool.clone();
+            let mut pool = payment_pool;
             for (&object_id, obj) in &state.objects {
                 if obj.is_waterbend_eligible(player) {
                     pool.add(crate::types::mana::ManaUnit::new(
@@ -14863,13 +14901,13 @@ fn can_pay_with_tap_payment_mode(
                     Some(choices)
                 })
                 .collect::<Vec<_>>();
-            can_pay_with_convoke_options(&player_data.mana_pool, cost, ctx, permissions, &options)
+            can_pay_with_convoke_options(&payment_pool, cost, ctx, permissions, &options)
         }
         ConvokeMode::Delve => {
             // CR 702.66a: each card in the caster's graveyard can be exiled to pay
             // one generic mana. Model each as a generic-only colorless unit, exactly
             // like Improvise, so a spell castable only with delve is offered.
-            let mut pool = player_data.mana_pool.clone();
+            let mut pool = payment_pool;
             for (&object_id, obj) in &state.objects {
                 if obj.is_delve_eligible(player) {
                     pool.add(crate::types::mana::ManaUnit::convoke_payment(
