@@ -13342,6 +13342,190 @@ fn trigger_unless_they_discard_multi_sentence_branch_not_terminal_cost() {
     );
 }
 
+/// CR 701.9 + CR 118.12: the discard unless-cost's COUNT axis, exercised across
+/// both payer forms of the shared `parse_unless_discard_cost_phrase` authority.
+/// The `they` form used to lack the axis entirely, so anything but "a card"
+/// failed to lower; the two forms must now accept the identical vocabulary.
+#[test]
+fn unless_discard_cost_phrase_spans_count_and_type_axes_for_both_payers() {
+    fn discard(count: i32, filter: Option<TargetFilter>) -> AbilityCost {
+        AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: count },
+            filter,
+            selection: CardSelectionMode::Chosen,
+            self_scope: DiscardSelfScope::FromHand,
+        }
+    }
+    // The type axis is owned by the shared `parse_discard_card_filter`
+    // authority; this test's claim is that the COUNT axis composes with it, not
+    // what that authority lowers "nonland" to — so read the expected filter from
+    // the authority rather than restating its grammar here.
+    let nonland =
+        crate::parser::oracle_effect::imperative::parse_discard_card_filter("nonland cards")
+            .expect("the shared filter authority types 'nonland cards'");
+
+    // (phrase, expected cost) — the count axis (article / numeral) crossed with
+    // the type axis (bare noun / type phrase), plus the CR 701.9b random tail.
+    let cases: [(&str, AbilityCost); 5] = [
+        ("a card", discard(1, None)),
+        ("two cards", discard(2, None)),
+        ("three cards", discard(3, None)),
+        ("a card at random", discard(1, None)),
+        ("two nonland cards", discard(2, Some(nonland))),
+    ];
+
+    for (phrase, expected) in cases {
+        // `they` payer form — must stop at the branch boundary and lower the phrase.
+        let (they_cost, rest) = parse_unless_they_discard_cost(phrase)
+            .unwrap_or_else(|| panic!("`they discard {phrase}` must lower"));
+        assert_eq!(they_cost, expected, "they-payer cost for {phrase:?}");
+        assert!(
+            rest.trim().is_empty(),
+            "whole branch should be consumed for {phrase:?}, left {rest:?}"
+        );
+
+        // `you` payer form — same vocabulary, same lowering.
+        let you_cost = parse_unless_alt_cost(&format!("you discard {phrase}"))
+            .unwrap_or_else(|| panic!("`you discard {phrase}` must lower"));
+        assert_eq!(you_cost, expected, "you-payer cost for {phrase:?}");
+    }
+}
+
+/// CR 118.12a: an unresolvable count must fail closed. `parse_number` folds a
+/// bare `X` to 0, and a zero-card discard is a cost every player can always pay
+/// — the punisher would silently never fire. The clause must stay unlowered so
+/// coverage reports it honestly instead.
+#[test]
+fn unless_discard_cost_phrase_rejects_zero_count() {
+    assert!(
+        parse_unless_they_discard_cost("x cards").is_none(),
+        "an X-count unless-discard must not lower to a free cost"
+    );
+    assert!(
+        parse_unless_alt_cost("you discard x cards").is_none(),
+        "the controller form must fail closed on the same input"
+    );
+}
+
+/// CR 118.12a: a plural discard branch must still leave a chained " or …"
+/// branch for the disjunction combinator — the count axis must not swallow it.
+#[test]
+fn unless_they_discard_plural_keeps_chained_or_branch() {
+    let cost = parse_unless_they_alt_cost_chain("they discard two cards or pay 5 life")
+        .expect("disjunctive chain should lower");
+    let AbilityCost::OneOf { costs } = &cost else {
+        panic!("expected OneOf, got {cost:?}");
+    };
+    assert_eq!(costs.len(), 2, "both branches should survive: {costs:?}");
+    assert!(
+        matches!(
+            costs[0],
+            AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 2 },
+                ..
+            }
+        ),
+        "first branch should be a two-card discard, got {:?}",
+        costs[0]
+    );
+    assert!(
+        matches!(
+            costs[1],
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 5 }
+            }
+        ),
+        "second branch should survive the plural first branch, got {:?}",
+        costs[1]
+    );
+}
+
+/// CR 608.2c + CR 614.15 + CR 725.1: Court of Ambition's upkeep trigger is a
+/// per-opponent punisher whose monarch rider replaces BOTH the life loss and its
+/// unless-cost. Both branches must carry their own `unless_pay` scoped to the
+/// iterating opponent, and the rider must be a `ConditionInstead` swap (an
+/// additive sub would make a monarch controller drain 3 AND 6).
+#[test]
+fn court_of_ambition_monarch_branch_carries_its_own_scoped_unless_cost() {
+    fn scoped_discard(unless: &UnlessPayModifier, expected_count: i32) {
+        assert_eq!(
+            unless.payer,
+            TargetFilter::ScopedPlayer,
+            "each opponent pays for their own iteration"
+        );
+        assert!(
+            matches!(
+                unless.cost,
+                AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value } ,
+                    filter: None,
+                    ..
+                } if value == expected_count
+            ),
+            "expected a {expected_count}-card discard, got {:?}",
+            unless.cost
+        );
+    }
+
+    let def = parse_trigger_line(
+            "At the beginning of your upkeep, each opponent loses 3 life unless they discard a card. If you're the monarch, instead each opponent loses 6 life unless they discard two cards.",
+            "Court of Ambition",
+        );
+    let execute = def.execute.as_ref().expect("should have execute");
+
+    assert!(
+        matches!(
+            *execute.effect,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                ..
+            }
+        ),
+        "base branch should lose 3 life, got {:?}",
+        execute.effect
+    );
+    assert_eq!(execute.player_scope, Some(PlayerFilter::Opponent));
+    scoped_discard(
+        execute
+            .unless_pay
+            .as_ref()
+            .expect("base branch must keep its unless cost"),
+        1,
+    );
+
+    let rider = execute
+        .sub_ability
+        .as_ref()
+        .expect("monarch rider should be chained");
+    assert!(
+        matches!(
+            rider.condition,
+            Some(AbilityCondition::ConditionInstead { ref inner }) if matches!(**inner, AbilityCondition::IsMonarch)
+        ),
+        "rider must REPLACE the base branch, got {:?}",
+        rider.condition
+    );
+    assert!(
+        matches!(
+            *rider.effect,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 6 },
+                ..
+            }
+        ),
+        "monarch branch should lose 6 life, got {:?}",
+        rider.effect
+    );
+    assert_eq!(rider.player_scope, Some(PlayerFilter::Opponent));
+    scoped_discard(
+        rider
+            .unless_pay
+            .as_ref()
+            .expect("monarch branch must carry its own unless cost"),
+        2,
+    );
+}
+
 #[test]
 fn trigger_unless_pay_for_each_uses_dynamic_generic_cost() {
     let def = parse_trigger_line(

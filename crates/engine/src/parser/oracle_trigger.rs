@@ -3294,7 +3294,7 @@ fn parse_inferred_pronoun_unless_alt_cost(
     let cost = if let Ok((rest, _)) =
         tag::<_, _, OracleError<'_>>("they discard ").parse(after_unless)
     {
-        parse_unless_discard_cost(rest)?
+        parse_unless_discard_cost_phrase(rest)?
     } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("they pay ").parse(after_unless) {
         parse_unless_life_cost(rest)?
     } else {
@@ -3319,64 +3319,88 @@ fn parse_unless_life_cost(rest: &str) -> Option<AbilityCost> {
     None
 }
 
-fn parse_unless_discard_cost(discard_tail: &str) -> Option<AbilityCost> {
-    let trailing = discard_tail.trim().trim_end_matches('.').trim();
-
-    // CR 118.12 + CR 701.9: Try numeric count first ("two cards", "three cards"),
-    // then fall back to article form ("a card", "an enchantment card").
-    if let Some((n, after_num)) = parse_number(trailing) {
-        let after_num = after_num.trim();
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("cards").parse(after_num) {
-            let rest = rest.trim().trim_end_matches('.').trim();
-            if rest.is_empty()
-                || tag::<_, _, OracleError<'_>>("at random")
-                    .parse(rest)
-                    .is_ok()
-            {
-                return Some(AbilityCost::Discard {
-                    count: QuantityExpr::Fixed { value: n as i32 },
-                    filter: None,
-                    selection: crate::types::ability::CardSelectionMode::Chosen,
-                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
-                });
-            }
-        }
+/// CR 701.9 + CR 118.12: SINGLE AUTHORITY for the discard alternative-cost
+/// phrase that follows an unless-clause's `discard(s)` verb.
+///
+/// Grammar — two independent axes over one noun:
+///
+/// ```text
+/// discard_phrase := [<count> | "a" | "an"] [<type phrase>] ("card" | "cards") ["at random"]
+/// ```
+///
+/// Both unless-payer forms route here: the controller form ("unless **you**
+/// discard two cards", from `parse_unless_alt_cost` /
+/// `parse_inferred_pronoun_unless_alt_cost`) and the anaphoric-player form
+/// ("unless **they** discard two cards" — Court of Ambition,
+/// `parse_unless_they_discard_cost`). They were hand-written mirrors that
+/// drifted — only the controller form ever grew the count axis, so every card
+/// printing a plural discard against an anaphoric payer fell out of the grammar
+/// and surfaced as `Unimplemented`. One authority means the count and type axes
+/// cannot diverge by payer again, and it composes them: "discard two nonland
+/// cards" needs no new arm.
+///
+/// `branch_text` must already be bounded by the caller — the `they` form stops
+/// at `unless_branch_boundary` so a chained " or …" branch survives, while the
+/// `you` form owns the rest of the clause.
+///
+/// CR 701.9b ("some effects … require a random discard") is accepted as an "at
+/// random" tail but deliberately does NOT set
+/// `CardSelectionMode::Random`: the resolution-time unless-payment path
+/// (`engine_payment_choices.rs`) discards `selection` and always prompts, so
+/// emitting `Random` would claim a behavior the engine does not implement.
+/// Preserves the pre-existing mapping of both mirrors exactly.
+fn parse_unless_discard_cost_phrase(branch_text: &str) -> Option<AbilityCost> {
+    let trimmed = branch_text.trim().trim_end_matches('.').trim();
+    if trimmed.is_empty() {
+        return None;
     }
 
-    let trailing = alt((
-        tag::<_, _, OracleError<'_>>("a "),
-        tag::<_, _, OracleError<'_>>("an "),
-    ))
-    .parse(trailing)
-    .map(|(rest, _)| rest.trim())
-    .unwrap_or(trailing);
-    if !trailing.is_empty() {
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("card").parse(trailing) {
-            let rest = rest.trim().trim_end_matches('.').trim();
-            if rest.is_empty()
-                || tag::<_, _, OracleError<'_>>("at random")
-                    .parse(rest)
-                    .is_ok()
-            {
-                return Some(AbilityCost::Discard {
-                    count: QuantityExpr::Fixed { value: 1 },
-                    filter: None,
-                    selection: crate::types::ability::CardSelectionMode::Chosen,
-                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
-                });
-            }
-        }
-        if let Some(filter) = super::oracle_effect::imperative::parse_discard_card_filter(trailing)
+    // CR 701.9: the count axis. `parse_number` spans both the numeral ("two
+    // cards") and the singular article ("a card" / "an enchantment card"), so
+    // one call covers the whole axis; a bare noun ("card") has neither and
+    // counts as one.
+    let (count, after_count) = parse_number(trimmed).unwrap_or((1, trimmed));
+    let after_count = after_count.trim();
+
+    // CR 118.12a: fail closed on a zero count. `parse_number` folds a bare `X`
+    // to 0 for the callers that want a numeric-only reading, but an unless-cost
+    // of "discard 0 cards" is FREE — the punisher would silently never fire.
+    // No printed card announces X inside an unless-discard, so an unresolvable
+    // count must stay visible as an unsupported clause rather than lower to a
+    // cost every player can always pay.
+    if count == 0 {
+        return None;
+    }
+
+    let discard = |filter| AbilityCost::Discard {
+        count: QuantityExpr::Fixed {
+            value: count as i32,
+        },
+        filter,
+        selection: crate::types::ability::CardSelectionMode::Chosen,
+        self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+    };
+
+    // Untyped noun: the count axis alone ("a card", "two cards"). The plural
+    // arm precedes the singular so `tag("card")` cannot leave a stray "s".
+    if let Ok((rest, _)) =
+        alt((tag::<_, _, OracleError<'_>>("cards"), tag("card"))).parse(after_count)
+    {
+        let rest = rest.trim().trim_end_matches('.').trim();
+        if rest.is_empty()
+            || tag::<_, _, OracleError<'_>>("at random")
+                .parse(rest)
+                .is_ok()
         {
-            return Some(AbilityCost::Discard {
-                count: QuantityExpr::Fixed { value: 1 },
-                filter: Some(filter),
-                selection: crate::types::ability::CardSelectionMode::Chosen,
-                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
-            });
+            return Some(discard(None));
         }
     }
-    None
+
+    // Typed noun: the remainder is a type phrase plus the noun, lowered by the
+    // shared `parse_discard_card_filter` authority (which owns the
+    // " card"/" cards" suffix strip and rejects anything it cannot type).
+    super::oracle_effect::imperative::parse_discard_card_filter(after_count)
+        .map(|filter| discard(Some(filter)))
 }
 
 /// CR 118.12 + CR 608.2c + CR 119.4: Recognize non-mana "unless" alternative
@@ -3423,7 +3447,7 @@ pub(crate) fn parse_unless_alt_cost(after_unless: &str) -> Option<AbilityCost> {
     // ("at random", trailing punctuation) since the caller strips the entire
     // unless-clause wholesale.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you discard ").parse(after_unless) {
-        return parse_unless_discard_cost(rest);
+        return parse_unless_discard_cost_phrase(rest);
     }
 
     // "you pay N life" / "you pay N life." — life amount is bare integer.
@@ -3835,52 +3859,15 @@ fn parse_unless_they_sacrifice_filter(input: &str) -> Option<(AbilityCost, &str)
 }
 
 /// CR 701.9 + CR 118.12: Parse the tail of "they discard ..." preserving
-/// the unconsumed remainder. Mirrors `parse_unless_discard_cost` but stops
-/// at the branch boundary.
+/// the unconsumed remainder. Bounds the branch at `unless_branch_boundary` so a
+/// chained " or …" branch survives, then defers the phrase grammar itself to
+/// the shared `parse_unless_discard_cost_phrase` authority — the `you` and
+/// `they` payer axes share one vocabulary.
 fn parse_unless_they_discard_cost(input: &str) -> Option<(AbilityCost, &str)> {
     let boundary = unless_branch_boundary(input);
     let branch_text = input[..boundary].trim();
     let after = &input[boundary..];
-    if branch_text.is_empty() {
-        return None;
-    }
-    // Strip article
-    let stripped = alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))
-        .parse(branch_text)
-        .map(|(rest, _)| rest)
-        .unwrap_or(branch_text);
-    // Plain "card" / "card at random"
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("card").parse(stripped) {
-        let rest = rest.trim();
-        if rest.is_empty()
-            || tag::<_, _, OracleError<'_>>("at random")
-                .parse(rest)
-                .is_ok()
-        {
-            return Some((
-                AbilityCost::Discard {
-                    count: QuantityExpr::Fixed { value: 1 },
-                    filter: None,
-                    selection: crate::types::ability::CardSelectionMode::Chosen,
-                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
-                },
-                after,
-            ));
-        }
-    }
-    // Typed filter ("nonland card", "creature card", etc.)
-    if let Some(filter) = super::oracle_effect::imperative::parse_discard_card_filter(stripped) {
-        return Some((
-            AbilityCost::Discard {
-                count: QuantityExpr::Fixed { value: 1 },
-                filter: Some(filter),
-                selection: crate::types::ability::CardSelectionMode::Chosen,
-                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
-            },
-            after,
-        ));
-    }
-    None
+    parse_unless_discard_cost_phrase(branch_text).map(|cost| (cost, after))
 }
 
 /// CR 119.4 + CR 118.12: Parse the tail of "they pay N life" preserving
