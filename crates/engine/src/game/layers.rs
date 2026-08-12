@@ -1501,6 +1501,7 @@ fn evaluate_condition_with_context(
                         trigger_source: None,
                         recipient: recipient_id,
                         scoped_player: None,
+                        damage_source: None,
                     },
                 )
             };
@@ -1683,7 +1684,8 @@ fn evaluate_condition_with_context(
             | crate::types::ability::ObjectScope::OtherRevealedCard
             | crate::types::ability::ObjectScope::OwnedLinkedExileCard
             | crate::types::ability::ObjectScope::Demonstrative
-            | crate::types::ability::ObjectScope::AmassedArmy => false,
+            | crate::types::ability::ObjectScope::AmassedArmy
+            | crate::types::ability::ObjectScope::BatchSource => false,
         },
         // CR 702.171b + CR 110.5d: off-battlefield permanents have no saddled designation.
         StaticCondition::SourceIsSaddled => state.objects.get(&source_id).is_some_and(|obj| {

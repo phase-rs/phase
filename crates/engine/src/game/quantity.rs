@@ -61,6 +61,11 @@ pub struct QuantityContext {
     /// Current player for an "each player/opponent" resolution pass. Distinct
     /// from `controller`, which remains the printed ability's controller.
     pub scoped_player: Option<PlayerId>,
+    /// CR 120.1: The per-iteration damage source of an `EachSourceDealsDamage`
+    /// batch. Set by the per-source resolver
+    /// (`resolve_quantity_with_targets_and_damage_source`); `None` in every
+    /// non-batch context (a null read → 0, fail-closed).
+    pub damage_source: Option<ObjectId>,
 }
 
 impl QuantityContext {
@@ -196,6 +201,7 @@ pub fn resolve_quantity(
             trigger_source: None,
             recipient: None,
             scoped_player: None,
+            damage_source: None,
         },
     )
 }
@@ -221,6 +227,7 @@ pub fn resolve_quantity_with_recipient(
             trigger_source: None,
             recipient: Some(recipient_id),
             scoped_player: None,
+            damage_source: None,
         },
     )
 }
@@ -376,7 +383,11 @@ pub(crate) fn quantity_expr_uses_resolution_only_object_scope(expr: &QuantityExp
             // links only at resolution time, never as a static CDA read.
             | ObjectScope::OwnedLinkedExileCard
             | ObjectScope::Demonstrative
-            | ObjectScope::AmassedArmy => true,
+            | ObjectScope::AmassedArmy
+            // CR 120.1: the per-iteration damage source of an
+            // `EachSourceDealsDamage` batch is bound per batch member only at
+            // resolution time, never as a static CDA read.
+            | ObjectScope::BatchSource => true,
         }
     }
     match expr {
@@ -407,6 +418,46 @@ pub(crate) fn quantity_expr_uses_resolution_only_object_scope(expr: &QuantityExp
         QuantityExpr::Difference { left, right } => {
             quantity_expr_uses_resolution_only_object_scope(left)
                 || quantity_expr_uses_resolution_only_object_scope(right)
+        }
+    }
+}
+
+/// CR 120.1 + CR 608.2: True when `expr` references `scope` anywhere — including
+/// nested inside any composite wrapper (`Multiply`, `Offset`, `Sum`,
+/// `Difference`, …). Structural recursion over the already-parsed `QuantityExpr`;
+/// the `QuantityRef` leaf classifies per-object scopes exhaustively so a new
+/// object-scoped reference forces a decision here. Used by the parser (does the
+/// "each <filter> deals damage" amount carry the deferred `Anaphoric` pronoun?)
+/// and by the resolver (does the batch amount read the per-source `BatchSource`
+/// scope?).
+pub(crate) fn quantity_expr_contains_scope(expr: &QuantityExpr, scope: ObjectScope) -> bool {
+    fn ref_contains_scope(qty: &QuantityRef, scope: ObjectScope) -> bool {
+        match qty {
+            QuantityRef::Power { scope: s }
+            | QuantityRef::Toughness { scope: s }
+            | QuantityRef::ObjectManaValue { scope: s }
+            | QuantityRef::ObjectColorCount { scope: s }
+            | QuantityRef::ObjectNameWordCount { scope: s }
+            | QuantityRef::ObjectTypelineComponentCount { scope: s }
+            | QuantityRef::ManaSymbolsInManaCost { scope: s, .. }
+            | QuantityRef::CountersOn { scope: s, .. } => *s == scope,
+            _ => false,
+        }
+    }
+    match expr {
+        QuantityExpr::Fixed { .. } => false,
+        QuantityExpr::Ref { qty } => ref_contains_scope(qty, scope),
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => quantity_expr_contains_scope(inner, scope),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => exprs
+            .iter()
+            .any(|expr| quantity_expr_contains_scope(expr, scope)),
+        QuantityExpr::UpTo { max } => quantity_expr_contains_scope(max, scope),
+        QuantityExpr::Power { exponent, .. } => quantity_expr_contains_scope(exponent, scope),
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_contains_scope(left, scope) || quantity_expr_contains_scope(right, scope)
         }
     }
 }
@@ -491,6 +542,9 @@ fn resolution_only_scope_referent_present(
             })
         }
         ObjectScope::AmassedArmy => ability.amassed_army_object.is_some(),
+        // CR 120.1: the per-iteration batch member is bound only while the
+        // per-source resolver runs; absent everywhere else.
+        ObjectScope::BatchSource => ctx.damage_source.is_some(),
     }
 }
 
@@ -517,6 +571,7 @@ pub(crate) fn quantity_expr_missing_resolution_only_referent(
             trigger_source: ability.trigger_source.clone(),
             recipient: None,
             scoped_player: ability.scoped_player,
+            damage_source: None,
         };
         !resolution_only_scope_referent_present(state, scope, ctx, &ability.targets, ability)
     }
@@ -1649,6 +1704,7 @@ pub(crate) fn resolve_quantity_for_trigger_check(
         trigger_source: source_context.cloned(),
         recipient: None,
         scoped_player,
+        damage_source: None,
     };
 
     // Fast path: when current_trigger_event is already set (resolution-time
@@ -1958,6 +2014,7 @@ pub fn resolve_quantity_with_targets(
                 trigger_source: ability.trigger_source.clone(),
                 recipient: None,
                 scoped_player: ability.scoped_player,
+                damage_source: None,
             },
             &ability.targets,
             ability.chosen_x,
@@ -2010,6 +2067,7 @@ pub(crate) fn resolve_quantity_with_targets_and_recipient(
                 trigger_source: ability.trigger_source.clone(),
                 recipient: Some(recipient_id),
                 scoped_player: ability.scoped_player,
+                damage_source: None,
             },
             &ability.targets,
             ability.chosen_x,
@@ -2017,6 +2075,43 @@ pub(crate) fn resolve_quantity_with_targets_and_recipient(
         ),
         other => fold_compose(other, |inner| {
             resolve_quantity_with_targets_and_recipient(state, inner, ability, recipient_id)
+        }),
+    }
+}
+
+/// CR 120.1 + CR 608.2: Resolve a `QuantityExpr` that references the
+/// per-iteration damage source of an `EachSourceDealsDamage` batch
+/// (`ObjectScope::BatchSource`). Threaded through every composite wrapper so
+/// "twice its power" / "its power plus its toughness" read the same batch
+/// member. Matches the source against its live object, falling back to LKI
+/// (CR 113.7a) at each characteristic read.
+pub(crate) fn resolve_quantity_with_targets_and_damage_source(
+    state: &GameState,
+    expr: &QuantityExpr,
+    ability: &ResolvedAbility,
+    damage_source: ObjectId,
+) -> i32 {
+    let controller = ability.original_controller.unwrap_or(ability.controller);
+    match expr {
+        QuantityExpr::Fixed { value } => *value,
+        QuantityExpr::Ref { qty } => resolve_ref(
+            state,
+            qty,
+            controller,
+            QuantityContext {
+                entering: None,
+                source: ability.source_id,
+                trigger_source: ability.trigger_source.clone(),
+                recipient: None,
+                scoped_player: ability.scoped_player,
+                damage_source: Some(damage_source),
+            },
+            &ability.targets,
+            ability.chosen_x,
+            Some(ability),
+        ),
+        other => fold_compose(other, |inner| {
+            resolve_quantity_with_targets_and_damage_source(state, inner, ability, damage_source)
         }),
     }
 }
@@ -2045,6 +2140,7 @@ pub fn resolve_quantity_with_targets_slice(
                 trigger_source: None,
                 recipient: None,
                 scoped_player: None,
+                damage_source: None,
             },
             targets,
             None,
@@ -2126,6 +2222,7 @@ pub(crate) fn resolve_quantity_scoped_with_targets(
                 trigger_source: None,
                 recipient: None,
                 scoped_player: Some(scope_player),
+                damage_source: None,
             },
             targets,
             None,
@@ -5069,6 +5166,9 @@ fn object_for_scope<'a>(
         | ObjectScope::OwnedLinkedExileCard
         | ObjectScope::Demonstrative
         | ObjectScope::AmassedArmy => None,
+        // CR 120.1: the per-iteration damage source of an `EachSourceDealsDamage`
+        // batch is bound per batch member by the per-source resolver.
+        ObjectScope::BatchSource => ctx.damage_source.and_then(|id| state.objects.get(&id)),
     }
 }
 
@@ -5136,6 +5236,9 @@ fn object_id_for_scope(
         | ObjectScope::OwnedLinkedExileCard
         | ObjectScope::Demonstrative
         | ObjectScope::AmassedArmy => None,
+        // CR 120.1: the per-iteration damage source of an `EachSourceDealsDamage`
+        // batch is bound per batch member by the per-source resolver.
+        ObjectScope::BatchSource => ctx.damage_source,
     }
 }
 
@@ -5377,7 +5480,13 @@ fn resolve_counters_on_scope(
                 }
             }
         }
-        ObjectScope::Source | ObjectScope::Anaphoric => {
+        ObjectScope::Source
+        | ObjectScope::Anaphoric
+        // CR 120.1 + CR 113.7a: the per-iteration batch member's counters are
+        // read via its live object, falling back to LKI (mirrors the
+        // `Source`/`Anaphoric` live-with-LKI shape; `object_id_for_scope`
+        // reads `ctx.damage_source`).
+        | ObjectScope::BatchSource => {
             resolve_counters_on_live_or_lki_scope(state, scope, ctx, targets, counter_type)
         }
         ObjectScope::CostPaidObject => ability
@@ -5880,6 +5989,16 @@ where
         ObjectScope::OtherRevealedCard => 0,
         // MV-only referent; no P/T semantics.
         ObjectScope::OwnedLinkedExileCard => 0,
+        // CR 120.1 + CR 208.3 + CR 113.7a: the per-iteration damage source of an
+        // `EachSourceDealsDamage` batch reads its OWN characteristic ("deals
+        // damage equal to ITS power"). Guarded live-then-LKI read (a batch
+        // member that leaves the battlefield mid-batch still contributes its
+        // pre-leave power), mirroring the `Recipient` arm.
+        ObjectScope::BatchSource => {
+            object_id_for_scope(state, ObjectScope::BatchSource, ctx, targets)
+                .and_then(|id| read_object_pt_by_id(state, id, &obj_extract, &lki_extract))
+                .unwrap_or(0)
+        }
     }
 }
 
@@ -6134,6 +6253,29 @@ fn resolve_object_mana_value(
             } else {
                 current_mana_value.unwrap_or(0)
             }
+        }
+        // CR 120.1 + CR 202.3 + CR 113.7a: the per-iteration damage source of an
+        // `EachSourceDealsDamage` batch reads its OWN mana value. Live object
+        // first, LKI fallback (mirrors the `EventSource` arm), so a batch member
+        // that leaves the battlefield mid-batch still contributes its pre-leave
+        // value.
+        ObjectScope::BatchSource => {
+            let Some(object_id) =
+                object_id_for_scope(state, ObjectScope::BatchSource, ctx, targets)
+            else {
+                return 0;
+            };
+            state
+                .objects
+                .get(&object_id)
+                .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
+                .or_else(|| {
+                    state
+                        .lki_cache
+                        .get(&object_id)
+                        .map(|lki| u32_to_i32_saturating(lki.mana_value))
+                })
+                .unwrap_or(0)
         }
     }
 }
@@ -8483,6 +8625,7 @@ mod tests {
                     trigger_source: None,
                     recipient: None,
                     scoped_player: None,
+                    damage_source: None,
                 },
             ),
             1
@@ -14848,6 +14991,7 @@ mod tests {
                     trigger_source: None,
                     recipient: None,
                     scoped_player: Some(scoped_player),
+                    damage_source: None,
                 },
             ),
             9,
@@ -15728,6 +15872,300 @@ mod tests {
             5,
             "Demonstrative P/T difference must use effect context 7/2, not cost-paid 3/3"
         );
+    }
+
+    /// CR 120.1 + CR 208.3 + CR 113.7a: the `ObjectScope::BatchSource` power
+    /// read binding-block — `resolve_quantity_with_targets_and_damage_source`
+    /// resolves a `Power { BatchSource }` ref to the SUPPLIED batch member's
+    /// own power (live object first, LKI fallback when the member leaves the
+    /// battlefield mid-batch).
+    #[test]
+    fn resolve_batch_source_power_live_and_lki() {
+        use crate::types::ability::ResolvedAbility;
+        let mut state = GameState::new_two_player(42);
+        let ability_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bartz".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&ability_source).unwrap();
+            obj.power = Some(4);
+            obj.toughness = Some(3);
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        // A batch member with power 5, distinct from the ability source (4) —
+        // proves the read follows `damage_source`, not the source.
+        let member = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bird".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&member).unwrap();
+            obj.power = Some(5);
+            obj.toughness = Some(5);
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 0 },
+                player: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ability_source,
+            PlayerId(0),
+        );
+        let power = QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::BatchSource,
+            },
+        };
+        assert_eq!(
+            resolve_quantity_with_targets_and_damage_source(&state, &power, &ability, member),
+            5,
+            "live batch member power (5) must win, never the ability source's 4"
+        );
+
+        // LKI fallback: the member left the battlefield with a buffed battlefield
+        // LKI; the live graveyard card is reverted to base (1), so the buffed LKI
+        // must win (mirrors the `Source` power LKI read).
+        let mut state = GameState::new_two_player(42);
+        let member = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Departed Bird".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&member).unwrap();
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(1);
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        let mut lki = state.objects[&member].snapshot_public_characteristics();
+        lki.power = Some(6);
+        lki.toughness = Some(6);
+        state.lki_cache.insert(member, lki);
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 0 },
+                player: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ability_source,
+            PlayerId(0),
+        );
+        assert_eq!(
+            resolve_quantity_with_targets_and_damage_source(&state, &power, &ability, member),
+            6,
+            "buffed battlefield LKI power must win for an off-battlefield batch member"
+        );
+    }
+
+    /// CR 120.1 + CR 202.3 + CR 113.7a: `ObjectManaValue { BatchSource }` reads
+    /// the batch member's own mana value (live, then LKI).
+    #[test]
+    fn resolve_batch_source_mana_value_live_and_lki() {
+        use crate::types::ability::ResolvedAbility;
+        let mut state = GameState::new_two_player(42);
+        let ability_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let member = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Mana Member".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&member).unwrap().mana_cost = ManaCost::generic(7);
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 0 },
+                player: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ability_source,
+            PlayerId(0),
+        );
+        let mv = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::BatchSource,
+            },
+        };
+        assert_eq!(
+            resolve_quantity_with_targets_and_damage_source(&state, &mv, &ability, member),
+            7,
+            "live batch member mana value"
+        );
+
+        // LKI fallback: the member is GONE entirely (no live object anywhere) —
+        // only the LKI snapshot carries its mana value (CR 202.3 zone-independent
+        // read via the cache).
+        let mut state = GameState::new_two_player(42);
+        let member = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Departed".to_string(),
+            Zone::Graveyard,
+        );
+        state.objects.get_mut(&member).unwrap().mana_cost = ManaCost::generic(1);
+        let mut lki = state.objects[&member].snapshot_public_characteristics();
+        lki.mana_value = 3;
+        state.lki_cache.insert(member, lki);
+        state.objects.remove(&member);
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 0 },
+                player: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ability_source,
+            PlayerId(0),
+        );
+        assert_eq!(
+            resolve_quantity_with_targets_and_damage_source(&state, &mv, &ability, member),
+            3,
+            "LKI mana value must win when the batch member has no live object"
+        );
+    }
+
+    /// CR 120.1 + CR 608.2: the per-source wrapper threads the batch member
+    /// through composite wrappers ("twice ..." / "plus" composed) and leaves
+    /// `Fixed` alone.
+    #[test]
+    fn resolve_quantity_with_damage_source_composed_and_fixed() {
+        use crate::types::ability::ResolvedAbility;
+        let mut state = GameState::new_two_player(42);
+        let ability_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let member = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bird".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&member).unwrap();
+            obj.power = Some(4);
+            obj.toughness = Some(3);
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 0 },
+                player: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ability_source,
+            PlayerId(0),
+        );
+        // Composed Multiply over the batch power → 2 × 4 = 8.
+        let composed = QuantityExpr::Multiply {
+            factor: 2,
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::BatchSource,
+                },
+            }),
+        };
+        assert_eq!(
+            resolve_quantity_with_targets_and_damage_source(&state, &composed, &ability, member),
+            8,
+            "composed per-source amount must double the batch member's power"
+        );
+        // Fixed stays constant regardless of the batch member.
+        let fixed = QuantityExpr::Fixed { value: 9 };
+        assert_eq!(
+            resolve_quantity_with_targets_and_damage_source(&state, &fixed, &ability, member),
+            9,
+            "a Fixed amount must ignore the batch member"
+        );
+    }
+
+    /// CR 120.1 + CR 608.2: `quantity_expr_contains_scope` detects a scope
+    /// nested anywhere in the composite wrapper tree. Shared by the parser's
+    /// anaphoric-rebind guard in `try_parse_each_source_deals_damage`
+    /// (testing for `Anaphoric`) and the resolver's per-source detection in
+    /// `resolve_each_source_deals_damage` (testing for `BatchSource`).
+    #[test]
+    fn quantity_expr_contains_scope_detects_nested() {
+        let ref_batch = || QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::BatchSource,
+            },
+        };
+        // Not present.
+        assert!(!quantity_expr_contains_scope(
+            &ref_batch(),
+            ObjectScope::Anaphoric
+        ));
+        assert!(!quantity_expr_contains_scope(
+            &QuantityExpr::Fixed { value: 1 },
+            ObjectScope::BatchSource
+        ));
+        // Direct.
+        assert!(quantity_expr_contains_scope(
+            &ref_batch(),
+            ObjectScope::BatchSource
+        ));
+        // Nested in Multiply.
+        assert!(quantity_expr_contains_scope(
+            &QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(ref_batch()),
+            },
+            ObjectScope::BatchSource
+        ));
+        // Nested in Offset.
+        assert!(quantity_expr_contains_scope(
+            &QuantityExpr::Offset {
+                inner: Box::new(ref_batch()),
+                offset: 1,
+            },
+            ObjectScope::BatchSource
+        ));
+        // Nested in Sum (one of two operands).
+        assert!(quantity_expr_contains_scope(
+            &QuantityExpr::Sum {
+                exprs: vec![
+                    QuantityExpr::Fixed { value: 1 },
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Toughness {
+                            scope: ObjectScope::BatchSource,
+                        }
+                    },
+                ],
+            },
+            ObjectScope::BatchSource
+        ));
+        // Nested in Difference (right operand).
+        assert!(quantity_expr_contains_scope(
+            &QuantityExpr::Difference {
+                left: Box::new(QuantityExpr::Fixed { value: 1 }),
+                right: Box::new(ref_batch()),
+            },
+            ObjectScope::BatchSource
+        ));
     }
 
     #[test]

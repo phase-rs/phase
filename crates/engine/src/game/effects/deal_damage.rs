@@ -2486,8 +2486,19 @@ pub fn resolve_each_source_deals_damage(
         }
     };
 
-    // CR 608.2: the amount is uniform across every source — resolve it once.
-    let amt = resolve_quantity_with_targets(state, amount, ability).max(0) as u32;
+    // CR 608.2: the amount is uniform across every source — resolve it once —
+    // UNLESS the amount reads the per-source `BatchSource` scope (CR 120.1:
+    // "deals damage equal to its power" resolves per source object, never
+    // against the ability source).
+    let per_source = crate::game::quantity::quantity_expr_contains_scope(
+        amount,
+        crate::types::ability::ObjectScope::BatchSource,
+    );
+    let amt_uniform = if per_source {
+        0
+    } else {
+        resolve_quantity_with_targets(state, amount, ability).max(0) as u32
+    };
 
     // CR 608.2 + CR 120.1: evaluate the source class against the battlefield at
     // resolution (mirrors `resolve_all`). Each matching object is an independent
@@ -2516,26 +2527,41 @@ pub fn resolve_each_source_deals_damage(
     // recipient so combined lethal/excess is computed once all sources have
     // marked). Each source carries its OWN `DamageContext` (CR 120.1 identity).
     let mut entries: Vec<(ObjectId, DamageContext, TargetRef, u32)> = Vec::new();
-    if amt > 0 {
-        for &source_id in &source_ids {
-            let ctx = DamageContext::from_source(state, source_id)
-                .unwrap_or_else(|| DamageContext::fallback(source_id, ability.controller));
-            match recipient {
-                EachDamageRecipient::Shared(_) => {
-                    for recip in &shared_recipients {
-                        entries.push((source_id, ctx, recip.clone(), amt));
-                    }
+    for &source_id in &source_ids {
+        // CR 120.1 + CR 113.7a: each batch member deals its OWN characteristic;
+        // resolved per source (live object, LKI fallback via the new scope's
+        // resolve arms — the same instant semantics as the one-time uniform
+        // resolution, but read against each batch member). Zero/sourceless
+        // members deal nothing (skip) — entry-set-equivalent to the uniform
+        // path's `if amt > 0` gate.
+        let amt = if per_source {
+            crate::game::quantity::resolve_quantity_with_targets_and_damage_source(
+                state, amount, ability, source_id,
+            )
+            .max(0) as u32
+        } else {
+            amt_uniform
+        };
+        if amt == 0 {
+            continue;
+        }
+        let ctx = DamageContext::from_source(state, source_id)
+            .unwrap_or_else(|| DamageContext::fallback(source_id, ability.controller));
+        match recipient {
+            EachDamageRecipient::Shared(_) => {
+                for recip in &shared_recipients {
+                    entries.push((source_id, ctx, recip.clone(), amt));
                 }
-                // CR 109.4 + CR 120.3a: each source deals to the player that
-                // controls it.
-                EachDamageRecipient::EachController => {
-                    let controller = state
-                        .objects
-                        .get(&source_id)
-                        .map(|obj| obj.controller)
-                        .unwrap_or(ctx.controller);
-                    entries.push((source_id, ctx, TargetRef::Player(controller), amt));
-                }
+            }
+            // CR 109.4 + CR 120.3a: each source deals to the player that
+            // controls it.
+            EachDamageRecipient::EachController => {
+                let controller = state
+                    .objects
+                    .get(&source_id)
+                    .map(|obj| obj.controller)
+                    .unwrap_or(ctx.controller);
+                entries.push((source_id, ctx, TargetRef::Player(controller), amt));
             }
         }
     }

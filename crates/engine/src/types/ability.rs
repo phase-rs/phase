@@ -5773,6 +5773,18 @@ pub enum ObjectScope {
     /// Mana-value-only referent today. NOTE: a THIRD set-member ObjectScope should
     /// trigger a `SetMember { set, selector }` parameterization round.
     OwnedLinkedExileCard,
+    /// CR 120.1: The per-iteration damage SOURCE of an
+    /// [`Effect::EachSourceDealsDamage`] batch — "each <filter> you control
+    /// deals damage equal to its power to …". Each matching object is the
+    /// source of its own damage; "its power" reads THAT object, not the ability
+    /// source (which is exempted by the "other" FilterProp). Bound per batch
+    /// member at resolution by a per-source resolver (`damage_source` field on
+    /// `QuantityContext`). Distinct from [`ObjectScope::Source`] (the ability
+    /// source) and `EventTarget` (the damage RECIPIENT); the filter-evaluated
+    /// source set is unrelated to any trigger event. No runtime fallback: when
+    /// the per-iteration id is absent (a condition/layer read) it reads null →
+    /// 0, mirroring [`ObjectScope::Target`]'s fail-closed null read.
+    BatchSource,
 }
 
 /// Source set for counting distinct card types.
@@ -10897,7 +10909,10 @@ pub enum Effect {
         /// subjects route to `DamageEachPlayer`.
         sources: TargetFilter,
         /// CR 120.1: Damage dealt by every source. Uniform across the batch
-        /// (resolved once, CR 608.2).
+        /// (resolved once, CR 608.2) UNLESS the amount reads the per-source
+        /// `ObjectScope::BatchSource` scope ("deals damage equal to its power"),
+        /// in which case it is resolved per batch member (each source is the
+        /// source of its own damage, CR 120.1).
         amount: QuantityExpr,
         /// CR 120.3: The recipient resolution strategy (shared target vs
         /// per-source controller).

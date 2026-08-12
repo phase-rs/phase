@@ -3115,6 +3115,9 @@ fn scan_object_scope(x: &ObjectScope) -> Axes {
         // CR 607.2a: source-persistent exile-pile member read — no event/sibling
         // projected axis (mirrors AmassedArmy).
         ObjectScope::OwnedLinkedExileCard => Axes::NONE,
+        // CR 120.1: per-iteration batch source — a resolution-filtered object
+        // with no event/sibling axis (mirrors Source/Target).
+        ObjectScope::BatchSource => Axes::NONE,
         ObjectScope::EventTarget => Axes {
             event: true,
             sibling: false,

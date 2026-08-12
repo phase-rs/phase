@@ -1058,6 +1058,7 @@ mod ashling_delayed_sacrifice_unless_pay;
 mod atarkas_command_sequential_mode_after_decline;
 mod aurora_awakener_reveal_until_n_permanents;
 mod baron_helmut_zemo_boast;
+mod bartz_and_boko_each_source_damage;
 mod base_pt_dynamic_set_std_base_pt;
 mod become_color_set_std_batch;
 mod behold_chosen_object_power_damage;
