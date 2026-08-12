@@ -19,7 +19,8 @@ fn commander_combat_damage_enables_eagle_vision_freerunning() {
     scenario.with_library_top(P0, &["First Draw", "Second Draw", "Third Draw"]);
     let commander = scenario.add_creature(P0, "Test Commander", 2, 2).id();
     let eagle_vision = scenario
-        .add_spell_to_hand_from_oracle(P0, "Eagle Vision", false, EAGLE_VISION_ORACLE)
+        .add_spell_to_hand(P0, "Eagle Vision", false)
+        .from_oracle_text_with_keywords(&["Freerunning"], EAGLE_VISION_ORACLE)
         .with_mana_cost(ManaCost::Cost {
             generic: 4,
             shards: vec![ManaCostShard::Blue],
