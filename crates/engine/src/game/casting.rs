@@ -14814,11 +14814,14 @@ fn can_pay_with_spell_tap_payments(
     else {
         return false;
     };
+    let fused = state.pending_cast.as_ref().is_some_and(|pending| {
+        pending.object_id == source_id && pending.casting_variant == CastingVariant::Fuse
+    });
     can_pay_with_tap_payment_mode(
         state,
         player,
         mode,
-        spell_has_delve_payment_for(state, player, source_id, false),
+        spell_has_delve_payment_for(state, player, source_id, fused),
         cost,
         ctx,
         permissions,
@@ -15249,11 +15252,14 @@ fn feasibly_payable_with_tap_payment_mode_in_context(
         player_can_spend_as_any_color_for_payment(simulated, player, Some(source_id), ctx);
     let permissions =
         super::static_abilities::build_cost_permission_context(simulated, player, any_color);
+    let fused = simulated.pending_cast.as_ref().is_some_and(|pending| {
+        pending.object_id == source_id && pending.casting_variant == CastingVariant::Fuse
+    });
     can_pay_with_tap_payment_mode(
         simulated,
         player,
         tap_payment_mode,
-        spell_has_delve_payment_for(simulated, player, source_id, false),
+        spell_has_delve_payment_for(simulated, player, source_id, fused),
         cost,
         ctx,
         permissions,

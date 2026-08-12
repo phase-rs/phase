@@ -4925,7 +4925,10 @@ fn mana_payment_actions(
                         ));
                     }
                 }
-                _ => {}
+                ConvokeMode::Convoke
+                | ConvokeMode::Improvise
+                | ConvokeMode::Waterbend
+                | ConvokeMode::Delve => {}
             }
         }
     }
