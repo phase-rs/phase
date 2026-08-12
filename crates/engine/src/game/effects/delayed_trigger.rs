@@ -2322,6 +2322,80 @@ mod tests {
     }
 
     #[test]
+    fn uses_tracked_set_binds_mode_ability_effects() {
+        let mut state = GameState::new_two_player(42);
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(1), vec![ObjectId(10)]);
+        state.next_tracked_set_id = 2;
+
+        let mode = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Exile),
+                destination: Zone::Hand,
+                target: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(TargetFilter::Any),
+                    caused_by: Some(crate::types::ability::ThisWayCause::Exiled),
+                },
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                random_order: false,
+            },
+        );
+        let effect_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .with_modal(
+            crate::types::ability::ModalChoice {
+                min_choices: 1,
+                max_choices: 1,
+                mode_count: 1,
+                ..Default::default()
+            },
+            vec![mode],
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(effect_def),
+                uses_tracked_set: true,
+            },
+            vec![],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).expect("resolve must succeed");
+
+        let mode = state.delayed_triggers[0]
+            .ability
+            .mode_abilities
+            .first()
+            .expect("delayed modal must retain its mode");
+        assert!(matches!(
+            mode.effect.as_ref(),
+            Effect::ChangeZoneAll {
+                target: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(1),
+                    caused_by: Some(crate::types::ability::ThisWayCause::Exiled),
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn uses_tracked_set_binds_nested_delayed_effects() {
         let mut state = GameState::new_two_player(42);
         state
@@ -2393,14 +2467,17 @@ mod tests {
             .insert(TrackedSetId(1), vec![ObjectId(10)]);
         state.next_tracked_set_id = 2;
 
-        // Parser emits ChangeZone with TrackedSetId(0) sentinel
+        // The ChangeZone upgrade must preserve the tracked-set filter and bind
+        // its sentinel, rather than dropping it to an unfiltered tracked set.
         let effect_def = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
                 origin: None,
                 destination: Zone::Battlefield,
-                target: TargetFilter::TrackedSet {
+                target: TargetFilter::TrackedSetFiltered {
                     id: TrackedSetId(0),
+                    filter: Box::new(TargetFilter::Any),
+                    caused_by: Some(crate::types::ability::ThisWayCause::Exiled),
                 },
                 owner_library: false,
                 enter_transformed: false,
@@ -2429,8 +2506,9 @@ mod tests {
         let result = resolve(&mut state, &ability, &mut events);
         assert!(result.is_ok());
 
-        // Should be upgraded to ChangeZoneAll with resolved TrackedSetId; origin
-        // stays unset so runtime derives member zones when firing.
+        // Should be upgraded to ChangeZoneAll with the filtered tracked set
+        // intact and its sentinel resolved; origin stays unset so runtime derives
+        // member zones when firing.
         match &state.delayed_triggers[0].ability.effect {
             Effect::ChangeZoneAll {
                 origin,
@@ -2440,12 +2518,14 @@ mod tests {
             } => {
                 assert_eq!(*origin, None);
                 assert_eq!(*destination, Zone::Battlefield);
-                assert_eq!(
-                    *target,
-                    TargetFilter::TrackedSet {
-                        id: TrackedSetId(1)
-                    }
-                );
+                assert!(matches!(
+                    target,
+                    TargetFilter::TrackedSetFiltered {
+                        id: TrackedSetId(1),
+                        filter,
+                        caused_by: Some(crate::types::ability::ThisWayCause::Exiled),
+                    } if matches!(filter.as_ref(), TargetFilter::Any)
+                ));
             }
             other => panic!("Expected ChangeZoneAll, got {:?}", other),
         }
