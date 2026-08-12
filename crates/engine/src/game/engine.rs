@@ -15916,7 +15916,16 @@ mod stage2_injector_tests {
                 }
                 if test_file || spans.iter().any(|(a, b)| (*a..=*b).contains(&n)) {
                     in_test += 1;
-                } else if line.contains("waiting_for = ") || line.contains("Ok(Some(") {
+                } else if line.contains("waiting_for = ")
+                    || line.contains("Ok(Some(")
+                    // `install_direct_choice_frame` owns the actual
+                    // `state.waiting_for` write. Its typed prompt argument is
+                    // still a production mint, not a reader; the call sits
+                    // within this bounded argument expression.
+                    || lines[n.saturating_sub(32)..n]
+                        .iter()
+                        .any(|prior| prior.contains(".install_direct_choice_frame("))
+                {
                     producers.push(format!("{rel}:{}", n + 1));
                 } else {
                     readers.push(format!("{rel}:{}", n + 1));
@@ -16037,7 +16046,7 @@ mod stage2_injector_tests {
                 // `OptionalEffect` prompt. Re-pinned against the merged source.
                 "game/effects/mod.rs:6300".to_string(),
                 "game/effects/mod.rs:6377".to_string(),
-                "game/effects/mod.rs:9570".to_string(),
+                "game/effects/mod.rs:9576".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
