@@ -2407,10 +2407,8 @@ pub(crate) fn deliver_replaced_zone_change(
                 let (recorded, source_id) = {
                     let frame = state
                         .resolution_stack
-                        .active_discard_parent_of_active_ability_continuation_mut(frame_id)
-                        .expect(
-                            "discard provenance must name the active continuation's discard parent",
-                        );
+                        .active_discard_or_direct_continuation_parent_mut(frame_id)
+                        .expect("discard provenance must name the active discard operation");
                     let recorded = frame.results.is_empty();
                     let source_id = frame.source_id;
                     if recorded {

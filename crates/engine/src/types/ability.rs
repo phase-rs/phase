@@ -6299,6 +6299,16 @@ pub enum QuantityRef {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<TargetFilter>,
     },
+    /// CR 603.2 + CR 603.3: Number of spells cast before the spell named by
+    /// the resolving trigger event, scoped and optionally filtered by spell
+    /// characteristics. Unlike `SpellsCastThisTurn`, this is a trigger-time
+    /// history boundary: spells cast in response after the trigger do not
+    /// retroactively change the count (Thousand-Year Storm class).
+    SpellsCastBeforeTriggeringSpell {
+        scope: CountScope,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
+    },
     /// Count of permanents matching filter that entered the battlefield
     /// under the controller's control this turn.
     EnteredThisTurn { filter: TargetFilter },

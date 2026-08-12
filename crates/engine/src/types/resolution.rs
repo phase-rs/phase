@@ -656,6 +656,34 @@ impl ResolutionStack {
         }
     }
 
+    /// Returns the active discard operation, or its exact direct parent when
+    /// an ability continuation has already been parked above it. Terminal
+    /// discard delivery owns either of these two adjacent shapes; it must not
+    /// search through another active resolution frame for a matching ID.
+    pub fn active_discard_or_direct_continuation_parent_mut(
+        &mut self,
+        discard_id: DiscardFrameId,
+    ) -> Option<&mut DiscardFrame> {
+        let active_index = self.frames.len().checked_sub(1)?;
+        let discard_index = match self.frames.get(active_index) {
+            Some(ResolutionFrame::Discard(discard)) if discard.id == discard_id => active_index,
+            Some(ResolutionFrame::AbilityContinuation(_)) => {
+                let discard_index = active_index.checked_sub(1)?;
+                match self.frames.get(discard_index) {
+                    Some(ResolutionFrame::Discard(discard)) if discard.id == discard_id => {
+                        discard_index
+                    }
+                    Some(_) | None => return None,
+                }
+            }
+            Some(_) | None => return None,
+        };
+        match self.frames.get_mut(discard_index) {
+            Some(ResolutionFrame::Discard(discard)) => Some(discard),
+            Some(_) | None => unreachable!("checked discard frame must retain its frame kind"),
+        }
+    }
+
     /// Identifies the exact discard parent of the active continuation without
     /// exposing any non-adjacent frame.
     pub fn active_ability_continuation_discard_parent_id(&self) -> Option<DiscardFrameId> {
@@ -4054,6 +4082,15 @@ mod tests {
 
     #[test]
     fn active_discard_parent_of_active_ability_continuation_is_direct_and_id_bound() {
+        let mut active = ResolutionStack::default();
+        let active_id = active.begin_discard(None);
+        assert!(
+            active
+                .active_discard_or_direct_continuation_parent_mut(active_id)
+                .is_some(),
+            "an active discard owns terminal delivery before a continuation is parked"
+        );
+
         let mut direct = ResolutionStack::default();
         let direct_id = direct.begin_discard(None);
         direct.push_inner(continuation_frame(1));
@@ -4096,6 +4133,12 @@ mod tests {
                 .active_discard_parent_of_active_ability_continuation_mut(buried_id)
                 .is_none(),
             "a discard below an active child must not be recovered by a stack search"
+        );
+        assert!(
+            buried
+                .active_discard_or_direct_continuation_parent_mut(buried_id)
+                .is_none(),
+            "terminal delivery may not recover a discard below another active frame"
         );
     }
 

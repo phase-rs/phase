@@ -277,6 +277,10 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
                         source_filter: filter,
                     },
                 ..
+            }
+            | QuantityRef::AttackedThisTurn {
+                filter: Some(filter),
+                ..
             } => filter_uses_recipient(filter),
             QuantityRef::ObjectColorCount {
                 scope: ObjectScope::Recipient,
@@ -669,6 +673,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
         | QuantityRef::BendTypesThisTurn
@@ -968,6 +973,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
         | QuantityRef::BendTypesThisTurn
@@ -1211,6 +1217,7 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         // CR 117.1: spell-cast journals store each spell's cast-time
         // characteristics.
         | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SpellsCastThisGame { .. }
         // CR 701.16a: sacrifice-time characteristics.
         | QuantityRef::SacrificedThisTurn { .. }
@@ -1446,6 +1453,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
         | QuantityRef::BendTypesThisTurn
@@ -4010,6 +4018,47 @@ fn resolve_ref(
                         .sum(),
                 )
             }
+        }
+        // CR 603.2 + CR 603.3: A trigger's spell event fixes the upper bound
+        // for "before it this turn" counts. The per-player journal is ordered
+        // by cast time, so records strictly before that spell's own record are
+        // the printed population even if players cast responses before this
+        // triggered ability resolves.
+        QuantityRef::SpellsCastBeforeTriggeringSpell { scope, ref filter } => {
+            let Some(crate::types::events::GameEvent::SpellCast {
+                object_id: triggering_spell,
+                ..
+            }) = state.current_trigger_event.as_ref()
+            else {
+                return 0;
+            };
+            let Some((records, boundary)) =
+                scoped_players(state, scope, ctx, controller).find_map(|player| {
+                    let records = state.spells_cast_this_turn_by_player.get(&player.id)?;
+                    records
+                        .iter()
+                        .rposition(|record| record.spell_object_id == Some(*triggering_spell))
+                        .map(|boundary| (records, boundary))
+                })
+            else {
+                return 0;
+            };
+            usize_to_i32_saturating(
+                records
+                    .iter()
+                    .take(boundary)
+                    .filter(|record| {
+                        filter.as_ref().is_none_or(|filter| {
+                            spell_record_matches_filter(
+                                record,
+                                filter,
+                                controller,
+                                &state.all_creature_types,
+                            )
+                        })
+                    })
+                    .count(),
+            )
         }
         // Count permanents matching filter that entered the battlefield this turn.
         // Uses `entered_battlefield_turn` field on GameObject.
@@ -13263,6 +13312,56 @@ mod tests {
         };
 
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 1);
+    }
+
+    /// CR 603.2 + CR 603.3: a triggered spell-history count has to stop at
+    /// the triggering spell's own journal entry, even if another spell was
+    /// cast in response before the triggered ability resolves.
+    #[test]
+    fn spell_history_before_triggering_spell_excludes_later_responses() {
+        fn spell_record(object_id: ObjectId, core_type: CoreType) -> SpellCastRecord {
+            SpellCastRecord {
+                core_types: vec![core_type],
+                spell_object_id: Some(object_id),
+                ..SpellCastRecord::default()
+            }
+        }
+
+        let first_spell = ObjectId(10);
+        let triggering_spell = ObjectId(11);
+        let response_spell = ObjectId(12);
+        let mut state = GameState::new_two_player(42);
+        state.spells_cast_this_turn_by_player.insert(
+            PlayerId(0),
+            crate::im::Vector::from(vec![
+                spell_record(first_spell, CoreType::Instant),
+                spell_record(triggering_spell, CoreType::Sorcery),
+                spell_record(response_spell, CoreType::Instant),
+            ]),
+        );
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            card_id: CardId(11),
+            controller: PlayerId(0),
+            object_id: triggering_spell,
+        });
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::SpellsCastBeforeTriggeringSpell {
+                scope: CountScope::Controller,
+                filter: Some(TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                    ],
+                }),
+            },
+        };
+
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)),
+            1,
+            "only the earlier instant is before the triggering sorcery"
+        );
     }
 
     /// Storm Entity's "for each other spell cast this turn": `CountScope::All`
