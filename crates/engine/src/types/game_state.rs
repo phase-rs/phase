@@ -16555,6 +16555,29 @@ pub struct PendingMultiDraw {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct DrawSequenceFrameId(pub u64);
 
+/// The unbookkept suffix of one individual draw whose Library → Hand delivery
+/// parked on a replacement choice.
+///
+/// The selected card stays here until its zone change settles. Recording it as
+/// drawn before then would emit `CardDrawn` and advance the draw ledger while
+/// the card is still in the library; retaining the remaining selected cards
+/// also preserves the ordinary one-at-a-time draw order after the choice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingDrawDelivery {
+    pub player: PlayerId,
+    pub current: ObjectId,
+    /// False while the current card still needs its initial pipeline pass;
+    /// true once a parked replacement choice has delivered that pass.
+    pub current_settled: bool,
+    pub remaining: Vec<ObjectId>,
+    #[serde(
+        default,
+        serialize_with = "crate::types::deterministic_serde::hash_set"
+    )]
+    pub applied: HashSet<AppliedReplacementKey>,
+    pub attempted_empty_library: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum DrawSequenceOrigin {
     #[default]
@@ -16597,6 +16620,10 @@ pub struct DrawSequenceFrame {
     /// effect replaces a draw within a sequence of card draws, the replacement
     /// effect is completed before resuming the sequence."
     pub remaining: u32,
+    /// A card delivery that has selected its card but has not yet settled its
+    /// `Moved` replacement choice. The frame owns its ledger and suffix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_delivery: Option<PendingDrawDelivery>,
     /// CR 608.2c: running total of cards ACTUALLY delivered across every
     /// completed unit of this instruction. This is the value a later "that many"
     /// clause on the same card reads ("Draw two cards, then discard that many") —
@@ -16717,6 +16744,7 @@ impl DrawSequenceStack {
             applied,
             origin,
             remaining: count,
+            pending_delivery: None,
             accumulated: 0,
         });
         debug_assert!(
@@ -16768,6 +16796,7 @@ impl DrawSequenceStack {
                     && a.remaining == b.remaining
                     && a.accumulated == b.accumulated
                     && a.origin == b.origin
+                    && a.pending_delivery == b.pending_delivery
             })
     }
 
@@ -17199,6 +17228,17 @@ impl GameState {
     /// than an invitation to search below it.
     pub fn clear_active_ability_continuation(&mut self) -> Result<bool, ResolutionStackError> {
         Ok(self.take_active_ability_continuation()?.is_some())
+    }
+
+    /// Clears the reveal choice's continuation while allowing an exact active
+    /// batch-delivery child to retain its own pending zone-change work.
+    pub fn clear_active_ability_continuation_or_batch_delivery_child(
+        &mut self,
+    ) -> Result<bool, ResolutionStackError> {
+        Ok(self
+            .resolution_stack
+            .take_active_ability_continuation_or_batch_delivery_child()?
+            .is_some())
     }
 
     /// Returns the complete ChangeZone owner only when it owns the stack top.
@@ -19125,11 +19165,32 @@ impl GameState {
     }
 
     pub(crate) fn current_or_begin_rules_execution_node(&mut self) -> RulesExecutionNodeRef {
-        self.active_rules_execution_node.unwrap_or_else(|| {
+        self.live_active_rules_execution_node().unwrap_or_else(|| {
             self.resolved_rules_journal
                 .begin_proposal()
                 .expect("resolved-rules journal proposal ordinal overflow")
         })
+    }
+
+    /// Returns the ambient execution node only while its provenance record is
+    /// still retained. The journal has an intentionally shorter retention
+    /// window than the transient scope, so a boundary may discard a completed
+    /// parent before a later nested mana activation observes that scope.
+    fn live_active_rules_execution_node(&mut self) -> Option<RulesExecutionNodeRef> {
+        let node = self.active_rules_execution_node?;
+        if self.rules_execution_node_is_live(node) {
+            Some(node)
+        } else {
+            self.active_rules_execution_node = None;
+            None
+        }
+    }
+
+    fn rules_execution_node_is_live(&self, node: RulesExecutionNodeRef) -> bool {
+        self.resolved_rules_journal
+            .nodes()
+            .iter()
+            .any(|candidate| candidate.identity == node)
     }
 
     /// CR 800.4: Begin the distinct execution node for one player leaving the
@@ -19154,8 +19215,9 @@ impl GameState {
             .get(&source_id)
             .map(ObjectIncarnationRef::from_object)
             .expect("mana ability activation source must exist");
+        let parent = self.live_active_rules_execution_node();
         self.resolved_rules_journal
-            .begin_activated_mana(source, self.active_rules_execution_node)
+            .begin_activated_mana(source, parent)
             .expect("resolved-rules journal settlement ordinal overflow")
     }
 
@@ -19168,12 +19230,11 @@ impl GameState {
         trigger: Option<TriggerDefinitionRef>,
         caused_by: Option<RulesExecutionNodeRef>,
     ) -> RulesExecutionNodeRef {
+        let parent = caused_by
+            .filter(|node| self.rules_execution_node_is_live(*node))
+            .or_else(|| self.live_active_rules_execution_node());
         self.resolved_rules_journal
-            .begin_triggered_mana(
-                source,
-                trigger,
-                caused_by.or(self.active_rules_execution_node),
-            )
+            .begin_triggered_mana(source, trigger, parent)
             .expect("resolved-rules journal settlement ordinal overflow")
     }
 
@@ -22527,7 +22588,7 @@ mod tests {
     };
     use crate::types::deterministic_serde::test_support::ReverseBuildHasher;
     use crate::types::identifiers::{
-        DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
+        CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
     };
     use crate::types::resolved_commands::ResolvedDelayedTriggerCommand;
 
@@ -22551,6 +22612,72 @@ mod tests {
                 printed_index,
             },
         }
+    }
+
+    #[test]
+    fn mana_journal_ignores_a_stale_nested_parent_after_journal_reset() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mana Source".to_string(),
+            Zone::Battlefield,
+        );
+        let source = state
+            .objects
+            .get(&source_id)
+            .map(ObjectIncarnationRef::from_object)
+            .expect("test source exists");
+
+        let mut parent = None;
+        for _ in 0..7 {
+            state.active_rules_execution_node = parent;
+            let node = state.begin_activated_mana_journal_node(source_id);
+            assert_eq!(
+                state
+                    .resolved_rules_journal
+                    .nodes()
+                    .iter()
+                    .find(|candidate| candidate.identity == node)
+                    .expect("activation node is retained")
+                    .caused_by,
+                parent,
+                "a live nested activation keeps its exact parent"
+            );
+            parent = Some(node);
+        }
+        let stale_parent = parent.expect("deep chain creates a terminal parent");
+
+        state.resolved_rules_journal = Default::default();
+        state.active_rules_execution_node = Some(stale_parent);
+        let fresh_activation = state.begin_activated_mana_journal_node(source_id);
+        assert_eq!(
+            state
+                .resolved_rules_journal
+                .nodes()
+                .iter()
+                .find(|candidate| candidate.identity == fresh_activation)
+                .expect("fresh activation node is retained")
+                .caused_by,
+            None,
+            "a journal reset must not retain a parent ordinal it no longer owns"
+        );
+
+        state.active_rules_execution_node = Some(stale_parent);
+        let fresh_trigger =
+            state.begin_triggered_mana_journal_node(source, None, Some(stale_parent));
+        assert_eq!(
+            state
+                .resolved_rules_journal
+                .nodes()
+                .iter()
+                .find(|candidate| candidate.identity == fresh_trigger)
+                .expect("fresh trigger node is retained")
+                .caused_by,
+            None,
+            "triggered mana also rejects an absent explicit or ambient parent"
+        );
     }
 
     #[test]

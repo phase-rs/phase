@@ -4340,6 +4340,7 @@ fn quantity_ref_target_slot_spec(qty: &QuantityRef) -> Option<TargetFilter> {
         | QuantityRef::DistinctColorsAmongPermanents { filter }
         | QuantityRef::DistinctCounterKindsAmong { filter } => filter_target_slot_filter(filter),
         QuantityRef::SpellsCastThisTurn { filter, .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
         | QuantityRef::SpellsCastThisGame { filter, .. } => {
             filter.as_ref().and_then(filter_target_slot_filter)
         }
@@ -4469,7 +4470,8 @@ fn collect_target_slot_specs(
         }
         filters.push(target);
         for filter in filters {
-            if matches!(filter, TargetFilter::SelfRef | TargetFilter::ParentTarget) {
+            // Keep per-slot metadata aligned with the surfaced cast-time slots.
+            if filter.is_context_ref() {
                 continue;
             }
             let id = TargetInstanceId(*next_instance);
@@ -6761,7 +6763,10 @@ fn assign_selected_slots_recursive(
         }
         filters.push(target);
         for filter in filters {
-            if matches!(filter, TargetFilter::SelfRef | TargetFilter::ParentTarget) {
+            // Mirror `collect_target_slots` and `assign_targets_recursive`:
+            // context-reference fighters resolve from the ability chain, so they
+            // consume no interactive target-selection slot.
+            if filter.is_context_ref() {
                 continue;
             }
             let Some(selected_slot) = selected_slots.get(*next_slot) else {

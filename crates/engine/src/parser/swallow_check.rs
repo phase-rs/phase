@@ -4111,6 +4111,7 @@ fn detect_duration_this_turn(
             x,
             QuantityRef::LifeLostThisTurn { .. }
                 | QuantityRef::SpellsCastThisTurn { .. }
+                | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
                 | QuantityRef::EnteredThisTurn { .. }
                 | QuantityRef::SacrificedThisTurn { .. }
                 | QuantityRef::CrimesCommittedThisTurn
