@@ -3086,9 +3086,19 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Retrace" => Ok(Keyword::Retrace),
         "SplitSecond" => Ok(Keyword::SplitSecond),
         "Storm" => Ok(Keyword::Storm),
-        "Suspend" => serde_json::from_value(data.clone())
-            .map(Keyword::Suspend)
-            .map_err(|error| format!("Suspend: {error}")),
+        "Suspend" => {
+            let object = data.as_object().ok_or("Suspend: expected object")?;
+            let count = object
+                .get("count")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or("Suspend: missing count")?;
+            let count = u32::try_from(count).map_err(|_| "Suspend: count exceeds u32")?;
+            let cost = object.get("cost").ok_or("Suspend: missing cost")?;
+            Ok(Keyword::Suspend {
+                count,
+                cost: mana(cost)?,
+            })
+        }
         "Gift" => serde_json::from_value(data.clone())
             .map(Keyword::Gift)
             .map_err(|error| format!("GiftKind: {error}")),
