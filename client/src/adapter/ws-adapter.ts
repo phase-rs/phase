@@ -203,6 +203,7 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 30 — Serialized player-action completion provenance and modal continuations.
  * 29 — Added requester-correlated ResolveAllRejected response frames.
  * 28 — Added native ResolveAll request/result frames.
  * 27 — Added DraftKind.Sealed, serialized by draft WebSocket messages.
@@ -236,7 +237,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 29;
+export const PROTOCOL_VERSION = 30;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

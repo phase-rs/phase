@@ -11,9 +11,9 @@ use crate::game::speed::has_max_speed;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityKind, CardPlayMode, CardTypeSetSource, ControllerRef,
     CopyRetargetPermission, CostPaidObjectSnapshot, EachDamageRecipient, Effect, EffectError,
-    EffectKind, EffectOutcomeSignal, EffectScope, FilterProp, OpponentMayScope, PlayerFilter,
-    PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
-    RevealUntilDisposition, SacrificeCost, SacrificeRequirement, SharedQuality,
+    EffectKind, EffectOutcomeSignal, EffectResolutionResult, EffectScope, FilterProp,
+    OpponentMayScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation,
+    ResolvedAbility, RevealUntilDisposition, SacrificeCost, SacrificeRequirement, SharedQuality,
     SharedQualityRelation, SiblingCondition, SubAbilityLink, TapStateChange, TargetChoiceTiming,
     TargetFilter, TargetRef, ThisWayCause,
 };
@@ -71,6 +71,7 @@ pub mod choose_one_of;
 pub mod clash;
 pub mod cleanup;
 pub mod collect_evidence;
+pub mod complete_player_action;
 pub mod conjure;
 pub mod connive;
 pub mod control_next_turn;
@@ -1434,6 +1435,17 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             .expect("settled ChangeZone must consume the active owner once");
         if let Some(count) = moved_count {
             state.last_effect_count = Some(count);
+            if let Some(cause) = this_way_cause_for_zone(destination) {
+                stamp_active_player_action_completion(
+                    state,
+                    source_id,
+                    EffectResolutionResult {
+                        cause,
+                        count: usize::try_from(count.max(0))
+                            .expect("nonnegative moved count fits usize"),
+                    },
+                );
+            }
         }
         events.push(GameEvent::EffectResolved {
             kind: effect_kind,
@@ -1641,6 +1653,46 @@ pub(crate) fn append_to_pending_continuation(
     } else {
         state.park_ability_continuation(PendingContinuation::new(tail, state));
     }
+}
+
+/// CR 608.2c: Stamp an operation result onto only the active, same-source
+/// completion head whose producer-action requirement matches. This is a typed
+/// adjacency check; it never searches past another resolution frame.
+pub(crate) fn stamp_active_player_action_completion(
+    state: &mut GameState,
+    source_id: ObjectId,
+    result: EffectResolutionResult,
+) {
+    let Some(frame) = state.active_ability_continuation_frame_mut() else {
+        return;
+    };
+    let chain = frame.pending.chain.as_mut();
+    let Effect::CompletePlayerAction {
+        required_result, ..
+    } = &chain.effect
+    else {
+        return;
+    };
+    if chain.source_id == source_id && required_result.cause == result.cause {
+        chain.set_prior_effect_result_for_immediate_node(result);
+    }
+}
+
+pub(crate) fn active_player_action_completion_requires(
+    state: &GameState,
+    source_id: ObjectId,
+    cause: ThisWayCause,
+) -> bool {
+    state.active_ability_continuation().is_some_and(|pending| {
+        pending.chain.source_id == source_id
+            && matches!(
+                &pending.chain.effect,
+                Effect::CompletePlayerAction {
+                    required_result,
+                    ..
+                } if required_result.cause == cause
+            )
+    })
 }
 
 fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbility) {
@@ -2467,6 +2519,25 @@ fn apply_parent_chain_context(
     // one immediate looping child. Ordinary hand-offs must not let it leak to
     // a later grandchild with a different instruction scope.
     child.context.parent_target_iteration_members = None;
+    // CR 608.2c: A completed effect result is a one-hop input. Clear the
+    // inherited copy first, then stamp it only onto the same-source immediate
+    // `CompletePlayerAction` child whose requirement names the same producer
+    // action. Count mismatches are intentionally retained so the completion
+    // node can resolve as a failed action rather than observing no result.
+    let prior_effect_result = child.context.prior_effect_result.take();
+    if child.source_id == parent.source_id {
+        if let (
+            Some(result),
+            Effect::CompletePlayerAction {
+                required_result, ..
+            },
+        ) = (prior_effect_result, &child.effect)
+        {
+            if result.cause == required_result.cause {
+                child.set_prior_effect_result_for_immediate_node(result);
+            }
+        }
+    }
     // CR 701.9a + CR 608.2c: A discard result is visible only to the direct
     // contingent child. Every ordinary hand-off clears it, preventing a later
     // grandchild (or an unrelated chain branch) from reading stale provenance.
@@ -3034,6 +3105,9 @@ fn effect_manages_own_outcome_flag(effect: &Effect) -> bool {
                 without_paying_mana_cost: false,
                 ..
             }
+            // CR 608.2c: this node derives success from its exact one-hop
+            // operation result and propagates that boolean to its printed tail.
+            | Effect::CompletePlayerAction { .. }
     )
 }
 
@@ -4209,7 +4283,7 @@ pub fn resolve_effect(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
-) -> Result<(), EffectError> {
+) -> Result<Option<EffectResolutionResult>, EffectError> {
     match &ability.effect {
         Effect::StartYourEngines { .. } => speed_effects::resolve_start(state, ability, events),
         Effect::ChangeSpeed { .. } => speed_effects::resolve_change_speed(state, ability, events),
@@ -4238,7 +4312,7 @@ pub fn resolve_effect(
         // dispatched inside `resolve_set_tap_state`.
         Effect::SetTapState { .. } => tap_untap::resolve_set_tap_state(state, ability, events),
         Effect::RemoveCounter { .. } => counters::resolve_remove(state, ability, events),
-        Effect::Sacrifice { .. } => sacrifice::resolve(state, ability, events),
+        Effect::Sacrifice { .. } => return sacrifice::resolve(state, ability, events),
         Effect::DiscardCard { .. } => discard::resolve(state, ability, events),
         Effect::Mill { .. } => mill::resolve(state, ability, events),
         Effect::Scry { .. } => scry::resolve(state, ability, events),
@@ -4246,7 +4320,7 @@ pub fn resolve_effect(
         Effect::DamageAll { .. } => deal_damage::resolve_all(state, ability, events),
         Effect::DamageEachPlayer { .. } => deal_damage::resolve_each_player(state, ability, events),
         Effect::DestroyAll { .. } => destroy::resolve_all(state, ability, events),
-        Effect::ChangeZone { .. } => change_zone::resolve(state, ability, events),
+        Effect::ChangeZone { .. } => return change_zone::resolve(state, ability, events),
         Effect::ChangeZoneAll { .. } => change_zone::resolve_all(state, ability, events),
         Effect::Dig { .. } => dig::resolve(state, ability, events),
         Effect::GainControl { .. } => gain_control::resolve(state, ability, events),
@@ -4558,6 +4632,9 @@ pub fn resolve_effect(
         Effect::BlightEffect { .. } => blight::resolve(state, ability, events),
         Effect::Endure { .. } => endure::resolve(state, ability, events),
         Effect::Forage => forage::resolve(state, ability, events),
+        Effect::CompletePlayerAction { .. } => {
+            complete_player_action::resolve(state, ability, events)
+        }
         Effect::Harness => harness::resolve(state, ability, events),
         Effect::CollectEvidence { .. } => collect_evidence::resolve(state, ability, events),
         Effect::SetLifeTotal { .. } => life::resolve_set_life_total(state, ability, events),
@@ -4619,7 +4696,8 @@ pub fn resolve_effect(
             }
             Ok(())
         }
-    }
+    }?;
+    Ok(None)
 }
 
 /// Returns true if the given effect has a handler in the engine.
@@ -5090,26 +5168,18 @@ fn affected_objects_with_causes(
 /// effect kind (and its declared destination), so it is independent of any
 /// replacement that later redirects the members' landing zone.
 pub(crate) fn this_way_cause_for_effect(effect: &Effect) -> Option<ThisWayCause> {
-    use crate::types::zones::Zone;
-    // CR 400.7: a generic zone change names a "this way" verb only for the
-    // destinations a consumer references — Exile (exiled), Battlefield
-    // (returned/put onto the battlefield), Hand (bounced/returned to hand).
-    let cause_for_zone = |destination: Zone| match destination {
-        Zone::Exile => Some(ThisWayCause::Exiled),
-        Zone::Battlefield => Some(ThisWayCause::Returned),
-        Zone::Hand => Some(ThisWayCause::Bounced),
-        _ => None,
-    };
     match effect {
         Effect::Destroy { .. } | Effect::DestroyAll { .. } => Some(ThisWayCause::Destroyed),
         Effect::Sacrifice { .. } => Some(ThisWayCause::Sacrificed),
         Effect::Mill { .. } => Some(ThisWayCause::Milled),
         Effect::Discard { .. } | Effect::DiscardCard { .. } => Some(ThisWayCause::Discarded),
         Effect::ChangeZone { destination, .. } | Effect::ChangeZoneAll { destination, .. } => {
-            cause_for_zone(*destination)
+            this_way_cause_for_zone(*destination)
         }
         // CR 611.2c: mass-bounce destination defaults to Hand.
-        Effect::BounceAll { destination, .. } => cause_for_zone(destination.unwrap_or(Zone::Hand)),
+        Effect::BounceAll { destination, .. } => {
+            this_way_cause_for_zone(destination.unwrap_or(Zone::Hand))
+        }
         Effect::ExileTop { .. } | Effect::ExileFromTopUntil { .. } => Some(ThisWayCause::Exiled),
         // CR 608.2c: a coercion (mass MustAttack) names no "<verb>ed this way" set —
         // "those creatures" is a bare frozen population, so its members carry no
@@ -5118,6 +5188,17 @@ pub(crate) fn this_way_cause_for_effect(effect: &Effect) -> Option<ThisWayCause>
         // Reveals, taps, counter producers, the RevealUntil kept card, and any
         // other producer do not name a "<verb>ed this way" set — leave them
         // unstamped (matched only by `caused_by: None`).
+        _ => None,
+    }
+}
+
+/// CR 400.7 + CR 608.2c: Map a requested one-shot zone destination to the
+/// producer-action vocabulary used by typed "this way" and completion data.
+pub(crate) fn this_way_cause_for_zone(destination: Zone) -> Option<ThisWayCause> {
+    match destination {
+        Zone::Exile => Some(ThisWayCause::Exiled),
+        Zone::Battlefield => Some(ThisWayCause::Returned),
+        Zone::Hand => Some(ThisWayCause::Bounced),
         _ => None,
     }
 }
@@ -5994,6 +6075,9 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
         Effect::RemoveCounter { .. } => {
             counters::remove_counter_optional_is_infeasible(state, ability)
         }
+        // CR 701.61a + CR 608.2d: A player cannot choose to forage unless at
+        // least one complete forage mode is currently available.
+        Effect::Forage => !forage::can_forage(state, ability),
         Effect::CastFromZone {
             mode,
             target,
@@ -7690,6 +7774,7 @@ pub(crate) enum PendingPlayerScopeSacrificeOutcome {
     Completed {
         events_before_sacrifice: usize,
         events_after_sacrifice: usize,
+        sacrificed_count: usize,
     },
 }
 
@@ -7698,6 +7783,7 @@ enum PlayerScopeSacrificePerformOutcome {
     Completed {
         events_before_sacrifice: usize,
         events_after_sacrifice: usize,
+        sacrificed_count: usize,
     },
 }
 
@@ -7960,6 +8046,7 @@ fn perform_player_scope_sacrifices(
             }
         }
     }
+    let sacrificed_count = completion.sacrificed.len();
     events.push(GameEvent::EffectResolved {
         kind: completion
             .effect_kind
@@ -7973,6 +8060,7 @@ fn perform_player_scope_sacrifices(
     Ok(PlayerScopeSacrificePerformOutcome::Completed {
         events_before_sacrifice,
         events_after_sacrifice,
+        sacrificed_count,
     })
 }
 
@@ -8130,9 +8218,11 @@ pub(crate) fn perform_collected_player_scope_sacrifices_with_completion(
         PlayerScopeSacrificePerformOutcome::Completed {
             events_before_sacrifice,
             events_after_sacrifice,
+            sacrificed_count,
         } => Ok(PendingPlayerScopeSacrificeOutcome::Completed {
             events_before_sacrifice,
             events_after_sacrifice,
+            sacrificed_count,
         }),
     }
 }
@@ -8231,9 +8321,11 @@ pub(crate) fn advance_pending_player_scope_sacrifice_choice(
         PlayerScopeSacrificePerformOutcome::Completed {
             events_before_sacrifice,
             events_after_sacrifice,
+            sacrificed_count,
         } => Ok(PendingPlayerScopeSacrificeOutcome::Completed {
             events_before_sacrifice,
             events_after_sacrifice,
+            sacrificed_count,
         }),
     }
 }
@@ -8260,9 +8352,11 @@ pub(crate) fn drain_pending_player_scope_sacrifice_after_replacement(
         PlayerScopeSacrificePerformOutcome::Completed {
             events_before_sacrifice,
             events_after_sacrifice,
+            sacrificed_count,
         } => Ok(PendingPlayerScopeSacrificeOutcome::Completed {
             events_before_sacrifice,
             events_after_sacrifice,
+            sacrificed_count,
         }),
     }
 }
@@ -9899,6 +9993,7 @@ fn resolve_chain_body(
 
     // CR 603.7: Snapshot event count so we can detect objects moved by this effect.
     let events_before = events.len();
+    let mut immediate_effect_result = None;
 
     // Skip no-op unimplemented/runtime-handled effects, and a random
     // `Effect::Choose` already resolved above by `resolve_random_in_chain`.
@@ -10166,7 +10261,11 @@ fn resolve_chain_body(
                     // resolution, mirroring the drain-path resume at depth 1.
                     let _ = resolve_ability_chain(state, iter_effective, events, depth.max(1));
                 } else {
-                    let _ = resolve_effect(state, iter_effective, events);
+                    if let Ok(result) = resolve_effect(state, iter_effective, events) {
+                        if iterations == 1 {
+                            immediate_effect_result = result;
+                        }
+                    }
                 }
                 // CR 608.2c + CR 109.5: When the inner effect enters an
                 // interactive WaitingFor (e.g. SearchChoice), stash the
@@ -10231,6 +10330,22 @@ fn resolve_chain_body(
         } // end shares_quality_failed else
     }
 
+    // CR 701.61a + CR 608.2c: Forage owns the nested B→C→tail chain it
+    // constructs at runtime. Its nested completion node is the sole publisher
+    // of the action and its ledgers; the outer frame must not walk or publish
+    // the same tail a second time.
+    if matches!(ability.effect, Effect::Forage) {
+        return Ok(());
+    }
+    // CR 608.2c + CR 701.55d: ChooseOneOf snapshots its runtime tail in the
+    // typed branch-choice carrier and attaches it only to the final selected
+    // branch. The generic walker must not also park the same sub-ability.
+    if matches!(ability.effect, Effect::ChooseOneOf { .. })
+        && matches!(state.waiting_for, WaitingFor::ChooseOneOfBranch { .. })
+    {
+        return Ok(());
+    }
+
     if matches!(ability.effect, Effect::ChangeZone { .. })
         && matches!(state.waiting_for, WaitingFor::Priority { .. })
         && state.active_change_zone_frame().is_none()
@@ -10281,6 +10396,15 @@ fn resolve_chain_body(
             _ => None,
         })
         .collect();
+    let result_context_owned;
+    let ability = if let Some(result) = immediate_effect_result {
+        let mut owned = ability.clone();
+        owned.context.prior_effect_result = Some(result);
+        result_context_owned = owned;
+        &result_context_owned
+    } else {
+        ability
+    };
     // CR 701.9a + CR 608.2c + CR 400.7: Capture the result from the active,
     // operation-owned discard frame. Unlike an event-slice or global ledger,
     // the frame remains exact through replacement redirection and cannot be
@@ -10344,6 +10468,19 @@ fn resolve_chain_body(
             state.player_actions_this_turn.push((*player_id, *action));
         }
     }
+
+    // CR 608.2c: Normalize the actual completion outcome before the printed
+    // tail is evaluated. A count/cause mismatch remains a resolved no-op and
+    // therefore keeps `WhenYouDo` / `IfYouDo` descendants false.
+    let completion_outcome_owned;
+    let ability = if matches!(ability.effect, Effect::CompletePlayerAction { .. }) {
+        let mut owned = ability.clone();
+        owned.set_optional_effect_performed_recursive(complete_player_action::succeeded(ability));
+        completion_outcome_owned = owned;
+        &completion_outcome_owned
+    } else {
+        ability
+    };
 
     // CR 603.7: Record the objects affected by this effect as a tracked set so
     // downstream sub-abilities can resolve "this way" references (pronouns,

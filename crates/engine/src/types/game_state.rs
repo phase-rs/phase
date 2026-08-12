@@ -3837,6 +3837,10 @@ pub struct PendingChooseOneOf {
     pub parent_targets: Vec<TargetRef>,
     #[serde(default)]
     pub context: super::ability::SpellContext,
+    /// CR 608.2c: Runtime tail retained until the final queued chooser selects
+    /// a branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<Box<super::ability::ResolvedAbility>>,
     /// CR 614.5 + CR 616.1f: replacement effects already applied to the event
     /// that produced this queued branch choice.
     #[serde(
@@ -10349,6 +10353,11 @@ pub enum WaitingFor {
         parent_targets: Vec<TargetRef>,
         #[serde(default)]
         context: super::ability::SpellContext,
+        /// CR 608.2c: Runtime continuation that follows the complete modal
+        /// choice. It is attached only to the final selected branch, after all
+        /// CR 701.55d choosers have resolved their instances.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continuation: Option<Box<super::ability::ResolvedAbility>>,
         /// CR 614.5 + CR 616.1f: replacement effects already applied to the
         /// event that produced this choice.
         #[serde(
@@ -27180,6 +27189,7 @@ mod tests {
             branch_descriptions: vec!["Draw a card.".to_string()],
             parent_targets: vec![],
             context: crate::types::ability::SpellContext::default(),
+            continuation: None,
             replacement_applied: Default::default(),
             remaining_players: vec![],
         }));

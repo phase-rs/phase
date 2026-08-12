@@ -987,6 +987,11 @@ pub(super) fn handle_replacement_choice(
                 // CR 101.4: a simultaneous each-player sacrifice paused by a
                 // CR 616.1 replacement choice resumes the already-announced
                 // remaining sacrifices before any parked continuation can run.
+                let sacrifice_source_id = state
+                    .pending_player_scope_sacrifice_choice
+                    .as_ref()
+                    .map(|pending| pending.ability.source_id)
+                    .expect("active sacrifice choice owns its source identity");
                 match effects::drain_pending_player_scope_sacrifice_after_replacement(state, events)
                     .map_err(|error| EngineError::InvalidAction(error.to_string()))?
                 {
@@ -994,7 +999,18 @@ pub(super) fn handle_replacement_choice(
                     effects::PendingPlayerScopeSacrificeOutcome::PausedForReplacement => {
                         waiting_for = state.waiting_for.clone();
                     }
-                    effects::PendingPlayerScopeSacrificeOutcome::Completed { .. } => {
+                    effects::PendingPlayerScopeSacrificeOutcome::Completed {
+                        sacrificed_count,
+                        ..
+                    } => {
+                        effects::stamp_active_player_action_completion(
+                            state,
+                            sacrifice_source_id,
+                            crate::types::ability::EffectResolutionResult {
+                                cause: crate::types::ability::ThisWayCause::Sacrificed,
+                                count: sacrificed_count,
+                            },
+                        );
                         effects::drain_pending_continuation(state, events);
                         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                             waiting_for = state.waiting_for.clone();
@@ -6864,6 +6880,7 @@ mod tests {
             branch_descriptions: Vec::new(),
             parent_targets: Vec::new(),
             context: Default::default(),
+            continuation: None,
             replacement_applied: Default::default(),
             remaining_players: Vec::new(),
         };

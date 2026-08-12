@@ -5525,6 +5525,7 @@ mod tests {
                 branches: Vec::new(),
                 parent_targets: Vec::new(),
                 context: SpellContext::default(),
+                continuation: None,
                 replacement_applied: HashSet::new(),
                 remaining_players: Vec::new(),
             },

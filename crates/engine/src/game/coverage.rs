@@ -3712,6 +3712,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::ChangeTargets { .. }
         | Effect::ExchangeControl { .. }
         | Effect::Forage
+        | Effect::CompletePlayerAction { .. }
         | Effect::Harness
         | Effect::Learn
         | Effect::NoteManaSpent
@@ -6586,6 +6587,7 @@ fn visit_direct_effect_ability_payloads<'a>(
         | Effect::Adapt { .. }
         | Effect::Learn
         | Effect::Forage
+        | Effect::CompletePlayerAction { .. }
         | Effect::Harness
         | Effect::CollectEvidence { .. }
         | Effect::Endure { .. }

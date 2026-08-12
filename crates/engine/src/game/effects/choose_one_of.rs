@@ -50,6 +50,7 @@ pub fn resolve(
             branches,
             parent_targets: ability.targets.clone(),
             context: ability.context.clone(),
+            continuation: ability.sub_ability.clone(),
             replacement_applied: ability.replacement_applied.clone(),
             players,
         },
@@ -69,6 +70,7 @@ pub(crate) struct PromptRequest {
     pub branches: Vec<AbilityDefinition>,
     pub parent_targets: Vec<TargetRef>,
     pub context: crate::types::ability::SpellContext,
+    pub continuation: Option<Box<ResolvedAbility>>,
     pub replacement_applied: HashSet<AppliedReplacementKey>,
     pub players: Vec<PlayerId>,
 }
@@ -80,6 +82,7 @@ pub(crate) fn prompt_next(state: &mut GameState, request: PromptRequest) {
         branches,
         parent_targets,
         context,
+        continuation,
         replacement_applied,
         mut players,
     } = request;
@@ -96,6 +99,7 @@ pub(crate) fn prompt_next(state: &mut GameState, request: PromptRequest) {
         branch_descriptions,
         parent_targets,
         context,
+        continuation,
         replacement_applied,
         remaining_players: players,
     };
@@ -125,6 +129,7 @@ pub(crate) fn resume_pending(state: &mut GameState, _events: &mut Vec<GameEvent>
             branches: pending.branches,
             parent_targets: pending.parent_targets,
             context: pending.context,
+            continuation: pending.continuation,
             replacement_applied: pending.replacement_applied,
             players: pending.remaining_players,
         },
@@ -138,6 +143,7 @@ pub(crate) struct BranchSelection {
     pub branches: Vec<AbilityDefinition>,
     pub parent_targets: Vec<TargetRef>,
     pub context: crate::types::ability::SpellContext,
+    pub continuation: Option<Box<ResolvedAbility>>,
     pub replacement_applied: HashSet<AppliedReplacementKey>,
     pub remaining_players: Vec<PlayerId>,
     pub index: usize,
@@ -155,6 +161,7 @@ pub(crate) fn resolve_branch(
         branches,
         parent_targets,
         context,
+        continuation,
         replacement_applied,
         remaining_players,
         index,
@@ -164,14 +171,16 @@ pub(crate) fn resolve_branch(
             "ChooseOneOf branch index {index} out of range"
         )));
     };
+    let is_final_chooser = remaining_players.is_empty();
 
-    if !remaining_players.is_empty() {
+    if !is_final_chooser {
         state.push_choose_one_of(PendingChooseOneOf {
             controller,
             source_id,
             branches: branches.clone(),
             parent_targets: parent_targets.clone(),
             context: context.clone(),
+            continuation: continuation.clone(),
             replacement_applied: replacement_applied.clone(),
             remaining_players,
         });
@@ -188,6 +197,16 @@ pub(crate) fn resolve_branch(
         .any(|target| matches!(target, TargetRef::Player(pid) if *pid == player))
     {
         resolved.targets.push(TargetRef::Player(player));
+    }
+
+    // CR 608.2c + CR 701.55d: Instructions after a multi-player branch choice
+    // run once, after the final chooser's selected branch. Keeping the runtime
+    // continuation in the typed choice carrier preserves its exact resolved
+    // context without converting it back into an AbilityDefinition.
+    if is_final_chooser {
+        if let Some(continuation) = continuation {
+            crate::game::ability_utils::append_to_sub_chain(&mut resolved, *continuation);
+        }
     }
 
     super::resolve_ability_chain(state, &resolved, events, 1)?;
@@ -520,6 +539,64 @@ mod tests {
         assert_eq!(state.players[0].life, 22);
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         assert!(state.resolution_stack.is_empty());
+    }
+
+    #[test]
+    fn multi_chooser_runtime_tail_runs_once_after_final_choice() {
+        // CR 701.55d + CR 608.2c: each instructed player resolves a branch in
+        // APNAP order, then the instruction following the whole choice runs
+        // once. It must not run after every player's branch.
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        );
+        let tail = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 10 },
+                player: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Opponent,
+                branches: vec![branch],
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        )
+        .sub_ability(tail);
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).expect("first opponent is prompted");
+        apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 })
+            .expect("first opponent chooses a branch");
+        assert_eq!(
+            state.players[0].life, 21,
+            "the outer tail cannot run before the final chooser"
+        );
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ChooseOneOfBranch {
+                player: PlayerId(2),
+                ..
+            }
+        ));
+
+        apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 })
+            .expect("final opponent chooses a branch");
+        assert_eq!(
+            state.players[0].life, 32,
+            "two branch gains plus exactly one ten-life outer tail"
+        );
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     }
 
     #[test]

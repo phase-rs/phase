@@ -16106,9 +16106,14 @@ mod stage2_injector_tests {
                 // shifts combine with #6958's paid-cast outcome exclusion and
                 // #6976's conditional-branch exclusions. None creates an
                 // `OptionalEffect` prompt. Re-pinned against the merged source.
-                "game/effects/mod.rs:6306".to_string(),
-                "game/effects/mod.rs:6383".to_string(),
-                "game/effects/mod.rs:9578".to_string(),
+                // #7221 adds the typed player-action completion seam above all three
+                // producers: `:6306/:6383/:9578 => :6390/:6467/:9672`. The first
+                // two move by +84; the third also includes ten lines added inside
+                // `resolve_chain_body`. The census and partition assertions above
+                // remain unchanged, and each producer remains in its named function.
+                "game/effects/mod.rs:6390".to_string(),
+                "game/effects/mod.rs:6467".to_string(),
+                "game/effects/mod.rs:9672".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.

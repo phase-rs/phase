@@ -2433,7 +2433,9 @@ export type PlayerActionKind =
   | "CollectEvidence"
   | "ShuffledLibrary"
   | "Proliferate"
-  | "Investigate";
+  | "Investigate"
+  | "Draw"
+  | "Forage";
 
 export type GameEvent =
   | { type: "GameStarted" }

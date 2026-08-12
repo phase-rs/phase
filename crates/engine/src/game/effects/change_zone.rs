@@ -4,8 +4,8 @@ use crate::game::game_object::AttachTarget;
 #[cfg(test)]
 use crate::game::zones;
 use crate::types::ability::{
-    ControllerRef, Duration, Effect, EffectError, EffectKind, FilterProp, LibraryPosition,
-    QuantityExpr, ResolvedAbility, TargetChoiceTiming, TargetFilter, TargetRef,
+    ControllerRef, Duration, Effect, EffectError, EffectKind, EffectResolutionResult, FilterProp,
+    LibraryPosition, QuantityExpr, ResolvedAbility, TargetChoiceTiming, TargetFilter, TargetRef,
     TargetSelectionMode, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
@@ -410,7 +410,8 @@ pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
-) -> Result<(), EffectError> {
+) -> Result<Option<EffectResolutionResult>, EffectError> {
+    let events_before = events.len();
     let (
         origin,
         dest_zone,
@@ -480,6 +481,11 @@ pub fn resolve(
             )
         }
         _ => return Err(EffectError::MissingParam("Destination".to_string())),
+    };
+
+    let completed_result = |count| {
+        super::this_way_cause_for_zone(dest_zone)
+            .map(|cause| EffectResolutionResult { cause, count })
     };
 
     let mut origin = origin;
@@ -605,7 +611,7 @@ pub fn resolve(
                 source_id: ability.source_id,
                 subject: None,
             });
-            return Ok(());
+            return Ok(completed_result(0));
         }
 
         // CR 400.7: SelfRef resolves only to the exact source or, for a departure
@@ -618,7 +624,7 @@ pub fn resolve(
                 source_id: ability.source_id,
                 subject: None,
             });
-            return Ok(());
+            return Ok(completed_result(0));
         }
 
         // CR 400.7 + CR 603.7c: a delayed ability whose pinned referent became a
@@ -639,7 +645,7 @@ pub fn resolve(
                 source_id: ability.source_id,
                 subject: None,
             });
-            return Ok(());
+            return Ok(completed_result(0));
         }
 
         // CR 701.23b + CR 401.2: Interactive library-step fail-to-find guard.
@@ -678,7 +684,7 @@ pub fn resolve(
                 source_id: ability.source_id,
                 subject: None,
             });
-            return Ok(());
+            return Ok(completed_result(0));
         }
 
         // CR 608.2c: A tracked-set filter ("from among the milled cards" / "X
@@ -757,7 +763,7 @@ pub fn resolve(
                 source_id: ability.source_id,
                 subject: None,
             });
-            return Ok(());
+            return Ok(completed_result(0));
         }
 
         if eligible.is_empty() {
@@ -769,7 +775,7 @@ pub fn resolve(
                 source_id: ability.source_id,
                 subject: None,
             });
-            return Ok(());
+            return Ok(completed_result(0));
         }
 
         if matches!(ability.target_selection_mode, TargetSelectionMode::Random)
@@ -844,9 +850,9 @@ pub fn resolve(
                         ability.source_id,
                     );
                     crate::game::replacement::park_waiting_for(state, player);
-                    return Ok(());
+                    return Ok(None);
                 }
-                ZoneMoveResult::NeedsAuraAttachmentChoice => return Ok(()),
+                ZoneMoveResult::NeedsAuraAttachmentChoice => return Ok(None),
             }
 
             // CR 614.13a: single-pick entry completed (Done branch) — clear the
@@ -865,7 +871,11 @@ pub fn resolve(
                 source_id: ability.source_id,
                 subject: None,
             });
-            return Ok(());
+            return Ok(completed_result(count_selected_zone_arrivals(
+                &events[events_before..],
+                &[chosen],
+                dest_zone,
+            )));
         }
 
         if eligible.len() == 1 && !choice_up_to && choice_count == 1 {
@@ -936,9 +946,9 @@ pub fn resolve(
                         ability.source_id,
                     );
                     crate::game::replacement::park_waiting_for(state, player);
-                    return Ok(());
+                    return Ok(None);
                 }
-                ZoneMoveResult::NeedsAuraAttachmentChoice => return Ok(()),
+                ZoneMoveResult::NeedsAuraAttachmentChoice => return Ok(None),
             }
 
             // CR 614.13a: single-pick entry completed (Done branch) — clear the
@@ -957,7 +967,11 @@ pub fn resolve(
                 source_id: ability.source_id,
                 subject: None,
             });
-            return Ok(());
+            return Ok(completed_result(count_selected_zone_arrivals(
+                &events[events_before..],
+                &[chosen],
+                dest_zone,
+            )));
         }
 
         state.waiting_for = WaitingFor::EffectZoneChoice {
@@ -998,7 +1012,7 @@ pub fn resolve(
         };
         // EffectResolved is emitted by the EffectZoneChoice handler after the player chooses
         // (matching the DiscardChoice pattern — single authority for the event).
-        return Ok(());
+        return Ok(None);
     }
 
     let ctx = ChangeZoneIterationCtx {
@@ -1155,7 +1169,7 @@ pub fn resolve(
                         effect_kind: EffectKind::from(&ability.effect),
                     },
                 );
-                return Ok(());
+                return Ok(None);
             }
             crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsChoice(player) => {
                 // CR 614.12b + CR 614.1c + CR 614.13: stash the unprocessed targets
@@ -1220,7 +1234,7 @@ pub fn resolve(
                 crate::game::replacement::park_waiting_for(state, player);
                 // EffectResolved is emitted by the drain after the loop completes —
                 // do NOT emit here.
-                return Ok(());
+                return Ok(None);
             }
         }
     }
@@ -1256,7 +1270,30 @@ pub fn resolve(
         subject: None,
     });
 
-    Ok(())
+    Ok(completed_result(count_selected_zone_arrivals(
+        &events[events_before..],
+        &targeted_objects,
+        dest_zone,
+    )))
+}
+
+/// CR 614.6 + CR 608.2c: Count only selected members that actually arrived in
+/// the requested destination during this operation's exact event slice.
+pub(crate) fn count_selected_zone_arrivals(
+    events: &[GameEvent],
+    selected: &[ObjectId],
+    destination: Zone,
+) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::ZoneChanged { object_id, to, .. }
+                    if *to == destination && selected.contains(object_id)
+            )
+        })
+        .count()
 }
 
 /// CR 122.1 + CR 614.1c: Merge unconditional and conditional entry-time counters
