@@ -27566,6 +27566,9 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
     if let Some(else_branch) = def.else_ability.as_mut() {
         rewrite_player_scope_refs(else_branch);
     }
+    for mode_ability in &mut def.mode_abilities {
+        rewrite_player_scope_refs(mode_ability);
+    }
 }
 
 /// CR 608.2 + CR 109.5: Apply `rewrite_player_scope_refs` rooted at every def in
@@ -27594,6 +27597,9 @@ fn apply_player_scope_rewrites(def: &mut AbilityDefinition) {
     }
     if let Some(else_branch) = def.else_ability.as_mut() {
         apply_player_scope_rewrites(else_branch);
+    }
+    for mode_ability in &mut def.mode_abilities {
+        apply_player_scope_rewrites(mode_ability);
     }
 }
 

@@ -45,6 +45,52 @@ fn each_target_filter_mut_does_not_visit_shuffle() {
 }
 
 #[test]
+fn player_scope_rewrite_reaches_modal_mode_abilities() {
+    let mode = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Discard {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::Target,
+                },
+            },
+            target: TargetFilter::Controller,
+        },
+    );
+    let mut def = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    )
+    .player_scope(PlayerFilter::All)
+    .with_modal(
+        ModalChoice {
+            min_choices: 1,
+            max_choices: 1,
+            mode_count: 1,
+            ..Default::default()
+        },
+        vec![mode],
+    );
+
+    apply_player_scope_rewrites(&mut def);
+
+    assert!(matches!(
+        def.mode_abilities[0].effect.as_ref(),
+        Effect::Discard {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::ScopedPlayer,
+                },
+            },
+            target: TargetFilter::ScopedPlayer,
+        }
+    ));
+}
+
+#[test]
 fn do_the_same_type_rewrite_does_not_overwrite_logical_target_leaves() {
     let original = TargetFilter::And {
         filters: vec![TargetFilter::Typed(TypedFilter::creature())],
@@ -17885,7 +17931,7 @@ fn temporal_prefix_in_effect_chain() {
 #[test]
 fn temporal_prefix_preserves_full_delayed_effect_chain() {
     let def = parse_effect_chain(
-        "At the beginning of the next end step, each player discards their hand and returns to their hand each card they exiled this way.",
+        "At the beginning of the next end step, each player discards their hand, then returns to their hand each card they exiled this way.",
         AbilityKind::Spell,
     );
     let Effect::CreateDelayedTrigger {
