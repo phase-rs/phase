@@ -37,7 +37,7 @@ fn paid_life_amount_for_cost(
                 .unwrap_or(0),
         ),
         AbilityCost::Composite { costs } => {
-            let mut total = None;
+            let mut total: Option<u32> = None;
             for cost in costs {
                 if let Some(amount) = paid_life_amount_for_cost(state, ability, cost) {
                     total = Some(total.unwrap_or(0).saturating_add(amount));
