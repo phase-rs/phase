@@ -16426,7 +16426,7 @@ mod stage2_injector_tests {
                 //
                 // SET PRESERVATION: unchanged. Upstream adds no line matching the needle to this file and
                 // neither does this branch — total still 37, partition still 5/7/25.
-                "game/engine.rs:12006".to_string(),
+                "game/engine.rs:12004".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \
