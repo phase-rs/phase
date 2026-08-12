@@ -314,7 +314,11 @@ pub fn is_triggered_mana_ability(
     // above for the deliberately-not-yet-widened `AbilityActivated` axis.
     matches!(
         trigger_event,
-        Some(GameEvent::TappedForMana { .. } | GameEvent::ManaAdded { .. })
+        Some(
+            GameEvent::TappedForMana { .. }
+                | GameEvent::ManaAbilityProduced { .. }
+                | GameEvent::ManaAdded { .. }
+        )
     )
 }
 
@@ -441,7 +445,9 @@ pub fn resolve_triggered_mana_ability_inline(
     let node = source.map(|source| {
         let caused_by = match trigger_event {
             Some(
-                GameEvent::ManaAdded { source_id, .. } | GameEvent::TappedForMana { source_id, .. },
+                GameEvent::ManaAdded { source_id, .. }
+                | GameEvent::TappedForMana { source_id, .. }
+                | GameEvent::ManaAbilityProduced { source_id, .. },
             ) => state
                 .resolved_rules_journal
                 .latest_mana_producer_for_source(*source_id),
@@ -724,6 +730,18 @@ fn produce_mana_from_ability(
                 obj.chosen_attributes.push(ChosenAttribute::Color(color));
             }
         }
+    }
+
+    // CR 605.1b: Emit one aggregate event for every mana-ability resolution,
+    // including abilities without a tap cost. Its output vector lets triggered
+    // mana abilities inspect the whole resolution exactly once.
+    if !produced_for_tap_event.is_empty() {
+        events.push(GameEvent::ManaAbilityProduced {
+            player_id: player,
+            source_id,
+            produced: produced_for_tap_event.clone(),
+            trigger_state: crate::types::events::ManaAbilityTriggerState::Pending,
+        });
     }
 
     // CR 106.12a: an "is tapped for mana" trigger fires once per resolution of

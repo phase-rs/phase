@@ -458,6 +458,9 @@ pub enum TriggerMode {
     // Mana
     /// CR 106.4: Triggers when mana is added to a player's mana pool.
     ManaAdded,
+    /// CR 605.1b: Triggers once when a qualifying activated mana ability
+    /// resolves and produces mana, including non-tap mana abilities.
+    ManaAbilityProduced,
     ManaExpend,
 
     // Land
@@ -749,6 +752,7 @@ impl FromStr for TriggerMode {
             "LifeLostAll" => TriggerMode::LifeLostAll,
             "LosesGame" => TriggerMode::LosesGame,
             "ManaAdded" => TriggerMode::ManaAdded,
+            "ManaAbilityProduced" => TriggerMode::ManaAbilityProduced,
             "ManaExpend" => TriggerMode::ManaExpend,
             "ManifestDread" => TriggerMode::ManifestDread,
             "Mentored" => TriggerMode::Mentored,
@@ -1089,6 +1093,7 @@ mod tests {
             "LosesGame",
             "LoyaltyAbilityActivated",
             "ManaAdded",
+            "ManaAbilityProduced",
             "ManaExpend",
             "ManifestDread",
             "Mentored",

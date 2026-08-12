@@ -270,7 +270,8 @@ pub fn resolve(
             .current_trigger_event
             .as_ref()
             .and_then(|event| match event {
-                GameEvent::TappedForMana { player_id, .. } => Some(*player_id),
+                GameEvent::TappedForMana { player_id, .. }
+                | GameEvent::ManaAbilityProduced { player_id, .. } => Some(*player_id),
                 _ => None,
             })
             .unwrap_or(ability.controller),
@@ -867,7 +868,10 @@ fn resolve_mana_types_impl(
         ManaProduction::TriggerEventManaType => {
             use crate::types::events::GameEvent;
             match &state.current_trigger_event {
-                Some(GameEvent::TappedForMana { produced, .. }) => {
+                Some(
+                    GameEvent::TappedForMana { produced, .. }
+                    | GameEvent::ManaAbilityProduced { produced, .. },
+                ) => {
                     let distinct: std::collections::HashSet<_> = produced.iter().copied().collect();
                     distinct.into_iter().collect()
                 }

@@ -2199,15 +2199,23 @@ fn collect_matching_triggers_inner(
             // marker so manual `TapLandForMana` taps (still `FromTap`) still
             // fire, and on `is_triggered_mana_ability` so non-mana `TapsForMana`
             // triggers still fire (CR 603.3).
-            if matches!(trig_def.mode, TriggerMode::TapsForMana)
-                && matches!(
-                    event,
+            if matches!(
+                (trig_def.mode.clone(), event),
+                (
+                    TriggerMode::TapsForMana,
                     GameEvent::TappedForMana {
                         tap_state: ManaTapState::FromTapTriggersResolved,
                         ..
                     }
+                ) | (
+                    TriggerMode::ManaAbilityProduced,
+                    GameEvent::ManaAbilityProduced {
+                        trigger_state:
+                            crate::types::events::ManaAbilityTriggerState::InlineResolved,
+                        ..
+                    }
                 )
-                && super::mana_abilities::is_triggered_mana_ability(&ability, Some(event))
+            ) && super::mana_abilities::is_triggered_mana_ability(&ability, Some(event))
             {
                 continue;
             }
@@ -2822,15 +2830,30 @@ fn inline_tap_mana_trigger_abilities(
         for active in super::functioning_abilities::active_trigger_definitions(state, object) {
             let definition_ref = active.definition_ref.clone();
             let trigger_definition = active.definition;
-            if !matches!(trigger_definition.mode, TriggerMode::TapsForMana) {
+            if !matches!(
+                trigger_definition.mode,
+                TriggerMode::TapsForMana | TriggerMode::ManaAbilityProduced
+            ) {
                 continue;
             }
-            if !super::trigger_matchers::match_taps_for_mana(
-                tap_event,
-                trigger_definition,
-                &source_context,
-                state,
-            ) {
+            let matches_event = match trigger_definition.mode {
+                TriggerMode::TapsForMana => super::trigger_matchers::match_taps_for_mana(
+                    tap_event,
+                    trigger_definition,
+                    &source_context,
+                    state,
+                ),
+                TriggerMode::ManaAbilityProduced => {
+                    super::trigger_matchers::match_mana_ability_produced(
+                        tap_event,
+                        trigger_definition,
+                        &source_context,
+                        state,
+                    )
+                }
+                _ => false,
+            };
+            if !matches_event {
                 continue;
             }
             let mut ability = build_triggered_ability_from_context(
@@ -2886,6 +2909,12 @@ pub(super) fn resolve_tap_mana_triggers_inline(
             Some(
                 ev @ GameEvent::TappedForMana {
                     tap_state: ManaTapState::FromTap,
+                    ..
+                },
+            ) => ev.clone(),
+            Some(
+                ev @ GameEvent::ManaAbilityProduced {
+                    trigger_state: crate::types::events::ManaAbilityTriggerState::Pending,
                     ..
                 },
             ) => ev.clone(),
@@ -2964,6 +2993,9 @@ pub(super) fn resolve_tap_mana_triggers_inline(
             if matches!(tap_state, ManaTapState::FromTap) {
                 *tap_state = ManaTapState::FromTapTriggersResolved;
             }
+        }
+        if let GameEvent::ManaAbilityProduced { trigger_state, .. } = ev {
+            *trigger_state = crate::types::events::ManaAbilityTriggerState::InlineResolved;
         }
     }
 

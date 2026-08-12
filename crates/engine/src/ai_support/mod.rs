@@ -1013,6 +1013,12 @@ fn resolve_mana_option_for_trigger_probe(
             produced: vec![option.mana_type],
             tap_state: ManaTapState::FromTap,
         });
+        events.push(GameEvent::ManaAbilityProduced {
+            player_id: player,
+            source_id: option.object_id,
+            produced: vec![option.mana_type],
+            trigger_state: crate::types::events::ManaAbilityTriggerState::Pending,
+        });
     }
 
     triggers::events_would_queue_non_mana_trigger(&mut probe, &events)
@@ -1770,7 +1776,8 @@ fn beneficial_mana_tap_trigger_hold(
                     // same predicates the trigger resolver uses. `taps_for_mana_card_matches`
                     // ignores `taps_for_mana_produced`, so a produced-mana filter is
                     // treated as matching (over-approx, err-to-hold).
-                    crate::types::triggers::TriggerMode::TapsForMana => {
+                    crate::types::triggers::TriggerMode::TapsForMana
+                    | crate::types::triggers::TriggerMode::ManaAbilityProduced => {
                         crate::game::trigger_matchers::taps_for_mana_card_matches(
                             trigger,
                             state,

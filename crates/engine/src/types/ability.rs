@@ -4719,6 +4719,9 @@ pub enum FilterProp {
     /// looking up the name from `state.objects` (or `lki_cache` if the target
     /// has already left its zone).
     SameNameAsParentTarget,
+    /// CR 607.2a + CR 201.2: Matches an object whose name equals a card durably
+    /// exiled by this ability's source. Used by the Extraplanar Lens class.
+    SameNameAsExiledBySource,
     /// CR 201.2 + CR 201.2a: Matches objects whose name equals the name of any
     /// permanent currently on the battlefield. `controller` optionally narrows
     /// the pool of permanents whose names are considered (None = any controller,
@@ -21811,6 +21814,12 @@ pub struct TriggerDefinition {
     /// mana type (the "for mana" form). Ignored by other trigger modes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub taps_for_mana_produced: Option<Vec<ManaType>>,
+    /// CR 605.1b: Aggregate mana-ability production predicate for
+    /// `TriggerMode::ManaAbilityProduced`. Kept separate from
+    /// `taps_for_mana_produced`: the latter describes the distinct CR 106.12a
+    /// "is tapped for mana" event family.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mana_ability_produced: Option<ManaAbilityProducedFilter>,
     /// CR 701.30d + CR 603.4: Required clash outcome for "Whenever you clash and
     /// win" triggers (Sylvan Echoes). `Some(ClashResult::Won)` narrows the trigger
     /// so it MATCHES only when the ability's controller WON the clash — the win
@@ -21822,6 +21831,14 @@ pub struct TriggerDefinition {
     /// controller (see `ClashResult::for_player` / `match_clash`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clash_result: Option<ClashResult>,
+}
+
+/// CR 605.1b: Which aggregate mana output a mana-ability trigger requires.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ManaAbilityProducedFilter {
+    /// At least one output unit has the source permanent's chosen color.
+    SourceChosenColor,
 }
 
 /// Monotonic identity for one intentionally-installed ordered base trigger set.
@@ -22289,6 +22306,7 @@ impl TriggerDefinition {
             coin_flip_result: None,
             die_result: None,
             taps_for_mana_produced: None,
+            mana_ability_produced: None,
             clash_result: None,
         }
     }
@@ -26960,6 +26978,7 @@ mod tests {
             coin_flip_result: None,
             die_result: None,
             taps_for_mana_produced: None,
+            mana_ability_produced: None,
             clash_result: None,
         };
         let json = serde_json::to_string(&trigger).unwrap();

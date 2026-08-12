@@ -10634,6 +10634,53 @@ fn trigger_you_tap_a_land_for_colorless_mana() {
 }
 
 #[test]
+fn caged_sun_uses_aggregate_land_mana_production() {
+    let def = parse_trigger_line(
+        "Whenever a land's ability causes you to add one or more mana of the chosen color, add an additional one mana of that color.",
+        "Caged Sun",
+    );
+    assert_eq!(def.mode, TriggerMode::ManaAbilityProduced);
+    assert_eq!(def.valid_card, Some(TargetFilter::Typed(TypedFilter::land())));
+    assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    assert!(matches!(
+        def.mana_ability_produced,
+        Some(crate::types::ability::ManaAbilityProducedFilter::SourceChosenColor)
+    ));
+    assert!(matches!(
+        def.execute.as_deref().map(|ability| ability.effect.as_ref()),
+        Some(Effect::Mana {
+            produced: ManaProduction::ChosenColor { .. },
+            ..
+        })
+    ));
+}
+
+#[test]
+fn extraplanar_lens_uses_source_linked_name_filter() {
+    let def = parse_trigger_line(
+        "Whenever a land with the same name as the exiled card is tapped for mana, its controller adds one mana of any type that land produced.",
+        "Extraplanar Lens",
+    );
+    assert_eq!(def.mode, TriggerMode::TapsForMana);
+    let Some(TargetFilter::Typed(filter)) = def.valid_card else {
+        panic!("expected a typed land filter");
+    };
+    assert_eq!(filter.type_filters, vec![TypeFilter::Land]);
+    assert!(
+        filter
+            .properties
+            .contains(&FilterProp::SameNameAsExiledBySource)
+    );
+    assert!(matches!(
+        def.execute.as_deref().map(|ability| ability.effect.as_ref()),
+        Some(Effect::Mana {
+            produced: ManaProduction::TriggerEventManaType,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn trigger_forbidden_orchard_targets_opponent_token_owner() {
     let def = parse_trigger_line(
             "Whenever you tap Forbidden Orchard for mana, target opponent creates a 1/1 colorless Spirit creature token.",
