@@ -10640,14 +10640,19 @@ fn caged_sun_uses_aggregate_land_mana_production() {
         "Caged Sun",
     );
     assert_eq!(def.mode, TriggerMode::ManaAbilityProduced);
-    assert_eq!(def.valid_card, Some(TargetFilter::Typed(TypedFilter::land())));
+    assert_eq!(
+        def.valid_card,
+        Some(TargetFilter::Typed(TypedFilter::land()))
+    );
     assert_eq!(def.valid_target, Some(TargetFilter::Controller));
     assert!(matches!(
         def.mana_ability_produced,
         Some(crate::types::ability::ManaAbilityProducedFilter::SourceChosenColor)
     ));
     assert!(matches!(
-        def.execute.as_deref().map(|ability| ability.effect.as_ref()),
+        def.execute
+            .as_deref()
+            .map(|ability| ability.effect.as_ref()),
         Some(Effect::Mana {
             produced: ManaProduction::ChosenColor { .. },
             ..
@@ -10666,13 +10671,13 @@ fn extraplanar_lens_uses_source_linked_name_filter() {
         panic!("expected a typed land filter");
     };
     assert_eq!(filter.type_filters, vec![TypeFilter::Land]);
-    assert!(
-        filter
-            .properties
-            .contains(&FilterProp::SameNameAsExiledBySource)
-    );
+    assert!(filter
+        .properties
+        .contains(&FilterProp::SameNameAsExiledBySource));
     assert!(matches!(
-        def.execute.as_deref().map(|ability| ability.effect.as_ref()),
+        def.execute
+            .as_deref()
+            .map(|ability| ability.effect.as_ref()),
         Some(Effect::Mana {
             produced: ManaProduction::TriggerEventManaType,
             ..
