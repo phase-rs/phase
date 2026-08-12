@@ -733,7 +733,10 @@ impl ResolutionStack {
                 ) {
                     return Ok(None);
                 }
-                let ResolutionFrame::AbilityContinuation(frame) = self.frames.remove(parent_index)
+                let child_index = self.frames.len() - 1;
+                self.frames.swap(parent_index, child_index);
+                let ResolutionFrame::AbilityContinuation(frame) =
+                    self.pop_expected(FrameKind::AbilityContinuation)?
                 else {
                     unreachable!("checked batch parent must retain its frame kind")
                 };
