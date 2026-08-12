@@ -288,6 +288,9 @@ fn harsh_mentor_punishes_opponent_nonmana_permanent_abilities_only() {
         let source = source.from_oracle_text(oracle).id();
 
         let mut runner = scenario.build();
+        runner
+            .act(GameAction::PassPriority)
+            .expect("the active player must be able to pass priority to P1");
         runner.activate(source, 0).resolve().life_delta(P1)
     }
 
