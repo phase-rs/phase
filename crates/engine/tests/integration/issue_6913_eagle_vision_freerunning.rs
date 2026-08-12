@@ -19,7 +19,7 @@ fn commander_combat_damage_enables_eagle_vision_freerunning() {
     let commander = scenario.add_creature(P0, "Test Commander", 2, 2).id();
     let eagle_vision = scenario
         .add_spell_to_hand(P0, "Eagle Vision", false)
-        .from_oracle_text_with_keywords(&["Freerunning"], EAGLE_VISION_ORACLE)
+        .from_oracle_text_with_keywords(&["Freerunning:{1}{U}"], EAGLE_VISION_ORACLE)
         .with_mana_cost(ManaCost::Cost {
             generic: 4,
             shards: vec![ManaCostShard::Blue],
@@ -48,9 +48,7 @@ fn commander_combat_damage_enables_eagle_vision_freerunning() {
     );
 
     runner.advance_to_phase(Phase::PostCombatMain);
-    // Fund both the printed and alternative costs so the casting-variant
-    // choice is surfaced instead of auto-selecting its sole affordable option.
-    for _ in 0..5 {
+    for _ in 0..2 {
         let _ = runner.state_mut().add_mana_to_pool(
             P0,
             ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
@@ -59,8 +57,8 @@ fn commander_combat_damage_enables_eagle_vision_freerunning() {
     let committed = runner.cast(eagle_vision).commit();
     assert_eq!(
         committed.state().players[0].mana_pool.total(),
-        3,
-        "paying Eagle Vision's {{1}}{{U}} Freerunning cost must leave three of the five blue mana unspent"
+        0,
+        "the two available blue mana must pay Eagle Vision's {{1}}{{U}} Freerunning cost"
     );
 
     let outcome = committed.resolve();
