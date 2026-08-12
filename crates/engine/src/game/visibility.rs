@@ -1799,6 +1799,7 @@ fn redact_printed_identity(obj: &mut crate::game::game_object::GameObject) {
     obj.parse_warnings.clear();
     obj.back_face = None;
     obj.specialize_faces = None;
+    obj.specialized_color = None;
     obj.cleave_variant = None;
     obj.modal = None;
     obj.additional_cost = None;
@@ -1822,6 +1823,7 @@ fn redact_printed_identity(obj: &mut crate::game::game_object::GameObject) {
     Arc::make_mut(&mut obj.base_static_definitions).clear();
     obj.base_color.clear();
     obj.base_printed_ref = None;
+    obj.room_unlocks = None;
 }
 
 fn hide_card(state: &mut GameState, obj_id: ObjectId) {
@@ -1940,7 +1942,7 @@ mod tests {
         ManaAbilityResume, MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingBeginGameAbility,
         PendingCast, PendingCostMoveCompletion, PendingCostMoveResume, PendingManaAbility,
         PendingScopedLibrarySearch, PendingSearchFoundBatch, PreparedScopedLibrarySearchChoice,
-        TargetEffectDetail,
+        RoomUnlockState, TargetEffectDetail,
     };
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
@@ -2827,6 +2829,10 @@ mod tests {
             obj.base_card_types = card_types;
             obj.mana_cost = ManaCost::generic(7);
             obj.base_mana_cost = ManaCost::generic(7);
+            obj.room_unlocks = Some(RoomUnlockState {
+                left_unlocked: true,
+                right_unlocked: false,
+            });
         }
 
         let owner_view = filter_state_for_viewer(&state, PlayerId(1));
@@ -2845,6 +2851,13 @@ mod tests {
         assert_eq!(owned.base_toughness, Some(9));
         assert_ne!(owned.base_card_types, CardType::default());
         assert_eq!(owned.base_mana_cost, ManaCost::generic(7));
+        assert_eq!(
+            owned.room_unlocks,
+            Some(RoomUnlockState {
+                left_unlocked: true,
+                right_unlocked: false,
+            })
+        );
 
         let opponent_view = filter_state_for_viewer(&state, PlayerId(0));
         let hidden = opponent_view.objects.get(&card_id).unwrap();
@@ -2862,6 +2875,7 @@ mod tests {
         assert_eq!(hidden.base_card_types, CardType::default());
         assert_eq!(hidden.mana_cost, ManaCost::default());
         assert_eq!(hidden.base_mana_cost, ManaCost::default());
+        assert!(hidden.room_unlocks.is_none());
 
         let serialized = serde_json::to_string(hidden).unwrap();
         for secret in [
