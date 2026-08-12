@@ -3125,12 +3125,28 @@ fn filter_inner_for_object(
         // `ObjectScope::EventTarget`; inert (matches nothing) outside a trigger.
         TargetFilter::EventTarget => crate::game::quantity::triggering_event_target_object(state)
             .is_some_and(|damaged| damaged == object_id),
-        // ParentTarget/ParentTargetController/ParentTargetOwner/PostReplacementSourceController
+        // CR 400.7 + CR 603.7c: a parent object can be the member predicate of
+        // a tracked-set continuation. In that one scan-based path, match the
+        // creation-time target only while its recorded incarnation is current.
+        TargetFilter::ParentTarget => ability.is_some_and(|ability| {
+            !ability.target_incarnations.is_empty()
+                && ability.targets.iter().any(|target| {
+                    matches!(target, TargetRef::Object(id)
+                        if *id == object_id && ability.target_pin_is_current(*id, state))
+                })
+        }),
+        TargetFilter::ParentTargetSlot { index } => ability.is_some_and(|ability| {
+            !ability.target_incarnations.is_empty()
+                && matches!(
+                    ability.targets.get(*index),
+                    Some(TargetRef::Object(id))
+                        if *id == object_id && ability.target_pin_is_current(*id, state)
+                )
+        }),
+        // ParentTargetController/ParentTargetOwner/PostReplacementSourceController
         // resolve at resolution time, not via object matching. ParentTargetOwner
         // mirrors ParentTargetController for the player-axis side of CR 108.3 vs CR 109.4.
-        TargetFilter::ParentTarget
-        | TargetFilter::ParentTargetSlot { .. }
-        | TargetFilter::ParentTargetController
+        TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::PostReplacementSourceController
         // CR 615.5: an object-typed resolution-time ref (the prevented event's

@@ -5812,6 +5812,7 @@ fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
             filters.iter().any(filter_refs_parent_target)
         }
         TargetFilter::Not { filter } => filter_refs_parent_target(filter),
+        TargetFilter::TrackedSetFiltered { filter, .. } => filter_refs_parent_target(filter),
         _ => false,
     }
 }
