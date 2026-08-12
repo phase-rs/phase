@@ -1019,6 +1019,23 @@ pub(crate) fn mana_choice_prompt(
         ManaProduction::ChosenColor {
             fixed_alternative, ..
         } => {
+            if fixed_alternative.is_some() {
+                // CR 106.5: A fixed alternative makes production resolvable
+                // before the color choice. If it resolves to no mana, no color
+                // choice is needed. Pure chosen-color production must retain
+                // its prompt because that choice can determine its count.
+                let produces_mana = count_ability
+                    .map(|ability| {
+                        !super::effects::mana::resolve_mana_types_for_ability(
+                            produced, state, ability,
+                        )
+                        .is_empty()
+                    })
+                    .unwrap_or(true);
+                if !produces_mana {
+                    return None;
+                }
+            }
             let chosen = super::effects::mana::chosen_color_for_mana(state, source_id);
             match (fixed_alternative, chosen) {
                 // CR 106.1: "Add {fixed} or one mana of the chosen color" — once
@@ -10785,6 +10802,55 @@ mod tests {
         .unwrap();
 
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 2);
+    }
+
+    #[test]
+    fn fixed_or_chosen_color_prompt_requires_positive_production() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(8110),
+            PlayerId(0),
+            "Fixed or Chosen Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        for (count, expected_prompt) in [(0, false), (1, true)] {
+            let ability = ResolvedAbility::new(
+                Effect::Mana {
+                    produced: ManaProduction::ChosenColor {
+                        count: QuantityExpr::Fixed { value: count },
+                        contribution: ManaContribution::Base,
+                        fixed_alternative: Some(ManaColor::Green),
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+
+            assert_eq!(
+                mana_choice_prompt(
+                    &ability.effect,
+                    &state,
+                    source,
+                    Some(&ability),
+                    Some(&ability),
+                )
+                .is_some(),
+                expected_prompt,
+                "CR 106.5: fixed-or-chosen mana count {count} must {} a color prompt",
+                if expected_prompt {
+                    "reach"
+                } else {
+                    "not reach"
+                },
+            );
+        }
     }
 
     /// Issue #460 + CR 106.12a: Vorinclex's `TapsForMana` trigger must fire
