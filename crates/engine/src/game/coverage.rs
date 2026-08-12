@@ -4660,6 +4660,14 @@ fn keyword_supported(kw: &Keyword) -> bool {
 fn keyword_gap_label(kw: &Keyword) -> Option<String> {
     match kw {
         Keyword::Unknown(s) => Some(format!("Keyword:{s}")),
+        Keyword::CumulativeUpkeep(AbilityCost::EffectCost { .. }) => {
+            // The keyword remains faithfully parsed, but this particular base
+            // cost cannot yet pass through the per-counter payment pipeline.
+            // Keep it distinct from the supported cumulative-upkeep shapes so
+            // coverage records a newly surfaced payload rather than a lost
+            // keyword handler.
+            Some("Keyword:CumulativeUpkeepUnsupportedEffectCost".to_string())
+        }
         Keyword::CumulativeUpkeep(cost) if !cost.supports_cumulative_upkeep_payment() => {
             Some("Keyword:CumulativeUpkeepUnsupportedCost".to_string())
         }
@@ -14383,6 +14391,23 @@ mod tests {
             .find(|item| item.category == ParseCategory::Keyword)
             .expect("keyword parse item");
         assert!(!keyword.supported);
+    }
+
+    #[test]
+    fn cumulative_upkeep_effect_cost_has_a_distinct_coverage_gap() {
+        let mut face = make_face();
+        face.keywords
+            .push(Keyword::CumulativeUpkeep(AbilityCost::EffectCost {
+                effect: Box::new(Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                }),
+            }));
+
+        let gaps = card_face_gaps(&face);
+        assert!(gaps
+            .iter()
+            .any(|gap| gap == "Keyword:CumulativeUpkeepUnsupportedEffectCost"));
     }
 
     #[test]
