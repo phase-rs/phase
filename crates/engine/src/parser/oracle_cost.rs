@@ -840,7 +840,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
             };
         }
-        if all_consuming(tag("a card"))
+        if all_consuming(tag::<_, _, nom::error::Error<&str>>("a card"))
             .parse(rest_lower.as_str())
             .is_ok()
         {
