@@ -28,10 +28,16 @@ fn mana_grants(oracle: &str, name: &str) -> Vec<ManaSpellGrant> {
     grants.clone()
 }
 
+fn mana_with_grants(color: ManaType, source: ObjectId, grants: Vec<ManaSpellGrant>) -> ManaUnit {
+    let mut mana = ManaUnit::new(color, source, false, vec![]);
+    mana.grants = grants;
+    mana
+}
+
 fn spell_cant_be_countered(state: &engine::types::game_state::GameState, spell: ObjectId) -> bool {
     state.objects[&spell]
         .static_definitions
-        .iter_all()
+        .iter_unchecked()
         .any(|definition| definition.mode == StaticMode::CantBeCountered)
 }
 
@@ -54,10 +60,9 @@ fn boseiju_grant_matches_instants_and_not_creature_spells() {
         .id();
     instant_scenario.with_mana_pool(
         P0,
-        vec![ManaUnit::new(
+        vec![mana_with_grants(
             ManaType::Colorless,
             boseiju,
-            false,
             grants.clone(),
         )],
     );
@@ -79,7 +84,7 @@ fn boseiju_grant_matches_instants_and_not_creature_spells() {
         .id();
     creature_scenario.with_mana_pool(
         P0,
-        vec![ManaUnit::new(ManaType::Colorless, boseiju, false, grants)],
+        vec![mana_with_grants(ManaType::Colorless, boseiju, grants)],
     );
     let mut creature_runner = creature_scenario.build();
     let creature_commit = creature_runner.cast(creature).commit();
@@ -113,7 +118,7 @@ fn opal_palace_grant_counts_the_current_command_zone_cast_at_entry() {
     scenario.with_mana_pool(
         P0,
         vec![
-            ManaUnit::new(ManaType::Colorless, opal, false, grants),
+            mana_with_grants(ManaType::Colorless, opal, grants),
             ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
             ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
             ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
