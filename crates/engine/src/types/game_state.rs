@@ -16555,6 +16555,29 @@ pub struct PendingMultiDraw {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct DrawSequenceFrameId(pub u64);
 
+/// The unbookkept suffix of one individual draw whose Library → Hand delivery
+/// parked on a replacement choice.
+///
+/// The selected card stays here until its zone change settles. Recording it as
+/// drawn before then would emit `CardDrawn` and advance the draw ledger while
+/// the card is still in the library; retaining the remaining selected cards
+/// also preserves the ordinary one-at-a-time draw order after the choice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingDrawDelivery {
+    pub player: PlayerId,
+    pub current: ObjectId,
+    /// False while the current card still needs its initial pipeline pass;
+    /// true once a parked replacement choice has delivered that pass.
+    pub current_settled: bool,
+    pub remaining: Vec<ObjectId>,
+    #[serde(
+        default,
+        serialize_with = "crate::types::deterministic_serde::hash_set"
+    )]
+    pub applied: HashSet<AppliedReplacementKey>,
+    pub attempted_empty_library: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum DrawSequenceOrigin {
     #[default]
@@ -16597,6 +16620,10 @@ pub struct DrawSequenceFrame {
     /// effect replaces a draw within a sequence of card draws, the replacement
     /// effect is completed before resuming the sequence."
     pub remaining: u32,
+    /// A card delivery that has selected its card but has not yet settled its
+    /// `Moved` replacement choice. The frame owns its ledger and suffix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_delivery: Option<PendingDrawDelivery>,
     /// CR 608.2c: running total of cards ACTUALLY delivered across every
     /// completed unit of this instruction. This is the value a later "that many"
     /// clause on the same card reads ("Draw two cards, then discard that many") —
@@ -16717,6 +16744,7 @@ impl DrawSequenceStack {
             applied,
             origin,
             remaining: count,
+            pending_delivery: None,
             accumulated: 0,
         });
         debug_assert!(
@@ -16768,6 +16796,7 @@ impl DrawSequenceStack {
                     && a.remaining == b.remaining
                     && a.accumulated == b.accumulated
                     && a.origin == b.origin
+                    && a.pending_delivery == b.pending_delivery
             })
     }
 
