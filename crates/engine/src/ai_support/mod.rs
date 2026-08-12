@@ -6171,7 +6171,7 @@ mod tests {
     }
 
     #[test]
-    fn target_selection_legal_actions_use_current_targets_without_simulation() {
+    fn earlier_target_selection_legal_actions_use_current_targets_without_simulation() {
         let mut state = setup_priority();
         let targets: Vec<TargetRef> = (0..25)
             .map(|i| {
@@ -6198,13 +6198,22 @@ mod tests {
         state.waiting_for = WaitingFor::TargetSelection {
             player: PlayerId(0),
             pending_cast,
-            target_slots: vec![crate::types::game_state::TargetSelectionSlot {
-                legal_targets: targets.clone(),
-                optional: true,
-                chooser: None,
-                effect_kind: EffectKind::NoOp,
-                effect_detail: TargetEffectDetail::None,
-            }],
+            target_slots: vec![
+                crate::types::game_state::TargetSelectionSlot {
+                    legal_targets: targets.clone(),
+                    optional: true,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
+                },
+                crate::types::game_state::TargetSelectionSlot {
+                    legal_targets: Vec::new(),
+                    optional: true,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
+                },
+            ],
             mode_labels: Vec::new(),
             selection: crate::types::game_state::TargetSelectionProgress {
                 current_slot: 0,
