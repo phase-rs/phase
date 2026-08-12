@@ -2570,7 +2570,9 @@ mod tests {
                     contribution: ManaContribution::Base,
                 },
                 restrictions: vec![],
-                grants: vec![ManaSpellGrant::CantBeCountered],
+                grants: vec![ManaSpellGrant::CantBeCountered {
+                    filter: TargetFilter::Any,
+                }],
                 expiry: None,
                 target: None,
             },
@@ -2582,7 +2584,12 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         let unit = &state.players[0].mana_pool.mana[0];
-        assert_eq!(unit.grants, vec![ManaSpellGrant::CantBeCountered]);
+        assert_eq!(
+            unit.grants,
+            vec![ManaSpellGrant::CantBeCountered {
+                filter: TargetFilter::Any,
+            }]
+        );
     }
 
     /// CR 106.7 + CR 106.1b: Reflecting Pool — produces one mana of any type

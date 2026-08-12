@@ -16958,6 +16958,45 @@ pub(super) fn activation_payment_context(
     }
 }
 
+/// CR 106.6: Evaluate a mana unit's spell-effect condition against the spell
+/// it paid for, with the mana owner's controller as the source-relative "you".
+fn mana_grant_matches_spell(
+    state: &GameState,
+    spell_id: ObjectId,
+    caster: PlayerId,
+    unit: &crate::types::mana::ManaUnit,
+    filter: &TargetFilter,
+) -> bool {
+    let filter_ctx =
+        crate::game::filter::FilterContext::from_source_with_controller(unit.source_id, caster);
+    crate::game::filter::matches_target_filter(state, spell_id, filter, &filter_ctx)
+}
+
+/// CR 106.6a + CR 903.8: Resolve an entry-counter grant while a commander
+/// spell is still being paid for. The cast record is committed after payment,
+/// so its current command-zone cast is included here exactly once.
+fn resolve_mana_entry_counter_count(
+    state: &GameState,
+    count: &QuantityExpr,
+    caster: PlayerId,
+    source_id: ObjectId,
+    spell_id: ObjectId,
+) -> u32 {
+    let resolved =
+        u32::try_from(resolve_quantity(state, count, caster, source_id)).unwrap_or_default();
+    if matches!(
+        count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::CommanderCastFromCommandZoneCount
+        }
+    ) && pending_cast_origin_zone_for(state, spell_id) == Some(Zone::Command)
+    {
+        resolved.saturating_add(1)
+    } else {
+        resolved
+    }
+}
+
 /// CR 106.6: When mana with spell grants is spent to cast a spell, apply those
 /// grants to the spell object (e.g., "that spell can't be countered").
 fn apply_mana_spell_grants(
@@ -16965,9 +17004,15 @@ fn apply_mana_spell_grants(
     spell_id: ObjectId,
     spent_units: &[crate::types::mana::ManaUnit],
 ) {
-    let has_cant_be_countered = spent_units
-        .iter()
-        .any(|u| u.grants.contains(&ManaSpellGrant::CantBeCountered));
+    let Some(caster) = state.objects.get(&spell_id).map(|obj| obj.controller) else {
+        return;
+    };
+    let has_cant_be_countered = spent_units.iter().any(|unit| {
+        unit.grants.iter().any(|grant| {
+            matches!(grant, ManaSpellGrant::CantBeCountered { filter }
+                if mana_grant_matches_spell(state, spell_id, caster, unit, filter))
+        })
+    });
 
     if has_cant_be_countered {
         if let Some(obj) = state.objects.get_mut(&spell_id) {
@@ -16983,9 +17028,6 @@ fn apply_mana_spell_grants(
         }
     }
 
-    let Some(caster) = state.objects.get(&spell_id).map(|obj| obj.controller) else {
-        return;
-    };
     let spell_meta = build_spell_meta(state, caster, spell_id);
     let mut keyword_grants: Vec<(crate::types::keywords::Keyword, Duration)> = Vec::new();
     for grant in spent_units.iter().flat_map(|unit| unit.grants.iter()) {
@@ -17021,6 +17063,31 @@ fn apply_mana_spell_grants(
             vec![ContinuousModification::AddKeyword { keyword }],
             None,
         );
+    }
+
+    // CR 106.6a + CR 614.1c: Each spent mana unit can carry a distinct
+    // battlefield-entry replacement effect. Register it before the spell
+    // resolves so the zone pipeline applies its counters as the permanent
+    // enters, alongside counter-placement replacements.
+    for unit in spent_units {
+        for grant in &unit.grants {
+            let ManaSpellGrant::EntersWithCounters {
+                filter,
+                counter_type,
+                count,
+            } = grant
+            else {
+                continue;
+            };
+            if !mana_grant_matches_spell(state, spell_id, caster, unit, filter) {
+                continue;
+            }
+            let count =
+                resolve_mana_entry_counter_count(state, count, caster, unit.source_id, spell_id);
+            state
+                .pending_etb_counters
+                .push((spell_id, counter_type.clone(), count));
+        }
     }
 
     // CR 106.6 + CR 603.3b: Reflexive "when you spend this mana to cast a

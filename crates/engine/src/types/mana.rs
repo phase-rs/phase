@@ -2,7 +2,10 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use super::ability::{AbilityTag, Comparator, TargetFilter, TriggerDefinitionOccurrenceRef};
+use super::ability::{
+    AbilityTag, Comparator, QuantityExpr, TargetFilter, TriggerDefinitionOccurrenceRef,
+};
+use super::counter::CounterType;
 use super::events::GameEvent;
 use super::game_state::ProductionOverride;
 use super::identifiers::{ObjectId, ObjectIncarnationRef};
@@ -1310,8 +1313,17 @@ fn default_mana_keyword_grant_duration() -> Box<crate::types::ability::Duration>
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ManaSpellGrant {
-    /// The spell cast with this mana can't be countered.
-    CantBeCountered,
+    /// CR 106.6: A spell matching `filter` and cast with this mana can't be
+    /// countered. `TargetFilter::Any` represents the unqualified wording.
+    CantBeCountered { filter: TargetFilter },
+    /// CR 106.6a + CR 614.1c: A permanent spell matching `filter` and cast
+    /// with this mana enters with `count` `counter_type` counters. Each mana
+    /// unit carries a separate replacement effect.
+    EntersWithCounters {
+        filter: TargetFilter,
+        counter_type: CounterType,
+        count: QuantityExpr,
+    },
     /// CR 106.6 + CR 702.10: If the spell this mana is spent on satisfies
     /// `restriction`, grant it `keyword` for `duration` (subtype lands use
     /// `UntilEndOfTurn`; Hall of the Bandit Lord uses `Permanent`).

@@ -16341,7 +16341,12 @@ fn mana_spend_restriction_chosen_type_cant_be_countered() {
         );
     let (restriction, grants) = result.expect("should parse");
     assert_eq!(restriction, vec![ManaSpendRestriction::ChosenCreatureType]);
-    assert_eq!(grants, vec![ManaSpellGrant::CantBeCountered]);
+    assert_eq!(
+        grants,
+        vec![ManaSpellGrant::CantBeCountered {
+            filter: TargetFilter::Any,
+        }]
+    );
 }
 
 #[test]
@@ -16357,7 +16362,12 @@ fn mana_spend_restriction_legendary_cant_be_countered() {
         restriction,
         vec![ManaSpendRestriction::SpellType("Legendary".to_string())]
     );
-    assert_eq!(grants, vec![ManaSpellGrant::CantBeCountered]);
+    assert_eq!(
+        grants,
+        vec![ManaSpellGrant::CantBeCountered {
+            filter: TargetFilter::Any,
+        }]
+    );
 }
 
 /// CR 106.6: Activation-first disjunction — "to activate X or cast Y"

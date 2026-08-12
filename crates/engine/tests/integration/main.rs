@@ -690,6 +690,7 @@ mod issue_689_resonating_lute_hand_size;
 mod issue_691_sheoldred_saga_lore;
 mod issue_6943_faerie_slumber_party;
 mod issue_6979_land_mana_amplification;
+mod issue_6981_mana_spend_provenance;
 mod issue_7063_library_reorder;
 mod issue_7087_recruit_discard_provenance;
 mod issue_709_regression;

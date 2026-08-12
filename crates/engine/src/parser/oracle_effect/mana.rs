@@ -14,6 +14,7 @@ use crate::types::ability::{
     ManaContribution, ManaProduction, ManaSpendRestriction, ManaTargetRole, ObjectScope,
     QuantityExpr, QuantityRef, TypeFilter, TypedFilter,
 };
+use crate::types::counter::CounterType;
 use crate::types::keywords::KeywordKind;
 use crate::types::mana::{
     AbilityActivationScope, ManaColor, ManaRestriction, ManaSpellGrant, SpellCostCriterion,
@@ -2471,14 +2472,76 @@ pub(super) fn parse_mana_spell_grant(lower: &str) -> Option<Vec<ManaSpellGrant>>
     if let Some(grant) = parse_conditional_keyword_grant(trimmed) {
         return Some(vec![grant]);
     }
+    if let Some(grant) = parse_conditional_cant_be_countered_grant(trimmed) {
+        return Some(vec![grant]);
+    }
+    if let Some(grant) = parse_conditional_enters_with_counters_grant(trimmed) {
+        return Some(vec![grant]);
+    }
     // Use nom tag for matching
     if value::<_, _, OracleError<'_>, _>((), tag("that spell can't be countered"))
         .parse(trimmed)
         .is_ok()
     {
-        return Some(vec![ManaSpellGrant::CantBeCountered]);
+        return Some(vec![ManaSpellGrant::CantBeCountered {
+            filter: TargetFilter::Any,
+        }]);
     }
     None
+}
+
+/// CR 106.6: Parse "If that mana is spent on an instant or sorcery spell,
+/// that spell can't be countered" (Boseiju, Who Shelters All).
+fn parse_conditional_cant_be_countered_grant(lower: &str) -> Option<ManaSpellGrant> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("if that mana is spent on ")
+        .parse(lower)
+        .ok()?;
+    let (rest, filter_text) = terminated(
+        take_until::<_, _, OracleError<'_>>(", that spell can't be countered"),
+        tag(", that spell can't be countered"),
+    )
+    .parse(rest)
+    .ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    Some(ManaSpellGrant::CantBeCountered {
+        filter: parse_spend_trigger_filter(filter_text.trim())?,
+    })
+}
+
+/// CR 106.6a + CR 614.1c: Parse mana whose spent-mana replacement effect has
+/// a counter-bearing battlefield entry result (Opal Palace class).
+fn parse_conditional_enters_with_counters_grant(lower: &str) -> Option<ManaSpellGrant> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("if you spend this mana to cast ")
+        .parse(lower)
+        .ok()?;
+    let (rest, filter_text) = terminated(
+        take_until::<_, _, OracleError<'_>>(", it enters with a number of additional "),
+        tag(", it enters with a number of additional "),
+    )
+    .parse(rest)
+    .ok()?;
+    let filter = parse_spend_trigger_filter(filter_text.trim())?;
+    let (rest, counter_type) = terminated(
+        nom_primitives::parse_counter_type_typed,
+        tag(" counters on it equal to "),
+    )
+    .parse(rest)
+    .ok()?;
+    let (_, count) = all_consuming(value(
+        QuantityExpr::Ref {
+            qty: QuantityRef::CommanderCastFromCommandZoneCount,
+        },
+        tag("the number of times it's been cast from the command zone this game"),
+    ))
+    .parse(rest)
+    .ok()?;
+    Some(ManaSpellGrant::EntersWithCounters {
+        filter,
+        counter_type,
+        count,
+    })
 }
 
 /// CR 106.6 + CR 702.10: Parse mana-rider keyword grants:
@@ -2627,6 +2690,20 @@ pub(crate) fn parse_mana_spend_trigger(lower: &str) -> Option<ManaSpellGrant> {
 ///
 /// Returns `None` for an unrecognized filter, so the clause stays a loud gap.
 fn parse_spend_trigger_filter(filter: &str) -> Option<TargetFilter> {
+    // CR 903.3d: "your commander" is a commander spell. The live object
+    // retains this designation while on the stack, so the standard object
+    // filter authority can evaluate it when mana is paid.
+    if let Ok((_, filter)) =
+        all_consuming(map(tag::<_, _, OracleError<'_>>("your commander"), |_| {
+            TargetFilter::Typed(TypedFilter {
+                properties: vec![FilterProp::IsCommander],
+                ..TypedFilter::default()
+            })
+        }))
+        .parse(filter)
+    {
+        return Some(filter);
+    }
     // CR 202.3: "a spell with mana value N or greater/less" — a post-`spell`
     // threshold, not a type phrase (the helper keeps the article).
     if let Some((comparator, value)) = parse_mana_value_threshold(filter) {
@@ -2708,7 +2785,9 @@ fn extract_spell_grants(text: &str) -> (&str, Vec<ManaSpellGrant>) {
             let before_len = before.len();
             return (
                 text[..before_len].trim(),
-                vec![ManaSpellGrant::CantBeCountered],
+                vec![ManaSpellGrant::CantBeCountered {
+                    filter: TargetFilter::Any,
+                }],
             );
         }
     }
