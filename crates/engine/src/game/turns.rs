@@ -295,22 +295,13 @@ pub(super) fn mark_empty_attackers_end_combat(state: &mut GameState, events: &mu
 }
 
 /// The declaration-continuation form of [`mark_empty_attackers_end_combat`].
-/// It preserves the established ordering that has already processed
-/// declaration triggers and advances past the synthetic marker without
-/// running EndCombat step triggers.
+/// CR 508.8 skips only Declare Blockers and Combat Damage; the normal End
+/// Combat step still begins and must run its triggers and priority window.
 pub(super) fn advance_after_empty_attackers(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
     mark_empty_attackers_end_combat(state, events);
-    state.combat = None;
-    // CR 511.3: The synthetic empty-attacker path still ends this combat, so
-    // its extra-combat attacker restriction cannot survive to postcombat main.
-    state.current_combat_attacker_restriction = None;
-    state.current_combat_attacker_restriction_source = None;
-    super::layers::prune_end_of_combat_effects(state);
-    super::layers::prune_controller_end_combat_step_effects(state, state.active_player);
-    let _ = advance_phase_once(state, events);
     auto_advance(state, events)
 }
 
@@ -3006,8 +2997,13 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
                     player: state.active_player,
                 });
             }
-            let _ = advance_phase_once(state, events);
-            // Continue to EndCombat
+            // CR 117.3a: After the combat-damage turn-based action and its
+            // triggered abilities are handled, the active player receives
+            // priority before the step ends. This also gives phase stops a
+            // Priority window in which to interrupt auto-pass.
+            return AutoAdvanceStep::waiting(WaitingFor::Priority {
+                player: state.active_player,
+            });
         }
         Phase::EndCombat => {
             // CR 511.1: "At end of combat" triggers fire here.
@@ -3034,12 +3030,13 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
                 if let Some(prompt) = ordering_prompt {
                     return AutoAdvanceStep::waiting(prompt);
                 }
-                return AutoAdvanceStep::waiting(WaitingFor::Priority {
-                    player: state.active_player,
-                });
             }
-            let _ = advance_phase_once(state, events);
-            // Continue to PostCombatMain
+            // CR 511.1: The active player receives priority as the End Combat step
+            // begins, even when no ability triggered. Keeping the phase active until
+            // all players pass lets phase stops interrupt auto-pass here.
+            return AutoAdvanceStep::waiting(WaitingFor::Priority {
+                player: state.active_player,
+            });
         }
         Phase::End => {
             // CR 513.1 + CR 611.2a/b: Expire `PlayFromExile { duration:
@@ -7636,6 +7633,10 @@ mod tests {
         )
         .unwrap();
 
+        // CR 511.1: the empty-attacker path still enters EndCombat, whose
+        // priority window must be passed before PostCombatMain.
+        apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
+        apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
         assert_eq!(state.phase, Phase::PostCombatMain);
     }
 
