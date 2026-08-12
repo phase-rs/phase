@@ -284,6 +284,44 @@ fn emperor_of_bones_adapt_pipeline_binds_delayed_sacrifice_to_returned_creature(
     );
 }
 
+#[test]
+fn emperor_of_bones_adapt_without_linked_exile_has_no_riders_to_apply() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let emperor = scenario
+        .add_creature_from_oracle(P0, "Emperor of Bones", 2, 2, EMPEROR_ORACLE)
+        .id();
+    let swamp_a = scenario.add_basic_land(P0, engine::types::mana::ManaColor::Black);
+    let swamp_b = scenario.add_basic_land(P0, engine::types::mana::ManaColor::Black);
+
+    let mut runner = scenario.build();
+    runner
+        .activate(emperor, 0)
+        .pay_with(&[swamp_a, swamp_b])
+        .resolve();
+
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&emperor]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0),
+        2,
+        "Adapt must still put its counters on Emperor"
+    );
+    assert_eq!(
+        state.delayed_triggers.len(),
+        0,
+        "no returned creature means Emperor's haste and delayed Sacrifice riders must not run"
+    );
+    assert_eq!(
+        state.objects[&emperor].zone,
+        Zone::Battlefield,
+        "Emperor must remain on the battlefield when no linked creature was exiled"
+    );
+}
+
 /// CR 614.12a + CR 400.7j: An as-enters choice on the returned permanent must
 /// complete without losing later instructions that refer to that permanent.
 #[test]
