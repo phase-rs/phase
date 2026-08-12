@@ -314,7 +314,11 @@ pub fn is_triggered_mana_ability(
     // above for the deliberately-not-yet-widened `AbilityActivated` axis.
     matches!(
         trigger_event,
-        Some(GameEvent::TappedForMana { .. } | GameEvent::ManaAdded { .. })
+        Some(
+            GameEvent::TappedForMana { .. }
+                | GameEvent::ManaAbilityProduced { .. }
+                | GameEvent::ManaAdded { .. }
+        )
     )
 }
 
@@ -441,7 +445,9 @@ pub fn resolve_triggered_mana_ability_inline(
     let node = source.map(|source| {
         let caused_by = match trigger_event {
             Some(
-                GameEvent::ManaAdded { source_id, .. } | GameEvent::TappedForMana { source_id, .. },
+                GameEvent::ManaAdded { source_id, .. }
+                | GameEvent::TappedForMana { source_id, .. }
+                | GameEvent::ManaAbilityProduced { source_id, .. },
             ) => state
                 .resolved_rules_journal
                 .latest_mana_producer_for_source(*source_id),
@@ -641,6 +647,7 @@ fn produce_mana_from_ability(
         },
     );
     let mut produced_for_tap_event = Vec::new();
+    let mut produced_for_ability_events = Vec::new();
     for recipient in recipients {
         let mut scoped = resolved_for_quantity.clone();
         scoped.set_original_controller_recursive(player);
@@ -689,6 +696,9 @@ fn produce_mana_from_ability(
         // resolution. Its payload is the full aggregate produced by the
         // ability, including scoped recipients that exclude the activator.
         produced_for_tap_event.extend(produced_mana.iter().copied());
+        if !produced_mana.is_empty() {
+            produced_for_ability_events.push((recipient, produced_mana.clone()));
+        }
         for &mana_type in &produced_mana {
             mana_payment::produce_mana_with_attributes_from_source_quality(
                 state,
@@ -724,6 +734,19 @@ fn produce_mana_from_ability(
                 obj.chosen_attributes.push(ChosenAttribute::Color(color));
             }
         }
+    }
+
+    // CR 605.1b: Emit one aggregate event per receiving player for every
+    // mana-ability resolution, including abilities without a tap cost. Its
+    // output vector lets triggered mana abilities inspect each player's share
+    // of a multi-recipient resolution exactly once.
+    for (recipient, produced) in produced_for_ability_events {
+        events.push(GameEvent::ManaAbilityProduced {
+            player_id: recipient,
+            source_id,
+            produced,
+            trigger_state: crate::types::events::ManaAbilityTriggerState::Pending,
+        });
     }
 
     // CR 106.12a: an "is tapped for mana" trigger fires once per resolution of
@@ -2167,6 +2190,19 @@ fn suspend_mana_ability_parent_chain(parent: Option<&mut ManaAbilityCostParent>)
     }
 }
 
+/// Only a pre-delivery replacement-ordering pause may replace the active prompt
+/// with `ReplacementChoice`. A post-delivery substitute can keep a replacement
+/// record while it waits on its own prompt, so it has no ordering player and
+/// must remain visible.
+fn pause_pre_delivery_mana_cost_replacement_choice(
+    state: &mut GameState,
+    choice_player: Option<PlayerId>,
+) {
+    if let Some(choice_player) = choice_player.filter(|_| state.pending_replacement.is_some()) {
+        super::costs::pause_cost_payment_for_replacement_choice(state, choice_player);
+    }
+}
+
 fn pause_mana_ability_cost_payment(
     state: &mut GameState,
     pre_delivery_choice_player: Option<PlayerId>,
@@ -2191,19 +2227,7 @@ fn pause_mana_ability_cost_payment(
         pending: Box::new(pending),
         cursor,
     });
-    // `NeedsChoice` also reports a post-delivery replacement continuation.
-    // That continuation has already consumed `pending_replacement` and installed
-    // its own live prompt, which must remain visible while the typed cursor is
-    // parked. Pre-delivery CR 616.1 ordering is the only case that needs a
-    // synthesized ReplacementChoice.
-    if state.pending_replacement.is_some() {
-        super::costs::pause_cost_payment_for_replacement_choice(
-            state,
-            pre_delivery_choice_player.expect(
-                "a pending replacement must identify the player ordering the interrupted mana cost",
-            ),
-        );
-    }
+    pause_pre_delivery_mana_cost_replacement_choice(state, pre_delivery_choice_player);
 }
 
 fn mana_ability_cursor_after_current_component(
@@ -4489,6 +4513,7 @@ pub(crate) fn resume_waiting_for(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::sync::Arc;
 
     use super::*;
@@ -4551,18 +4576,19 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityKind, AbilityTag, ActivationRestriction, Comparator,
         ContinuousModification, ControllerRef, CopyRetargetPermission, DelayedTriggerCondition,
-        DevotionColors, Duration, Effect, FilterProp, LinkedExileScope, ManaContribution,
-        ManaProduction, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, QuantityExpr,
-        QuantityRef, SacrificeCost, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter,
-        TypedFilter, REMOVE_COUNTER_COST_ANY_NUMBER,
+        DevotionColors, Duration, Effect, EffectKind, FilterProp, LinkedExileScope,
+        ManaContribution, ManaProduction, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope,
+        QuantityExpr, QuantityRef, SacrificeCost, StaticDefinition, TargetFilter,
+        TriggerDefinition, TypeFilter, TypedFilter, REMOVE_COUNTER_COST_ANY_NUMBER,
     };
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
-    use crate::types::game_state::{ExileLink, ExileLinkKind};
-    use crate::types::identifiers::CardId;
+    use crate::types::game_state::{ExileLink, ExileLinkKind, PendingReplacement};
+    use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::{
         ManaColor, ManaCost, ManaCostShard, ManaRestriction, ManaType, ManaUnit,
     };
+    use crate::types::proposed_event::{ProposedEvent, ReplacementId};
     use crate::types::statics::{CostPaymentProhibition, ProhibitionScope, StaticMode};
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
@@ -4579,6 +4605,61 @@ mod tests {
             },
         )
         .cost(AbilityCost::Tap)
+    }
+
+    #[test]
+    fn post_delivery_mana_cost_pause_preserves_its_live_prompt() {
+        let mut state = GameState::new_two_player(42);
+        state.pending_replacement = Some(PendingReplacement {
+            proposed: ProposedEvent::Draw {
+                player_id: PlayerId(0),
+                count: 1,
+                applied: HashSet::new(),
+            },
+            sacrifice_provenance: None,
+            candidates: vec![ReplacementId {
+                source: ObjectId(7),
+                index: 0,
+            }],
+            search_found_candidates: Vec::new(),
+            depth: 0,
+            is_optional: false,
+            library_placement: None,
+            excess_recipient: None,
+            lifelink_bonus: 0,
+            may_cost_paid: false,
+            may_cost_remaining: None,
+        });
+        let live_prompt = WaitingFor::DiscardChoice {
+            player: PlayerId(0),
+            count: 1,
+            cards: Vec::new(),
+            source_id: ObjectId(7),
+            effect_kind: EffectKind::Discard,
+            up_to: false,
+            unless_filter: None,
+            discard_frame: None,
+        };
+        state.waiting_for = live_prompt.clone();
+
+        pause_pre_delivery_mana_cost_replacement_choice(&mut state, None);
+        assert_eq!(
+            state.waiting_for, live_prompt,
+            "a post-delivery substitute has no ordering player and retains its live prompt"
+        );
+
+        pause_pre_delivery_mana_cost_replacement_choice(&mut state, Some(PlayerId(0)));
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::ReplacementChoice {
+                    player: PlayerId(0),
+                    candidate_count: 1,
+                    ..
+                }
+            ),
+            "an explicit pre-delivery ordering player still opens the replacement choice"
+        );
     }
 
     #[test]
@@ -4645,6 +4726,27 @@ mod tests {
             } if *source_id == source
                 && *produced == recipient_colors
         )));
+        let mut recipient_events: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::ManaAbilityProduced {
+                    player_id,
+                    source_id,
+                    produced,
+                    ..
+                } if *source_id == source => Some((*player_id, produced.clone())),
+                _ => None,
+            })
+            .collect();
+        recipient_events.sort_by_key(|(player, _)| *player);
+        assert_eq!(
+            recipient_events,
+            vec![
+                (PlayerId(1), vec![recipient_colors[0]]),
+                (PlayerId(2), vec![recipient_colors[1]]),
+            ],
+            "each recipient receives one distinct aggregate ManaAbilityProduced event"
+        );
     }
 
     fn gemstone_caverns_mana_ability() -> AbilityDefinition {

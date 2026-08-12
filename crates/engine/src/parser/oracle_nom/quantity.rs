@@ -574,6 +574,10 @@ fn parse_number_of_cards_drawn_this_turn(input: &str) -> OracleResult<'_, Quanti
             },
             tag("your opponents have drawn this turn"),
         ),
+        // CR 121.1: A bare past-participle clause inherits the ability
+        // controller: "cards drawn this turn" (Fists of Flame) omits an
+        // explicit possessive but still counts that controller's draws.
+        value(PlayerScope::Controller, tag("drawn this turn")),
         // CR 121.1: the caster's own draws this turn.
         value(PlayerScope::Controller, tag("you've drawn this turn")),
         value(PlayerScope::Controller, tag("you have drawn this turn")),
@@ -1234,17 +1238,37 @@ fn parse_commander_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> 
     Ok((rest, QuantityRef::CommanderManaValue { owner }))
 }
 
-/// CR 122.1: Parse "counters among [filter]" — sum across every counter type.
+/// CR 122.1: Parse "[kind] counters among [filter]".
 ///
-/// Used for phrases like "thirty or more counters among artifacts and creatures
-/// you control" (Lux Artillery's intervening-if). The counter type is `None`
-/// because the Oracle text does not restrict to any particular counter kind;
-/// the resolver sums counters of every type on every matching object.
+/// The counter-kind qualifier is optional, which is the whole variation axis of
+/// this phrase:
+///
+/// * absent — "thirty or more counters among artifacts and creatures you
+///   control" (Lux Artillery's intervening-if). `counter_type: None`, and the
+///   resolver sums counters of EVERY kind on every matching object.
+/// * present — "four or more lore counters among Sagas you control" (Tom
+///   Bombadil). `counter_type: Some(kind)` narrows the sum to that kind.
+///
+/// One `opt` rather than two combinators: the qualifier is a leaf parameter of
+/// the same phrase, and every counter kind `parse_counter_type_typed` knows is
+/// covered by writing it once.
 ///
 /// Composes with `parse_there_are_conditions` to form the full
-/// "there are N or more counters among [filter]" condition.
+/// "there are N or more [kind] counters among [filter]" condition.
 fn parse_counters_among_ref(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = tag("counters among ").parse(input)?;
+    // The qualifier and the noun are ONE unit, not an `opt` qualifier followed by
+    // a separate noun: `parse_counter_type_typed` also accepts the bare word
+    // "counters" (as `CounterType::Any`), so an `opt` would succeed on the
+    // untyped phrase, consume the noun as if it were the qualifier, and then
+    // strand the parse with no branch left to back off to.
+    let (rest, counter_type) = alt((
+        map(
+            terminated(parse_counter_type_typed, tag(" counters among ")),
+            Some,
+        ),
+        value(None, tag("counters among ")),
+    ))
+    .parse(input)?;
     let type_text = rest.trim_end_matches('.').trim_end_matches(',');
     let (filter, remainder) = parse_type_phrase(type_text);
     if matches!(filter, TargetFilter::Any) {
@@ -1260,7 +1284,7 @@ fn parse_counters_among_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     Ok((
         &input[consumed..],
         QuantityRef::CountersOnObjects {
-            counter_type: None,
+            counter_type,
             filter,
         },
     ))
@@ -3859,6 +3883,64 @@ fn parse_for_each_card_drawn_this_way(input: &str) -> OracleResult<'_, QuantityR
     Ok((rest, QuantityRef::EventContextAmount))
 }
 
+/// CR 508.1a + CR 613.4c: "for each time it/they have attacked this turn"
+/// counts the recipient creature's own attack declarations. `Not(Another)` is
+/// the existing recipient-relative identity primitive: with the affected
+/// creature bound as the filter recipient, it admits precisely that creature's
+/// declaration record. `All` keeps this quantity composable for statics that
+/// affect creatures beyond their controller's battlefield.
+fn parse_for_each_recipient_attack_count(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = alt((tag("time "), tag("times "))).parse(input)?;
+    let (rest, _) = alt((
+        tag("it has attacked this turn"),
+        tag("they have attacked this turn"),
+    ))
+    .parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::AttackedThisTurn {
+            scope: CountScope::All,
+            filter: Some(TargetFilter::Typed(TypedFilter::creature().properties(
+                vec![FilterProp::Not {
+                    prop: Box::new(FilterProp::Another),
+                }],
+            ))),
+        },
+    ))
+}
+
+/// CR 603.2 + CR 603.3: "for each other <type> spell you've cast before it
+/// this turn" retains the trigger event's spell as a history boundary. The
+/// printed "other" is already entailed by counting strictly earlier cast
+/// records, so it does not use `FilterProp::Another`'s unrelated live-object
+/// meaning.
+fn parse_for_each_spells_before_triggering_spell(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("other ").parse(input)?;
+    let (rest, first_type) = parse_type_filter_word(rest)?;
+    let (rest, second_type) = opt(preceded(
+        alt((tag(" and "), tag(" or "))),
+        parse_type_filter_word,
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag(" spell").parse(rest)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    let (rest, _) = tag(" you've cast before it this turn").parse(rest)?;
+    let first = TargetFilter::Typed(TypedFilter::new(first_type));
+    let filter = match second_type {
+        Some(second_type) => TargetFilter::Or {
+            filters: vec![first, TargetFilter::Typed(TypedFilter::new(second_type))],
+        },
+        None => first,
+    };
+    Ok((
+        rest,
+        QuantityRef::SpellsCastBeforeTriggeringSpell {
+            scope: CountScope::Controller,
+            filter: Some(filter),
+        },
+    ))
+}
+
 /// CR 120.1 + CR 603.2c + CR 608.2c: "opponent(s) dealt damage [this way]"
 /// inside a trigger effect counts the distinct damaged opponents carried by the
 /// current trigger event batch. This is not `EventContextAmount`: the scalar
@@ -3894,6 +3976,8 @@ fn parse_for_each_clause_ref_with_they_controller(
     alt((
         parse_event_context_opponent_dealt_damage,
         parse_for_each_card_drawn_this_way,
+        parse_for_each_recipient_attack_count,
+        parse_for_each_spells_before_triggering_spell,
         alt((
             parse_for_each_one_life_changed,
             alt((
@@ -4700,6 +4784,15 @@ fn parse_object_possessive_scope(input: &str) -> OracleResult<'_, ObjectScope> {
         value(ObjectScope::Target, tag("target creature's")),
         value(ObjectScope::Target, tag("target permanent's")),
         value(ObjectScope::EventSource, tag("that spell's")),
+        // CR 608.2k + CR 714.2e: "that Saga's mana value" (Narci, Fable Singer).
+        // Same shape as the "that spell's" arm above and bound the same way: an
+        // untargeted back-reference to the object the TRIGGER CONDITION named,
+        // not a threaded target. The "that <core type>'s" arms below bind to
+        // `Target` because their referent is a target this ability announced;
+        // a Saga-chapter meta-trigger announces none, so `EventSource` — the
+        // Saga carried by `GameEvent::SagaChapterAbilityResolved` — is the only
+        // referent that exists.
+        value(ObjectScope::EventSource, tag("that saga's")),
         // CR 202.3 + CR 608.2c: "that <type> card's" — the type-qualified anaphor
         // for the exile-until hit ("that nonland card's mana value", Lady Loki).
         // The type qualifier is REQUIRED, not optional: a bare "that card's" is
@@ -6395,6 +6488,7 @@ mod tests {
 
         // Controller forms (bare + the-number-of) still resolve to Controller.
         for text in [
+            "cards drawn this turn",
             "cards you've drawn this turn",
             "cards you have drawn this turn",
             "the number of cards you've drawn this turn",
@@ -6410,6 +6504,57 @@ mod tests {
                 "{text:?} must remain Controller-scoped"
             );
         }
+    }
+
+    /// CR 508.1a + CR 613.4c: the distributive attack-history phrase must
+    /// retain its recipient identity instead of counting every attack made by
+    /// the ability controller (Moraug's static clause).
+    #[test]
+    fn parse_for_each_recipient_attack_count_is_recipient_relative() {
+        for text in [
+            "time it has attacked this turn",
+            "times they have attacked this turn",
+        ] {
+            let (rest, quantity) = parse_for_each_clause_ref_complete(text)
+                .unwrap_or_else(|_| panic!("{text:?} should parse"));
+            assert_eq!(rest, "", "{text:?} should fully consume");
+            assert_eq!(
+                quantity,
+                QuantityRef::AttackedThisTurn {
+                    scope: CountScope::All,
+                    filter: Some(TargetFilter::Typed(TypedFilter::creature().properties(
+                        vec![FilterProp::Not {
+                            prop: Box::new(FilterProp::Another),
+                        }]
+                    ),)),
+                },
+                "{text:?} must retain recipient-relative identity"
+            );
+        }
+    }
+
+    /// CR 603.2 + CR 603.3: the repeat count is bounded by the triggering
+    /// spell, not by whatever was cast later while its trigger waited on the
+    /// stack (Thousand-Year Storm).
+    #[test]
+    fn parse_for_each_spells_before_triggering_spell_keeps_history_boundary() {
+        let (rest, quantity) = parse_for_each_clause_ref_complete(
+            "other instant and sorcery spells you've cast before it this turn",
+        )
+        .expect("trigger-bound spell history should parse");
+        assert_eq!(rest, "");
+        assert_eq!(
+            quantity,
+            QuantityRef::SpellsCastBeforeTriggeringSpell {
+                scope: CountScope::Controller,
+                filter: Some(TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                    ],
+                }),
+            }
+        );
     }
 
     /// CR 109.5 + CR 121.1: "that player" in a per-player effect is a

@@ -850,7 +850,7 @@ pub enum Keyword {
     Fuse,
     Gravestorm,
     Haunt,
-    /// CR 702.74a: Hideaway N — look at top N cards, exile one face down, rest on bottom.
+    /// CR 702.75a: Hideaway N — look at top N cards, exile one face down, rest on bottom.
     Hideaway(u32),
     Improvise,
     Ingest,
@@ -2588,7 +2588,8 @@ impl FromStr for Keyword {
                 "recover" => return Ok(Keyword::Recover(parse_keyword_mana_cost(p))),
                 // CR 702.148a: Cleave {cost}
                 "cleave" => return Ok(Keyword::Cleave(parse_keyword_mana_cost(p))),
-                // CR 702.74a
+                // CR 702.75a; the 4 default is CR 702.75b's errata for pre-errata
+                // cards printed as bare "Hideaway".
                 "hideaway" => return Ok(Keyword::Hideaway(p.parse().unwrap_or(4))),
                 "afflict" => return Ok(Keyword::Afflict(p.parse().unwrap_or(1))),
                 // CR 303.4a + CR 702.5a: When the enchant clause is unrecognized
@@ -3086,12 +3087,25 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Retrace" => Ok(Keyword::Retrace),
         "SplitSecond" => Ok(Keyword::SplitSecond),
         "Storm" => Ok(Keyword::Storm),
-        "Suspend" => Ok(Keyword::Suspend {
-            count: 0,
-            cost: ManaCost::default(),
-        }),
-        "Gift" => Ok(Keyword::Gift(GiftKind::Card)),
-        "Discover" => Ok(Keyword::Discover(0)),
+        "Suspend" => {
+            let object = data.as_object().ok_or("Suspend: expected object")?;
+            let count = object
+                .get("count")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or("Suspend: missing count")?;
+            let count = u32::try_from(count).map_err(|_| "Suspend: count exceeds u32")?;
+            let cost = object.get("cost").ok_or("Suspend: missing cost")?;
+            Ok(Keyword::Suspend {
+                count,
+                cost: mana(cost)?,
+            })
+        }
+        "Gift" => serde_json::from_value(data.clone())
+            .map(Keyword::Gift)
+            .map_err(|error| format!("GiftKind: {error}")),
+        "Discover" => serde_json::from_value(data.clone())
+            .map(Keyword::Discover)
+            .map_err(|error| format!("Discover: {error}")),
         "Spree" => Ok(Keyword::Spree),
         "Ravenous" => Ok(Keyword::Ravenous),
         "Daybound" => Ok(Keyword::Daybound),
@@ -3105,31 +3119,24 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Dethrone" => Ok(Keyword::Dethrone),
         "DoubleTeam" => Ok(Keyword::DoubleTeam),
         "LivingMetal" => Ok(Keyword::LivingMetal),
-        // CR 702.24a: Legacy serialized data had `Keyword::CumulativeUpkeep`
-        // carry a raw `String` cost (e.g. "{1}"). Task 3 changed the field
-        // to a typed `AbilityCost`, but parsing the legacy string requires
-        // the Oracle parser, which doesn't live in this deserialization
-        // path. Card-data.json is regenerated from MTGJSON+Oracle text by
-        // the pipeline (`./scripts/gen-card-data.sh`), so the practical
-        // fix is to re-run that pipeline rather than recover legacy data
-        // here. The zero-cost sentinel is a well-formed placeholder until
-        // the pipeline rebuilds the typed cost.
-        "Cumulative" => Ok(Keyword::CumulativeUpkeep(AbilityCost::Mana {
-            cost: ManaCost::zero(),
-        })),
-        // CR 702.24a: Legacy serialized data had `Keyword::CumulativeUpkeep`
-        // carry a raw `String` cost (e.g. "{1}"). Task 3 changed the field
-        // to a typed `AbilityCost`, but parsing the legacy string requires
-        // the Oracle parser, which doesn't live in this deserialization
-        // path. Card-data.json is regenerated from MTGJSON+Oracle text by
-        // the pipeline (`./scripts/gen-card-data.sh`), so the practical
-        // fix is to re-run that pipeline rather than recover legacy data
-        // here. The zero-cost sentinel is a well-formed placeholder until
-        // the pipeline rebuilds the typed cost.
-        "CumulativeUpkeep" => Ok(Keyword::CumulativeUpkeep(AbilityCost::Mana {
-            cost: ManaCost::zero(),
-        })),
-        "Ripple" => Ok(Keyword::Ripple(1)),
+        // CR 702.24a: Current serialized keywords carry the typed
+        // `AbilityCost` emitted by this engine. Preserve it faithfully; only
+        // the historic raw-string form falls back because parsing Oracle mana
+        // syntax is outside this deserialization boundary.
+        "Cumulative" | "CumulativeUpkeep" => {
+            let cost = if data.is_string() {
+                AbilityCost::Mana {
+                    cost: ManaCost::zero(),
+                }
+            } else {
+                serde_json::from_value(data.clone())
+                    .map_err(|error| format!("CumulativeUpkeep: {error}"))?
+            };
+            Ok(Keyword::CumulativeUpkeep(cost))
+        }
+        "Ripple" => serde_json::from_value(data.clone())
+            .map(Keyword::Ripple)
+            .map_err(|error| format!("Ripple: {error}")),
         "Totem" => Ok(Keyword::Totem),
         // Parameterized: ManaCost (new keywords)
         "Warp" => Ok(Keyword::Warp(mana(data)?)),
@@ -4667,6 +4674,36 @@ mod tests {
         let json = serde_json::to_string(&keywords).unwrap();
         let deserialized: Vec<Keyword> = serde_json::from_str(&json).unwrap();
         assert_eq!(keywords, deserialized);
+    }
+
+    #[test]
+    fn tagged_keyword_payloads_deserialize_without_substitution() {
+        let gift: Keyword = serde_json::from_str(r#"{"Gift":{"type":"TappedFish"}}"#)
+            .expect("Gift payload deserializes");
+        assert_eq!(gift, Keyword::Gift(GiftKind::TappedFish));
+
+        let discover: Keyword =
+            serde_json::from_str(r#"{"Discover": 7}"#).expect("Discover payload deserializes");
+        assert_eq!(discover, Keyword::Discover(7));
+
+        let ripple: Keyword =
+            serde_json::from_str(r#"{"Ripple": 4}"#).expect("Ripple payload deserializes");
+        assert_eq!(ripple, Keyword::Ripple(4));
+
+        let suspend: Keyword = serde_json::from_str(
+            r#"{"Suspend":{"count":4,"cost":{"type":"Cost","shards":["Blue"],"generic":0}}}"#,
+        )
+        .expect("Suspend payload deserializes");
+        assert_eq!(
+            suspend,
+            Keyword::Suspend {
+                count: 4,
+                cost: ManaCost::Cost {
+                    shards: vec![crate::types::mana::ManaCostShard::Blue],
+                    generic: 0,
+                },
+            }
+        );
     }
 
     #[test]

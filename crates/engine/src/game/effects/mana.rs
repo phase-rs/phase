@@ -271,7 +271,8 @@ pub fn resolve(
             .current_trigger_event
             .as_ref()
             .and_then(|event| match event {
-                GameEvent::TappedForMana { player_id, .. } => Some(*player_id),
+                GameEvent::TappedForMana { player_id, .. }
+                | GameEvent::ManaAbilityProduced { player_id, .. } => Some(*player_id),
                 _ => None,
             })
             .unwrap_or(ability.controller),
@@ -868,7 +869,10 @@ fn resolve_mana_types_impl(
         ManaProduction::TriggerEventManaType => {
             use crate::types::events::GameEvent;
             match &state.current_trigger_event {
-                Some(GameEvent::TappedForMana { produced, .. }) => {
+                Some(
+                    GameEvent::TappedForMana { produced, .. }
+                    | GameEvent::ManaAbilityProduced { produced, .. },
+                ) => {
                     let distinct: std::collections::HashSet<_> = produced.iter().copied().collect();
                     distinct.into_iter().collect()
                 }
@@ -2567,7 +2571,9 @@ mod tests {
                     contribution: ManaContribution::Base,
                 },
                 restrictions: vec![],
-                grants: vec![ManaSpellGrant::CantBeCountered],
+                grants: vec![ManaSpellGrant::CantBeCountered {
+                    filter: TargetFilter::Any,
+                }],
                 expiry: None,
                 target: None,
             },
@@ -2579,7 +2585,12 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         let unit = &state.players[0].mana_pool.mana[0];
-        assert_eq!(unit.grants, vec![ManaSpellGrant::CantBeCountered]);
+        assert_eq!(
+            unit.grants,
+            vec![ManaSpellGrant::CantBeCountered {
+                filter: TargetFilter::Any,
+            }]
+        );
     }
 
     /// CR 106.7 + CR 106.1b: Reflecting Pool — produces one mana of any type

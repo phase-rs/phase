@@ -126,6 +126,18 @@ fn default_cube_min_deck_size() -> usize {
     40
 }
 
+/// Derive the session pack size from the selected MTGJSON booster product.
+/// Every supported set currently has uniformly sized variants; rejecting mixed
+/// data keeps UI progress and sealed-pool validation aligned with actual pulls.
+fn set_cards_per_pack(set_pool: &LimitedSetPool) -> Result<u8, String> {
+    set_pool.cards_per_pack().ok_or_else(|| {
+        format!(
+            "Set {} has no single MTGJSON pack size across its booster variants",
+            set_pool.code
+        )
+    })
+}
+
 /// Initialize panic hook for better error messages in WASM.
 #[wasm_bindgen(start)]
 pub fn init_panic_hook() {
@@ -164,6 +176,7 @@ pub fn start_quick_draft(
 
     let ai_difficulty = map_difficulty(difficulty);
     let set_code = set_pool.code.clone();
+    let cards_per_pack = set_cards_per_pack(&set_pool).map_err(|e| JsValue::from_str(&e))?;
 
     let config = DraftConfig {
         source: DraftSource::Set {
@@ -172,7 +185,7 @@ pub fn start_quick_draft(
         set_code,
         kind: DraftKind::Quick,
         pod_size: 8,
-        cards_per_pack: 14,
+        cards_per_pack,
         pack_count: 3,
         min_deck_size: 40,
         addable_cards: DeckAddableCards::standard_basics(),
@@ -221,6 +234,7 @@ pub fn start_sealed_draft(
     let set_pool: LimitedSetPool = serde_json::from_str(set_pool_json)
         .map_err(|e| JsValue::from_str(&format!("Failed to parse set pool: {e}")))?;
     let set_code = set_pool.code.clone();
+    let cards_per_pack = set_cards_per_pack(&set_pool).map_err(|e| JsValue::from_str(&e))?;
     let config = DraftConfig {
         source: DraftSource::Set {
             code: set_code.clone(),
@@ -228,7 +242,7 @@ pub fn start_sealed_draft(
         set_code,
         kind: DraftKind::Sealed,
         pod_size: 8,
-        cards_per_pack: 14,
+        cards_per_pack,
         pack_count: 6,
         min_deck_size: 40,
         addable_cards: DeckAddableCards::standard_basics(),
@@ -847,6 +861,7 @@ fn create_multiplayer_draft_inner(
             let set_pool: LimitedSetPool = serde_json::from_str(&set_pool_json)
                 .map_err(|e| format!("Failed to parse set pool: {}", e))?;
             let set_code = set_pool.code.clone();
+            let cards_per_pack = set_cards_per_pack(&set_pool)?;
 
             let config = DraftConfig {
                 source: DraftSource::Set {
@@ -855,7 +870,7 @@ fn create_multiplayer_draft_inner(
                 set_code,
                 kind: draft_kind,
                 pod_size: seats.len() as u8,
-                cards_per_pack: 14,
+                cards_per_pack,
                 pack_count: if draft_kind == DraftKind::Sealed {
                     6
                 } else {
@@ -1239,6 +1254,78 @@ mod create_multiplayer_draft_tests {
         );
         // DraftKind flow-through: Traditional flows unchanged.
         assert!(matches!(view.kind, DraftKind::Traditional));
+
+        clear_state();
+    }
+
+    #[test]
+    fn set_branch_uses_the_mtgjson_pack_size_for_draft_and_sealed() {
+        let set_pool_json = r#"{
+            "code": "TST",
+            "name": "Test Set",
+            "release_date": null,
+            "pack_variants": [{
+                "contents": [{ "slot": "common", "count": 3, "choices": [{ "sheet": "common", "weight": 1 }] }],
+                "weight": 1
+            }],
+            "pack_variants_total_weight": 1,
+            "sheets": {
+                "common": {
+                    "cards": [
+                        { "name": "Alpha", "set_code": "TST", "collector_number": "1", "rarity": "common", "weight": 1 },
+                        { "name": "Beta", "set_code": "TST", "collector_number": "2", "rarity": "common", "weight": 1 },
+                        { "name": "Gamma", "set_code": "TST", "collector_number": "3", "rarity": "common", "weight": 1 }
+                    ],
+                    "total_weight": 3,
+                    "foil": false,
+                    "balance_colors": false
+                }
+            },
+            "prints": [],
+            "basic_lands": []
+        }"#;
+        let pool_input_json = serde_json::json!({
+            "type": "Set",
+            "data": { "set_pool_json": set_pool_json }
+        })
+        .to_string();
+        let seats_json = r#"[
+            { "type": "Human", "player_id": 0, "display_name": "Host" },
+            { "type": "Human", "player_id": 1, "display_name": "Guest" }
+        ]"#;
+
+        clear_state();
+        let draft_view = create_multiplayer_draft_inner(
+            &pool_input_json,
+            seats_json,
+            1,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+        )
+        .expect("set draft should start");
+        assert_eq!(draft_view.cards_per_pack, 3);
+        assert_eq!(draft_view.current_pack.expect("current pack").len(), 3);
+
+        clear_state();
+        let sealed_view = create_multiplayer_draft_inner(
+            &pool_input_json,
+            seats_json,
+            3,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+        )
+        .expect("set sealed should start");
+        assert_eq!(sealed_view.cards_per_pack, 3);
+        assert_eq!(sealed_view.pool.len(), 18);
+        assert!(sealed_view
+            .sealed_packs
+            .expect("sealed pack boundaries")
+            .iter()
+            .all(|pack| pack.len() == 3));
 
         clear_state();
     }

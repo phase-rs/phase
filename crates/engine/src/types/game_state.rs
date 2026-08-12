@@ -45,7 +45,7 @@ use super::replacements::ReplacementEvent;
 #[cfg(debug_assertions)]
 use super::resolution::debug_assert_runtime_resolution_invariants;
 use super::resolution::{
-    AbilityContinuationFrame, ChangeZoneFrame, MultiDrawFrame, OptionalEffectFrame,
+    AbilityContinuationFrame, ChangeZoneFrame, FrameGate, MultiDrawFrame, OptionalEffectFrame,
     PendingCoinFlip, PendingMutateMerge, PendingProliferateActions, RepeatedOptionalPaymentFrame,
     ResolutionFrame, ResolutionStack, ResolutionStackError, ResolutionStateWire,
 };
@@ -221,6 +221,33 @@ mod tuple_key_map {
         }
 
         deserializer.deserialize_map(TupleKeyVisitor)
+    }
+}
+
+#[cfg(test)]
+mod legacy_trigger_definition_ref_map {
+    use super::*;
+
+    pub fn serialize<S, H>(
+        map: &HashMap<TriggerDefinitionRef, u32, H>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut entries: Vec<_> = map.iter().collect();
+        entries.sort_unstable_by_key(|(key, _)| *key);
+        entries.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<HashMap<TriggerDefinitionRef, u32>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Vec::<(TriggerDefinitionRef, u32)>::deserialize(deserializer)
+            .map(|entries| entries.into_iter().collect())
     }
 }
 
@@ -2396,6 +2423,8 @@ impl LatchedBatchedTrigger {
 pub struct LatchedSuppressTrigger {
     pub source_context: TriggerSourceContext,
     pub source_filter: TargetFilter,
+    #[serde(default)]
+    pub trigger_source_filter: Option<TargetFilter>,
     pub events: Vec<crate::types::statics::SuppressedTriggerEvent>,
 }
 
@@ -5920,7 +5949,6 @@ pub enum PendingCostMoveCompletion {
         phyrexian_choices: Option<Vec<ShardChoice>>,
         cascade_cast_transformed: bool,
         resolution_success_waiting_for: Option<Box<WaitingFor>>,
-        pool_before: usize,
         prepaid_actual_mana_spent: Option<u32>,
     },
 }
@@ -6172,18 +6200,13 @@ pub enum PendingCostMoveResume {
         resolved: Box<ResolvedAbility>,
         ability_index: usize,
     },
-    /// CR 702.21a + CR 122.1 + CR 616.1: Ward's player-counter unless-cost
-    /// (`AbilityCost::GetPlayerCounters`) paused on a replacement choice for
-    /// the `AddCounter` event it attempted (e.g. an optional "you may
-    /// prevent a player from getting counters" replacement, or a CR 616.1
-    /// ordering choice among several applicable replacements). Retains the
-    /// full `WaitingFor::UnlessPayment` payload so the choice's resolution —
-    /// Applied (paid) via the `ReplacementDelivered` boundary, or Prevented
-    /// (failed) via the `ReplacementPrevented` boundary — can drive the same
-    /// paid/failed tail `handle_unless_payment` uses for every other cost
-    /// shape, instead of resetting to bare priority with the Ward-guarded
-    /// ability's fate undetermined.
-    GetPlayerCountersUnlessPayment {
+    /// CR 118.12 + CR 122.1 + CR 616.1: A counter-addition unless-cost paused
+    /// on a replacement choice. Covers Ward's player-counter payment and the
+    /// source-counter `EffectCost` used by cumulative upkeep. Retains the full
+    /// `WaitingFor::UnlessPayment` payload so Applied completes payment and a
+    /// prevented placement fails it instead of orphaning the pending ability.
+    #[serde(alias = "GetPlayerCountersUnlessPayment")]
+    CounterAdditionUnlessPayment {
         #[serde(deserialize_with = "crate::types::ability::deserialize_ability_cost_compat")]
         cost: AbilityCost,
         pending_effect: Box<ResolvedAbility>,
@@ -16529,6 +16552,29 @@ pub struct PendingMultiDraw {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct DrawSequenceFrameId(pub u64);
 
+/// The unbookkept suffix of one individual draw whose Library → Hand delivery
+/// parked on a replacement choice.
+///
+/// The selected card stays here until its zone change settles. Recording it as
+/// drawn before then would emit `CardDrawn` and advance the draw ledger while
+/// the card is still in the library; retaining the remaining selected cards
+/// also preserves the ordinary one-at-a-time draw order after the choice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingDrawDelivery {
+    pub player: PlayerId,
+    pub current: ObjectId,
+    /// False while the current card still needs its initial pipeline pass;
+    /// true once a parked replacement choice has delivered that pass.
+    pub current_settled: bool,
+    pub remaining: Vec<ObjectId>,
+    #[serde(
+        default,
+        serialize_with = "crate::types::deterministic_serde::hash_set"
+    )]
+    pub applied: HashSet<AppliedReplacementKey>,
+    pub attempted_empty_library: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum DrawSequenceOrigin {
     #[default]
@@ -16571,6 +16617,10 @@ pub struct DrawSequenceFrame {
     /// effect replaces a draw within a sequence of card draws, the replacement
     /// effect is completed before resuming the sequence."
     pub remaining: u32,
+    /// A card delivery that has selected its card but has not yet settled its
+    /// `Moved` replacement choice. The frame owns its ledger and suffix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_delivery: Option<PendingDrawDelivery>,
     /// CR 608.2c: running total of cards ACTUALLY delivered across every
     /// completed unit of this instruction. This is the value a later "that many"
     /// clause on the same card reads ("Draw two cards, then discard that many") —
@@ -16691,6 +16741,7 @@ impl DrawSequenceStack {
             applied,
             origin,
             remaining: count,
+            pending_delivery: None,
             accumulated: 0,
         });
         debug_assert!(
@@ -16742,6 +16793,7 @@ impl DrawSequenceStack {
                     && a.remaining == b.remaining
                     && a.accumulated == b.accumulated
                     && a.origin == b.origin
+                    && a.pending_delivery == b.pending_delivery
             })
     }
 
@@ -17173,6 +17225,17 @@ impl GameState {
     /// than an invitation to search below it.
     pub fn clear_active_ability_continuation(&mut self) -> Result<bool, ResolutionStackError> {
         Ok(self.take_active_ability_continuation()?.is_some())
+    }
+
+    /// Clears the reveal choice's continuation while allowing an exact active
+    /// batch-delivery child to retain its own pending zone-change work.
+    pub fn clear_active_ability_continuation_or_batch_delivery_child(
+        &mut self,
+    ) -> Result<bool, ResolutionStackError> {
+        Ok(self
+            .resolution_stack
+            .take_active_ability_continuation_or_batch_delivery_child()?
+            .is_some())
     }
 
     /// Returns the complete ChangeZone owner only when it owns the stack top.
@@ -18420,6 +18483,24 @@ impl GameState {
         })
     }
 
+    /// CR 400.7: Capture the exact incarnation-bound snapshot of an object, for
+    /// an event whose subject must survive that object leaving and re-entering
+    /// the battlefield at the same storage id.
+    ///
+    /// This is the general entry point; the capture body lives in
+    /// [`Self::capture_connive_subject`], which was the first caller to need it
+    /// (CR 701.50b/f) and remains a thin typed wrapper over the same snapshot.
+    /// There is deliberately no raw-`ObjectId` variant: a bare id cannot
+    /// distinguish the original incarnation from a re-entered one, which is the
+    /// whole reason this exists.
+    pub fn capture_event_object_snapshot(
+        &self,
+        object_id: ObjectId,
+    ) -> Option<EventObjectSnapshot> {
+        self.capture_connive_subject(object_id)
+            .map(|subject| subject.snapshot)
+    }
+
     /// Builds the exact paused-delivery key from the replacement record before
     /// that record is consumed. Only a `ZoneChange` can belong to either
     /// logical zone-change owner.
@@ -18681,6 +18762,38 @@ impl GameState {
             .record_frame_transition(command.clone())
             .expect("resolved frame transition must have a live journal cause");
         Ok(command)
+    }
+
+    /// Atomically installs a direct-choice owner and the prompt it is allowed to
+    /// consume. A direct-choice frame may never be visible with an unrelated
+    /// `WaitingFor`, nor may it be buried below another direct-choice owner.
+    pub fn install_direct_choice_frame(
+        &mut self,
+        frame: ResolutionFrame,
+        waiting_for: WaitingFor,
+    ) -> Result<(), ResolutionStackError> {
+        if !matches!(frame.gate(), FrameGate::DirectChoice(_)) {
+            return Err(ResolutionStackError::InvalidPayload {
+                frame: frame.kind(),
+                message: "direct-choice installation requires a direct-choice frame".to_string(),
+            });
+        }
+
+        let transition = ResolvedFrameTransition::Push {
+            frame: frame.clone(),
+        };
+        let mut candidate = (*self.resolution_stack).clone();
+        candidate.push_inner(frame);
+        candidate.validate(&waiting_for)?;
+
+        let previous_waiting_for = std::mem::replace(&mut self.waiting_for, waiting_for);
+        if let Err(error) = self.resolve_and_apply_frame_transition(transition) {
+            self.waiting_for = previous_waiting_for;
+            return Err(match error {
+                ResolvedFrameTransitionReplayInvariantError::Stack(error) => error,
+            });
+        }
+        Ok(())
     }
 
     /// Applies and journals one already-resolved player resource edit.
@@ -19081,11 +19194,32 @@ impl GameState {
     }
 
     pub(crate) fn current_or_begin_rules_execution_node(&mut self) -> RulesExecutionNodeRef {
-        self.active_rules_execution_node.unwrap_or_else(|| {
+        self.live_active_rules_execution_node().unwrap_or_else(|| {
             self.resolved_rules_journal
                 .begin_proposal()
                 .expect("resolved-rules journal proposal ordinal overflow")
         })
+    }
+
+    /// Returns the ambient execution node only while its provenance record is
+    /// still retained. The journal has an intentionally shorter retention
+    /// window than the transient scope, so a boundary may discard a completed
+    /// parent before a later nested mana activation observes that scope.
+    fn live_active_rules_execution_node(&mut self) -> Option<RulesExecutionNodeRef> {
+        let node = self.active_rules_execution_node?;
+        if self.rules_execution_node_is_live(node) {
+            Some(node)
+        } else {
+            self.active_rules_execution_node = None;
+            None
+        }
+    }
+
+    fn rules_execution_node_is_live(&self, node: RulesExecutionNodeRef) -> bool {
+        self.resolved_rules_journal
+            .nodes()
+            .iter()
+            .any(|candidate| candidate.identity == node)
     }
 
     /// CR 800.4: Begin the distinct execution node for one player leaving the
@@ -19110,8 +19244,9 @@ impl GameState {
             .get(&source_id)
             .map(ObjectIncarnationRef::from_object)
             .expect("mana ability activation source must exist");
+        let parent = self.live_active_rules_execution_node();
         self.resolved_rules_journal
-            .begin_activated_mana(source, self.active_rules_execution_node)
+            .begin_activated_mana(source, parent)
             .expect("resolved-rules journal settlement ordinal overflow")
     }
 
@@ -19124,12 +19259,11 @@ impl GameState {
         trigger: Option<TriggerDefinitionRef>,
         caused_by: Option<RulesExecutionNodeRef>,
     ) -> RulesExecutionNodeRef {
+        let parent = caused_by
+            .filter(|node| self.rules_execution_node_is_live(*node))
+            .or_else(|| self.live_active_rules_execution_node());
         self.resolved_rules_journal
-            .begin_triggered_mana(
-                source,
-                trigger,
-                caused_by.or(self.active_rules_execution_node),
-            )
+            .begin_triggered_mana(source, trigger, parent)
             .expect("resolved-rules journal settlement ordinal overflow")
     }
 
@@ -22479,10 +22613,11 @@ mod tests {
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, Effect, PostReplacementContinuation, QuantityExpr,
         ResolvedAbility, TargetFilter, TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef,
+        TriggerEntry, TriggerGrantInstanceRef,
     };
     use crate::types::deterministic_serde::test_support::ReverseBuildHasher;
     use crate::types::identifiers::{
-        DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
+        CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
     };
     use crate::types::resolved_commands::ResolvedDelayedTriggerCommand;
 
@@ -22494,7 +22629,7 @@ mod tests {
 
     #[derive(Serialize)]
     struct TriggerRefFixture<'a> {
-        #[serde(serialize_with = "trigger_definition_ref_map::serialize")]
+        #[serde(serialize_with = "legacy_trigger_definition_ref_map::serialize")]
         values: &'a HashMap<TriggerDefinitionRef, u32, ReverseBuildHasher>,
     }
 
@@ -22506,6 +22641,72 @@ mod tests {
                 printed_index,
             },
         }
+    }
+
+    #[test]
+    fn mana_journal_ignores_a_stale_nested_parent_after_journal_reset() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mana Source".to_string(),
+            Zone::Battlefield,
+        );
+        let source = state
+            .objects
+            .get(&source_id)
+            .map(ObjectIncarnationRef::from_object)
+            .expect("test source exists");
+
+        let mut parent = None;
+        for _ in 0..7 {
+            state.active_rules_execution_node = parent;
+            let node = state.begin_activated_mana_journal_node(source_id);
+            assert_eq!(
+                state
+                    .resolved_rules_journal
+                    .nodes()
+                    .iter()
+                    .find(|candidate| candidate.identity == node)
+                    .expect("activation node is retained")
+                    .caused_by,
+                parent,
+                "a live nested activation keeps its exact parent"
+            );
+            parent = Some(node);
+        }
+        let stale_parent = parent.expect("deep chain creates a terminal parent");
+
+        state.resolved_rules_journal = Default::default();
+        state.active_rules_execution_node = Some(stale_parent);
+        let fresh_activation = state.begin_activated_mana_journal_node(source_id);
+        assert_eq!(
+            state
+                .resolved_rules_journal
+                .nodes()
+                .iter()
+                .find(|candidate| candidate.identity == fresh_activation)
+                .expect("fresh activation node is retained")
+                .caused_by,
+            None,
+            "a journal reset must not retain a parent ordinal it no longer owns"
+        );
+
+        state.active_rules_execution_node = Some(stale_parent);
+        let fresh_trigger =
+            state.begin_triggered_mana_journal_node(source, None, Some(stale_parent));
+        assert_eq!(
+            state
+                .resolved_rules_journal
+                .nodes()
+                .iter()
+                .find(|candidate| candidate.identity == fresh_trigger)
+                .expect("fresh trigger node is retained")
+                .caused_by,
+            None,
+            "triggered mana also rejects an absent explicit or ambient parent"
+        );
     }
 
     #[test]
@@ -22604,7 +22805,7 @@ mod tests {
             .expect("trigger-ref fixture should serialize"),
             r#"{"values":[[{"source":{"object_id":7,"incarnation":3},"occurrence":{"type":"Printed","data":{"base_set":1,"printed_index":0}}},10],[{"source":{"object_id":7,"incarnation":3},"occurrence":{"type":"Printed","data":{"base_set":1,"printed_index":1}}},11],[{"source":{"object_id":7,"incarnation":3},"occurrence":{"type":"Printed","data":{"base_set":1,"printed_index":2}}},12]]}"#
         );
-        let trigger_round_trip = trigger_definition_ref_map::deserialize(
+        let trigger_round_trip = legacy_trigger_definition_ref_map::deserialize(
             &mut serde_json::Deserializer::from_str(
                 r#"[[{"source":{"object_id":7,"incarnation":3},"occurrence":{"type":"Printed","data":{"base_set":1,"printed_index":2}}},12],[{"source":{"object_id":7,"incarnation":3},"occurrence":{"type":"Printed","data":{"base_set":1,"printed_index":0}}},10]]"#,
             ),
@@ -28401,6 +28602,60 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn game_state_deserialize_preserves_legacy_grant_fire_counts_by_recipient() {
+        let object_id = ObjectId(993);
+        let second_object_id = ObjectId(994);
+        let mut state = GameState::new_two_player(42);
+        let mut object = GameObject::new(
+            object_id,
+            CardId(993),
+            PlayerId(0),
+            "Legacy granted trigger".to_string(),
+            Zone::Battlefield,
+        );
+        let entry = TriggerEntry::new(
+            TriggerDefinitionOccurrenceRef::Granted {
+                grant_instance: TriggerGrantInstanceRef(1),
+            },
+            TriggerDefinition::new(crate::types::triggers::TriggerMode::Attacks),
+        );
+        let definition = object.trigger_definition_ref(&entry);
+        object.trigger_definitions.push(entry);
+        state.objects.insert(object_id, object);
+        state
+            .trigger_fire_counts_this_turn
+            .insert(definition.clone(), 2);
+
+        let mut second_object = GameObject::new(
+            second_object_id,
+            CardId(994),
+            PlayerId(0),
+            "Second legacy granted trigger".to_string(),
+            Zone::Battlefield,
+        );
+        let second_entry = TriggerEntry::new(
+            TriggerDefinitionOccurrenceRef::Granted {
+                grant_instance: TriggerGrantInstanceRef(1),
+            },
+            TriggerDefinition::new(crate::types::triggers::TriggerMode::Attacks),
+        );
+        let second_definition = second_object.trigger_definition_ref(&second_entry);
+        second_object.trigger_definitions.push(second_entry);
+        state.objects.insert(second_object_id, second_object);
+        state
+            .trigger_fire_counts_this_turn
+            .insert(second_definition.clone(), 3);
+
+        let snapshot = serde_json::to_value(state).expect("serialize fixture state");
+        let restored: GameState =
+            serde_json::from_value(snapshot).expect("recipient-specific ledger counts restore");
+        assert_eq!(
+            restored.trigger_fire_counts_this_turn,
+            HashMap::from([(definition, 2), (second_definition, 3),])
+        );
     }
 
     #[test]

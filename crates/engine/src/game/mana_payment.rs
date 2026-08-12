@@ -2724,7 +2724,9 @@ mod tests {
             supertype: Some(crate::types::mana::ManaSupertype::Snow),
             source_could_produce_two_or_more_colors: true,
             restrictions: vec![ManaRestriction::OnlyForSpell],
-            grants: vec![ManaSpellGrant::CantBeCountered],
+            grants: vec![ManaSpellGrant::CantBeCountered {
+                filter: TargetFilter::Any,
+            }],
             expiry: Some(ManaExpiry::EndOfTurn),
         }
     }

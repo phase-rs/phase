@@ -760,6 +760,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             }
             FilterProp::SameName => parts.push("same name".into()),
             FilterProp::SameNameAsParentTarget => parts.push("same name as parent target".into()),
+            FilterProp::SameNameAsExiledBySource => parts.push("same name as exiled card".into()),
             FilterProp::NameMatchesAnyPermanent { controller } => match controller {
                 Some(c) => parts.push(format!("name matches {} permanent", fmt_controller(c))),
                 None => parts.push("name matches any permanent".into()),
@@ -1617,6 +1618,17 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 fmt_count_scope(scope)
             ),
             None => format!("spells cast this turn ({})", fmt_count_scope(scope)),
+        },
+        QuantityRef::SpellsCastBeforeTriggeringSpell { scope, filter } => match filter {
+            Some(filter) => format!(
+                "{} spells cast before the triggering spell ({})",
+                fmt_target(filter),
+                fmt_count_scope(scope)
+            ),
+            None => format!(
+                "spells cast before the triggering spell ({})",
+                fmt_count_scope(scope)
+            ),
         },
         QuantityRef::EnteredThisTurn { filter } => {
             format!("{} entered this turn", fmt_target(filter))
@@ -4161,6 +4173,19 @@ fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> Stri
     }
 }
 
+fn fmt_ordinal(n: u32) -> String {
+    let suffix = match n % 100 {
+        11..=13 => "th",
+        _ => match n % 10 {
+            1 => "st",
+            2 => "nd",
+            3 => "rd",
+            _ => "th",
+        },
+    };
+    format!("{n}{suffix}")
+}
+
 /// Format a `TriggerConstraint` as a human-readable string for the parse-details overlay.
 fn fmt_trigger_constraint(c: &crate::types::ability::TriggerConstraint) -> String {
     use crate::types::ability::TriggerConstraint as TC;
@@ -4168,11 +4193,28 @@ fn fmt_trigger_constraint(c: &crate::types::ability::TriggerConstraint) -> Strin
         TC::OncePerTurn => "once per turn".into(),
         TC::OncePerGame => "once per game".into(),
         TC::OnlyDuringYourTurn => "only during your turn".into(),
-        TC::NthSpellThisTurn { n, filter } => match filter {
-            Some(f) => format!("on your {n}th {} spell this turn", fmt_target(f)),
-            None => format!("on your {n}th spell this turn"),
-        },
-        TC::NthDrawThisTurn { n } => format!("on your {n}th draw this turn"),
+        TC::NthSpellThisTurn {
+            n,
+            comparator,
+            filter,
+        } => {
+            let timing = match comparator {
+                Comparator::EQ => format!("on your {}", fmt_ordinal(*n)),
+                Comparator::GT if *n == 1 => "after your first".to_string(),
+                Comparator::GT
+                | Comparator::LT
+                | Comparator::GE
+                | Comparator::LE
+                | Comparator::NE => {
+                    format!("when your spell count {} {n}", fmt_comparator(comparator))
+                }
+            };
+            match filter {
+                Some(f) => format!("{timing} {} spell this turn", fmt_target(f)),
+                None => format!("{timing} spell this turn"),
+            }
+        }
+        TC::NthDrawThisTurn { n } => format!("on your {} draw this turn", fmt_ordinal(*n)),
         TC::OnlyDuringOpponentsTurn => "only during opponent's turn".into(),
         TC::OnlyDuringYourMainPhase => "only during your main phase".into(),
         TC::AtClassLevel { level } => format!("at class level {level}"),
@@ -8009,6 +8051,9 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::LifeLostThisTurn { .. } => ("LifeLostThisTurn", Handled),
         QuantityRef::EventContextAmount => ("EventContextAmount", Handled),
         QuantityRef::SpellsCastThisTurn { .. } => ("SpellsCastThisTurn", Handled),
+        QuantityRef::SpellsCastBeforeTriggeringSpell { .. } => {
+            ("SpellsCastBeforeTriggeringSpell", Handled)
+        }
         QuantityRef::EnteredThisTurn { .. } => ("EnteredThisTurn", Handled),
         QuantityRef::SacrificedThisTurn { .. } => ("SacrificedThisTurn", Handled),
         QuantityRef::CrimesCommittedThisTurn => ("CrimesCommittedThisTurn", Handled),
@@ -11314,10 +11359,10 @@ mod tests {
     use crate::database::legality::{legalities_to_export_map, LegalityStatus};
     use crate::parser::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
     use crate::types::ability::{
-        AbilityCondition, AbilityKind, ContinuousModification, ControllerRef, CounterTransferMode,
-        DieResultBranch, Effect, PileSource, PlayerFilter, PlayerScope, PreventionAmount,
-        PreventionScope, ReplacementCondition, StaticDefinition, TargetFilter, VoteTally,
-        VoteVisibility, VoterScope,
+        AbilityCondition, AbilityKind, Comparator, ContinuousModification, ControllerRef,
+        CounterTransferMode, DieResultBranch, Effect, PileSource, PlayerFilter, PlayerScope,
+        PreventionAmount, PreventionScope, ReplacementCondition, StaticDefinition, TargetFilter,
+        TriggerConstraint, VoteTally, VoteVisibility, VoterScope,
     };
     use crate::types::card_type::CardType;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -11326,6 +11371,54 @@ mod tests {
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::{BlockExceptionKind, ProhibitionScope};
     use crate::types::zones::{EtbTapState, Zone};
+
+    #[test]
+    fn nonfirst_spell_constraint_has_grammatical_coverage_detail() {
+        assert_eq!(
+            fmt_trigger_constraint(&TriggerConstraint::NthSpellThisTurn {
+                n: 1,
+                comparator: Comparator::GT,
+                filter: None,
+            }),
+            "after your first spell this turn"
+        );
+        assert_eq!(
+            fmt_trigger_constraint(&TriggerConstraint::NthSpellThisTurn {
+                n: 2,
+                comparator: Comparator::EQ,
+                filter: None,
+            }),
+            "on your 2nd spell this turn"
+        );
+        assert_eq!(
+            fmt_trigger_constraint(&TriggerConstraint::NthSpellThisTurn {
+                n: 13,
+                comparator: Comparator::EQ,
+                filter: None,
+            }),
+            "on your 13th spell this turn"
+        );
+        assert_eq!(
+            fmt_trigger_constraint(&TriggerConstraint::NthDrawThisTurn { n: 3 }),
+            "on your 3rd draw this turn"
+        );
+    }
+
+    #[test]
+    fn ordinal_formatter_handles_last_digits_and_teens() {
+        for (n, expected) in [
+            (1, "1st"),
+            (2, "2nd"),
+            (3, "3rd"),
+            (4, "4th"),
+            (11, "11th"),
+            (12, "12th"),
+            (13, "13th"),
+            (21, "21st"),
+        ] {
+            assert_eq!(fmt_ordinal(n), expected);
+        }
+    }
 
     #[test]
     fn change_zone_signature_exposes_enters_attacking() {

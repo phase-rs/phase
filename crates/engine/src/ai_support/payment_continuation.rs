@@ -413,7 +413,7 @@ fn classify_parked_cost_move_root(state: &GameState) -> PaymentContinuationState
         | PendingCostMoveResume::ReplacementMayCost { .. }
         | PendingCostMoveResume::Foretell { .. }
         | PendingCostMoveResume::UnlessBouncePayment { .. }
-        | PendingCostMoveResume::GetPlayerCountersUnlessPayment { .. }
+        | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
         | PendingCostMoveResume::LoyaltyActivation { .. } => {
             PaymentContinuationState::NotAffiliated
         }
@@ -658,7 +658,7 @@ fn pending_cost_move_contains_root(
         | Some(PendingCostMoveResume::Foretell { .. })
         | Some(PendingCostMoveResume::DelveManaPayment { .. })
         | Some(PendingCostMoveResume::UnlessBouncePayment { .. })
-        | Some(PendingCostMoveResume::GetPlayerCountersUnlessPayment { .. })
+        | Some(PendingCostMoveResume::CounterAdditionUnlessPayment { .. })
         | Some(PendingCostMoveResume::LoyaltyActivation { .. })
         | None => false,
     }

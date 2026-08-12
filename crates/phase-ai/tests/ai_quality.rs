@@ -9,16 +9,25 @@ use std::collections::{HashMap, HashSet};
 use engine::game::combat::{AttackTarget, AttackerInfo, CombatState};
 use engine::game::deck_loading::DeckEntry;
 use engine::game::scenario::{GameScenario, P0, P1};
-use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter};
+use engine::types::ability::TargetRef;
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, ControllerRef, Effect, QuantityExpr, QuantityRef, TargetFilter,
+    TypedFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
 use engine::types::card_type::{CardType, CoreType};
 use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::{PlayerDeckPool, WaitingFor};
+use engine::types::identifiers::ObjectId;
+use engine::types::keywords::Keyword;
 use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use phase_ai::auto_play::{driver_step, run_ai_actions, AiActionsBreakReason};
+use phase_ai::auto_play::{
+    driver_step, run_ai_actions, run_ai_actions_bounded, AiActionsBreakReason,
+};
 use phase_ai::choose_action;
 use phase_ai::config::{create_config, AiDifficulty, Platform};
 use phase_ai::score_candidates;
@@ -201,6 +210,954 @@ fn prefers_removing_larger_creature() {
             GameAction::CastSpell { .. } | GameAction::PassPriority
         ),
         "AI should consider casting removal or pass — got {action:?}"
+    );
+}
+
+/// With a single 2/1 creature and no Equipment on board, Slash of Light deals 1
+/// damage — non-lethal on a 3/3 — so casting it at a 3/3 wastes the removal
+/// spell. The AI should NOT commit the cast in this situation.
+///
+/// Slash of Light's Oracle text:
+/// "Slash of Light deals damage equal to the number of creatures you control
+///  plus the number of Equipment you control to target creature."
+///
+/// CR 120.3: damage equal to the number of creatures you control (1) plus the
+/// number of Equipment you control (0) = 1 damage. CR 704.5g: 1 marked damage
+/// on an undamaged 3/3 does not reach its 3 toughness, so it survives.
+#[test]
+fn does_not_cast_slash_of_light_for_nonlethal_damage() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // AI's single 2/1 creature (1 creature, 0 Equipment → Slash deals 1).
+    scenario.add_creature(P0, "My Bear", 2, 1);
+    // Opponent's 3/3 that 1 damage cannot kill.
+    scenario.add_creature(P1, "Opponent Bear", 3, 3);
+
+    scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Slash of Light",
+            true,
+            "Slash of Light deals damage equal to the number of creatures you control plus the number of Equipment you control to target creature.",
+        )
+        .id();
+
+    // Fund {1}{W} so the cast is affordable — passing must reflect the waste,
+    // not an unpayable cost.
+    let mut mana = vec![ManaUnit::new(
+        ManaType::White,
+        ObjectId(9_999),
+        false,
+        vec![],
+    )];
+    mana.push(ManaUnit::new(
+        ManaType::Colorless,
+        ObjectId(9_999),
+        false,
+        vec![],
+    ));
+    scenario.with_mana_pool(P0, mana);
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+
+    // Easy, Hard, and Very Hard: the whiff guard deterministically ranks the
+    // wasteful cast BELOW passing its priority. Assert via `score_candidates`
+    // (the deterministic policy-registry ranking) rather than `choose_action`
+    // (which applies softmax temperature + search pre-emptions and is therefore
+    // difficulty-stochastic at the argmax boundary). The discriminating signal
+    // for the cast-commit gate is that the whiff burn is deprioritized below
+    // passing.
+    //
+    // Medium is deliberately NOT asserted here: at difficulty Medium the cast
+    // decision goes through the search path which projects casting Slash of Light
+    // as a ~WIN_SCORE (10000) line whether or not the whiff penalty is applied —
+    // a search/terminal-eval artifact orthogonal to the cast-commit whiff guard.
+    for diff in [
+        AiDifficulty::Easy,
+        AiDifficulty::Hard,
+        AiDifficulty::VeryHard,
+    ] {
+        let config = create_config(diff, Platform::Native);
+        let scored = phase_ai::score_candidates(runner.state(), P0, &config);
+        let cast = scored
+            .iter()
+            .find(|(a, _)| matches!(a, GameAction::CastSpell { .. }))
+            .map(|(_, s)| *s);
+        let pass = scored
+            .iter()
+            .find(|(a, _)| matches!(a, GameAction::PassPriority))
+            .map(|(_, s)| *s);
+        let (Some(cast), Some(pass)) = (cast, pass) else {
+            panic!("{diff:?}: expected both CastSpell and PassPriority candidates, got {scored:?}");
+        };
+        assert!(
+            cast < pass,
+            "{diff:?}: the wasteful Slash of Light cast ({cast:.3}) must rank below \
+             passing ({pass:.3}) — the whiff guard did not deprioritize the burn"
+        );
+    }
+}
+
+/// Drives the full Very Hard pipeline after a wasteful Slash of Light cast would
+/// be committed: confirms the AI does NOT commit the cast (and therefore never
+/// points its non-lethal 1 damage at the opponent's 3/3). The cast-commit
+/// whiff guard (the `removal_lethality::can_kill_any_legal_target` gate behind
+/// `AntiSelfHarm::score_pre_cast`) deprioritizes a burn whose damage kills no
+/// legal target, so the Very Hard AI passes instead of pinging the 3/3 for a
+/// wasted 1 point.
+///
+/// Two-tier reach-guard: (1) the scorer must offer the exact Slash of Light
+/// `CastSpell` candidate at the cast-commit step — proving the gate is in the
+/// decision path rather than the test passing vacuously on an unrelated
+/// action — and (2) the bounded pipeline must still produce at least one
+/// decision. Only with both tiers does "no CastSpell in the results" prove the
+/// whiff guard deprioritized the cast.
+#[test]
+fn very_hard_slash_of_light_does_not_commit_or_ping_the_3_3() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let _mine = scenario.add_creature(P0, "My Bear", 2, 1).id();
+    let _theirs = scenario.add_creature(P1, "Opponent Bear", 3, 3).id();
+
+    let slash = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Slash of Light",
+            true,
+            "Slash of Light deals damage equal to the number of creatures you control plus the number of Equipment you control to target creature.",
+        )
+        .id();
+
+    let mut mana = vec![ManaUnit::new(
+        ManaType::White,
+        ObjectId(9_999),
+        false,
+        vec![],
+    )];
+    mana.push(ManaUnit::new(
+        ManaType::Colorless,
+        ObjectId(9_999),
+        false,
+        vec![],
+    ));
+    scenario.with_mana_pool(P0, mana);
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+
+    // Reach-guard (tier 1): the exact Slash of Light cast must be offered as a
+    // candidate to the Very Hard scorer. A vacuous "no candidates" pass would
+    // satisfy the outcome asserts below for the wrong reason. Read-only — no
+    // borrow survives past this block.
+    let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+    let scored = phase_ai::score_candidates(runner.state(), P0, &config);
+    assert!(
+        scored.iter().any(|(a, _)| matches!(
+            a,
+            GameAction::CastSpell { object_id, .. } if *object_id == slash
+        )),
+        "Slash of Light must be offered as a CastSpell candidate, got {scored:?}"
+    );
+
+    let ai_players = HashSet::from([P0]);
+    let ai_configs = HashMap::from([(P0, config)]);
+    let mut ai_rng = SmallRng::seed_from_u64(42);
+    let ai_session = phase_ai::session::AiSession::arc_from_game(runner.state());
+
+    let results = run_ai_actions_bounded(
+        runner.state_mut(),
+        &ai_players,
+        &ai_configs,
+        &mut ai_rng,
+        &ai_session,
+        4,
+    );
+
+    // The Very Hard AI must NOT commit the wasteful cast, so it must not choose
+    // a target either — the first (and only) action should be a priority pass.
+    let cast = results
+        .iter()
+        .find(|r| matches!(r.action, GameAction::CastSpell { .. }));
+    assert!(
+        cast.is_none(),
+        "AI must NOT commit the non-lethal Slash of Light cast — actions: {:?}",
+        results.iter().map(|r| &r.action).collect::<Vec<_>>()
+    );
+    let target = results.iter().find_map(|r| match r.action {
+        GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(id)),
+        } => Some(id),
+        _ => None,
+    });
+    assert!(
+        target.is_none(),
+        "AI must not aim Slash of Light at any creature — got target {target:?}"
+    );
+    // Reach-guard: the engine's full Very Hard action pipeline gave the AI a
+    // chance to act (at least one decision was produced), proving the test did
+    // not short-circuit before the cast-commit gate could be evaluated. A pass
+    // (or any decision) reaching the arms above means the whiff guard fired.
+    assert!(
+        !results.is_empty(),
+        "Very Hard AI must produce at least one decision at the cast-commit step"
+    );
+}
+
+/// Hostile sibling for the whiff gate: the opponent has a 3/3 that survives
+/// AND a 1/1 that Slash's 1 damage KILLS. The cast is a *partial* whiff, not a
+/// total one — `can_kill_any_legal_target` must NOT veto. This proves the gate
+/// blocks only *total* whiffs (target choice for a partial whiff is deferred to
+/// the existing target-selection `lethality_bonus`).
+///
+/// Asserted via `score_candidates` (deterministic policy-registry ranking) at
+/// Easy, exactly as the total-whiff guard test does, so the two are directly
+/// comparable: total whiff → cast ranks below pass; partial whiff → cast ranks
+/// above pass.
+#[test]
+fn slash_of_light_commits_when_a_legal_target_is_lethal() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // AI's single 2/1 creature → Slash deals 1.
+    scenario.add_creature(P0, "My Bear", 2, 1);
+    // Opponent's 1/1 that 1 damage kills (CR 704.5g), and a 3/3 that it doesn't.
+    scenario.add_creature(P1, "Small Opponent", 1, 1);
+    scenario.add_creature(P1, "Big Opponent", 3, 3);
+
+    scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Slash of Light",
+            true,
+            "Slash of Light deals damage equal to the number of creatures you control plus the number of Equipment you control to target creature.",
+        )
+        .id();
+
+    let mut mana = vec![ManaUnit::new(
+        ManaType::White,
+        ObjectId(9_999),
+        false,
+        vec![],
+    )];
+    mana.push(ManaUnit::new(
+        ManaType::Colorless,
+        ObjectId(9_999),
+        false,
+        vec![],
+    ));
+    scenario.with_mana_pool(P0, mana);
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+
+    let config = create_config(AiDifficulty::Easy, Platform::Native);
+    let scored = phase_ai::score_candidates(runner.state(), P0, &config);
+    let cast = scored
+        .iter()
+        .find(|(a, _)| matches!(a, GameAction::CastSpell { .. }))
+        .map(|(_, s)| *s);
+    let pass = scored
+        .iter()
+        .find(|(a, _)| matches!(a, GameAction::PassPriority))
+        .map(|(_, s)| *s);
+    let (Some(cast), Some(pass)) = (cast, pass) else {
+        panic!("expected both CastSpell and PassPriority candidates, got {scored:?}");
+    };
+    assert!(
+        cast > pass,
+        "partial whiff must NOT be vetoed: a legal lethal target (the opponent 1/1) \
+         exists, so the cast ({cast:.3}) should rank above passing ({pass:.3}) — \
+         the gate must only block total whiffs"
+    );
+}
+
+/// Differential test for mixed-removal spells: a spell with TWO creature-only
+/// effects — "deal 1 damage to target creature; destroy target creature" —
+/// must NOT be penalized as a damage whiff when it still has a useful Destroy
+/// line. Without the non-`DealDamage` fail-open guard, `can_kill_any_legal_target`
+/// aggregates only the spell's `DealDamage` half, sees the 1 damage survive the
+/// 3/3, and wrongly vetoes the cast.
+///
+/// The damage amount is DYNAMIC (ObjectCount of the AI's creatures → 1), matching
+/// spells where `lethal_to_creature` fails open and the `can_kill_any_legal_target`
+/// gate determines lethality.
+///
+/// This test isolates the whiff penalty. A second, otherwise-identical spell
+/// deals only the dynamic 1 damage ("pure burn"): on the same board it is a
+/// provable total damage whiff and receives the -8 `wasted_cast_penalty`,
+/// while the mixed spell must not. Both are driven through the real cast
+/// pipeline to ensure the cast-commit gate is fully evaluated.
+#[test]
+fn mixed_damage_and_destroy_is_not_penalized_as_a_damage_whiff() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // AI's single creature makes the dynamic ObjectCount amount resolve to 1
+    // (Slash-of-Light-shaped); the opponent's 3/3 survives 1 damage but Destroy
+    // kills it (CR 701.8a).
+    scenario.add_creature(P0, "My Bear", 2, 1);
+    scenario.add_creature(P1, "Opponent Bear", 3, 3);
+
+    let mut my_filter = TypedFilter::creature();
+    my_filter.controller = Some(ControllerRef::You);
+    let amount = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(my_filter),
+        },
+    };
+
+    // Mixed "deal 1 damage + destroy target creature".
+    let mixed = scenario
+        .add_spell_to_hand(P0, "Charred Murder", true)
+        .with_ability(Effect::DealDamage {
+            amount: amount.clone(),
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            damage_source: None,
+            excess: None,
+        })
+        .with_ability(Effect::Destroy {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            cant_regenerate: false,
+        })
+        .id();
+
+    // Pure "deal 1 damage to target creature" — a total damage whiff here
+    // (1 cannot kill the 3/3).
+    let pure = scenario
+        .add_spell_to_hand(P0, "Pure Burn", true)
+        .with_ability(Effect::DealDamage {
+            amount: amount.clone(),
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            damage_source: None,
+            excess: None,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+
+    let config = create_config(AiDifficulty::Easy, Platform::Native);
+    let scored = phase_ai::score_candidates(runner.state(), P0, &config);
+
+    // Reach-guard: BOTH spells must actually be offered as CastSpell
+    // candidates to prevent a vacuous pass that never reaches the cast-commit gate.
+    let mixed_score = scored
+        .iter()
+        .find(|(a, _)| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == mixed))
+        .map(|(_, s)| *s)
+        .unwrap_or_else(|| {
+            panic!("mixed spell {mixed:?} must be offered as CastSpell, got {scored:?}")
+        });
+    let pure_score = scored
+        .iter()
+        .find(|(a, _)| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == pure))
+        .map(|(_, s)| *s)
+        .unwrap_or_else(|| {
+            panic!("pure whiff spell {pure:?} must be offered as CastSpell, got {scored:?}")
+        });
+
+    // The mixed spell's Destroy line makes it strictly more castable than the
+    // identical pure-damage whiff. Without the non-`DealDamage` fail-open guard,
+    // `can_kill_any_legal_target` penalizes the mixed spell with the same -8
+    // whiff penalty, collapsing this inequality.
+    assert!(
+        mixed_score > pure_score + config.policy_penalties.wasted_cast_penalty.abs() * 0.5,
+        "mixed deal-1 + destroy ({mixed_score:.3}) must outrank the identical pure \
+         burn whiff ({pure_score:.3}): Destroy is a useful removal line the gate \
+         must not penalize as a damage whiff"
+    );
+}
+
+/// Differential test for mixed control spells: a spell with a creature-damage
+/// effect AND a "gain control of target permanent" effect must NOT be
+/// penalized as a damage whiff when the control half is independently useful.
+/// `Effect::GainControl` is classified `EffectPolarity::Contextual`, so the
+/// fail-open requires the gate to cover Contextual non-`DealDamage` effects
+/// with a creature-or-permanent target (CR 613.1b, Layer 2). Without it,
+/// `can_kill_any_legal_target` aggregates only the `DealDamage` half, sees the
+/// 1 damage survive the 3/3, and wrongly vetoes the cast.
+///
+/// The damage amount is DYNAMIC (ObjectCount of the AI's creatures → 1),
+/// Slash-of-Light-shaped; the opponent also controls a non-creature permanent
+/// (Island) so the control line is legal and genuinely useful. On this board the
+/// pure burn is a provable total damage whiff (-8 `wasted_cast_penalty`) while
+/// the mixed control spell must not be penalized. Both are driven through the
+/// real cast pipeline so the cast-commit gate is fully evaluated.
+#[test]
+fn mixed_damage_and_gain_control_is_not_penalized_as_a_damage_whiff() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // AI's single creature makes the dynamic ObjectCount amount resolve to 1
+    // (Slash-of-Light-shaped); the opponent's 3/3 survives 1 damage but the
+    // Island is a legal, useful GainControl permanent target (CR 613.1b).
+    scenario.add_creature(P0, "My Bear", 2, 1);
+    scenario.add_creature(P1, "Opponent Bear", 3, 3);
+    scenario.add_basic_land(P1, engine::types::mana::ManaColor::Blue);
+
+    let mut my_filter = TypedFilter::creature();
+    my_filter.controller = Some(ControllerRef::You);
+    let amount = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(my_filter),
+        },
+    };
+
+    // Mixed "deal 1 damage to target creature + gain control of target permanent".
+    let mixed = scenario
+        .add_spell_to_hand(P0, "Charmed Heist", true)
+        .with_ability(Effect::DealDamage {
+            amount: amount.clone(),
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            damage_source: None,
+            excess: None,
+        })
+        .with_ability(Effect::GainControl {
+            target: TargetFilter::Typed(TypedFilter::permanent()),
+        })
+        .id();
+
+    // Pure "deal 1 damage to target creature" — a total damage whiff here
+    // (1 cannot kill the 3/3).
+    let pure = scenario
+        .add_spell_to_hand(P0, "Pure Burn", true)
+        .with_ability(Effect::DealDamage {
+            amount: amount.clone(),
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            damage_source: None,
+            excess: None,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+
+    let config = create_config(AiDifficulty::Easy, Platform::Native);
+    let scored = phase_ai::score_candidates(runner.state(), P0, &config);
+
+    // Reach-guard: BOTH spells must actually be offered as CastSpell
+    // candidates to prevent a vacuous pass that never reaches the cast-commit gate.
+    let mixed_score = scored
+        .iter()
+        .find(|(a, _)| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == mixed))
+        .map(|(_, s)| *s)
+        .unwrap_or_else(|| {
+            panic!("mixed spell {mixed:?} must be offered as CastSpell, got {scored:?}")
+        });
+    let pure_score = scored
+        .iter()
+        .find(|(a, _)| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == pure))
+        .map(|(_, s)| *s)
+        .unwrap_or_else(|| {
+            panic!("pure whiff spell {pure:?} must be offered as CastSpell, got {scored:?}")
+        });
+
+    // The mixed spell's permanent-control line makes it strictly more castable
+    // than the identical pure-damage whiff. Without the Contextual/permanent
+    // fail-open, `can_kill_any_legal_target` penalizes the mixed spell with the
+    // same -8 whiff penalty, collapsing this inequality.
+    assert!(
+        mixed_score > pure_score + config.policy_penalties.wasted_cast_penalty.abs() * 0.5,
+        "mixed deal-1 + gain control of a permanent ({mixed_score:.3}) must outrank \
+         the identical pure burn whiff ({pure_score:.3}): stealing the opponent's \
+         permanent is a useful control line (CR 613.1b) the gate must not penalize \
+         as a damage whiff"
+    );
+}
+
+/// A mixed spell carrying a DEFAULT-population `DestroyAll` (declaring
+/// `TargetFilter::None`) plus a "deal 1 damage to target creature" effect must
+/// NOT be penalized as a damage whiff when its wipe half is independently
+/// useful. `TargetFilter::None` means the engine resolver's default population
+/// — all creatures (destroy.rs `resolve_all`, CR 701.8) — so the opponent's
+/// 3/3 is a wipe target even though the spell declares no filter. Pre-fix, the
+/// cast-commit gate fed the raw `None` into `find_legal_targets` (an empty
+/// set), the wipe half credited nothing, and the 1-damage half vetoed the
+/// whole spell as a whiff. The wipe is also NON-targeted (CR 115.10a): target
+/// legality never gates its population.
+///
+/// The damage amount is DYNAMIC (ObjectCount of the AI's creatures → 1),
+/// Slash-of-Light-shaped. On this board the pure burn is a provable total
+/// damage whiff (-8 `wasted_cast_penalty`) while the mixed wipe spell must not
+/// be penalized. Both are driven through the real cast pipeline so the
+/// cast-commit gate is fully evaluated.
+#[test]
+fn mixed_damage_and_destroy_all_is_not_penalized_as_a_damage_whiff() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // AI's single creature makes the dynamic ObjectCount amount resolve to 1
+    // (Slash-of-Light-shaped); the opponent's 3/3 survives 1 damage but is in
+    // the wipe's default all-creatures population (CR 701.8, destroy.rs
+    // `resolve_all`).
+    scenario.add_creature(P0, "My Bear", 2, 1);
+    scenario.add_creature(P1, "Opponent Bear", 3, 3);
+
+    let mut my_filter = TypedFilter::creature();
+    my_filter.controller = Some(ControllerRef::You);
+    let amount = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(my_filter),
+        },
+    };
+
+    // Mixed "deal 1 damage to target creature + destroy all permanents" — the
+    // wipe declares NO filter, so its population is the resolver's default
+    // (all creatures).
+    let mixed = scenario
+        .add_spell_to_hand(P0, "Charred Judgement", true)
+        .with_ability(Effect::DealDamage {
+            amount: amount.clone(),
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            damage_source: None,
+            excess: None,
+        })
+        .with_ability(Effect::DestroyAll {
+            target: TargetFilter::None,
+            cant_regenerate: false,
+        })
+        .id();
+
+    // Pure "deal 1 damage to target creature" — a total damage whiff here
+    // (1 cannot kill the 3/3).
+    let pure = scenario
+        .add_spell_to_hand(P0, "Pure Burn", true)
+        .with_ability(Effect::DealDamage {
+            amount: amount.clone(),
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            damage_source: None,
+            excess: None,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+
+    let config = create_config(AiDifficulty::Easy, Platform::Native);
+    let scored = phase_ai::score_candidates(runner.state(), P0, &config);
+
+    // Reach-guard: BOTH spells must actually be offered as CastSpell
+    // candidates to prevent a vacuous pass that never reaches the cast-commit gate.
+    let mixed_score = scored
+        .iter()
+        .find(|(a, _)| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == mixed))
+        .map(|(_, s)| *s)
+        .unwrap_or_else(|| {
+            panic!("mixed spell {mixed:?} must be offered as CastSpell, got {scored:?}")
+        });
+    let pure_score = scored
+        .iter()
+        .find(|(a, _)| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == pure))
+        .map(|(_, s)| *s)
+        .unwrap_or_else(|| {
+            panic!("pure whiff spell {pure:?} must be offered as CastSpell, got {scored:?}")
+        });
+
+    // The mixed spell's default-population wipe line (the 3/3 is in the
+    // resolver's all-creatures population, CR 701.8 / destroy.rs `resolve_all`;
+    // the wipe is non-targeted, CR 115.10a) makes it strictly more castable
+    // than the identical pure-damage whiff. Without the resolver-mirroring mass
+    // path, `can_kill_any_legal_target` penalizes the mixed spell with the same
+    // -8 whiff penalty, collapsing this inequality.
+    assert!(
+        mixed_score > pure_score + config.policy_penalties.wasted_cast_penalty.abs() * 0.5,
+        "mixed deal-1 + default-population destroy-all ({mixed_score:.3}) must outrank \
+         the identical pure burn whiff ({pure_score:.3}): the wipe's default \
+         all-creatures population (CR 701.8 / destroy.rs `resolve_all`) makes the \
+         3/3 a wipe target and the wipe is non-targeted (CR 115.10a), so the gate \
+        must not penalize the spell as a damage whiff"
+    );
+}
+
+/// Production-pipeline differential pinning BOTH seams restored by the
+/// whiff-gate fix, for a MIXED wipe spell on a board whose only opposing
+/// creature is HEXPROOF:
+///
+/// * **Targeting is gated, the wipe population is not.** Hexproof (CR 702.11b)
+///   prevents the creature being *targeted* by the spell's "deal 1 damage to
+///   target creature" half — but `DestroyAll` is NON-targeted (CR 115.10a), so
+///   hexproof never answers it. With `TargetFilter::None` (CR 701.8) the
+///   resolver's population defaults to ALL creatures, so the hexproof 3/3 is a
+///   genuine wipe target.
+/// * **Own bear gives the damage half a legal ANNOUNCE target (CR 601.2c).**
+///   The AI's own 2/1 means the DealDamage half has a legal target to name when
+///   the spell is cast, so the PENDING spell is valid and the cast pipeline
+///   reaches the cast-commit scoring.
+///
+/// The reference R is a PURE `DestroyAll{None}` wipe (NOT pure burn): on a
+/// board with no targetable opponent creature, pure burn is hard-REJECTED by
+/// `is_redundant_creature_only_removal` (whose creature-only half has no live
+/// opponent target), so it is never offered and cannot be a comparable
+/// reference. The pure wipe R has no creature-only half, is offered, and is
+/// the honest baseline: the mixed spell M (DealDamage half + wipe) must carry
+/// the SAME cast-commit score as R (modulo the small margin), because both
+/// clear the hexproof population and M's dead damage half adds a no-target
+/// whiff only if the rescue fails.
+///
+/// This pins TWO fixes:
+///   1. **Tactical gate mass-awareness** (tactical_gate.rs) — pre-fix M is
+///      hard-REJECTED by `is_redundant_creature_only_removal` (its creature-only
+///      half has no live opponent target on a hexproof board), so the
+///      `CastSpell` reach-guard on M fails (only `PassPriority` is offered).
+///   2. **anti_self_harm no-target rescue** — pre-rescue M carries the -8
+///      `wasted_cast_penalty` no-target penalty (M ≈ R − 8), failing the
+///      differential; post-rescue M ≈ R.
+#[test]
+fn mixed_destroy_all_not_penalized_when_only_population_is_hexproof() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // The AI's own 2/1 gives the DealDamage half a legal ANNOUNCE target so the
+    // pending spell is valid (CR 601.2c), and resolves the dynamic ObjectCount
+    // amount to 1. The opponent's ONLY creature is hexproof (CR 702.11b): an
+    // illegal TARGET for the damage half, but in the wipe's resolver population
+    // (CR 115.10a non-targeted; CR 701.8 default all-creatures for `None`).
+    scenario.add_creature(P0, "My Bear", 2, 1);
+    scenario
+        .add_creature(P1, "Hexproof Bear", 3, 3)
+        .with_keyword(Keyword::Hexproof);
+
+    let mut my_filter = TypedFilter::creature();
+    my_filter.controller = Some(ControllerRef::You);
+    let amount = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(my_filter),
+        },
+    };
+
+    // Mixed "deal 1 damage to target creature + destroy all creatures" — the
+    // damage half is announceable (own bear) but NOT lethal/useful by target;
+    // the DestroyAll half clears the hexproof population.
+    let mixed = scenario
+        .add_spell_to_hand(P0, "Charred Judgement", true)
+        .with_ability(Effect::DealDamage {
+            amount: amount.clone(),
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            damage_source: None,
+            excess: None,
+        })
+        .with_ability(Effect::DestroyAll {
+            target: TargetFilter::None,
+            cant_regenerate: false,
+        })
+        .id();
+
+    // Reference: PURE wipe (CR 701.8, CR 115.10a) — the honest comparable. Pure
+    // burn would be hard-rejected by `is_redundant_creature_only_removal` on this
+    // board (no live opponent target), so it is NOT a valid reference.
+    let reference = scenario
+        .add_spell_to_hand(P0, "Pure Wipe", true)
+        .with_ability(Effect::DestroyAll {
+            target: TargetFilter::None,
+            cant_regenerate: false,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+
+    let config = create_config(AiDifficulty::Easy, Platform::Native);
+    let scored = phase_ai::score_candidates(runner.state(), P0, &config);
+
+    // Reach-guard: BOTH must be offered as CastSpell. The M reach-guard is the
+    // DISCRIMINATING guard for the tactical-gate fix: pre-fix M is hard-rejected
+    // (only PassPriority), so this unwrap panics.
+    let mixed_score = scored
+        .iter()
+        .find(|(a, _)| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == mixed))
+        .map(|(_, s)| *s)
+        .unwrap_or_else(|| {
+            panic!(
+                "mixed spell {mixed:?} must be offered as CastSpell (tactical gate must be \
+                    mass-aware), got {scored:?}"
+            )
+        });
+    let ref_score = scored
+        .iter()
+        .find(|(a, _)| {
+            matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == reference)
+        })
+        .map(|(_, s)| *s)
+        .unwrap_or_else(|| {
+            panic!("reference pure wipe {reference:?} must be offered as CastSpell, got {scored:?}")
+        });
+
+    // M's wipe clears the hexproof population exactly like R, so M must NOT be
+    // meaningfully below R. Pre-rescue M carried the -8 no-target penalty
+    // (M ≈ R − 8 < R − 4); post-rescue M ≈ R. The dead damage half is harmless
+    // once the wipe line rescues the spell, so the allowed gap is only the
+    // half-penalty margin.
+    assert!(
+        mixed_score > ref_score - config.policy_penalties.wasted_cast_penalty.abs() * 0.5,
+        "mixed deal-1 + destroy-all on a hexproof-only board ({mixed_score:.3}) must not be \
+         penalized below the pure wipe ({ref_score:.3}): the DestroyAll population is \
+         NON-targeted (CR 115.10a) and clears the hexproof 3/3 (CR 702.11b gates \
+         targeting only), so M is a real removal line, not a whiff"
+    );
+}
+
+/// Production-pipeline differential pinning the player-relative-wipe fix for
+/// the **anti_self_harm** thread: a mixed spell whose `DestroyAll` population
+/// carries a companion `ControllerRef::TargetOpponent` scope ("destroy all
+/// creatures target opponent controls") with a LIVE opponent creature on board
+/// and the companion player target LEFT UNBOUND, exactly as at cast-commit.
+///
+/// * **Why UNKNOWN.** The engine resolves `ControllerRef::TargetOpponent` by
+///   reading the first `TargetRef::Player` from `ability.targets` (filter.rs
+///   `ControllerRef::TargetPlayer|TargetOpponent` arm) and FAILS CLOSED without
+///   it, while `destroy::resolve_all` resolves the same population later via
+///   `FilterContext::from_ability` AFTER the companion player is announced
+///   (CR 601.2c). At cast-commit the companion slot is not yet bound, so the
+///   population is UNKNOWABLE — the mass helper must fail open (`None`), NOT
+///   read it as empty (CR 109.4 / CR 115.1).
+/// * **The wipe is non-targeted** (CR 115.10a): population members are not
+///   "targets" (CR 701.8), so the unbound companion player is a
+///   target-declaration bookkeeping gap, not a legality problem for the wipe.
+/// * **Reference R** is the identical target-player wipe ALONE — the
+///   apples-to-apples baseline: both M and R carry the same
+///   `TargetOpponent` wipe; only M adds the non-lethal damage half. So M must
+///   score ≈ R (within the half-penalty margin). Pre-fix the mass population
+///   read as empty → `can_kill_any_legal_target` did not credit the wipe → M's
+///   1-damage half was vetoed as a whiff (`wasted_cast_penalty`,
+///   anti_self_harm) → M ≈ R − 8, failing this assert.
+#[test]
+fn mixed_target_opponent_wipe_is_not_penalized_when_player_unbound() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // AI's 2/1 also lets the dynamic ObjectCount amount resolve to 1; the
+    // opponent's LIVE 3/3 is both a legal target for the damage half and a
+    // member of the TargetOpponent wipe population (CR 115.10a).
+    scenario.add_creature(P0, "My Bear", 2, 1);
+    scenario.add_creature(P1, "Opponent Bear", 3, 3);
+
+    let mut my_filter = TypedFilter::creature();
+    my_filter.controller = Some(ControllerRef::You);
+    let amount = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(my_filter),
+        },
+    };
+
+    // Companion `TargetPlayer`/`TargetOpponent` wipe filter — its player target
+    // slot is left unbound, as it is at cast-commit.
+    let opponent_wipe =
+        || TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::TargetOpponent));
+
+    // Mixed "deal 1 damage to target creature + destroy all creatures target
+    // opponent controls".
+    let mixed = scenario
+        .add_spell_to_hand(P0, "Targeted Cataclysm", true)
+        .with_ability(Effect::DealDamage {
+            amount: amount.clone(),
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            damage_source: None,
+            excess: None,
+        })
+        .with_ability(Effect::DestroyAll {
+            target: opponent_wipe(),
+            cant_regenerate: false,
+        })
+        .id();
+
+    // Reference: the SAME TargetOpponent wipe alone — the honest
+    // baseline (same wipe, no damage half).
+    let reference = scenario
+        .add_spell_to_hand(P0, "Pure Player Wipe", true)
+        .with_ability(Effect::DestroyAll {
+            target: opponent_wipe(),
+            cant_regenerate: false,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+
+    let config = create_config(AiDifficulty::Easy, Platform::Native);
+    let scored = phase_ai::score_candidates(runner.state(), P0, &config);
+
+    // Reach-guard: BOTH must be offered as CastSpell.
+    let mixed_score = scored
+        .iter()
+        .find(|(a, _)| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == mixed))
+        .map(|(_, s)| *s)
+        .unwrap_or_else(|| {
+            panic!("mixed spell {mixed:?} must be offered as CastSpell, got {scored:?}")
+        });
+    let ref_score = scored
+        .iter()
+        .find(|(a, _)| {
+            matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == reference)
+        })
+        .map(|(_, s)| *s)
+        .unwrap_or_else(|| {
+            panic!(
+                "reference target-player wipe {reference:?} must be offered as CastSpell, \
+                    got {scored:?}"
+            )
+        });
+
+    assert!(
+        mixed_score > ref_score - config.policy_penalties.wasted_cast_penalty.abs() * 0.5,
+        "mixed deal-1 + target-opponent wipe ({mixed_score:.3}) must not be penalized below \
+         the target-player wipe baseline ({ref_score:.3}): the wipe's population is UNKNOWN \
+         (companion player unbound at cast-commit, CR 109.4 / CR 115.1), so it must fail open \
+         (CR 115.10a non-targeted; CR 701.8) and rescue the non-lethal damage half"
+    );
+}
+
+/// Production-pipeline differential pinning the player-relative-wipe fix for
+/// the **tactical-gate** thread on a board whose only opposing creature is
+/// HEXPROOF. Pre-fix, an unbound player-relative wipe read as an EMPTY
+/// population, so `is_redundant_creature_only_removal` (consulting
+/// `has_opposing_mass_population`) saw no useful wipe and HARD-REJECTED the
+/// mixed spell — only `PassPriority` was offered, so the M reach-guard below
+/// panics. Post-fix the seam is UNKNOWN → not redundant → M is offered.
+///
+/// * The hexproof 3/3 (CR 702.11b) is an illegal TARGET for the damage half,
+///   but the wipe's `TargetOpponent` population is NON-targeted (CR 115.10a)
+///   and UNKNOWABLE at cast-commit (companion player unbound, CR 109.4 /
+///   CR 115.1; resolved later via `FilterContext::from_ability`, CR 601.2c).
+/// * The AI's own 2/1 gives the damage half a legal ANNOUNCE target so the
+///   pending spell is valid (CR 601.2c).
+/// * R is the same TargetOpponent wipe alone — the honest baseline: both M and
+///   R carry the unknown-population wipe, so M must score ≈ R (half-penalty
+///   margin), with the M-offered reach-guard as the DISCRIMINATING assert.
+#[test]
+fn target_opponent_wipe_offered_when_only_population_is_hexproof() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // The AI's 2/1 resolves the ObjectCount amount to 1 and gives the damage
+    // half a legal announce target; the opponent's only creature is hexproof.
+    scenario.add_creature(P0, "My Bear", 2, 1);
+    scenario
+        .add_creature(P1, "Hexproof Bear", 3, 3)
+        .with_keyword(Keyword::Hexproof);
+
+    let mut my_filter = TypedFilter::creature();
+    my_filter.controller = Some(ControllerRef::You);
+    let amount = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(my_filter),
+        },
+    };
+
+    let opponent_wipe =
+        || TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::TargetOpponent));
+
+    // Mixed "deal 1 damage to target creature + destroy all creatures target
+    // opponent controls" (companion player unbound).
+    let mixed = scenario
+        .add_spell_to_hand(P0, "Targeted Hexproof Cataclysm", true)
+        .with_ability(Effect::DealDamage {
+            amount: amount.clone(),
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            damage_source: None,
+            excess: None,
+        })
+        .with_ability(Effect::DestroyAll {
+            target: opponent_wipe(),
+            cant_regenerate: false,
+        })
+        .id();
+
+    // Reference: the SAME TargetOpponent wipe alone.
+    let reference = scenario
+        .add_spell_to_hand(P0, "Pure Player Wipe Hexproof", true)
+        .with_ability(Effect::DestroyAll {
+            target: opponent_wipe(),
+            cant_regenerate: false,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+
+    let config = create_config(AiDifficulty::Easy, Platform::Native);
+    let scored = phase_ai::score_candidates(runner.state(), P0, &config);
+
+    // DISCRIMINATING reach-guard: M must be offered. Pre-fix
+    // `is_redundant_creature_only_removal` hard-rejected M (empty population
+    // read → not a useful wipe) so only PassPriority was offered — this panics.
+    let mixed_score = scored
+        .iter()
+        .find(|(a, _)| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == mixed))
+        .map(|(_, s)| *s)
+        .unwrap_or_else(|| {
+            panic!(
+                "mixed spell {mixed:?} must be offered as CastSpell (the TargetOpponent wipe \
+                    must be UNKNOWN, not empty, so the tactical gate must not hard-reject), \
+                    got {scored:?}"
+            )
+        });
+    let ref_score = scored
+        .iter()
+        .find(|(a, _)| {
+            matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == reference)
+        })
+        .map(|(_, s)| *s)
+        .unwrap_or_else(|| {
+            panic!(
+                "reference pure wipe {reference:?} must be offered as CastSpell, got {scored:?}"
+            )
+        });
+
+    assert!(
+        mixed_score > ref_score - config.policy_penalties.wasted_cast_penalty.abs() * 0.5,
+        "mixed deal-1 + target-opponent wipe on a hexproof-only board ({mixed_score:.3}) must \
+         not be penalized below the pure wipe ({ref_score:.3}): the TargetOpponent population \
+         is UNKNOWN at cast-commit (CR 109.4 / CR 115.1) and the wipe is NON-targeted \
+         (CR 115.10a), so the seam must rescue the spell from both the tactical gate and the \
+         whiff penalty"
     );
 }
 

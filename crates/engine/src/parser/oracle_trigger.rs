@@ -23,7 +23,7 @@ use super::oracle_ir::trigger::{
 use super::oracle_modal::try_parse_inline_modal_ir;
 use super::oracle_nom::condition::parse_elided_subject_state_condition;
 use super::oracle_nom::condition::{
-    parse_inner_condition, parse_there_are_battlefield_count_clause,
+    parse_inner_condition, parse_spell_history_filter, parse_there_are_battlefield_count_clause,
 };
 use super::oracle_nom::condition::{parse_source_counters_exist, parse_source_has_counters};
 use super::oracle_nom::error::{oracle_err, OracleResult};
@@ -51,12 +51,12 @@ use crate::types::ability::{
     AdditionalCostOrigin, AdditionalCostPaymentSource, AggregateFunction, AttachmentKind,
     AttackersDeclaredCountSubject, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid,
     CoinFlipResult, Comparator, ControllerRef, CountScope, CounterTriggerFilter, DamageKindFilter,
-    DestinationConstraint, DieResultFilter, Effect, FilterProp, ObjectScope, OriginConstraint,
-    ParsedCondition, PlayerFilter, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef,
-    RenownSubject, SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality,
-    StaticCondition, SubAbilityLink, TapCreaturesRequirement, TargetFilter, TriggerCondition,
-    TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
-    ZoneChangeClause,
+    DestinationConstraint, DieResultFilter, Effect, FilterProp, ManaAbilityProducedFilter,
+    ObjectScope, OriginConstraint, ParsedCondition, PlayerFilter, PlayerScope, PtStat,
+    PtValueScope, QuantityExpr, QuantityRef, RenownSubject, SacrificeAggregateStat, SacrificeCost,
+    SacrificeRequirement, SharedQuality, StaticCondition, SubAbilityLink, TapCreaturesRequirement,
+    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier, ZoneChangeClause,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
@@ -64,7 +64,9 @@ use crate::types::events::{ClashResult, PlayerActionKind};
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ManaColor, ManaType};
 use crate::types::phase::Phase;
-use crate::types::triggers::{AttackTargetFilter, PlaneswalkRole, TriggerMode};
+use crate::types::triggers::{
+    AbilityLifecyclePoint, AttackTargetFilter, PlaneswalkRole, TriggerMode,
+};
 use crate::types::zones::Zone;
 use std::str::FromStr;
 
@@ -2604,7 +2606,11 @@ fn parse_nth_spell_this_turn_intervening_if(input: &str) -> OracleResult<'_, Tri
     {
         return Ok((
             rest,
-            TriggerConstraint::NthSpellThisTurn { n, filter: None },
+            TriggerConstraint::NthSpellThisTurn {
+                n,
+                comparator: Comparator::EQ,
+                filter: None,
+            },
         ));
     }
 
@@ -2619,6 +2625,7 @@ fn parse_nth_spell_this_turn_intervening_if(input: &str) -> OracleResult<'_, Tri
         rest,
         TriggerConstraint::NthSpellThisTurn {
             n,
+            comparator: Comparator::EQ,
             filter: Some(filter),
         },
     ))
@@ -3287,7 +3294,7 @@ fn parse_inferred_pronoun_unless_alt_cost(
     let cost = if let Ok((rest, _)) =
         tag::<_, _, OracleError<'_>>("they discard ").parse(after_unless)
     {
-        parse_unless_discard_cost(rest)?
+        parse_unless_discard_cost_phrase(rest)?
     } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("they pay ").parse(after_unless) {
         parse_unless_life_cost(rest)?
     } else {
@@ -3312,64 +3319,81 @@ fn parse_unless_life_cost(rest: &str) -> Option<AbilityCost> {
     None
 }
 
-fn parse_unless_discard_cost(discard_tail: &str) -> Option<AbilityCost> {
-    let trailing = discard_tail.trim().trim_end_matches('.').trim();
+/// CR 701.9 + CR 118.12: SINGLE AUTHORITY for the discard alternative-cost
+/// phrase that follows an unless-clause's `discard(s)` verb.
+///
+/// Grammar — two independent axes over one noun:
+///
+/// ```text
+/// discard_phrase := [<count> | "a" | "an"] [<type phrase>] ("card" | "cards")
+/// ```
+///
+/// Both unless-payer forms route here: the controller form ("unless **you**
+/// discard two cards", from `parse_unless_alt_cost` /
+/// `parse_inferred_pronoun_unless_alt_cost`) and the anaphoric-player form
+/// ("unless **they** discard two cards" — Court of Ambition,
+/// `parse_unless_they_discard_cost`). They were hand-written mirrors that
+/// drifted — only the controller form ever grew the count axis, so every card
+/// printing a plural discard against an anaphoric payer fell out of the grammar
+/// and surfaced as `Unimplemented`. One authority means the count and type axes
+/// cannot diverge by payer again, and it composes them: "discard two nonland
+/// cards" needs no new arm.
+///
+/// `branch_text` must already be bounded by the caller — the `they` form stops
+/// at `unless_branch_boundary` so a chained " or …" branch survives, while the
+/// `you` form owns the rest of the clause.
+///
+/// CR 701.9b ("some effects … require a random discard") stays unsupported:
+/// the resolution-time unless-payment path (`engine_payment_choices.rs`)
+/// ignores `selection` and always prompts, so accepting an "at random" tail
+/// would falsely lower a player-chosen discard as a random discard.
+fn parse_unless_discard_cost_phrase(branch_text: &str) -> Option<AbilityCost> {
+    let trimmed = branch_text.trim().trim_end_matches('.').trim();
+    if trimmed.is_empty() {
+        return None;
+    }
 
-    // CR 118.12 + CR 701.9: Try numeric count first ("two cards", "three cards"),
-    // then fall back to article form ("a card", "an enchantment card").
-    if let Some((n, after_num)) = parse_number(trailing) {
-        let after_num = after_num.trim();
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("cards").parse(after_num) {
-            let rest = rest.trim().trim_end_matches('.').trim();
-            if rest.is_empty()
-                || tag::<_, _, OracleError<'_>>("at random")
-                    .parse(rest)
-                    .is_ok()
-            {
-                return Some(AbilityCost::Discard {
-                    count: QuantityExpr::Fixed { value: n as i32 },
-                    filter: None,
-                    selection: crate::types::ability::CardSelectionMode::Chosen,
-                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
-                });
-            }
+    // CR 701.9: the count axis. `parse_number` spans both the numeral ("two
+    // cards") and the singular article ("a card" / "an enchantment card"), so
+    // one call covers the whole axis; a bare noun ("card") has neither and
+    // counts as one.
+    let (count, after_count) = parse_number(trimmed).unwrap_or((1, trimmed));
+    let after_count = after_count.trim();
+
+    // CR 118.12a: fail closed on a zero count. `parse_number` folds a bare `X`
+    // to 0 for the callers that want a numeric-only reading, but an unless-cost
+    // of "discard 0 cards" is FREE — the punisher would silently never fire.
+    // No printed card announces X inside an unless-discard, so an unresolvable
+    // count must stay visible as an unsupported clause rather than lower to a
+    // cost every player can always pay.
+    if count == 0 {
+        return None;
+    }
+
+    let count = i32::try_from(count).ok()?;
+    let discard = |filter| AbilityCost::Discard {
+        count: QuantityExpr::Fixed { value: count },
+        filter,
+        selection: crate::types::ability::CardSelectionMode::Chosen,
+        self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+    };
+
+    // Untyped noun: the count axis alone ("a card", "two cards"). The plural
+    // arm precedes the singular so `tag("card")` cannot leave a stray "s".
+    if let Ok((rest, _)) =
+        alt((tag::<_, _, OracleError<'_>>("cards"), tag("card"))).parse(after_count)
+    {
+        let rest = rest.trim().trim_end_matches('.').trim();
+        if rest.is_empty() {
+            return Some(discard(None));
         }
     }
 
-    let trailing = alt((
-        tag::<_, _, OracleError<'_>>("a "),
-        tag::<_, _, OracleError<'_>>("an "),
-    ))
-    .parse(trailing)
-    .map(|(rest, _)| rest.trim())
-    .unwrap_or(trailing);
-    if !trailing.is_empty() {
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("card").parse(trailing) {
-            let rest = rest.trim().trim_end_matches('.').trim();
-            if rest.is_empty()
-                || tag::<_, _, OracleError<'_>>("at random")
-                    .parse(rest)
-                    .is_ok()
-            {
-                return Some(AbilityCost::Discard {
-                    count: QuantityExpr::Fixed { value: 1 },
-                    filter: None,
-                    selection: crate::types::ability::CardSelectionMode::Chosen,
-                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
-                });
-            }
-        }
-        if let Some(filter) = super::oracle_effect::imperative::parse_discard_card_filter(trailing)
-        {
-            return Some(AbilityCost::Discard {
-                count: QuantityExpr::Fixed { value: 1 },
-                filter: Some(filter),
-                selection: crate::types::ability::CardSelectionMode::Chosen,
-                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
-            });
-        }
-    }
-    None
+    // Typed noun: the remainder is a type phrase plus the noun, lowered by the
+    // shared `parse_discard_card_filter` authority (which owns the
+    // " card"/" cards" suffix strip and rejects anything it cannot type).
+    super::oracle_effect::imperative::parse_discard_card_filter(after_count)
+        .map(|filter| discard(Some(filter)))
 }
 
 /// CR 118.12 + CR 608.2c + CR 119.4: Recognize non-mana "unless" alternative
@@ -3377,7 +3401,7 @@ fn parse_unless_discard_cost(discard_tail: &str) -> Option<AbilityCost> {
 /// text immediately after `" unless "`.
 ///
 /// Patterns recognized:
-/// - `you discard [N] card(s)[ at random][.]` → `AbilityCost::Discard { count, .. }`
+/// - `you discard [N] card(s)[.]` → `AbilityCost::Discard { count, .. }`
 /// - `you sacrifice [N] [filter][.]`          → `AbilityCost::Sacrifice { count, filter }`
 /// - `you pay N life[.]`                      → `AbilityCost::PayLife { amount }`
 /// - `you mill [N] card(s)[.]`  → `AbilityCost::Mill { count }`
@@ -3386,11 +3410,10 @@ fn parse_unless_discard_cost(discard_tail: &str) -> Option<AbilityCost> {
 /// Returns `None` for any other shape (mana costs and unknown forms fall
 /// through to the existing mana-cost path in `extract_unless_pay_modifier`).
 ///
-/// FIDELITY NOTE: `UnlessCost::DiscardCard` does not currently model "at random"
-/// — the engine resolves via `WaitingFor::WardDiscardChoice` (player-chosen).
-/// This is a known sub-fidelity gap (Balduvian Horde class). Post the
-/// 2026-05-09 fold, the `random: bool` field on `AbilityCost::Discard` is
-/// the natural home for this; wiring it into the runtime is future work.
+/// FIDELITY NOTE: `UnlessCost::DiscardCard` does not currently implement "at
+/// random" — the engine resolves via `WaitingFor::WardDiscardChoice`
+/// (player-chosen). Those phrases stay unimplemented (Balduvian Horde class)
+/// until the unless-payment path preserves `CardSelectionMode::Random`.
 pub(crate) fn parse_unless_alt_cost(after_unless: &str) -> Option<AbilityCost> {
     // CR 118.12 + CR 202.1: "you pay its mana cost" / "you pay ~'s mana cost" —
     // the unless cost is the ability source's OWN printed mana cost, which is
@@ -3416,7 +3439,7 @@ pub(crate) fn parse_unless_alt_cost(after_unless: &str) -> Option<AbilityCost> {
     // ("at random", trailing punctuation) since the caller strips the entire
     // unless-clause wholesale.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you discard ").parse(after_unless) {
-        return parse_unless_discard_cost(rest);
+        return parse_unless_discard_cost_phrase(rest);
     }
 
     // "you pay N life" / "you pay N life." — life amount is bare integer.
@@ -3828,52 +3851,15 @@ fn parse_unless_they_sacrifice_filter(input: &str) -> Option<(AbilityCost, &str)
 }
 
 /// CR 701.9 + CR 118.12: Parse the tail of "they discard ..." preserving
-/// the unconsumed remainder. Mirrors `parse_unless_discard_cost` but stops
-/// at the branch boundary.
+/// the unconsumed remainder. Bounds the branch at `unless_branch_boundary` so a
+/// chained " or …" branch survives, then defers the phrase grammar itself to
+/// the shared `parse_unless_discard_cost_phrase` authority — the `you` and
+/// `they` payer axes share one vocabulary.
 fn parse_unless_they_discard_cost(input: &str) -> Option<(AbilityCost, &str)> {
     let boundary = unless_branch_boundary(input);
     let branch_text = input[..boundary].trim();
     let after = &input[boundary..];
-    if branch_text.is_empty() {
-        return None;
-    }
-    // Strip article
-    let stripped = alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))
-        .parse(branch_text)
-        .map(|(rest, _)| rest)
-        .unwrap_or(branch_text);
-    // Plain "card" / "card at random"
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("card").parse(stripped) {
-        let rest = rest.trim();
-        if rest.is_empty()
-            || tag::<_, _, OracleError<'_>>("at random")
-                .parse(rest)
-                .is_ok()
-        {
-            return Some((
-                AbilityCost::Discard {
-                    count: QuantityExpr::Fixed { value: 1 },
-                    filter: None,
-                    selection: crate::types::ability::CardSelectionMode::Chosen,
-                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
-                },
-                after,
-            ));
-        }
-    }
-    // Typed filter ("nonland card", "creature card", etc.)
-    if let Some(filter) = super::oracle_effect::imperative::parse_discard_card_filter(stripped) {
-        return Some((
-            AbilityCost::Discard {
-                count: QuantityExpr::Fixed { value: 1 },
-                filter: Some(filter),
-                selection: crate::types::ability::CardSelectionMode::Chosen,
-                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
-            },
-            after,
-        ));
-    }
-    None
+    parse_unless_discard_cost_phrase(branch_text).map(|cost| (cost, after))
 }
 
 /// CR 119.4 + CR 118.12: Parse the tail of "they pay N life" preserving
@@ -7050,7 +7036,10 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
         // artifact or creature", "of a creature or land", "of a permanent").
         opt(preceded(
             tag(" of "),
-            preceded(alt((tag("a "), tag("an "))), parse_source_type_disjunction),
+            terminated(
+                preceded(alt((tag("a "), tag("an "))), parse_source_type_disjunction),
+                opt(tag(" on the battlefield")),
+            ),
         ))
         .map(|filter| filter.map(source_object_filter))
         .parse(rest)
@@ -7069,18 +7058,22 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
     }
 
     /// CR 602.1a: Parse a disjunction of card types for the source-object
-    /// filter: "artifact or creature", "creature or land", "permanent", etc.
-    /// Uses `separated_list1` per R1 (nom combinators on the first pass).
+    /// filter: "artifact or creature", "artifact, creature, or land",
+    /// "permanent", etc. Uses `separated_list1` per R1 (nom combinators on
+    /// the first pass).
     fn parse_source_type_disjunction(input: &str) -> OracleResult<'_, Vec<TypeFilter>> {
-        separated_list1(tag(" or "), parse_single_source_type)
-            .map(|types| {
-                if types.len() == 1 {
-                    types
-                } else {
-                    vec![TypeFilter::AnyOf(types)]
-                }
-            })
-            .parse(input)
+        separated_list1(
+            alt((tag(", or "), tag(", "), tag(" or "))),
+            parse_single_source_type,
+        )
+        .map(|types| {
+            if types.len() == 1 {
+                types
+            } else {
+                vec![TypeFilter::AnyOf(types)]
+            }
+        })
+        .parse(input)
     }
 
     /// CR 205: Match a single card type keyword for source-object filters.
@@ -9223,6 +9216,15 @@ pub(crate) fn parse_trigger_condition(
         return result;
     }
 
+    // CR 714.2e: "whenever the final chapter ability of a Saga you control
+    // resolves". Dispatched before subject decomposition — the grammatical
+    // subject of this clause is an ABILITY, not a permanent, so the generic
+    // subject/event-verb path would mis-bind "chapter ability" as the object
+    // filter.
+    if let Some(result) = try_parse_saga_chapter_ability_trigger(&lower) {
+        return result;
+    }
+
     // --- Phase triggers: "At the beginning of..." ---
     if let Some(result) = try_parse_phase_trigger(&lower) {
         return result;
@@ -10741,6 +10743,32 @@ fn parse_taps_for_mana_actor_line(
     let (subject_text, produced_filter) =
         split_taps_for_mana_for_clause(rest).ok_or_else(|| oracle_err(rest))?;
     Ok(("", (actor_controller, subject_text, produced_filter)))
+}
+
+/// CR 605.1b: Parse a passive "a land ... is tapped for mana" trigger subject.
+/// This is structurally distinct from the actor-led forms above because it
+/// constrains the mana source, not who performed the tap.
+fn parse_passive_taps_for_mana_line(i: &str) -> OracleResult<'_, String> {
+    let (rest, _) = opt(alt((tag("whenever "), tag("when ")))).parse(i)?;
+    let (rest, subject) = terminated(
+        take_until(" is tapped for mana"),
+        tag(" is tapped for mana"),
+    )
+    .parse(rest)?;
+    Ok((rest, subject.to_string()))
+}
+
+/// CR 605.1b: Recognizes the aggregate mana-ability condition whose produced
+/// type is the trigger source's chosen color (Caged Sun class).
+fn parse_land_ability_adds_chosen_color(i: &str) -> OracleResult<'_, ()> {
+    all_consuming(preceded(
+        alt((tag("whenever "), tag("when "))),
+        preceded(
+            tag("a land's ability causes you to add one or more mana of the "),
+            value((), tag("chosen color")),
+        ),
+    ))
+    .parse(i)
 }
 
 /// CR 603.2 + CR 605.1a: Returns true when `cond_lower` is a taps-for-mana trigger
@@ -12809,7 +12837,7 @@ fn parse_event_amount_quantifier(input: &str) -> OracleResult<'_, (Comparator, u
 /// in trigger_matchers.rs validates the caster against `valid_target`, so:
 /// - "you cast or copy"       → `TargetFilter::Controller`
 /// - "an opponent casts or copies" → `TypedFilter` with `ControllerRef::Opponent`
-///   (evaluates as `source_controller != player_id` in the current engine model)
+///   (evaluates through the shared team-aware opponent relation, CR 102.3)
 /// - "a player casts or copies" → `TargetFilter::Player` (any player, CR 102.1)
 ///
 /// Covers Storm-Kiln Artist (you), Mage Hunter (opponent), and any future card
@@ -14990,6 +15018,35 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         }
     }
 
+    if parse_land_ability_adds_chosen_color(lower).is_ok() {
+        let mut def = make_base();
+        def.mode = TriggerMode::ManaAbilityProduced;
+        def.valid_card = Some(TargetFilter::Typed(TypedFilter::land()));
+        def.valid_target = Some(TargetFilter::Controller);
+        def.mana_ability_produced = Some(ManaAbilityProducedFilter::SourceChosenColor);
+        return Some((TriggerMode::ManaAbilityProduced, def));
+    }
+
+    if let Ok((_, subject_text)) = parse_passive_taps_for_mana_line(lower) {
+        let suffix = " with the same name as the exiled card";
+        if let Ok((_, subject)) =
+            terminated(take_until::<_, _, OracleError<'_>>(suffix), tag(suffix))
+                .parse(subject_text.as_str())
+        {
+            if all_consuming(tag::<_, _, OracleError<'_>>("a land"))
+                .parse(subject)
+                .is_ok()
+            {
+                let mut def = make_base();
+                def.mode = TriggerMode::TapsForMana;
+                def.valid_card = Some(TargetFilter::Typed(
+                    TypedFilter::land().properties(vec![FilterProp::SameNameAsExiledBySource]),
+                ));
+                return Some((TriggerMode::TapsForMana, def));
+            }
+        }
+    }
+
     for prefix in ["whenever you tap ", "when you tap "] {
         let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) else {
             continue;
@@ -15847,6 +15904,9 @@ fn parse_player_action_phrase(text: &str) -> Option<PlayerActionKind> {
     if let Ok(("", action)) = parse_proliferate_player_action(text) {
         return Some(action);
     }
+    if let Ok(("", action)) = parse_forage_player_action(text) {
+        return Some(action);
+    }
     match text {
         "search your library" | "searches their library" => Some(PlayerActionKind::SearchedLibrary),
         "scry" | "scries" => Some(PlayerActionKind::Scry),
@@ -15875,10 +15935,33 @@ fn parse_proliferate_player_action(input: &str) -> OracleResult<'_, PlayerAction
     .parse(input)
 }
 
+fn parse_forage_player_action(input: &str) -> OracleResult<'_, PlayerActionKind> {
+    // CR 701.61a: Forage — exile three cards from your graveyard or sacrifice a Food.
+    all_consuming(alt((
+        value(PlayerActionKind::Forage, tag("forage")),
+        value(PlayerActionKind::Forage, tag("forages")),
+    )))
+    .parse(input)
+}
+
 /// Parse "whenever you cast your Nth spell each turn" (or "in a turn") and
 /// "whenever an opponent casts their Nth [noncreature] spell each turn" into a SpellCast
 /// trigger with a NthSpellThisTurn constraint.
 fn try_parse_nth_spell_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    match parse_other_than_first_spell_trigger(lower) {
+        OtherThanFirstSpellParse::Accepted(def) => {
+            return Some((TriggerMode::SpellCast, *def));
+        }
+        // The marker commits this grammar: never let a malformed qualifier
+        // silently broaden through the generic SpellCast parser.
+        OtherThanFirstSpellParse::Rejected => {
+            return Some((
+                TriggerMode::Unknown("malformed other-than-first spell trigger".to_string()),
+                make_base(),
+            ));
+        }
+        OtherThanFirstSpellParse::NotCandidate => {}
+    }
     // Branch 1: "you cast your <ordinal> [qualifier] spell each turn"
     if let Some(result) = try_parse_nth_spell_you(lower) {
         return Some(result);
@@ -15892,6 +15975,140 @@ fn try_parse_nth_spell_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefin
         return Some(result);
     }
     None
+}
+
+enum OtherThanFirstSpellParse {
+    NotCandidate,
+    Rejected,
+    Accepted(Box<TriggerDefinition>),
+}
+
+#[derive(Clone, Copy)]
+enum OtherThanFirstSpellActor {
+    You,
+    Opponent,
+    AnyPlayer,
+    EnchantedPlayer,
+}
+
+/// CR 603.2: this event qualifier is fire-time only, unlike a CR 603.4
+/// intervening-if condition. The recognizer owns the predicate only after it
+/// reaches the marker, so a malformed repeated qualifier fails closed.
+fn parse_other_than_first_spell_trigger(input: &str) -> OtherThanFirstSpellParse {
+    // `parse_trigger_condition` passes the complete trigger head (including
+    // "whenever"), while direct classifier tests pass its payload. Normalize
+    // both callers before matching the actor phrase.
+    let Ok((input, _)) = opt(tag::<_, _, OracleError<'_>>("whenever ")).parse(input) else {
+        return OtherThanFirstSpellParse::NotCandidate;
+    };
+    let mut actor_parser = alt((
+        value(
+            OtherThanFirstSpellActor::You,
+            tag::<_, _, OracleError<'_>>("you cast an "),
+        ),
+        value(OtherThanFirstSpellActor::You, tag("you cast a ")),
+        value(
+            OtherThanFirstSpellActor::Opponent,
+            tag("an opponent casts an "),
+        ),
+        value(
+            OtherThanFirstSpellActor::Opponent,
+            tag("an opponent casts a "),
+        ),
+        value(
+            OtherThanFirstSpellActor::EnchantedPlayer,
+            tag("enchanted player casts an "),
+        ),
+        value(
+            OtherThanFirstSpellActor::EnchantedPlayer,
+            tag("enchanted player casts a "),
+        ),
+        value(
+            OtherThanFirstSpellActor::AnyPlayer,
+            tag("a player casts an "),
+        ),
+        value(
+            OtherThanFirstSpellActor::AnyPlayer,
+            tag("a player casts a "),
+        ),
+    ));
+    let Ok((after_actor, actor)) = actor_parser.parse(input) else {
+        return OtherThanFirstSpellParse::NotCandidate;
+    };
+    let Ok((after_marker, first_qualifier)) = alt((
+        terminated(
+            take_until(" spell other than the first "),
+            tag::<_, _, OracleError<'_>>(" spell other than the first "),
+        ),
+        value("", tag("spell other than the first ")),
+    ))
+    .parse(after_actor) else {
+        return OtherThanFirstSpellParse::NotCandidate;
+    };
+    let Ok((after_repeated, repeated_qualifier)) = alt((
+        terminated(take_until(" spell "), tag(" spell ")),
+        value("", tag::<_, _, OracleError<'_>>("spell ")),
+    ))
+    .parse(after_marker) else {
+        return OtherThanFirstSpellParse::Rejected;
+    };
+    let pronoun_is_valid = match actor {
+        OtherThanFirstSpellActor::You => {
+            all_consuming(tag::<_, _, OracleError<'_>>("you cast each turn"))
+                .parse(after_repeated)
+                .is_ok()
+        }
+        OtherThanFirstSpellActor::Opponent
+        | OtherThanFirstSpellActor::AnyPlayer
+        | OtherThanFirstSpellActor::EnchantedPlayer => all_consuming(alt((
+            tag::<_, _, OracleError<'_>>("that player casts each turn"),
+            tag("they cast each turn"),
+        )))
+        .parse(after_repeated)
+        .is_ok(),
+    };
+    if !pronoun_is_valid {
+        return OtherThanFirstSpellParse::Rejected;
+    }
+    let parse_qualifier = |qualifier: &str| {
+        let qualifier = qualifier.trim();
+        if qualifier.is_empty() {
+            Some(None)
+        } else {
+            // Shared spell-history grammar handles the same typed/color
+            // qualifier axis at both occurrence sites. The marker/remainder
+            // structure is still parsed exclusively with nom above.
+            parse_spell_history_filter(qualifier).map(Some)
+        }
+    };
+    let Some(first_filter) = parse_qualifier(first_qualifier) else {
+        return OtherThanFirstSpellParse::Rejected;
+    };
+    let Some(repeated_filter) = parse_qualifier(repeated_qualifier) else {
+        return OtherThanFirstSpellParse::Rejected;
+    };
+    if first_filter != repeated_filter {
+        return OtherThanFirstSpellParse::Rejected;
+    }
+    let mut def = make_base();
+    def.mode = TriggerMode::SpellCast;
+    def.valid_target = match actor {
+        OtherThanFirstSpellActor::You => Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You),
+        )),
+        OtherThanFirstSpellActor::Opponent => Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        )),
+        OtherThanFirstSpellActor::AnyPlayer => None,
+        OtherThanFirstSpellActor::EnchantedPlayer => Some(TargetFilter::AttachedTo),
+    };
+    def.valid_card = first_filter.clone();
+    def.constraint = Some(TriggerConstraint::NthSpellThisTurn {
+        n: 1,
+        comparator: Comparator::GT,
+        filter: first_filter,
+    });
+    OtherThanFirstSpellParse::Accepted(Box::new(def))
 }
 
 /// Timing-clause kind for nth-spell/nth-draw triggers.
@@ -16026,7 +16243,11 @@ fn try_parse_nth_spell_you(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
     def.valid_target = Some(TargetFilter::Typed(
         TypedFilter::default().controller(ControllerRef::You),
     ));
-    def.constraint = Some(TriggerConstraint::NthSpellThisTurn { n, filter });
+    def.constraint = Some(TriggerConstraint::NthSpellThisTurn {
+        n,
+        comparator: Comparator::EQ,
+        filter,
+    });
     def.condition = timing_condition(timing);
     Some((TriggerMode::SpellCast, def))
 }
@@ -16049,7 +16270,11 @@ fn try_parse_nth_spell_opponent(lower: &str) -> Option<(TriggerMode, TriggerDefi
     def.valid_target = Some(TargetFilter::Typed(
         TypedFilter::default().controller(ControllerRef::Opponent),
     ));
-    def.constraint = Some(TriggerConstraint::NthSpellThisTurn { n, filter });
+    def.constraint = Some(TriggerConstraint::NthSpellThisTurn {
+        n,
+        comparator: Comparator::EQ,
+        filter,
+    });
     def.condition = timing_condition(timing);
     Some((TriggerMode::SpellCast, def))
 }
@@ -16072,7 +16297,11 @@ fn try_parse_nth_spell_any_player(lower: &str) -> Option<(TriggerMode, TriggerDe
     let filter = extract_spell_type_filter(rest);
     let mut def = make_base();
     def.mode = TriggerMode::SpellCast;
-    def.constraint = Some(TriggerConstraint::NthSpellThisTurn { n, filter });
+    def.constraint = Some(TriggerConstraint::NthSpellThisTurn {
+        n,
+        comparator: Comparator::EQ,
+        filter,
+    });
     def.condition = timing_condition(timing);
     Some((TriggerMode::SpellCast, def))
 }
@@ -17706,6 +17935,65 @@ fn try_parse_discard_trigger(
 /// "Another" self-exclusion (e.g., Mazirek's "another permanent") is carried by
 /// `FilterProp::Another` from `parse_trigger_subject`; the runtime matcher enforces
 /// it via `FilterProp::Another` → `object_id != source.id` in `filter.rs`.
+/// CR 714.2e: "Whenever the final chapter ability of \<saga\>
+/// triggers/resolves" — Historian's Boon, Narci Fable Singer, Tom Bombadil.
+///
+/// The one axis the printed class varies over is WHICH point of the observed
+/// ability's lifecycle fires the trigger (`triggers` / `resolves`), so that is a
+/// single `alt()`. The observed Saga flows through the shared
+/// `parse_trigger_subject` building block, so "a Saga you control", a bare
+/// "a Saga", and an opponent-scoped subject all work without any Saga-specific
+/// subject grammar here.
+///
+/// Deliberately requires "final": an unqualified "a chapter ability of …"
+/// observer is NOT accepted, because CR 714.2b makes each chapter symbol its own
+/// triggered ability and a single lore-counter addition can cross several
+/// chapter numbers at once. Such an observer must fire once per crossed ability,
+/// which the event-keyed matcher cannot express from one `CounterAdded`.
+/// Accepting the grammar would mint a silently under-firing trigger; no printed
+/// card needs it.
+fn try_parse_saga_chapter_ability_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    let (event, ()) = alt((
+        value((), tag::<_, _, OracleError<'_>>("whenever ")),
+        value((), tag("when ")),
+    ))
+    .parse(lower)
+    .ok()?;
+
+    let (subject_text, _) = (
+        opt(tag::<_, _, OracleError<'_>>("the ")),
+        tag("final chapter ability"),
+        tag(" of "),
+    )
+        .parse(event)
+        .ok()?;
+
+    let (filter, remainder) = parse_trigger_subject(subject_text, &mut ParseContext::default());
+
+    let (remainder, lifecycle) = alt((
+        value(
+            AbilityLifecyclePoint::Triggered,
+            tag::<_, _, OracleError<'_>>("triggers"),
+        ),
+        value(AbilityLifecyclePoint::Resolved, tag("resolves")),
+    ))
+    .parse(remainder.trim())
+    .ok()?;
+    // Anything left over is grammar this combinator did not model; fail closed
+    // rather than silently accepting a clause whose remainder carries meaning.
+    if !remainder.trim().is_empty() {
+        return None;
+    }
+
+    let mode = TriggerMode::FinalSagaChapterAbility { lifecycle };
+    let mut def = make_base();
+    def.mode = mode.clone();
+    // The observed Saga is an ordinary trigger subject — the runtime matcher
+    // applies this filter to the Saga carried by the event.
+    def.valid_card = Some(filter);
+    Some((mode, def))
+}
+
 fn try_parse_sacrifice_trigger(
     lower: &str,
     make_base: &dyn Fn() -> TriggerDefinition,
@@ -18751,6 +19039,133 @@ mod cost_x_totality_guard_tests {
             !matches!(*execute.effect, Effect::Unimplemented { .. }),
             "an ungated activated-ability X must stay GREEN — the engine carrier binds it. Got: {:?}",
             execute.effect
+        );
+    }
+}
+
+/// CR 714.2e: the final-chapter meta-trigger building block —
+/// "whenever [the final] chapter ability of \<saga\> triggers/resolves".
+///
+/// These exercise the lifecycle axis the combinator composes, the shared
+/// subject grammar, and the deliberate refusal of an unqualified
+/// chapter-ability clause — not one card's printed line.
+#[cfg(test)]
+mod saga_chapter_ability_trigger_tests {
+    use super::parse_trigger_line;
+    use crate::parser::oracle_nom::quantity::parse_quantity_ref;
+    use crate::types::ability::{
+        ControllerRef, ObjectScope, QuantityRef, TargetFilter, TypeFilter,
+    };
+    use crate::types::triggers::{AbilityLifecyclePoint, TriggerMode};
+
+    fn saga_filter(filter: Option<&TargetFilter>) -> (Vec<TypeFilter>, Option<ControllerRef>) {
+        let Some(TargetFilter::Typed(typed)) = filter else {
+            panic!("expected a typed Saga subject filter, got {filter:?}");
+        };
+        (typed.type_filters.clone(), typed.controller.clone())
+    }
+
+    /// Narci, Fable Singer / Tom Bombadil — the resolution half of the class.
+    #[test]
+    fn final_chapter_resolves() {
+        let def = parse_trigger_line(
+            "Whenever the final chapter ability of a Saga you control resolves, draw a card.",
+            "Test",
+        );
+        assert_eq!(
+            def.mode,
+            TriggerMode::FinalSagaChapterAbility {
+                lifecycle: AbilityLifecyclePoint::Resolved,
+            }
+        );
+        assert_eq!(
+            saga_filter(def.valid_card.as_ref()),
+            (
+                vec![TypeFilter::Subtype("Saga".to_string())],
+                Some(ControllerRef::You)
+            )
+        );
+    }
+
+    /// Historian's Boon — the same clause on the other end of the lifecycle
+    /// axis. Only the verb differs, so only the lifecycle point may differ.
+    #[test]
+    fn final_chapter_triggers() {
+        let def = parse_trigger_line(
+            "Whenever the final chapter ability of a Saga you control triggers, draw a card.",
+            "Test",
+        );
+        assert_eq!(
+            def.mode,
+            TriggerMode::FinalSagaChapterAbility {
+                lifecycle: AbilityLifecyclePoint::Triggered,
+            }
+        );
+        assert_eq!(
+            saga_filter(def.valid_card.as_ref()),
+            (
+                vec![TypeFilter::Subtype("Saga".to_string())],
+                Some(ControllerRef::You)
+            )
+        );
+    }
+
+    /// CR 714.2b: an UNQUALIFIED chapter-ability observer must be refused, not
+    /// silently accepted as if it were the final-chapter one. Each chapter
+    /// symbol is its own triggered ability, so one lore-counter addition
+    /// crossing several chapter numbers triggers that many abilities; an
+    /// observer of all of them owes one firing per crossed ability, which this
+    /// event-keyed trigger family cannot express. Falling back to `Unknown`
+    /// keeps the clause honestly coverage-red instead of minting a trigger that
+    /// under-fires.
+    #[test]
+    fn unqualified_chapter_ability_is_refused() {
+        let def = parse_trigger_line(
+            "Whenever a chapter ability of a Saga you control resolves, draw a card.",
+            "Test",
+        );
+        assert!(
+            matches!(def.mode, TriggerMode::Unknown(_)),
+            "an unqualified chapter-ability clause must not mint a final-chapter trigger, got {:?}",
+            def.mode
+        );
+    }
+
+    /// The observed Saga flows through the shared subject grammar, so an
+    /// unscoped subject keeps the subtype and drops only the controller
+    /// constraint.
+    #[test]
+    fn unscoped_saga_subject() {
+        let def = parse_trigger_line(
+            "Whenever the final chapter ability of a Saga resolves, draw a card.",
+            "Test",
+        );
+        assert_eq!(
+            def.mode,
+            TriggerMode::FinalSagaChapterAbility {
+                lifecycle: AbilityLifecyclePoint::Resolved,
+            }
+        );
+        assert_eq!(
+            saga_filter(def.valid_card.as_ref()),
+            (vec![TypeFilter::Subtype("Saga".to_string())], None)
+        );
+    }
+
+    /// CR 608.2k + CR 202.3: "that Saga's mana value" is an untargeted
+    /// back-reference to the object the trigger condition named, so it binds to
+    /// the event source — NOT to the target slot like the "that creature's"
+    /// sibling, whose referent is a target the ability announced. A Saga-chapter
+    /// meta-trigger announces none.
+    #[test]
+    fn that_sagas_mana_value_binds_the_event_source() {
+        let (rest, qty) = parse_quantity_ref("that saga's mana value").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            qty,
+            QuantityRef::ObjectManaValue {
+                scope: ObjectScope::EventSource
+            }
         );
     }
 }

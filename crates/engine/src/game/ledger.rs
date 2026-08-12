@@ -514,3 +514,57 @@ pub fn apply_resolved_ledger_edit(
 fn history_len(len: usize) -> Result<u32, ResolvedLedgerEditReplayInvariantError> {
     u32::try_from(len).map_err(|_| ResolvedLedgerEditReplayInvariantError::CounterOverflow)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::game_object::GameObject;
+    use crate::types::ability::{TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerEntry};
+    use crate::types::identifiers::ObjectId;
+    use crate::types::player::PlayerId;
+    use crate::types::resolved_commands::{ResolvedCommandOrdinal, RulesExecutionNodeRef};
+    use crate::types::triggers::TriggerMode;
+    use crate::types::zones::Zone;
+    use crate::types::CardId;
+
+    #[test]
+    fn max_times_replay_resolves_recipient_key() {
+        let object_id = ObjectId(1);
+        let mut state = GameState::new_two_player(42);
+        let mut object = GameObject::new(
+            object_id,
+            CardId(1),
+            PlayerId(0),
+            "Granted trigger".to_string(),
+            Zone::Battlefield,
+        );
+        let entry = TriggerEntry::new(
+            TriggerDefinitionOccurrenceRef::Printed {
+                base_set: object.trigger_base_set_instance,
+                printed_index: 0,
+            },
+            TriggerDefinition::new(TriggerMode::Attacks),
+        );
+        let trigger = object.trigger_definition_ref(&entry);
+        object.trigger_definitions.push(entry);
+        state.objects.insert(object_id, object);
+        state
+            .trigger_fire_counts_this_turn
+            .insert(trigger.clone(), 2);
+
+        let command = ResolvedLedgerEditCommand {
+            edit: ResolvedLedgerEdit::TriggerFired {
+                trigger: trigger.clone(),
+                edit: ResolvedTriggerLedgerEdit::MaxTimesPerTurn { expected_old: 2 },
+            },
+            cause: RulesExecutionNodeRef::Proposal(ResolvedCommandOrdinal(0)),
+        };
+
+        apply_resolved_ledger_edit(&mut state, &command).expect("legacy replay resolves grant key");
+        assert_eq!(
+            state.trigger_fire_counts_this_turn.get(&trigger).copied(),
+            Some(3)
+        );
+        assert_eq!(state.trigger_fire_counts_this_turn.len(), 1);
+    }
+}

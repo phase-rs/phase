@@ -376,6 +376,221 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
     ),
     // ----- Trigger cause filters -----
     (("TriggerCause", "core_types"), OrderingClass::SetEquivalent),
+    // ----- AbilityBlockReason -----
+    // CR 602.5: the field's own contract is "sorted, deduped permanents" — a
+    // canonicalized set of independently-prohibiting sources. Set.
+    (
+        ("AbilityBlockReason", "sources"),
+        OrderingClass::SetEquivalent,
+    ),
+    // ----- AbilityCondition (RevealedHasCardType) -----
+    // CR 205.1a: disjunctive core-type match against the revealed card — only
+    // membership decides the outcome. Matches `QuantityRef::card_types`. Set.
+    (
+        ("AbilityCondition", "card_types"),
+        OrderingClass::SetEquivalent,
+    ),
+    // ----- AbilityDefinitionDe (serde mirror of AbilityDefinition) -----
+    // The deserialization mirror must classify identically to the type it
+    // reconstructs, or the same list would diff differently depending on which
+    // shape the JSON deserialized through.
+    (
+        ("AbilityDefinitionDe", "activation_restrictions"),
+        OrderingClass::SetEquivalent,
+    ),
+    (
+        ("AbilityDefinitionDe", "mode_abilities"),
+        OrderingClass::OrderSignificant,
+    ),
+    (
+        ("AbilityDefinitionDe", "target_constraints"),
+        OrderingClass::SetEquivalent,
+    ),
+    // ----- CardFace / CardMetadata catalog lists -----
+    // CR 717.1: the set of lit-up roll numbers on an Attraction variant. Which
+    // numbers are lit decides the roll; their listing order does not. Set.
+    (
+        ("CardFace", "attraction_lights"),
+        OrderingClass::SetEquivalent,
+    ),
+    // Alchemy spellbook — the fixed candidate pool a draft effect selects from.
+    // Membership defines the pool; MTGJSON's listing order is incidental. Set.
+    (("CardMetadata", "spellbook"), OrderingClass::SetEquivalent),
+    // ----- CastingPermission -----
+    // CR 613.1d: enters-with continuous modifications carried on a cast grant.
+    // Layer assignment is by modification variant, so the layer system re-sorts
+    // them at apply time. Mirrors `StaticDefinition::modifications`. Set.
+    (
+        ("CastingPermission", "enters_with_modifications"),
+        OrderingClass::SetEquivalent,
+    ),
+    // ----- Effect embedded lists (continued) -----
+    // CR 122.1: entry-time counters gated per-filter. Counter placement is
+    // cumulative and filter-keyed, so reordering the riders cannot change the
+    // resulting counter set. Mirrors `Effect::enter_with_counters`. Set.
+    (
+        ("Effect", "conditional_enter_with_counters"),
+        OrderingClass::SetEquivalent,
+    ),
+    // CR 707.9: "except …" modifications applied to a created copy. Same
+    // layer-resorted rationale as `StaticDefinition::modifications`. Set.
+    (
+        ("Effect", "copy_modifications"),
+        OrderingClass::SetEquivalent,
+    ),
+    (("Effect", "modifications"), OrderingClass::SetEquivalent),
+    // Zone union searched for candidate cards — membership, not order. Set.
+    (("Effect", "zones"), OrderingClass::SetEquivalent),
+    // ----- FaceDownProfile -----
+    // CR 708.2a + CR 205.1a: the core types and subtypes a face-down permanent
+    // is given. Type/subtype sets are unordered. Set.
+    (
+        ("FaceDownProfile", "extra_core_types"),
+        OrderingClass::SetEquivalent,
+    ),
+    (
+        ("FaceDownProfile", "subtypes"),
+        OrderingClass::SetEquivalent,
+    ),
+    // ----- ManaSpendRestriction -----
+    // CR 106.6: the field's own contract is a DISJUNCTION of cost criteria —
+    // any one match satisfies it, so order cannot matter. Set.
+    (
+        ("ManaSpendRestriction", "criteria"),
+        OrderingClass::SetEquivalent,
+    ),
+    // ----- ModalChoice -----
+    // CR 700.2i: per-mode pawprint weights are index-parallel with the modes
+    // themselves — `mode_pawprints[i]` is the cost of mode `i`. Reordering
+    // reprices every mode. Positional.
+    (
+        ("ModalChoice", "mode_pawprints"),
+        OrderingClass::OrderSignificant,
+    ),
+    // ----- NotedManaPayment -----
+    // CR 106.6: the multiset of mana types spent on one activation. Consumers
+    // ask "was type T among them", never "which came first". Set.
+    (("NotedManaPayment", "types"), OrderingClass::SetEquivalent),
+    // ----- PerpetualModification -----
+    // CR 205.1a + CR 113.2c: granted keyword and creature-subtype sets. Each
+    // keyword instance functions independently (CR 113.2c). Set.
+    (
+        ("PerpetualModification", "creature_subtypes"),
+        OrderingClass::SetEquivalent,
+    ),
+    (
+        ("PerpetualModification", "keywords"),
+        OrderingClass::SetEquivalent,
+    ),
+    // ----- QuantityRef -----
+    // CR 305.2a: origin zones narrowing a land-play count — a membership test
+    // over the play's recorded origin. Set.
+    (("QuantityRef", "from_zones"), OrderingClass::SetEquivalent),
+    // ----- ReplacementCondition -----
+    // CR 111.1: core types the proposed token must overlap. Overlap is
+    // symmetric in the listing order. Set.
+    (
+        ("ReplacementCondition", "core_types"),
+        OrderingClass::SetEquivalent,
+    ),
+    // ----- During-resolution cast state (Cascade / Discover / Ripple) -----
+    // CR 608.2g: dig cards that were not the hit. CR 702.60a bottoms the
+    // non-cast reveals "in any order", so their recorded order is not
+    // rules-meaningful. Mirrors `CastPermissionConstraint::exiled_misses`. Set.
+    (
+        ("ResolutionCastCleanup", "exiled_misses"),
+        OrderingClass::SetEquivalent,
+    ),
+    // CR 607.2a: the "exiled this way" batch a re-offer's candidate set is
+    // confined to — a membership restriction. Set.
+    (
+        ("ResolutionCastSuccessAction", "member_pool"),
+        OrderingClass::SetEquivalent,
+    ),
+    // CR 702.60a: Ripple may cast ANY NUMBER of the same-named reveals, so the
+    // remaining pool is a candidate set, not a queue with meaningful order. Set.
+    (
+        ("ResolutionCastSuccessAction", "remaining_hits"),
+        OrderingClass::SetEquivalent,
+    ),
+    // Zone union searched for free-cast candidates. Matches `Effect::zones`. Set.
+    (
+        ("ResolutionCastSuccessAction", "zones"),
+        OrderingClass::SetEquivalent,
+    ),
+    // ----- ResolvedAbility (continued) -----
+    // Ids stripped from this ability's own candidate lists — read as a
+    // membership test, never as a positional referent. Set.
+    (
+        ("ResolvedAbility", "cost_paid_object_ids"),
+        OrderingClass::SetEquivalent,
+    ),
+    // CR 700.2b: one definition per mode; mode order is the player-facing
+    // label order. Mirrors `AbilityDefinition::mode_abilities`. Positional.
+    (
+        ("ResolvedAbility", "mode_abilities"),
+        OrderingClass::OrderSignificant,
+    ),
+    // CR 700.2d: the field's own contract is "in the printed instruction order
+    // used to resolve them" — order IS the resolution sequence. Positional.
+    (
+        ("ResolvedAbility", "selected_mode_labels"),
+        OrderingClass::OrderSignificant,
+    ),
+    // CR 115.1 + CR 601.2c: independent legality predicates ANDed together.
+    // Mirrors `AbilityDefinition::target_constraints`. Set.
+    (
+        ("ResolvedAbility", "target_constraints"),
+        OrderingClass::SetEquivalent,
+    ),
+    // CR 400.7 + CR 603.7c: incarnation pins for the referents in `targets`,
+    // which is itself positional — pin `i` guards target `i`. Reordering
+    // re-binds each pin to a different target. Positional.
+    (
+        ("ResolvedAbility", "target_incarnations"),
+        OrderingClass::OrderSignificant,
+    ),
+    // ----- SpellContext (continued) -----
+    // CR 113.2c + CR 601.2b: the non-kicker analogue of `kickers_paid`, read
+    // the same way (was cost C paid, how many times). Set.
+    (
+        ("SpellContext", "additional_cost_payments"),
+        OrderingClass::SetEquivalent,
+    ),
+    // CR 700.2d: mode indices are stored ASCENDING with repeats — the ordering
+    // is a normalization, and the multiset of chosen modes is the meaning.
+    // (Player-facing resolution order lives in `selected_mode_labels`.) Set.
+    (
+        ("SpellContext", "chosen_modes"),
+        OrderingClass::SetEquivalent,
+    ),
+    // ----- StaticMode (continued) -----
+    // CR 702.122a: which crew-like keyword actions a power/toughness
+    // contribution modifier applies to. Membership. Set.
+    (("StaticMode", "actions"), OrderingClass::SetEquivalent),
+    // CR 122.2: destination zones excluded from counter persistence — the
+    // "any zone other than [zones]" set. Set.
+    (
+        ("StaticMode", "excluded_zones"),
+        OrderingClass::SetEquivalent,
+    ),
+    // ----- TriggerCause / TriggerDefinition -----
+    // CR 603.6a: the field's own contract marks these qualifiers disjunctive. Set.
+    (("TriggerCause", "qualifiers"), OrderingClass::SetEquivalent),
+    // CR 106.1: the produced-mana set a "taps for {C}" trigger requires at
+    // least one match in — an overlap test. Set.
+    (
+        ("TriggerDefinition", "taps_for_mana_produced"),
+        OrderingClass::SetEquivalent,
+    ),
+    // ----- TriggerOccurrenceState -----
+    // Grant instances are addressed exclusively by `producer` key (duplicate
+    // producers are rejected outright) and by `instance` id — never by index.
+    // A keyed set. Set.
+    (
+        ("TriggerOccurrenceState", "active_grants"),
+        OrderingClass::SetEquivalent,
+    ),
 ];
 
 /// Look up the ordering class for a `(carrier, field)` pair.

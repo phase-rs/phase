@@ -3252,7 +3252,7 @@ pub(crate) fn ledger_edit_is_invalid(edit: &ResolvedLedgerEdit) -> bool {
                 || *resulting_first_card_drawn_this_turn != expected_first
         }
         ResolvedLedgerEdit::TriggerFired {
-            edit: ResolvedTriggerLedgerEdit::MaxTimesPerTurn { expected_old },
+            edit: ResolvedTriggerLedgerEdit::MaxTimesPerTurn { expected_old, .. },
             ..
         } => *expected_old == u32::MAX,
         ResolvedLedgerEdit::TriggerFired { .. }

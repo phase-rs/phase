@@ -267,6 +267,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
                 mark_public_state_object_dirty(state, *source_id);
                 mark_mana_display_dirty(state);
             }
+            GameEvent::ManaAbilityProduced { .. } => {}
             GameEvent::ManaExpended { player_id, .. } => {
                 mark_public_state_player_dirty(state, *player_id);
                 mark_mana_display_dirty(state);
@@ -415,6 +416,9 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::LandPlayed { .. }
             | GameEvent::StackPushed { .. }
             | GameEvent::StackResolved { .. }
+            // CR 714.2: a notification consumed by triggers only; the chapter
+            // ability's own effects dirty whatever display state they touched.
+            | GameEvent::SagaChapterAbilityResolved { .. }
             | GameEvent::GameOver { .. }
             // CR 732.2: a halted-resolution notification dirties no display state.
             | GameEvent::ResolutionHalted { .. }

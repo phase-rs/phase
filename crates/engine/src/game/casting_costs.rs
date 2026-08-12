@@ -49,6 +49,16 @@ use super::life_costs::PayLifeCostResult;
 
 const TERMINAL_CAST_CANCELLATION_ERROR: &str = "__terminal_cast_cancellation__";
 
+/// The mana payment authority stamps this on the spell object before casting
+/// finalization publishes the spell-cast event.
+fn recorded_mana_spent_to_cast(state: &GameState, object_id: ObjectId) -> u32 {
+    state
+        .objects
+        .get(&object_id)
+        .expect("spell object must exist while its cast is being finalized")
+        .mana_spent_to_cast_amount
+}
+
 fn stamp_controller_controlled_as_cast(
     state: &GameState,
     ability: &mut ResolvedAbility,
@@ -1975,7 +1985,6 @@ fn finish_cost_object_moves(
             phyrexian_choices,
             cascade_cast_transformed,
             resolution_success_waiting_for,
-            pool_before,
             prepaid_actual_mana_spent,
         } => {
             let returned_creature = chosen
@@ -1988,14 +1997,8 @@ fn finish_cost_object_moves(
                     .retain(|attacker| attacker.object_id != returned_creature);
                 combat.blocker_assignments.remove(&returned_creature);
             }
-            let pool_after = state
-                .players
-                .iter()
-                .find(|candidate| candidate.id == player)
-                .map(|candidate| candidate.mana_pool.produced_mana_total())
-                .unwrap_or(0);
             let actual_mana_spent = prepaid_actual_mana_spent
-                .unwrap_or_else(|| pool_before.saturating_sub(pool_after) as u32);
+                .unwrap_or_else(|| recorded_mana_spent_to_cast(state, pending.object_id));
             let deferred_life_resume_pending = pending.clone();
             finalize_cast_with_phyrexian_choices_inner(
                 state,
@@ -9115,13 +9118,6 @@ fn finalize_cast_with_phyrexian_choices_inner(
         return Ok(waiting_for);
     }
 
-    // CR 700.14: Snapshot pool size before payment to compute actual mana spent.
-    let pool_before = state
-        .players
-        .iter()
-        .find(|p| p.id == player)
-        .map(|p| p.mana_pool.produced_mana_total())
-        .unwrap_or(0);
     let cast_transformed = cascade_cast_transformed
         || super::casting::selected_exile_alt_cost_permission_casts_transformed(
             state,
@@ -9163,14 +9159,8 @@ fn finalize_cast_with_phyrexian_choices_inner(
                     )
                 })?;
                 pending.cost = ManaCost::NoCost;
-                let pool_after = state
-                    .players
-                    .iter()
-                    .find(|candidate| candidate.id == player)
-                    .map(|candidate| candidate.mana_pool.produced_mana_total())
-                    .unwrap_or(0);
                 pending.prepaid_actual_mana_spent =
-                    Some(pool_before.saturating_sub(pool_after) as u32);
+                    Some(recorded_mana_spent_to_cast(state, object_id));
                 state.pending_deferred_life_cost_resume =
                     Some(crate::types::game_state::DeferredLifeCostResume::Cast {
                         player,
@@ -9212,7 +9202,6 @@ fn finalize_cast_with_phyrexian_choices_inner(
                 phyrexian_choices: phyrexian_choices.map(|choices| choices.to_vec()),
                 cascade_cast_transformed,
                 resolution_success_waiting_for: resolution_success_waiting_for.map(Box::new),
-                pool_before,
                 prepaid_actual_mana_spent,
             },
             cost_event_start,
@@ -9221,15 +9210,10 @@ fn finalize_cast_with_phyrexian_choices_inner(
         );
     }
 
-    // CR 700.14: Compute actual mana deducted from pool (not declared cost).
-    let pool_after = state
-        .players
-        .iter()
-        .find(|p| p.id == player)
-        .map(|p| p.mana_pool.produced_mana_total())
-        .unwrap_or(0);
+    // CR 700.14: Use payment's recorded amount; auto-tapped mana can be
+    // produced and spent between pool snapshots.
     let actual_mana_spent =
-        prepaid_actual_mana_spent.unwrap_or_else(|| pool_before.saturating_sub(pool_after) as u32);
+        prepaid_actual_mana_spent.unwrap_or_else(|| recorded_mana_spent_to_cast(state, object_id));
 
     // CR 603.4 + CR 903.8: `origin_zone` preserves the pre-announcement zone so
     // that "cast from hand/graveyard/exile" conditions evaluate correctly and
@@ -11455,6 +11439,12 @@ fn auto_tap_mana_sources_inner(
                     produced: vec![option.mana_type],
                     tap_state: ManaTapState::FromTap,
                 });
+                events.push(GameEvent::ManaAbilityProduced {
+                    player_id: player,
+                    source_id: option.object_id,
+                    produced: vec![option.mana_type],
+                    trigger_state: crate::types::events::ManaAbilityTriggerState::Pending,
+                });
             });
         }
     }
@@ -12620,15 +12610,9 @@ fn finalize_mana_payment_with_resume(
                     Some(&mana_resume),
                     events,
                 )? {
-                    let pool_after = state
-                        .players
-                        .iter()
-                        .find(|candidate| candidate.id == player)
-                        .map(|candidate| candidate.mana_pool.total())
-                        .unwrap_or(0);
                     pending.cost = ManaCost::NoCost;
                     pending.prepaid_actual_mana_spent =
-                        Some(pool_before.saturating_sub(pool_after) as u32);
+                        Some(recorded_mana_spent_to_cast(state, pending.object_id));
                     state.pending_deferred_life_cost_resume =
                         Some(crate::types::game_state::DeferredLifeCostResume::Cast {
                             player,
@@ -13011,15 +12995,9 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
                     Some(&mana_resume),
                     events,
                 )? {
-                    let pool_after = state
-                        .players
-                        .iter()
-                        .find(|candidate| candidate.id == player)
-                        .map(|candidate| candidate.mana_pool.total())
-                        .unwrap_or(0);
                     pending.cost = ManaCost::NoCost;
                     pending.prepaid_actual_mana_spent =
-                        Some(pool_before.saturating_sub(pool_after) as u32);
+                        Some(recorded_mana_spent_to_cast(state, pending.object_id));
                     state.pending_deferred_life_cost_resume =
                         Some(crate::types::game_state::DeferredLifeCostResume::Cast {
                             player,

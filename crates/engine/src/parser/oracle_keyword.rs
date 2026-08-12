@@ -1671,7 +1671,7 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
         }
     }
 
-    // CR 702.74a: "hideaway N" — parameterized keyword.
+    // CR 702.75a: "hideaway N" — parameterized keyword.
     // Delegates to nom combinator for number parsing.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("hideaway ").parse(text) {
         if let Ok((rem, n)) = nom_primitives::parse_number.parse(rest.trim()) {

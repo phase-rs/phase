@@ -770,7 +770,7 @@ pub(super) fn handle_unless_payment(
                     // instead of leaving it orphaned at bare Priority.
                     PaymentOutcome::Paused { .. } => {
                         state.pending_cost_move_resume =
-                            Some(PendingCostMoveResume::GetPlayerCountersUnlessPayment {
+                            Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
                                 cost: poll_cost.clone(),
                                 pending_effect: pending_effect.clone(),
                                 trigger_event: trigger_event.clone(),
@@ -1194,6 +1194,36 @@ pub(super) fn handle_unless_payment(
             // them" — the payer takes damage from the ability source instead of
             // the primary effect (Blazing Salvo, Lava Blister, Barbarian Bully).
             AbilityCost::EffectCost { effect } => match effect.as_ref() {
+                // CR 702.24a + CR 122.1: Cumulative upkeep can require a
+                // source-counter effect cost (Aboroth). Route it through the
+                // same resolution payment authority as its activation-cost
+                // form, including the replacement-aware continuation.
+                Effect::PutCounter {
+                    target: TargetFilter::SelfRef,
+                    ..
+                } => match costs::pay_ability_cost_for_resolution(
+                    state,
+                    player,
+                    &AbilityCost::EffectCost {
+                        effect: effect.clone(),
+                    },
+                    pending_effect.as_ref(),
+                    events,
+                )? {
+                    PaymentOutcome::Paid => {}
+                    PaymentOutcome::Failed { .. } => payment_failed = true,
+                    PaymentOutcome::Paused { .. } => {
+                        state.pending_cost_move_resume =
+                            Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
+                                cost: poll_cost.clone(),
+                                pending_effect: pending_effect.clone(),
+                                trigger_event: trigger_event.clone(),
+                                effect_description: effect_description.clone(),
+                                remaining: remaining.clone(),
+                            });
+                        return Ok(action_result(events, state.waiting_for.clone()));
+                    }
+                },
                 Effect::DealDamage { .. } => {
                     let mut damage_ability = pending_effect.as_ref().clone();
                     damage_ability.effect = *effect.clone();
@@ -1275,7 +1305,7 @@ pub(super) fn handle_unless_payment(
 /// priority/continuations either way. Extracted from `handle_unless_payment`'s
 /// own tail so a cost shape that pauses on a nested replacement choice mid-payment
 /// (`AbilityCost::GetPlayerCounters`, via
-/// `PendingCostMoveResume::GetPlayerCountersUnlessPayment`) can resume through
+/// `PendingCostMoveResume::CounterAdditionUnlessPayment`) can resume through
 /// EXACTLY this same logic once the choice resolves, instead of duplicating it
 /// and risking drift between the immediate and deferred paths.
 #[allow(clippy::too_many_arguments)]
@@ -1844,7 +1874,7 @@ pub(super) fn resume_ward_sacrifice_payment(
     }
 }
 
-/// CR 702.21a + CR 122.1 + CR 616.1: Resume a Ward player-counter unless-payment
+/// CR 118.12 + CR 122.1 + CR 616.1: Resume a counter-addition unless-payment
 /// after its `AddCounter` replacement choice settled. `payment_succeeded` comes
 /// from the exact boundary the replacement pipeline resolved to
 /// (`CostMoveDrainBoundary::ReplacementDelivered` = the counters were actually
@@ -1854,12 +1884,12 @@ pub(super) fn resume_ward_sacrifice_payment(
 /// Delegates to the same `finish_unless_payment` tail every other unless-cost
 /// shape uses, so the Ward-guarded ability is settled exactly once, either way,
 /// instead of the game resetting to bare priority with its fate undetermined.
-pub(super) fn resume_get_player_counters_unless_payment(
+pub(super) fn resume_counter_addition_unless_payment(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     payment_succeeded: bool,
 ) -> Result<WaitingFor, EngineError> {
-    let Some(PendingCostMoveResume::GetPlayerCountersUnlessPayment {
+    let Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
         cost,
         pending_effect,
         trigger_event,
@@ -1867,7 +1897,7 @@ pub(super) fn resume_get_player_counters_unless_payment(
         remaining,
     }) = state.pending_cost_move_resume.take()
     else {
-        unreachable!("GetPlayerCounters unless-payment resume requires its typed continuation")
+        unreachable!("counter-addition unless-payment resume requires its typed continuation")
     };
     finish_unless_payment(
         state,

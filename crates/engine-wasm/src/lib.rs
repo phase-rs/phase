@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use rand::{Rng, SeedableRng};
@@ -176,6 +176,16 @@ mod external_format_config_tests {
     use engine::types::format::RangeOfInfluenceConfig;
 
     #[test]
+    fn object_id_records_serialize_with_json_string_keys() {
+        let record = object_id_record(HashMap::from([(ObjectId(42), "answer")]));
+
+        assert_eq!(
+            serde_json::to_value(record).expect("record serializes"),
+            serde_json::json!({ "42": "answer" })
+        );
+    }
+
+    #[test]
     fn external_initialization_rejects_limited_range_configuration() {
         let mut config = FormatConfig::standard();
         config.range_of_influence = Some(Box::new(RangeOfInfluenceConfig {
@@ -274,12 +284,11 @@ struct LegalActionsResult {
     mana_payment_shortcut_actions: Vec<GameAction>,
     /// Effective mana costs for castable spells, keyed by object_id.
     /// Reflects all cost modifiers (reductions, commander tax, alt costs).
-    spell_costs: std::collections::HashMap<ObjectId, ManaCost>,
+    spell_costs: BTreeMap<String, ManaCost>,
     /// Engine-grouped subset of `actions` keyed by `GameAction::source_object()`.
     /// Frontend uses this for "what can I do with this card?" lookups so it
     /// doesn't have to introspect `GameAction` variants client-side.
-    legal_actions_by_object:
-        std::collections::HashMap<ObjectId, Vec<engine::game::interaction::ObjectActionPayload>>,
+    legal_actions_by_object: BTreeMap<String, Vec<engine::game::interaction::ObjectActionPayload>>,
     /// Engine-level progress-wedge diagnostic: non-fatal signal that an owed
     /// decision has no legal action for any authorized submitter (an engine
     /// anomaly, not a rules outcome). `None` normally.
@@ -288,11 +297,20 @@ struct LegalActionsResult {
     viewer_interaction: engine::types::interaction::ViewerInteraction,
 }
 
+/// Convert engine object IDs into the string-keyed records JSON requires at the
+/// WASM boundary. The frontend already consumes these fields as `Record<string, _>`.
+fn object_id_record<V>(values: HashMap<ObjectId, V>) -> BTreeMap<String, V> {
+    values
+        .into_iter()
+        .map(|(object_id, value)| (object_id.0.to_string(), value))
+        .collect()
+}
+
 /// Serialize a Rust value to a JS object via JSON.
 ///
 /// Uses `serde_json` as the intermediary format, then `JSON.parse` on the JS side.
-/// This naturally converts all HashMap keys to strings (e.g., `ObjectId(42)` → `"42"`),
-/// producing plain JS objects instead of `Map` instances — no frontend post-processing needed.
+/// Callers must project numeric-keyed maps into string-keyed records before
+/// crossing this boundary; JSON objects cannot encode numeric map keys.
 ///
 /// V8's `JSON.parse` is heavily optimized and often outperforms equivalent direct
 /// object construction for large payloads.
@@ -1578,7 +1596,7 @@ pub fn get_filtered_game_state(viewer: u8) -> JsValue {
 }
 
 /// Get the legal actions, auto-pass recommendation, and spell costs for the current game state.
-/// Returns `{ actions: GameAction[], autoPassRecommended: boolean, spellCosts: Record<ObjectId, ManaCost> }`.
+/// Returns `{ actions: GameAction[], autoPassRecommended: boolean, spellCosts: Record<string, ManaCost> }`.
 #[wasm_bindgen]
 pub fn get_legal_actions_js() -> JsValue {
     match with_state_mut(|state| {
@@ -1593,9 +1611,9 @@ pub fn get_legal_actions_js() -> JsValue {
             auto_pass_recommended: auto_pass,
             end_continuous_effect_offers,
             mana_payment_shortcut_actions,
-            spell_costs,
-            legal_actions_by_object: engine::game::interaction::object_action_payloads(
-                &legal_actions_by_object,
+            spell_costs: object_id_record(spell_costs),
+            legal_actions_by_object: object_id_record(
+                engine::game::interaction::object_action_payloads(&legal_actions_by_object),
             ),
             stuck_diagnostic: engine::ai_support::stuck_decision_diagnostic(state),
             viewer_interaction: engine::game::interaction::derive_viewer_interaction(
@@ -1682,9 +1700,8 @@ struct ViewerSnapshot<'a> {
     auto_pass_recommended: bool,
     end_continuous_effect_offers: Vec<GameAction>,
     mana_payment_shortcut_actions: Vec<GameAction>,
-    spell_costs: std::collections::HashMap<ObjectId, ManaCost>,
-    legal_actions_by_object:
-        std::collections::HashMap<ObjectId, Vec<engine::game::interaction::ObjectActionPayload>>,
+    spell_costs: BTreeMap<String, ManaCost>,
+    legal_actions_by_object: BTreeMap<String, Vec<engine::game::interaction::ObjectActionPayload>>,
     /// Engine-level progress-wedge diagnostic: non-fatal signal that an owed
     /// decision has no legal action for any authorized submitter (an engine
     /// anomaly, not a rules outcome). `None` normally.
@@ -1704,9 +1721,9 @@ fn legal_actions_result_for_viewer(state: &GameState, viewer: PlayerId) -> Legal
         auto_pass_recommended,
         end_continuous_effect_offers,
         mana_payment_shortcut_actions,
-        spell_costs,
-        legal_actions_by_object: engine::game::interaction::object_action_payloads(
-            &legal_actions_by_object,
+        spell_costs: object_id_record(spell_costs),
+        legal_actions_by_object: object_id_record(
+            engine::game::interaction::object_action_payloads(&legal_actions_by_object),
         ),
         stuck_diagnostic: engine::ai_support::stuck_decision_diagnostic(state),
         viewer_interaction: engine::game::interaction::derive_viewer_interaction(

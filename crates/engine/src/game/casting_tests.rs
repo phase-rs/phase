@@ -48562,7 +48562,9 @@ fn colored_shard_pin_preserves_grant() {
     let obj = create_creature_spell_in_hand(&mut state, PlayerId(0));
     // Red unit carrying a CantBeCountered grant + three colorless for {3}.
     let mut red_grant = plain_unit(ManaType::Red, ObjectId(5));
-    red_grant.grants.push(ManaSpellGrant::CantBeCountered);
+    red_grant.grants.push(ManaSpellGrant::CantBeCountered {
+        filter: TargetFilter::Any,
+    });
     let red_pip = seed_unit(&mut state, PlayerId(0), red_grant);
     seed_unit(
         &mut state,

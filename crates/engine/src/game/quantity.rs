@@ -277,6 +277,10 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
                         source_filter: filter,
                     },
                 ..
+            }
+            | QuantityRef::AttackedThisTurn {
+                filter: Some(filter),
+                ..
             } => filter_uses_recipient(filter),
             QuantityRef::ObjectColorCount {
                 scope: ObjectScope::Recipient,
@@ -669,6 +673,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
         | QuantityRef::BendTypesThisTurn
@@ -968,6 +973,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
         | QuantityRef::BendTypesThisTurn
@@ -1211,6 +1217,7 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         // CR 117.1: spell-cast journals store each spell's cast-time
         // characteristics.
         | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SpellsCastThisGame { .. }
         // CR 701.16a: sacrifice-time characteristics.
         | QuantityRef::SacrificedThisTurn { .. }
@@ -1446,6 +1453,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
         | QuantityRef::BendTypesThisTurn
@@ -2561,7 +2569,31 @@ pub(crate) fn object_count_matching_ids(
     filter_ctx: &FilterContext<'_>,
     source_id: ObjectId,
 ) -> Vec<ObjectId> {
-    let mut ids = matching_object_ids_in_filter_universe(state, filter, filter_ctx);
+    object_count_matching_candidate_ids(
+        state,
+        matching_object_ids_in_filter_universe(state, filter, filter_ctx),
+        filter,
+        filter_ctx,
+        source_id,
+    )
+}
+
+/// Filters an ordered object snapshot with the same semantics as
+/// [`object_count_matching_ids`]. Callers choose the candidate universe; this
+/// helper owns membership checks, stable de-duplication, and "other than the
+/// triggering object" exclusion.
+pub(crate) fn object_count_matching_candidate_ids(
+    state: &GameState,
+    candidate_ids: Vec<ObjectId>,
+    filter: &TargetFilter,
+    filter_ctx: &FilterContext<'_>,
+    source_id: ObjectId,
+) -> Vec<ObjectId> {
+    let mut seen = HashSet::new();
+    let mut ids: Vec<ObjectId> = candidate_ids
+        .into_iter()
+        .filter(|id| seen.insert(*id) && matches_target_filter(state, *id, filter, filter_ctx))
+        .collect();
     // Drop the triggering object for an "other than" filter (Valakut's "five
     // other Mountains" — the newly-entered Mountain matches the per-object filter
     // as a pass-through and is removed here). The exclusion is the Oracle-text
@@ -4010,6 +4042,47 @@ fn resolve_ref(
                         .sum(),
                 )
             }
+        }
+        // CR 603.2 + CR 603.3: A trigger's spell event fixes the upper bound
+        // for "before it this turn" counts. The per-player journal is ordered
+        // by cast time, so records strictly before that spell's own record are
+        // the printed population even if players cast responses before this
+        // triggered ability resolves.
+        QuantityRef::SpellsCastBeforeTriggeringSpell { scope, ref filter } => {
+            let Some(crate::types::events::GameEvent::SpellCast {
+                object_id: triggering_spell,
+                ..
+            }) = state.current_trigger_event.as_ref()
+            else {
+                return 0;
+            };
+            let Some((records, boundary)) =
+                scoped_players(state, scope, ctx, controller).find_map(|player| {
+                    let records = state.spells_cast_this_turn_by_player.get(&player.id)?;
+                    records
+                        .iter()
+                        .rposition(|record| record.spell_object_id == Some(*triggering_spell))
+                        .map(|boundary| (records, boundary))
+                })
+            else {
+                return 0;
+            };
+            usize_to_i32_saturating(
+                records
+                    .iter()
+                    .take(boundary)
+                    .filter(|record| {
+                        filter.as_ref().is_none_or(|filter| {
+                            spell_record_matches_filter(
+                                record,
+                                filter,
+                                controller,
+                                &state.all_creature_types,
+                            )
+                        })
+                    })
+                    .count(),
+            )
         }
         // Count permanents matching filter that entered the battlefield this turn.
         // Uses `entered_battlefield_turn` field on GameObject.
@@ -5813,6 +5886,23 @@ where
 /// CR 202.3: Resolve an object's mana value through the same ObjectScope axis
 /// used for power/toughness. Source scope falls back to LKI for objects that
 /// moved during resolution; target scope reads the selected object target.
+/// CR 400.7 + CR 202.3: The mana value an event supplies for its OWN pinned
+/// subject incarnation, when the current trigger event carries one.
+///
+/// Only `SagaChapterAbilityResolved` pins a subject today. Its Saga is routinely
+/// gone by the time an observer resolves — CR 714.4 sacrifices it the moment the
+/// final chapter ability leaves the stack — and a re-entered Saga can occupy the
+/// same storage id, so neither live state nor the id-keyed LKI cache can be
+/// trusted to answer for the original.
+fn event_source_mana_value_override(state: &GameState) -> Option<i32> {
+    match current_or_detection_trigger_event(state)? {
+        GameEvent::SagaChapterAbilityResolved { saga, .. } => {
+            Some(u32_to_i32_saturating(saga.lki.mana_value))
+        }
+        _ => None,
+    }
+}
+
 fn resolve_object_mana_value(
     state: &GameState,
     scope: ObjectScope,
@@ -5843,6 +5933,15 @@ fn resolve_object_mana_value(
             .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
             .unwrap_or(0),
         ObjectScope::EventSource => {
+            // CR 400.7 + CR 202.3: an event that pins its own subject incarnation
+            // answers for that incarnation directly. Reading live state (or the
+            // id-keyed LKI cache) would let a re-entered permanent at the same
+            // storage id supply the value instead — Narci draining for the NEW
+            // Saga's mana value after a blink. Checked first, so the id-based
+            // fallback below only runs for events with no pinned subject.
+            if let Some(mana_value) = event_source_mana_value_override(state) {
+                return mana_value;
+            }
             let Some(object_id) =
                 object_id_for_scope(state, ObjectScope::EventSource, ctx, targets)
             else {
@@ -9339,6 +9438,53 @@ mod tests {
     }
 
     #[test]
+    fn object_count_matching_candidate_ids_filters_and_stably_deduplicates_snapshot() {
+        let mut state = GameState::new_two_player(46);
+        let red_a = create_object(
+            &mut state,
+            CardId(408),
+            PlayerId(0),
+            "Red A".to_string(),
+            Zone::Graveyard,
+        );
+        let green = create_object(
+            &mut state,
+            CardId(409),
+            PlayerId(0),
+            "Green".to_string(),
+            Zone::Graveyard,
+        );
+        let red_b = create_object(
+            &mut state,
+            CardId(410),
+            PlayerId(0),
+            "Red B".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&red_a).unwrap().color = vec![ManaColor::Red];
+        state.objects.get_mut(&green).unwrap().color = vec![ManaColor::Green];
+        state.objects.get_mut(&red_b).unwrap().color = vec![ManaColor::Red];
+
+        let filter =
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::HasColor {
+                color: ManaColor::Red,
+            }]));
+        let ctx = FilterContext::from_source(&state, ObjectId(0));
+        assert_eq!(
+            object_count_matching_candidate_ids(
+                &state,
+                vec![red_b, red_a, red_b, green],
+                &filter,
+                &ctx,
+                ObjectId(0),
+            ),
+            vec![red_b, red_a],
+            "candidate membership preserves its supplied order, rejects nonmatches, and \
+             retains only the first occurrence"
+        );
+    }
+
+    #[test]
     fn object_count_matching_ids_or_last_zone_changed_includes_typed_outside_ledger() {
         let mut state = GameState::new_two_player(46);
         let red_a = create_object(
@@ -12581,6 +12727,84 @@ mod tests {
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 3);
     }
 
+    /// `ZoneCardCount::filter` is evaluated against the card object rather than
+    /// reduced to its type list. This is the runtime half of the parser's
+    /// `there are no nonbasic land cards in your library` condition: a basic
+    /// land must not make the count nonzero, while a nonbasic land must.
+    #[test]
+    fn resolve_zone_card_count_preserves_nonbasic_land_filter() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(800),
+            PlayerId(0),
+            "Magmatic Scorchwing".to_string(),
+            Zone::Battlefield,
+        );
+        let basic = create_object(
+            &mut state,
+            CardId(801),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Library,
+        );
+        let basic_obj = state.objects.get_mut(&basic).unwrap();
+        basic_obj.card_types.core_types.push(CoreType::Land);
+        basic_obj.card_types.supertypes.push(Supertype::Basic);
+
+        let nonbasic_land =
+            TargetFilter::Typed(
+                TypedFilter::land().properties(vec![FilterProp::NotSupertype {
+                    value: Supertype::Basic,
+                }]),
+            );
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Library,
+                card_types: Vec::new(),
+                filter: Some(nonbasic_land),
+                scope: CountScope::Controller,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 0);
+
+        let opponent_nonbasic = create_object(
+            &mut state,
+            CardId(802),
+            PlayerId(1),
+            "Opponent's Karplusan Forest".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&opponent_nonbasic)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), source),
+            0,
+            "your library must not count an opponent's nonbasic land"
+        );
+
+        let nonbasic = create_object(
+            &mut state,
+            CardId(803),
+            PlayerId(0),
+            "Karplusan Forest".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&nonbasic)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 1);
+    }
+
     #[test]
     fn resolve_quantity_counters_on_self() {
         let mut state = GameState::new_two_player(42);
@@ -13159,6 +13383,56 @@ mod tests {
         };
 
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 1);
+    }
+
+    /// CR 603.2 + CR 603.3: a triggered spell-history count has to stop at
+    /// the triggering spell's own journal entry, even if another spell was
+    /// cast in response before the triggered ability resolves.
+    #[test]
+    fn spell_history_before_triggering_spell_excludes_later_responses() {
+        fn spell_record(object_id: ObjectId, core_type: CoreType) -> SpellCastRecord {
+            SpellCastRecord {
+                core_types: vec![core_type],
+                spell_object_id: Some(object_id),
+                ..SpellCastRecord::default()
+            }
+        }
+
+        let first_spell = ObjectId(10);
+        let triggering_spell = ObjectId(11);
+        let response_spell = ObjectId(12);
+        let mut state = GameState::new_two_player(42);
+        state.spells_cast_this_turn_by_player.insert(
+            PlayerId(0),
+            crate::im::Vector::from(vec![
+                spell_record(first_spell, CoreType::Instant),
+                spell_record(triggering_spell, CoreType::Sorcery),
+                spell_record(response_spell, CoreType::Instant),
+            ]),
+        );
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            card_id: CardId(11),
+            controller: PlayerId(0),
+            object_id: triggering_spell,
+        });
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::SpellsCastBeforeTriggeringSpell {
+                scope: CountScope::Controller,
+                filter: Some(TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                    ],
+                }),
+            },
+        };
+
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)),
+            1,
+            "only the earlier instant is before the triggering sorcery"
+        );
     }
 
     /// Storm Entity's "for each other spell cast this turn": `CountScope::All`

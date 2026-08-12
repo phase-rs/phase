@@ -92,25 +92,21 @@ mod trigger_occurrence_tests {
     fn identical_grants_from_distinct_producers_remain_distinct_entries() {
         let definition = TriggerDefinition::new(TriggerMode::Attacks);
         let mut state = TriggerOccurrenceState::default();
+        let first_producer = TriggerGrantProducerKey::Granted {
+            origin: static_origin(),
+            output_index: 0,
+        };
+        let second_producer = TriggerGrantProducerKey::Granted {
+            origin: TriggerProducerOrigin::Transient {
+                continuous_effect_id: 19,
+                modification_index: 0,
+            },
+            output_index: 0,
+        };
         let entries = state
             .reconcile_trigger_entries(vec![
-                (
-                    TriggerGrantProducerKey::Granted {
-                        origin: static_origin(),
-                        output_index: 0,
-                    },
-                    definition.clone(),
-                ),
-                (
-                    TriggerGrantProducerKey::Granted {
-                        origin: TriggerProducerOrigin::Transient {
-                            continuous_effect_id: 19,
-                            modification_index: 0,
-                        },
-                        output_index: 0,
-                    },
-                    definition,
-                ),
+                (first_producer.clone(), definition.clone()),
+                (second_producer.clone(), definition),
             ])
             .unwrap();
         assert_eq!(entries.len(), 2);
@@ -178,31 +174,6 @@ mod trigger_occurrence_tests {
             .unwrap()[0]
             .0;
         assert_eq!(instance, TriggerGrantInstanceRef(1));
-    }
-
-    #[test]
-    fn abandoning_a_recipient_retires_grants_without_rewinding_the_allocator() {
-        let producer = TriggerGrantProducerKey::Granted {
-            origin: static_origin(),
-            output_index: 0,
-        };
-        let mut state = TriggerOccurrenceState::default();
-        let first = state
-            .reconcile_grant_instances(vec![(producer.clone(), ())])
-            .unwrap()[0]
-            .0;
-
-        state.retire_all_grants();
-        assert_eq!(state.active_grants().count(), 0);
-
-        let replacement = state
-            .reconcile_grant_instances(vec![(producer, ())])
-            .unwrap()[0]
-            .0;
-        assert!(
-            replacement.0 > first.0,
-            "an abandoned recipient must not resurrect a retired grant generation"
-        );
     }
 }
 
@@ -4748,6 +4719,9 @@ pub enum FilterProp {
     /// looking up the name from `state.objects` (or `lki_cache` if the target
     /// has already left its zone).
     SameNameAsParentTarget,
+    /// CR 607.2a + CR 201.2: Matches an object whose name equals a card durably
+    /// exiled by this ability's source. Used by the Extraplanar Lens class.
+    SameNameAsExiledBySource,
     /// CR 201.2 + CR 201.2a: Matches objects whose name equals the name of any
     /// permanent currently on the battlefield. `controller` optionally narrows
     /// the pool of permanents whose names are considered (None = any controller,
@@ -6325,6 +6299,16 @@ pub enum QuantityRef {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<TargetFilter>,
     },
+    /// CR 603.2 + CR 603.3: Number of spells cast before the spell named by
+    /// the resolving trigger event, scoped and optionally filtered by spell
+    /// characteristics. Unlike `SpellsCastThisTurn`, this is a trigger-time
+    /// history boundary: spells cast in response after the trigger do not
+    /// retroactively change the count (Thousand-Year Storm class).
+    SpellsCastBeforeTriggeringSpell {
+        scope: CountScope,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
+    },
     /// Count of permanents matching filter that entered the battlefield
     /// under the controller's control this turn.
     EnteredThisTurn { filter: TargetFilter },
@@ -7514,6 +7498,45 @@ impl QuantityExpr {
             QuantityExpr::Power { exponent, .. } => exponent.any_ref(pred),
             QuantityExpr::Difference { left, right } => left.any_ref(pred) || right.any_ref(pred),
             QuantityExpr::Fixed { .. } => false,
+        }
+    }
+
+    /// CR 608.2c: Rebind a later clause's generic event-context amount to the
+    /// scalar result of the immediately preceding resolved instruction.
+    ///
+    /// Parser chain assembly uses this only when grammar proves that the
+    /// antecedent is the prior effect, rather than a triggering event or a
+    /// per-player iteration. The recursive walk preserves arithmetic wrappers
+    /// such as "twice that much".
+    pub fn rebind_event_context_amount_to_previous_effect(&mut self) {
+        match self {
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            } => {
+                *self = QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount {
+                        channel: DamageChannel::Total,
+                    },
+                };
+            }
+            QuantityExpr::Offset { inner, .. }
+            | QuantityExpr::ClampMin { inner, .. }
+            | QuantityExpr::Multiply { inner, .. }
+            | QuantityExpr::DivideRounded { inner, .. }
+            | QuantityExpr::UpTo { max: inner }
+            | QuantityExpr::Power {
+                exponent: inner, ..
+            } => inner.rebind_event_context_amount_to_previous_effect(),
+            QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+                for expr in exprs {
+                    expr.rebind_event_context_amount_to_previous_effect();
+                }
+            }
+            QuantityExpr::Difference { left, right } => {
+                left.rebind_event_context_amount_to_previous_effect();
+                right.rebind_event_context_amount_to_previous_effect();
+            }
+            QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => {}
         }
     }
 }
@@ -9457,6 +9480,22 @@ impl AbilityCost {
                 filter: None,
                 ..
             } => true,
+            // CR 702.24a + CR 122.1: The existing resolution payment
+            // authority can place a counter on the source through the
+            // replacement pipeline. This covers cumulative-upkeep costs such
+            // as Aboroth's "put a -1/-1 counter on this creature" without
+            // admitting arbitrary effect-as-cost shapes.
+            AbilityCost::EffectCost { effect }
+                if matches!(
+                    effect.as_ref(),
+                    Effect::PutCounter {
+                        target: TargetFilter::SelfRef,
+                        ..
+                    }
+                ) =>
+            {
+                true
+            }
             // CR 118.12a: OneOf at the base must be a disjunction of mana
             // costs; mixed-shape disjunctions are not yet expanded into a
             // payable per-counter form.
@@ -20501,6 +20540,11 @@ pub struct SpellContext {
     /// discard's direct child and clears it on every other hand-off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_discard_result: Option<DiscardedCardResult>,
+    /// CR 701.20e + CR 608.2c: Exact parent-produced cards forwarded to one
+    /// immediate "for each" child. The child uses this snapshot as its
+    /// iteration universe instead of an unqualified battlefield census.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_target_iteration_members: Option<Vec<ObjectId>>,
     /// CR 601.2c + CR 115.1: For a target slot announced by "an opponent's
     /// choice", the opponent the spell's controller chose to make that choice.
     /// In a multiplayer game the controller picks which opponent announces;
@@ -21465,6 +21509,16 @@ pub enum ReplacementCondition {
     Unrecognized { text: String },
 }
 
+/// The historical wire shape of `NthSpellThisTurn` represented an exact ordinal.
+/// Keep that meaning when a persisted export has no comparator field.
+fn default_nth_spell_comparator() -> Comparator {
+    Comparator::EQ
+}
+
+fn is_default_nth_spell_comparator(comparator: &Comparator) -> bool {
+    *comparator == Comparator::EQ
+}
+
 /// Rate-limiting constraint for triggered abilities.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -21476,11 +21530,18 @@ pub enum TriggerConstraint {
     /// "This ability triggers only during your turn."
     OnlyDuringYourTurn,
     /// "Whenever you/an opponent casts your/their Nth [qualifier] spell each turn" —
-    /// fires exactly when the caster's per-player spell count equals `n`.
+    /// fires when the caster's per-player spell count satisfies `comparator`
+    /// against `n`. `EQ` preserves the existing exact-ordinal behavior; `GT`
+    /// represents "other than the first ... spell" fire-time qualifiers.
     /// When `filter` is `Some`, only spells matching the filter are counted
     /// (e.g., `TypeFilter::Non(Creature)` for "noncreature spell").
     NthSpellThisTurn {
         n: u32,
+        #[serde(
+            default = "default_nth_spell_comparator",
+            skip_serializing_if = "is_default_nth_spell_comparator"
+        )]
+        comparator: Comparator,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<TargetFilter>,
     },
@@ -21593,7 +21654,7 @@ pub struct CounterTriggerFilter {
     pub counter_type: crate::types::counter::CounterType,
     /// If set, only fire when the count crosses this threshold:
     /// previous_count < threshold <= new_count.
-    /// Used by Saga chapter triggers (CR 714.2a).
+    /// Used by Saga chapter triggers (CR 714.2b).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threshold: Option<u32>,
 }
@@ -21713,9 +21774,20 @@ pub struct TriggerDefinition {
     pub constraint: Option<TriggerConstraint>,
     #[serde(default)]
     pub condition: Option<TriggerCondition>,
-    /// Optional filter for counter-related trigger modes (CR 714.2a).
+    /// Optional filter for counter-related trigger modes (CR 714.2b).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub counter_filter: Option<CounterTriggerFilter>,
+    /// CR 714.2 + CR 714.2a: The chapter symbol's Roman numeral, when this
+    /// trigger IS a Saga chapter ability. Provenance, not a second encoding of
+    /// the threshold: only the Saga parser sets it, and it is what distinguishes
+    /// a chapter ability from any other lore-counter threshold trigger a Saga
+    /// might carry. `None` for every non-chapter trigger.
+    ///
+    /// CR 714.2c ("{rN1}, {rN2}—[Effect]") yields one trigger per numeral, each
+    /// carrying its own chapter number, so two chapter abilities sharing a
+    /// printed line stay distinct here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saga_chapter: Option<u32>,
     /// CR 118.12: "Effect unless [player] pays {cost}" — tax trigger modifier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unless_pay: Option<UnlessPayModifier>,
@@ -21773,6 +21845,12 @@ pub struct TriggerDefinition {
     /// mana type (the "for mana" form). Ignored by other trigger modes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub taps_for_mana_produced: Option<Vec<ManaType>>,
+    /// CR 605.1b: Aggregate mana-ability production predicate for
+    /// `TriggerMode::ManaAbilityProduced`. Kept separate from
+    /// `taps_for_mana_produced`: the latter describes the distinct CR 106.12a
+    /// "is tapped for mana" event family.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mana_ability_produced: Option<ManaAbilityProducedFilter>,
     /// CR 701.30d + CR 603.4: Required clash outcome for "Whenever you clash and
     /// win" triggers (Sylvan Echoes). `Some(ClashResult::Won)` narrows the trigger
     /// so it MATCHES only when the ability's controller WON the clash — the win
@@ -21784,6 +21862,14 @@ pub struct TriggerDefinition {
     /// controller (see `ClashResult::for_player` / `match_clash`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clash_result: Option<ClashResult>,
+}
+
+/// CR 605.1b: Which aggregate mana output a mana-ability trigger requires.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ManaAbilityProducedFilter {
+    /// At least one output unit has the source permanent's chosen color.
+    SourceChosenColor,
 }
 
 /// Monotonic identity for one intentionally-installed ordered base trigger set.
@@ -21817,7 +21903,7 @@ pub struct CopyEffectInstanceRef {
 
 /// Payload-free identity of the continuous-effect occurrence which produced a
 /// Layer-6 trigger candidate.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum TriggerProducerOrigin {
     Static {
@@ -21836,7 +21922,7 @@ pub enum TriggerProducerOrigin {
 /// This is deliberately independent of `TriggerDefinition`: byte-identical
 /// grants from distinct producers remain independently functioning abilities
 /// (CR 113.2c).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum TriggerGrantProducerKey {
     KeywordCompanion {
@@ -21972,7 +22058,10 @@ impl<'de> Deserialize<'de> for TriggerEntry {
             TriggerEntryWire::IdentityBearing {
                 occurrence,
                 definition,
-            } => Ok(Self::new(occurrence, definition)),
+            } => Ok(Self {
+                occurrence,
+                definition,
+            }),
             // A later GameState normalization validates this only for a
             // provable printed/base slot. Keeping the marker here preserves the
             // distinction instead of guessing copied/granted provenance from
@@ -22156,13 +22245,6 @@ impl TriggerOccurrenceState {
             .retain(|active| live_instances.contains(&active.instance));
     }
 
-    /// Retires every active producer while preserving the monotonic allocator.
-    /// A player-left-game transition abandons the recipient permanently; a
-    /// future allocation must never resurrect one of its former grants.
-    pub fn retire_all_grants(&mut self) {
-        self.active_grants.clear();
-    }
-
     pub fn active_grants(
         &self,
     ) -> impl Iterator<Item = (&TriggerGrantProducerKey, TriggerGrantInstanceRef)> {
@@ -22242,6 +22324,7 @@ impl TriggerDefinition {
             constraint: None,
             condition: None,
             counter_filter: None,
+            saga_chapter: None,
             unless_pay: None,
             batched: false,
             die_sides: None,
@@ -22254,6 +22337,7 @@ impl TriggerDefinition {
             coin_flip_result: None,
             die_result: None,
             taps_for_mana_produced: None,
+            mana_ability_produced: None,
             clash_result: None,
         }
     }
@@ -22337,6 +22421,14 @@ impl TriggerDefinition {
 
     pub fn counter_filter(mut self, filter: CounterTriggerFilter) -> Self {
         self.counter_filter = Some(filter);
+        self
+    }
+
+    /// CR 714.2: Mark this trigger as the Saga chapter ability for `chapter`.
+    /// Only `parser::oracle_saga` may call this — it is the one place that has
+    /// read an actual chapter symbol.
+    pub fn saga_chapter(mut self, chapter: u32) -> Self {
+        self.saga_chapter = Some(chapter);
         self
     }
 
@@ -26904,6 +26996,7 @@ mod tests {
             constraint: None,
             condition: None,
             counter_filter: None,
+            saga_chapter: None,
             unless_pay: None,
             batched: false,
             die_sides: None,
@@ -26916,6 +27009,7 @@ mod tests {
             coin_flip_result: None,
             die_result: None,
             taps_for_mana_produced: None,
+            mana_ability_produced: None,
             clash_result: None,
         };
         let json = serde_json::to_string(&trigger).unwrap();

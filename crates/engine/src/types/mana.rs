@@ -2,7 +2,10 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use super::ability::{AbilityTag, Comparator, TargetFilter, TriggerDefinitionOccurrenceRef};
+use super::ability::{
+    AbilityTag, Comparator, QuantityExpr, TargetFilter, TriggerDefinitionOccurrenceRef,
+};
+use super::counter::CounterType;
 use super::events::GameEvent;
 use super::game_state::ProductionOverride;
 use super::identifiers::{ObjectId, ObjectIncarnationRef};
@@ -1308,10 +1311,19 @@ fn default_mana_keyword_grant_duration() -> Box<crate::types::ability::Duration>
     Box::new(crate::types::ability::Duration::UntilEndOfTurn)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum ManaSpellGrant {
-    /// The spell cast with this mana can't be countered.
-    CantBeCountered,
+    /// CR 106.6: A spell matching `filter` and cast with this mana can't be
+    /// countered. `TargetFilter::Any` represents the unqualified wording.
+    CantBeCountered { filter: TargetFilter },
+    /// CR 106.6a + CR 614.1c: A permanent spell matching `filter` and cast
+    /// with this mana enters with `count` `counter_type` counters. Each mana
+    /// unit carries a separate replacement effect.
+    EntersWithCounters {
+        filter: TargetFilter,
+        counter_type: CounterType,
+        count: QuantityExpr,
+    },
     /// CR 106.6 + CR 702.10: If the spell this mana is spent on satisfies
     /// `restriction`, grant it `keyword` for `duration` (subtype lands use
     /// `UntilEndOfTurn`; Hall of the Bandit Lord uses `Permanent`).
@@ -1349,6 +1361,81 @@ pub enum ManaSpellGrant {
         filter: TargetFilter,
         ability: Box<crate::types::ability::AbilityDefinition>,
     },
+}
+
+/// Current wire representation for [`ManaSpellGrant`].
+///
+/// `CantBeCountered` used to be a unit variant and therefore serialized as the
+/// bare string `"CantBeCountered"`. The scoped representation preserves that
+/// legacy data as an unqualified (`TargetFilter::Any`) grant.
+#[derive(Deserialize)]
+enum ManaSpellGrantRepr {
+    CantBeCountered {
+        filter: TargetFilter,
+    },
+    EntersWithCounters {
+        filter: TargetFilter,
+        counter_type: CounterType,
+        count: QuantityExpr,
+    },
+    AddKeywordUntilEndOfTurn {
+        keyword: Keyword,
+        #[serde(default)]
+        restriction: Option<ManaRestriction>,
+        #[serde(default = "default_mana_keyword_grant_duration")]
+        duration: Box<crate::types::ability::Duration>,
+    },
+    TriggerOnSpend {
+        filter: TargetFilter,
+        ability: Box<crate::types::ability::AbilityDefinition>,
+    },
+}
+
+impl From<ManaSpellGrantRepr> for ManaSpellGrant {
+    fn from(value: ManaSpellGrantRepr) -> Self {
+        match value {
+            ManaSpellGrantRepr::CantBeCountered { filter } => Self::CantBeCountered { filter },
+            ManaSpellGrantRepr::EntersWithCounters {
+                filter,
+                counter_type,
+                count,
+            } => Self::EntersWithCounters {
+                filter,
+                counter_type,
+                count,
+            },
+            ManaSpellGrantRepr::AddKeywordUntilEndOfTurn {
+                keyword,
+                restriction,
+                duration,
+            } => Self::AddKeywordUntilEndOfTurn {
+                keyword,
+                restriction,
+                duration,
+            },
+            ManaSpellGrantRepr::TriggerOnSpend { filter, ability } => {
+                Self::TriggerOnSpend { filter, ability }
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ManaSpellGrant {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value == serde_json::Value::String("CantBeCountered".to_string()) {
+            return Ok(Self::CantBeCountered {
+                filter: TargetFilter::Any,
+            });
+        }
+
+        serde_json::from_value::<ManaSpellGrantRepr>(value)
+            .map(Into::into)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 /// When mana expires — controls lifecycle beyond the normal CR 106.4 step/phase drain.
@@ -2316,6 +2403,23 @@ pub fn apply_empty_mana_pool_decisions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mana_spell_grant_accepts_legacy_unqualified_counter_protection() {
+        let grant: ManaSpellGrant = serde_json::from_str(r#""CantBeCountered""#)
+            .expect("legacy unqualified mana grant deserializes");
+        assert_eq!(
+            grant,
+            ManaSpellGrant::CantBeCountered {
+                filter: TargetFilter::Any,
+            }
+        );
+
+        let serialized = serde_json::to_string(&grant).expect("current grant serializes");
+        let round_tripped: ManaSpellGrant =
+            serde_json::from_str(&serialized).expect("current grant deserializes");
+        assert_eq!(round_tripped, grant);
+    }
 
     /// CR 702.143: `reduced_generic_by` reduces only the generic component,
     /// preserving colored pips and flooring at 0.

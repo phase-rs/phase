@@ -1566,6 +1566,28 @@ pub fn parse_target_with_syntax<'a>(
         return (TargetFilter::ParentTarget, rest, syntax);
     }
 
+    // CR 608.2c + CR 603.7: "each card(s) they exiled this way" refers to
+    // the exiled members published by the preceding effect, not every card
+    // matching the generic `each card` descriptor. Preserve the producer
+    // action so a tracked set containing other object movements is excluded.
+    if let Ok((rest_lower, _)) = (
+        opt(tag::<_, _, OracleError<'_>>("each ")),
+        alt((tag("cards"), tag("card"))),
+        tag(" they exiled this way"),
+    )
+        .parse(lower.as_str())
+    {
+        return (
+            TargetFilter::TrackedSetFiltered {
+                id: TrackedSetId(0),
+                filter: Box::new(TargetFilter::Typed(TypedFilter::card())),
+                caused_by: Some(ThisWayCause::Exiled),
+            },
+            &text[lower.len() - rest_lower.len()..],
+            syntax,
+        );
+    }
+
     // CR 601.2c: "each of <count> target <type>" is an exact-count multi-target
     // distribution (handled upstream by the counter.rs strip), NOT an all-matching
     // "each" filter. For any non-counter effect that reaches here, route the type

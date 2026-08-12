@@ -920,7 +920,6 @@ fn do_eliminate(
     // player leaving the game, so the consult is skipped while the
     // unconditional primitive guards still run (PLAN §3).
     exile_owned_objects_on_player_left_game(state, player, events);
-    retire_trigger_grants_owned_by(state, player);
     crate::game::planechase::finish_player_left_game_handoff(state, planar_handoff, events);
 
     state.auto_pass.remove(&player);
@@ -1174,18 +1173,6 @@ fn abandon_change_zone_family_for_controller(state: &mut GameState, player: Play
     state.waiting_for = WaitingFor::Priority {
         player: players::next_player(state, player),
     };
-}
-
-/// CR 800.4a: The trigger-grant registry is object-local serialized state.
-/// Once its owner has left, no active producer may survive to a later layer
-/// reconciliation; preserve the monotonic allocator while retiring all active
-/// instances so no occurrence is resurrected.
-fn retire_trigger_grants_owned_by(state: &mut GameState, player: PlayerId) {
-    for (_, object) in state.objects.iter_mut() {
-        if object.owner == player {
-            object.trigger_occurrence_state.retire_all_grants();
-        }
-    }
 }
 
 /// CR 104.2a: A player wins if all opponents have left. CR 104.3g: A team loses if all members have lost.
@@ -1470,6 +1457,7 @@ mod tests {
             crate::types::game_state::LatchedSuppressTrigger {
                 source_context: source_context(&state, leaving),
                 source_filter: crate::types::ability::TargetFilter::Any,
+                trigger_source_filter: None,
                 events: vec![crate::types::statics::SuppressedTriggerEvent::Dies],
             },
         );
