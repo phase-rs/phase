@@ -12103,33 +12103,26 @@ fn self_etb_sacrifice_it_anaphor_binds_to_self_ref() {
 }
 
 #[test]
-fn trigger_unless_you_discard_a_card() {
-    // CR 608.2c: Balduvian Horde — "sacrifice it unless you discard a card at random".
-    // The "at random" suffix is currently sub-fidelity (player-chosen via WardDiscardChoice);
-    // the cost-gate itself is captured.
+fn trigger_unless_you_discard_a_card_at_random_preserves_unsupported_clause() {
+    // Balduvian Horde's random discard cannot be lowered as a player-chosen
+    // unless payment: the payment resolver currently ignores selection mode.
+    // Keep the entire clause visible as unsupported until it can honor random
+    // discard rather than silently changing the card's behavior.
     let def = parse_trigger_line(
         "When ~ enters, sacrifice it unless you discard a card at random.",
         "Balduvian Horde",
     );
-    let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
-    assert_eq!(unless_pay.payer, TargetFilter::Controller);
     assert!(
-        matches!(
-            unless_pay.cost,
-            AbilityCost::Discard {
-                count: QuantityExpr::Fixed { value: 1 },
-                filter: None,
-                selection: CardSelectionMode::Chosen,
-                self_scope: DiscardSelfScope::FromHand
-            }
-        ),
-        "cost should be DiscardCard, got {:?}",
-        unless_pay.cost
+        def.unless_pay.is_none(),
+        "random discard must not lower to a player-chosen unless payment"
     );
-    let execute = def.execute.as_ref().expect("should have execute");
+    let execute = def
+        .execute
+        .as_ref()
+        .expect("should preserve the unsupported clause");
     assert!(
-        matches!(*execute.effect, Effect::Sacrifice { .. }),
-        "execute should be Sacrifice, got {:?}",
+        matches!(*execute.effect, Effect::Unimplemented { .. }),
+        "random-discard unless clause must remain visible as unimplemented, got {:?}",
         execute.effect
     );
 }
