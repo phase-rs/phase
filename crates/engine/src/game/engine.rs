@@ -11,9 +11,9 @@ use crate::types::actions::{
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState, PlayerActionKind};
 use crate::types::game_state::{
     ActionResult, AssistState, AutoMayChoice, AutoPassMode, AutoPassRequest, CastOfferKind,
-    ConvokeMode, CostResume, GameState, LandPlayRecord, LoopDetectionMode, ManaAbilityResume,
-    MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveResume, RetargetScope, StackEntry,
-    StackEntryKind, WaitingFor,
+    CastingVariant, ConvokeMode, CostResume, GameState, LandPlayRecord, LoopDetectionMode,
+    ManaAbilityResume, MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveResume, RetargetScope,
+    StackEntry, StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIncarnationRef};
 use crate::types::match_config::MatchType;
@@ -6169,9 +6169,17 @@ pub(super) fn resume_delve_mana_payment(state: &mut GameState) -> WaitingFor {
             fuel_id,
         ),
     );
+    let convoke_mode = state.pending_cast.as_ref().and_then(|pending| {
+        super::casting::spell_tap_payment_mode_for(
+            state,
+            player,
+            pending.object_id,
+            pending.casting_variant == CastingVariant::Fuse,
+        )
+    });
     WaitingFor::ManaPayment {
         player,
-        convoke_mode: Some(ConvokeMode::Delve),
+        convoke_mode: convoke_mode.or(Some(ConvokeMode::Delve)),
     }
 }
 
@@ -9477,6 +9485,54 @@ fn apply_action(
                 convoke_mode,
             }
         }
+        // CR 702.66a: Delve composes with a primary tap-payment keyword (for
+        // example, Hogaak's Convoke). Handle the graveyard contribution first so
+        // its object is never rejected by the battlefield-tap arm below.
+        (
+            WaitingFor::ManaPayment { player, .. },
+            GameAction::TapForConvoke {
+                object_id,
+                mana_type,
+            },
+        ) if state.objects.get(&object_id).is_some_and(|object| object.is_delve_eligible(*player))
+            && state.pending_cast.as_ref().is_some_and(|pending| {
+                super::casting::spell_has_delve_payment_for(
+                    state,
+                    *player,
+                    pending.object_id,
+                    pending.casting_variant == CastingVariant::Fuse,
+                )
+            }) => {
+            let player = *player;
+            if mana_type != crate::types::mana::ManaType::Colorless {
+                return Err(EngineError::ActionNotAllowed(
+                    "Delve can only pay generic mana".to_string(),
+                ));
+            }
+            let spell_id = state
+                .pending_cast
+                .as_ref()
+                .map(|pending| pending.object_id)
+                .ok_or_else(|| {
+                    EngineError::InvalidAction("No pending cast for delve".to_string())
+                })?;
+            state.pending_cost_move_resume = Some(PendingCostMoveResume::DelveManaPayment {
+                player,
+                fuel_id: object_id,
+            });
+            match zone_pipeline::move_object(
+                state,
+                ZoneMoveRequest::cost(object_id, Zone::Exile, spell_id)
+                    .track_exiled_by_source(),
+                &mut events,
+            ) {
+                ZoneMoveResult::Done => resume_delve_mana_payment(state),
+                ZoneMoveResult::NeedsChoice(_) => state.waiting_for.clone(),
+                ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                    unreachable!("a delve cost move to exile cannot require an Aura attachment")
+                }
+            }
+        }
         // CR 702.51a / Waterbend: Tap a creature or artifact to pay mana.
         // CR 702.51a + CR 302.6: Convoke taps creatures to pay mana; summoning sickness
         // (CR 302.6) is not checked because convoke does not use the tap activated-ability mechanism.
@@ -9594,64 +9650,6 @@ fn apply_action(
             WaitingFor::ManaPayment {
                 player: *player,
                 convoke_mode: Some(mode),
-            }
-        }
-        // CR 702.66a: Delve — exile a card from the caster's graveyard to pay one
-        // generic mana. Unlike convoke/improvise (which tap a permanent), the
-        // source is a graveyard card that is exiled. The contribution is a
-        // generic-only colorless marker (like Improvise) that can't leak into the
-        // pool.
-        (
-            WaitingFor::ManaPayment {
-                player,
-                convoke_mode: Some(ConvokeMode::Delve),
-            },
-            GameAction::TapForConvoke {
-                object_id,
-                mana_type,
-            },
-        ) => {
-            let player = *player;
-            if mana_type != crate::types::mana::ManaType::Colorless {
-                return Err(EngineError::ActionNotAllowed(
-                    "Delve can only pay generic mana".to_string(),
-                ));
-            }
-            let eligible = state
-                .objects
-                .get(&object_id)
-                .is_some_and(|o| o.is_delve_eligible(player));
-            if !eligible {
-                return Err(EngineError::ActionNotAllowed(
-                    "Can only delve a card from your own graveyard".to_string(),
-                ));
-            }
-            let spell_id = state
-                .pending_cast
-                .as_ref()
-                .map(|pending| pending.object_id)
-                .ok_or_else(|| {
-                    EngineError::InvalidAction("No pending cast for delve".to_string())
-                })?;
-            state.pending_cost_move_resume = Some(PendingCostMoveResume::DelveManaPayment {
-                player,
-                fuel_id: object_id,
-            });
-            // CR 702.66a + CR 614.1 + CR 616.1: The cost move must consult Moved
-            // replacements. `track_exiled_by_source` carries
-            // `ExileLinkSpec { duration: None, tracking: TrackBySource }`, so the
-            // delivery tail links only fuel that actually reaches exile.
-            match zone_pipeline::move_object(
-                state,
-                ZoneMoveRequest::cost(object_id, Zone::Exile, spell_id)
-                    .track_exiled_by_source(),
-                &mut events,
-            ) {
-                ZoneMoveResult::Done => resume_delve_mana_payment(state),
-                ZoneMoveResult::NeedsChoice(_) => state.waiting_for.clone(),
-                ZoneMoveResult::NeedsAuraAttachmentChoice => {
-                    unreachable!("a delve cost move to exile cannot require an Aura attachment")
-                }
             }
         }
         (WaitingFor::MulliganDecision { .. }, GameAction::MulliganDecision { choice }) => {
@@ -16107,10 +16105,11 @@ mod stage2_injector_tests {
                 // three producers: `:6212/:6289/:9477 => :6228/:6305/:9493`.
                 // shifts combine with #6958's paid-cast outcome exclusion and
                 // #6976's conditional-branch exclusions. None creates an
-                // `OptionalEffect` prompt. Re-pinned against the merged source.
-                "game/effects/mod.rs:6300".to_string(),
-                "game/effects/mod.rs:6377".to_string(),
-                "game/effects/mod.rs:9572".to_string(),
+                // `OptionalEffect` prompt. #7268 removes two lines above all three,
+                // preserving the same producers at `:6298/:6375/:9570`.
+                "game/effects/mod.rs:6298".to_string(),
+                "game/effects/mod.rs:6375".to_string(),
+                "game/effects/mod.rs:9570".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
@@ -16428,7 +16427,7 @@ mod stage2_injector_tests {
                 //
                 // SET PRESERVATION: unchanged. Upstream adds no line matching the needle to this file and
                 // neither does this branch — total still 37, partition still 5/7/25.
-                "game/engine.rs:12006".to_string(),
+                "game/engine.rs:12004".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \

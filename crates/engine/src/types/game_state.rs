@@ -3446,6 +3446,46 @@ impl PendingZoneChangeDelivery {
         Ok(())
     }
 
+    /// CR 400.7: A zone change creates a new object, so the retained delivery
+    /// event slice — not current object state — identifies whether this exact
+    /// pre-delivery incarnation moved.
+    ///
+    /// Returns the terminal completion recorded by the delivery pipeline, or
+    /// derives it from this paused delivery's exact event slice once its
+    /// resolution has returned to the owning resume driver.
+    ///
+    /// A returned prompt is terminal for this delivery. If an older pause path
+    /// omitted the sidecar classification, its own retained events remain the
+    /// authoritative witness; do not inspect live object state or global event
+    /// history, either of which could observe a later incarnation.
+    pub fn terminal_completion_after_resume(&self) -> ZoneMoveCompletion {
+        self.terminal_completion.unwrap_or_else(|| {
+            Self::completion_from_delivery_events(self.member, &self.delivery_events)
+        })
+    }
+
+    /// Classifies one explicit delivery slice against its pre-delivery
+    /// incarnation. Callers use this when a completed move does not have a
+    /// separately captured terminal sidecar.
+    pub fn completion_from_delivery_events(
+        member: ObjectIncarnationRef,
+        delivery_events: &[GameEvent],
+    ) -> ZoneMoveCompletion {
+        if delivery_events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::ZoneChanged { record, .. }
+                    if record
+                        .trigger_source_context()
+                        .is_some_and(|context| context.identity.reference == member)
+            )
+        }) {
+            ZoneMoveCompletion::Moved
+        } else {
+            ZoneMoveCompletion::Remained
+        }
+    }
+
     pub fn mark_counted(&mut self) {
         self.count = PausedZoneChangeDeliveryCount::AlreadyCounted;
     }
@@ -22706,6 +22746,35 @@ mod tests {
                 .caused_by,
             None,
             "triggered mana also rejects an absent explicit or ambient parent"
+        );
+    }
+
+    #[test]
+    fn paused_zone_change_delivery_derives_a_terminal_outcome_after_resume() {
+        let member = ObjectIncarnationRef::of(ObjectId(71), 4);
+        let mut delivery = PendingZoneChangeDelivery::new(
+            member,
+            ProposedEvent::zone_change(
+                member.object_id,
+                Zone::Battlefield,
+                Zone::Graveyard,
+                Some(ObjectId(72)),
+            ),
+        );
+
+        assert_eq!(
+            delivery.terminal_completion_after_resume(),
+            ZoneMoveCompletion::Remained,
+            "an answered pause with no original-incarnation event completed without moving"
+        );
+
+        delivery
+            .record_terminal_completion(ZoneMoveCompletion::Prevented)
+            .expect("the explicit replacement outcome is recorded once");
+        assert_eq!(
+            delivery.terminal_completion_after_resume(),
+            ZoneMoveCompletion::Prevented,
+            "an explicit replacement outcome remains authoritative over slice inference"
         );
     }
 

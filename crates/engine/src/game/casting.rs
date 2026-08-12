@@ -11422,20 +11422,18 @@ pub fn handle_cast_spell_with_payment_mode(
     // `enters_with_counter` rider). Maralen, Fae Ascendant; Intrepid
     // Paleontologist; The Matrix of Time.
     //
-    // ponytail: scoped to `ExilePermission` — the one variant class whose
-    // single-candidate cast currently mis-elects to Normal. The GENERAL rule is
-    // "don't skip single-candidate election when the elected option carries
-    // context a Normal cast would drop" (would also cover a hypothetical single
-    // Flashback/Escape/etc.). Not generalized here because the fall-through below
+    // The elected alternate-cost context must not be dropped when it is the sole
+    // candidate. This is intentionally scoped to variants that have no later
+    // cost-choice handler: ExilePermission and Freerunning. The fall-through below
     // routes single-candidate Warp/Evoke/Dash hand casts through their own
-    // cost-choice `WaitingFor` handlers; electing them via `continue_cast_with_
-    // variant` would preempt those prompts. Widen to the general predicate only
-    // after auditing those keyword handlers tolerate pre-election.
-    if let Some(option) = variant_choices
-        .options
-        .first()
-        .filter(|option| matches!(option.variant, CastingVariant::ExilePermission { .. }))
-    {
+    // cost-choice `WaitingFor` handlers; electing those here would preempt those
+    // prompts. Widen only after auditing those handlers for pre-election.
+    if let Some(option) = variant_choices.options.first().filter(|option| {
+        matches!(
+            option.variant,
+            CastingVariant::ExilePermission { .. } | CastingVariant::Freerunning
+        )
+    }) {
         return continue_cast_with_variant(
             state,
             player,
@@ -14646,6 +14644,21 @@ pub(super) fn spell_tap_payment_mode_for(
     }
 }
 
+/// CR 702.66a: Delve is an independent generic-payment permission. It composes
+/// with a spell's primary tap-payment mode (for example, Hogaak's Convoke), so
+/// callers must query it separately rather than treating `ConvokeMode` as a
+/// mutually exclusive keyword selection.
+pub(crate) fn spell_has_delve_payment_for(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    fused: bool,
+) -> bool {
+    effective_spell_keywords_for(state, player, source_id, fused)
+        .iter()
+        .any(|keyword| matches!(keyword, Keyword::Delve))
+}
+
 /// CR 601.2c + CR 601.2f: Target selection may precede locking the final
 /// mana obligation. Return true only when none of the production cost axes can
 /// still change the amount or the sources available before payment.
@@ -14799,13 +14812,25 @@ fn can_pay_with_spell_tap_payments(
     else {
         return false;
     };
-    can_pay_with_tap_payment_mode(state, player, mode, cost, ctx, permissions)
+    let fused = state.pending_cast.as_ref().is_some_and(|pending| {
+        pending.object_id == source_id && pending.casting_variant == CastingVariant::Fuse
+    });
+    can_pay_with_tap_payment_mode(
+        state,
+        player,
+        mode,
+        spell_has_delve_payment_for(state, player, source_id, fused),
+        cost,
+        ctx,
+        permissions,
+    )
 }
 
 fn can_pay_with_tap_payment_mode(
     state: &GameState,
     player: PlayerId,
     mode: ConvokeMode,
+    has_delve: bool,
     cost: &crate::types::mana::ManaCost,
     ctx: Option<&PaymentContext<'_>>,
     permissions: crate::types::mana::CostPermissionContext,
@@ -14814,12 +14839,26 @@ fn can_pay_with_tap_payment_mode(
         return false;
     };
 
+    let mut payment_pool = player_data.mana_pool.clone();
+    if has_delve && mode != ConvokeMode::Delve {
+        // CR 702.66a: Delve's generic-only contributions compose with the
+        // primary Convoke/Improvise/Waterbend payment channel.
+        for (&object_id, obj) in &state.objects {
+            if obj.is_delve_eligible(player) {
+                payment_pool.add(crate::types::mana::ManaUnit::convoke_payment(
+                    crate::types::mana::ManaType::Colorless,
+                    object_id,
+                ));
+            }
+        }
+    }
+
     // CR 601.2h: This is an affordability preview only. The real payment still
     // flows through ManaPayment and the shared mana-payment algorithm.
     match mode {
         ConvokeMode::Improvise => {
             // CR 702.126a: Improvise lets players tap untapped artifacts to pay generic mana.
-            let mut pool = player_data.mana_pool.clone();
+            let mut pool = payment_pool;
             for (&object_id, obj) in &state.objects {
                 if obj.is_improvise_eligible(player) {
                     pool.add(crate::types::mana::ManaUnit::convoke_payment(
@@ -14831,7 +14870,7 @@ fn can_pay_with_tap_payment_mode(
             mana_payment::can_pay_for_spell(&pool, cost, ctx, permissions)
         }
         ConvokeMode::Waterbend => {
-            let mut pool = player_data.mana_pool.clone();
+            let mut pool = payment_pool;
             for (&object_id, obj) in &state.objects {
                 if obj.is_waterbend_eligible(player) {
                     pool.add(crate::types::mana::ManaUnit::new(
@@ -14863,13 +14902,13 @@ fn can_pay_with_tap_payment_mode(
                     Some(choices)
                 })
                 .collect::<Vec<_>>();
-            can_pay_with_convoke_options(&player_data.mana_pool, cost, ctx, permissions, &options)
+            can_pay_with_convoke_options(&payment_pool, cost, ctx, permissions, &options)
         }
         ConvokeMode::Delve => {
             // CR 702.66a: each card in the caster's graveyard can be exiled to pay
             // one generic mana. Model each as a generic-only colorless unit, exactly
             // like Improvise, so a spell castable only with delve is offered.
-            let mut pool = player_data.mana_pool.clone();
+            let mut pool = payment_pool;
             for (&object_id, obj) in &state.objects {
                 if obj.is_delve_eligible(player) {
                     pool.add(crate::types::mana::ManaUnit::convoke_payment(
@@ -15211,7 +15250,18 @@ fn feasibly_payable_with_tap_payment_mode_in_context(
         player_can_spend_as_any_color_for_payment(simulated, player, Some(source_id), ctx);
     let permissions =
         super::static_abilities::build_cost_permission_context(simulated, player, any_color);
-    can_pay_with_tap_payment_mode(simulated, player, tap_payment_mode, cost, ctx, permissions)
+    let fused = simulated.pending_cast.as_ref().is_some_and(|pending| {
+        pending.object_id == source_id && pending.casting_variant == CastingVariant::Fuse
+    });
+    can_pay_with_tap_payment_mode(
+        simulated,
+        player,
+        tap_payment_mode,
+        spell_has_delve_payment_for(simulated, player, source_id, fused),
+        cost,
+        ctx,
+        permissions,
+    )
 }
 
 /// Castability-gate feasibility predicate. Returns true if `player` could pay

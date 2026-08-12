@@ -8788,6 +8788,12 @@ pub(super) fn pay_and_push_adventure(
         object_id,
         casting_variant == CastingVariant::Fuse,
     );
+    let has_delve = super::casting::spell_has_delve_payment_for(
+        state,
+        player,
+        object_id,
+        casting_variant == CastingVariant::Fuse,
+    );
     // Gate on eligible creatures/artifacts being present.
     let convoke_mode = convoke_mode.filter(|mode| {
         state.objects.values().any(|o| match mode {
@@ -8796,7 +8802,7 @@ pub(super) fn pay_and_push_adventure(
             ConvokeMode::Improvise => o.is_improvise_eligible(player),
             // CR 702.66a: delve needs at least one eligible card in the caster's graveyard.
             ConvokeMode::Delve => o.is_delve_eligible(player),
-        })
+        }) || (has_delve && state.objects.values().any(|o| o.is_delve_eligible(player)))
     });
 
     // Enter the payment step if cost needs player input (X), convoke/waterbend is active,
@@ -11820,7 +11826,12 @@ pub(super) fn max_x_value_excluding(
     // only generic mana by exiling cards from the caster's graveyard. Unlike
     // tap-payment keywords, this is an additional graveyard-card channel rather
     // than an alternative use of battlefield permanents.
-    let delve_capacity = if matches!(tap_payment_mode, Some(ConvokeMode::Delve)) {
+    let delve_capacity = if object_id.is_some_and(|oid| {
+        let fused = state.pending_cast.as_ref().is_some_and(|pending| {
+            pending.object_id == oid && pending.casting_variant == CastingVariant::Fuse
+        });
+        super::casting::spell_has_delve_payment_for(state, player, oid, fused)
+    }) {
         state
             .objects
             .iter()

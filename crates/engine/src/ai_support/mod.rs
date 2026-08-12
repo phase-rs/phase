@@ -6720,6 +6720,17 @@ mod tests {
             );
         }
         set_dummy_pending_cast(&mut state);
+        let pending_spell = state
+            .pending_cast
+            .as_ref()
+            .expect("dummy pending cast exists")
+            .object_id;
+        state
+            .objects
+            .get_mut(&pending_spell)
+            .expect("dummy spell exists")
+            .keywords
+            .push(Keyword::Delve);
         state.waiting_for = WaitingFor::ManaPayment {
             player: PlayerId(0),
             convoke_mode: Some(ConvokeMode::Delve),

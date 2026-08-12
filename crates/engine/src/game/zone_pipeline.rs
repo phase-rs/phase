@@ -676,19 +676,7 @@ pub(crate) fn zone_move_completion_from_delivery(
     member: ObjectIncarnationRef,
     delivery_events: &[GameEvent],
 ) -> ZoneMoveCompletion {
-    if delivery_events.iter().any(|event| {
-        matches!(
-            event,
-            GameEvent::ZoneChanged { record, .. }
-                if record
-                    .trigger_source_context()
-                    .is_some_and(|context| context.identity.reference == member)
-        )
-    }) {
-        ZoneMoveCompletion::Moved
-    } else {
-        ZoneMoveCompletion::Remained
-    }
+    PendingZoneChangeDelivery::completion_from_delivery_events(member, delivery_events)
 }
 
 pub(crate) enum ZoneDeliveryResult {
