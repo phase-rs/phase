@@ -712,6 +712,40 @@ impl ResolutionStack {
         }
     }
 
+    /// Consumes the active continuation, or its exact parent when a
+    /// `BatchDelivery` child currently owns the stack top. The batch remains
+    /// parked so its undelivered zone-change members settle before the enclosing
+    /// resolution advances; this fixed two-frame shape is not a general search.
+    pub fn take_active_ability_continuation_or_batch_delivery_child(
+        &mut self,
+    ) -> Result<Option<AbilityContinuationFrame>, ResolutionStackError> {
+        match self.last() {
+            Some(ResolutionFrame::AbilityContinuation(_)) | None => {
+                self.take_active_ability_continuation()
+            }
+            Some(ResolutionFrame::BatchDelivery(_)) => {
+                let Some(parent_index) = self.frames.len().checked_sub(2) else {
+                    return Ok(None);
+                };
+                if !matches!(
+                    self.frames.get(parent_index),
+                    Some(ResolutionFrame::AbilityContinuation(_))
+                ) {
+                    return Ok(None);
+                }
+                let ResolutionFrame::AbilityContinuation(frame) = self.frames.remove(parent_index)
+                else {
+                    unreachable!("checked batch parent must retain its frame kind")
+                };
+                Ok(Some(frame))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::AbilityContinuation,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
     /// Park a newly active ability continuation.
     pub fn push_ability_continuation(&mut self, frame: AbilityContinuationFrame) {
         self.push_inner(ResolutionFrame::AbilityContinuation(frame));
@@ -3956,6 +3990,63 @@ mod tests {
             pending: PendingContinuation::new(Box::new(resolved_draw(source_id)), &state),
             choose_zone_trigger_context: None,
         })
+    }
+
+    fn batch_delivery_frame(seed: u64) -> ResolutionFrame {
+        let mut state = GameState::new_two_player(seed);
+        let mut logical_zone_change_group = state.allocate_logical_zone_change_group(&[]);
+        logical_zone_change_group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("empty batch group retains its pre-delivery latch");
+        ResolutionFrame::BatchDelivery(Box::new(PendingBatchDeliveries {
+            logical_zone_change_group,
+            paused_current: None,
+            remaining: Vec::new(),
+            destination: Zone::Graveyard,
+            source_id: None,
+            enter_tapped: EtbTapState::Unspecified,
+            exile_tracking: ZoneDeliveryExileTracking::None,
+            library_placement: None,
+            completion: None,
+            replacement_applied: HashSet::new(),
+            requests: Vec::new(),
+            attempted: Vec::new(),
+            zone_change_record_start: state.zone_changes_this_turn.len(),
+            deferred_events: Vec::new(),
+        }))
+    }
+
+    #[test]
+    fn take_continuation_preserves_an_active_batch_delivery_child() {
+        let mut stack = ResolutionStack::default();
+        stack.push_inner(continuation_frame(1));
+        stack.push_inner(batch_delivery_frame(1));
+
+        assert!(
+            stack
+                .take_active_ability_continuation_or_batch_delivery_child()
+                .expect("the direct batch-child relation is consumable")
+                .is_some(),
+            "the direct continuation parent is removed"
+        );
+        assert!(
+            matches!(stack.last(), Some(ResolutionFrame::BatchDelivery(_))),
+            "the unrelated active batch remains available for its delivery drain"
+        );
+
+        let mut unrelated_child = ResolutionStack::default();
+        unrelated_child.push_inner(continuation_frame(2));
+        unrelated_child.push_inner(change_zone_frame(2));
+        assert!(
+            matches!(
+                unrelated_child.take_active_ability_continuation_or_batch_delivery_child(),
+                Err(ResolutionStackError::UnexpectedTop {
+                    expected: FrameKind::AbilityContinuation,
+                    actual: FrameKind::ChangeZone,
+                })
+            ),
+            "the helper does not search through an arbitrary child frame"
+        );
     }
 
     #[test]
