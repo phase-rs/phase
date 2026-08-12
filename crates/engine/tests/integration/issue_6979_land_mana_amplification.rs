@@ -2,14 +2,13 @@
 //! mana ability's aggregate output once, with the printed source restrictions.
 
 use engine::game::mana_abilities::activate_mana_ability;
-use engine::game::scenario::{GameScenario, P0};
+use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::triggers::process_triggers;
 use engine::game::zones::create_object;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, ChosenAttribute, Effect, ManaContribution, ManaProduction,
 };
 use engine::types::card_type::CoreType;
-use engine::types::events::{GameEvent, ManaTapState};
 use engine::types::game_state::{ExileLink, ExileLinkKind, ManaAbilityResume};
 use engine::types::identifiers::CardId;
 use engine::types::mana::{ManaColor, ManaType};
@@ -92,44 +91,35 @@ fn extraplanar_lens_matches_the_name_of_its_imprinted_land() {
         .as_artifact()
         .from_oracle_text(EXTRAPLANAR_LENS_ORACLE)
         .id();
+    let land = scenario.add_basic_land(P1, ManaColor::Green);
     let mut runner = scenario.build();
     let state = runner.state_mut();
     let imprinted = create_object(state, CardId(6980), P0, "Forest".to_string(), Zone::Exile);
-    let land = create_object(
-        state,
-        CardId(6981),
-        P0,
-        "Forest".to_string(),
-        Zone::Battlefield,
-    );
-    state
-        .objects
-        .get_mut(&land)
-        .expect("land")
-        .card_types
-        .core_types
-        .push(CoreType::Land);
     state.exile_links.push(ExileLink {
         source_id: lens,
         exiled_id: imprinted,
         kind: ExileLinkKind::TrackedBySource,
     });
-
-    process_triggers(
+    let ability = runner.state().objects[&land].abilities[0].clone();
+    let mut events = Vec::new();
+    activate_mana_ability(
         runner.state_mut(),
-        &[GameEvent::TappedForMana {
-            player_id: P0,
-            source_id: land,
-            produced: vec![ManaType::Green],
-            tap_state: ManaTapState::FromTap,
-        }],
-    );
+        land,
+        P1,
+        0,
+        &ability,
+        &mut events,
+        ManaAbilityResume::Priority,
+        None,
+    )
+    .expect("Forest mana ability must resolve");
+    process_triggers(runner.state_mut(), &events);
 
     assert_eq!(
-        runner.state().players[P0.0 as usize]
+        runner.state().players[P1.0 as usize]
             .mana_pool
             .count_color(ManaType::Green),
-        1,
-        "Lens adds one mana of the imprinted land's produced type"
+        2,
+        "Lens adds one mana of the imprinted land's produced type to the land's controller"
     );
 }
