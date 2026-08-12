@@ -12,9 +12,10 @@
 #   REGRESSED (coverage honesty)
 #                      — card flipped true -> false, but no previously parsed
 #                        supported handler was lost. This covers ParseWarning:*
-#                        and structured *UnsupportedCost findings: both expose
-#                        a pre-existing green that lacked a faithful typed
-#                        representation. Listed but non-fatal.
+#                        and a `Keyword:CumulativeUpkeep` finding: typed
+#                        cumulative-upkeep costs expose a pre-existing green
+#                        that lacked a faithful typed representation. Listed
+#                        but non-fatal.
 #
 #   GAINED             — card flipped false -> true. Informational.
 #
@@ -92,13 +93,12 @@ jq -n --slurpfile base "$BASELINE" --slurpfile curr "$CURRENT" '
     elif .category == "replacement" then empty
     else empty end;
 
-  # A structured unsupported cost is the coverage support boundary, not
-  # a missing handler: legacy exports could only carry a coarse supported node
-  # (for example a raw cumulative-upkeep cost). Deserializing its typed cost can
-  # honestly surface an unsupported shape without removing any executable
-  # implementation. Keep that distinct from a real handler regression.
-  def structured_unsupported_cost:
-    startswith("Keyword:") and endswith("UnsupportedCost");
+  # The coverage report labels an unsupported typed cumulative-upkeep cost at
+  # the keyword node. Before typed deserialization, every cumulative-upkeep
+  # cost was represented by a placeholder zero-mana cost and appeared green.
+  # That makes these newly surfaced gaps coverage honesty, not a lost handler.
+  def structured_unsupported_cumulative_upkeep:
+    . == "Keyword:CumulativeUpkeep";
 
   ($base[0].cards // []) as $bcards |
   ($curr[0].cards // []) as $ccards |
@@ -125,7 +125,7 @@ jq -n --slurpfile base "$BASELINE" --slurpfile curr "$CURRENT" '
       | .new_engine = [.new_handlers[] | select(startswith("ParseWarning:") | not)]
       | .new_engine_lost = [
           .new_engine[]
-          | select((structured_unsupported_cost | not)
+          | select((structured_unsupported_cumulative_upkeep | not)
               and (. as $handler | $baseline_supported_handlers | index($handler | ascii_downcase)))
         ]
       | .new_honesty = (.new_parser + (.new_engine - .new_engine_lost))
