@@ -2592,6 +2592,7 @@ mod tests {
         resolve(&mut state, &create, &mut events).expect("delayed trigger installs");
 
         let delayed = state.delayed_triggers[0].ability.clone();
+        assert_eq!(delayed.target_incarnations.len(), 1);
         assert!(delayed.target_pin_is_current(creature, &state));
         assert!(matches!(
             &delayed.effect,
