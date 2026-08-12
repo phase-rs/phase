@@ -55,7 +55,7 @@ fn wrath_uses_energy_paid_not_announced_x_for_destroy_threshold() {
     );
 
     let mut runner = scenario.build();
-    let outcome = runner.cast(wrath).x(2).resolve();
+    let outcome = runner.cast(wrath).x(2).accept_optional().resolve();
 
     match outcome.final_waiting_for() {
         WaitingFor::PayAmountChoice { player, max, .. } => {
