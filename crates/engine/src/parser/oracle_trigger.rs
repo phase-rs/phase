@@ -15858,6 +15858,9 @@ fn parse_player_action_phrase(text: &str) -> Option<PlayerActionKind> {
     if let Ok(("", action)) = parse_proliferate_player_action(text) {
         return Some(action);
     }
+    if let Ok(("", action)) = parse_forage_player_action(text) {
+        return Some(action);
+    }
     match text {
         "search your library" | "searches their library" => Some(PlayerActionKind::SearchedLibrary),
         "scry" | "scries" => Some(PlayerActionKind::Scry),
@@ -15882,6 +15885,15 @@ fn parse_proliferate_player_action(input: &str) -> OracleResult<'_, PlayerAction
     all_consuming(alt((
         value(PlayerActionKind::Proliferate, tag("proliferate")),
         value(PlayerActionKind::Proliferate, tag("proliferates")),
+    )))
+    .parse(input)
+}
+
+fn parse_forage_player_action(input: &str) -> OracleResult<'_, PlayerActionKind> {
+    // CR 701.61a: Forage — exile three cards from your graveyard or sacrifice a Food.
+    all_consuming(alt((
+        value(PlayerActionKind::Forage, tag("forage")),
+        value(PlayerActionKind::Forage, tag("forages")),
     )))
     .parse(input)
 }

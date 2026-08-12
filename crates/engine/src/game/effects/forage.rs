@@ -22,7 +22,7 @@ use crate::types::ability::{
     FilterProp, MultiTargetSpec, PlayerFilter, QuantityExpr, ResolvedAbility, TargetChoiceTiming,
     TargetFilter, TargetRef, TypedFilter,
 };
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -115,6 +115,7 @@ pub(crate) fn resolve(
         branches.push(sacrifice_food_branch());
     }
 
+    let foraged = !branches.is_empty();
     match branches.len() {
         // CR 701.61a: neither mode performable — foraging does nothing.
         0 => {}
@@ -144,6 +145,16 @@ pub(crate) fn resolve(
             choose.context = ability.context.clone();
             super::choose_one_of::resolve(state, &choose, events)?;
         }
+    }
+
+    if foraged {
+        events.push(GameEvent::PlayerPerformedAction {
+            player_id: controller,
+            action: PlayerActionKind::Forage,
+            look_count: None,
+            scry_bottom_count: None,
+            scry_top_count: None,
+        });
     }
 
     events.push(GameEvent::EffectResolved {
@@ -212,6 +223,16 @@ mod tests {
                 ..
             }
         )));
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: PlayerActionKind::Forage,
+                    ..
+                }
+            )),
+            "an impossible forage must not emit a player-action event"
+        );
     }
 
     /// CR 701.61a (exile mode): three graveyard cards and no Food prompts an
@@ -283,6 +304,14 @@ mod tests {
             state.waiting_for,
             WaitingFor::ChooseOneOfBranch { .. }
         ));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                player_id: PlayerId(0),
+                action: PlayerActionKind::Forage,
+                ..
+            }
+        )));
     }
 
     /// CR 701.61a: both modes available — the forager chooses which via a modal prompt.

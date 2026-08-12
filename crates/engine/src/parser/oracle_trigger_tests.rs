@@ -11706,6 +11706,17 @@ fn trigger_you_proliferate() {
 }
 
 #[test]
+fn trigger_you_forage() {
+    let def = parse_trigger_line(
+        "Whenever you forage, put a +1/+1 counter on this creature.",
+        "Corpseberry Cultivator",
+    );
+    assert_eq!(def.mode, TriggerMode::PlayerPerformedAction);
+    assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    assert_eq!(def.player_actions, Some(vec![PlayerActionKind::Forage]));
+}
+
+#[test]
 fn trigger_you_scry_or_surveil() {
     let def = parse_trigger_line(
         "Whenever you scry or surveil, draw a card.",
