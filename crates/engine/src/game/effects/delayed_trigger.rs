@@ -1027,6 +1027,11 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
                 }
                 | TargetFilter::Any => TargetFilter::TrackedSet { id: real_id },
                 TargetFilter::TrackedSet { id } => TargetFilter::TrackedSet { id: *id },
+                TargetFilter::TrackedSetFiltered { .. } => {
+                    let mut bound_target = (*target).clone();
+                    bound_target.rebind_tracked_set_sentinel(real_id);
+                    bound_target
+                }
                 _ => TargetFilter::TrackedSet { id: real_id },
             };
             *effect = Effect::ChangeZoneAll {
@@ -1056,6 +1061,9 @@ fn bind_tracked_set_to_ability_definition(ability: &mut AbilityDefinition, real_
     if let Some(else_ability) = ability.else_ability.as_mut() {
         bind_tracked_set_to_ability_definition(else_ability, real_id);
     }
+    for mode in &mut ability.mode_abilities {
+        bind_tracked_set_to_ability_definition(mode, real_id);
+    }
 }
 
 fn bind_tracked_set_to_ability_chain(ability: &mut ResolvedAbility, real_id: TrackedSetId) {
@@ -1068,6 +1076,9 @@ fn bind_tracked_set_to_ability_chain(ability: &mut ResolvedAbility, real_id: Tra
     }
     if let Some(else_ability) = ability.else_ability.as_mut() {
         bind_tracked_set_to_ability_chain(else_ability, real_id);
+    }
+    for mode in &mut ability.mode_abilities {
+        bind_tracked_set_to_ability_definition(mode, real_id);
     }
 }
 
@@ -2225,7 +2236,11 @@ mod tests {
             Effect::ChangeZone {
                 origin: None,
                 destination: Zone::Battlefield,
-                target: TargetFilter::Any,
+                target: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(TargetFilter::Any),
+                    caused_by: Some(crate::types::ability::ThisWayCause::Exiled),
+                },
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
@@ -2238,6 +2253,22 @@ mod tests {
                 enters_modified_if: None,
             },
         )));
+        effect_def.mode_abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Exile),
+                destination: Zone::Hand,
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                random_order: false,
+            },
+        ));
         let ability = ResolvedAbility::new(
             Effect::CreateDelayedTrigger {
                 condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
@@ -2260,6 +2291,25 @@ mod tests {
         match &sub.effect {
             Effect::ChangeZoneAll { origin, target, .. } => {
                 assert_eq!(*origin, None);
+                assert!(matches!(
+                    target,
+                    TargetFilter::TrackedSetFiltered {
+                        id: TrackedSetId(1),
+                        caused_by: Some(crate::types::ability::ThisWayCause::Exiled),
+                        ..
+                    }
+                ));
+            }
+            other => panic!("Expected sub ChangeZoneAll, got {:?}", other),
+        }
+
+        let mode = state.delayed_triggers[0]
+            .ability
+            .mode_abilities
+            .first()
+            .expect("mode ability must be preserved");
+        match mode.effect.as_ref() {
+            Effect::ChangeZoneAll { target, .. } => {
                 assert_eq!(
                     *target,
                     TargetFilter::TrackedSet {
@@ -2267,7 +2317,7 @@ mod tests {
                     }
                 );
             }
-            other => panic!("Expected sub ChangeZoneAll, got {:?}", other),
+            other => panic!("Expected mode ChangeZoneAll, got {:?}", other),
         }
     }
 

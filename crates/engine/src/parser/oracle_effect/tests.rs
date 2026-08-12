@@ -17885,7 +17885,7 @@ fn temporal_prefix_in_effect_chain() {
 #[test]
 fn temporal_prefix_preserves_full_delayed_effect_chain() {
     let def = parse_effect_chain(
-        "At the beginning of the next end step, each player discards their hand and returns to their hand each card they exiled this way.",
+        "At the beginning of the next end step, each player discards their hand, then returns to their hand each card they exiled this way.",
         AbilityKind::Spell,
     );
     let Effect::CreateDelayedTrigger {
