@@ -147,7 +147,7 @@ fn decision_contract_validates_a_target_before_a_dynamically_empty_optional_tail
         pending_cast,
         selection,
         ..
-    } = &state.waiting_for
+    } = &mut state.waiting_for
     else {
         panic!("Rousing Refrain must remain in target selection");
     };
