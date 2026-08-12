@@ -17444,6 +17444,28 @@ fn trigger_zada_full_oracle_copies_for_each_legal_creature_target() {
     }
 }
 
+/// CR 603.2 + CR 603.3: Thousand-Year Storm's copy count is anchored to the
+/// triggering spell's cast record, so responses cannot be included later.
+#[test]
+fn trigger_thousand_year_storm_keeps_trigger_bound_spell_history() {
+    let def = parse_trigger_line(
+        "Whenever you cast an instant or sorcery spell, copy it for each other instant and sorcery spell you've cast before it this turn. You may choose new targets for the copies.",
+        "Thousand-Year Storm",
+    );
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    let execute = def.execute.expect("copy trigger should have an effect");
+    assert!(matches!(*execute.effect, Effect::CopySpell { .. }));
+    assert!(matches!(
+        execute.repeat_for,
+        Some(QuantityExpr::Ref {
+            qty: QuantityRef::SpellsCastBeforeTriggeringSpell {
+                scope: CountScope::Controller,
+                filter: Some(TargetFilter::Or { .. }),
+            },
+        })
+    ));
+}
+
 #[test]
 fn trigger_leyline_of_resonance_targets_only_single_creature_you_control() {
     let def = parse_trigger_line(
