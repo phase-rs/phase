@@ -2105,6 +2105,17 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
         // can inspect the tracked member. Ordinary ChangeZoneAll player filters
         // remain declared targets and follow the generic validation below.
         validated.targets.clone()
+    } else if matches!(
+        mass_all_target_filter(&validated.effect),
+        Some(TargetFilter::Player)
+    ) {
+        // CR 115.1 + CR 608.2b: A bare `Player` mass-operation filter (such as
+        // "exile target player's graveyard") is represented by a companion
+        // declared-player slot. The mass filter is normally a resolution-time
+        // population scan, so it has no `target_filter()` entry; validate this
+        // exceptional declared target against the same legal-player set used
+        // to build the slot.
+        validate_pinned_targets(state, &validated.targets, &TargetFilter::Player, &validated)
     } else {
         match triggers::extract_target_filter_from_effect(&validated.effect) {
             Some(filter) if matches!(validated.effect, Effect::PairWith { .. }) => {
