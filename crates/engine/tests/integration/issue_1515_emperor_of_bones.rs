@@ -377,6 +377,9 @@ fn empty_forward_result_preserves_independent_sequential_siblings() {
         }
     }
 
+    // CR 608.2b: Make the first selected target illegal between announcement
+    // and resolution, so its forward-result move returns no object while the
+    // independently targeted Destroy sibling remains legal.
     engine::game::zones::move_to_zone(
         runner.state_mut(),
         graveyard_creature,
