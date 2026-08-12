@@ -3,7 +3,6 @@
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameScenario, P0, P1};
-use engine::types::game_state::CastingVariant;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -55,10 +54,7 @@ fn commander_combat_damage_enables_eagle_vision_freerunning() {
             ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
         );
     }
-    let committed = runner
-        .cast(eagle_vision)
-        .casting_variant(CastingVariant::Freerunning)
-        .commit();
+    let committed = runner.cast(eagle_vision).commit();
     assert_eq!(
         committed.state().players[0].mana_pool.total(),
         3,
