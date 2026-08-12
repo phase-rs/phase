@@ -6632,7 +6632,14 @@ mod tests {
 
         let (actions, _spell_costs, _grouped) = legal_actions_full(&state);
 
-        assert_eq!(actions, vec![GameAction::ChooseTarget { target: None }]);
+        assert!(actions.contains(&GameAction::ChooseTarget { target: None }));
+        assert!(actions.contains(&GameAction::CancelCast));
+        assert!(
+            !actions
+                .iter()
+                .any(|action| matches!(action, GameAction::ChooseTarget { target: Some(_) })),
+            "stale slot targets must not be reissued"
+        );
     }
 
     /// False-positive sweep (CR 103.5 / TL:R 906.6a): the simultaneous
