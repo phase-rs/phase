@@ -12,6 +12,29 @@ use super::turn_control;
 
 const HIDDEN_CARD_NAME: &str = "Hidden Card";
 
+/// Resolution-only look-result provenance is never part of a viewer snapshot.
+/// The engine retains it for the active loop, while clients need only the
+/// public prompt and the card identities they are otherwise allowed to see.
+fn redact_parent_target_iteration_members(ability: &mut crate::types::ability::ResolvedAbility) {
+    ability.context.parent_target_iteration_members = None;
+    if let Some(sub_ability) = ability.sub_ability.as_mut() {
+        redact_parent_target_iteration_members(sub_ability);
+    }
+    if let Some(else_ability) = ability.else_ability.as_mut() {
+        redact_parent_target_iteration_members(else_ability);
+    }
+}
+
+fn redact_waiting_for_iteration_members(waiting_for: &mut WaitingFor) {
+    match waiting_for {
+        WaitingFor::UnlessPayment { pending_effect, .. }
+        | WaitingFor::UnlessPaymentChooseCost { pending_effect, .. } => {
+            redact_parent_target_iteration_members(pending_effect);
+        }
+        _ => {}
+    }
+}
+
 pub(crate) fn interaction_object_identity_is_visible(state: &GameState, id: ObjectId) -> bool {
     state
         .objects
@@ -88,10 +111,13 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // viewer projection — including the activating player's projection.
     if let Some(pending) = filtered.pending_cast.as_mut() {
         pending.activation_trigger_collection = None;
+        redact_parent_target_iteration_members(&mut pending.ability);
     }
     if let Some(pending) = filtered.waiting_for.pending_cast_mut() {
         pending.activation_trigger_collection = None;
+        redact_parent_target_iteration_members(&mut pending.ability);
     }
+    redact_waiting_for_iteration_members(&mut filtered.waiting_for);
     // Interaction capability authority is trusted persistence state. Viewer
     // projections expose only the actor-scoped opaque opportunity IDs produced
     // by `game::interaction`, never the session/serial/slot minting ledger.
@@ -1898,8 +1924,8 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::EffectKind;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, BeholdCostAction, CostPaidObjectSnapshot, Effect,
-        ReplacementDefinition, ResolvedAbility, TargetFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, BeholdCostAction, CostPaidObjectSnapshot,
+        Effect, QuantityExpr, ReplacementDefinition, ResolvedAbility, TargetFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CardType, CoreType};
@@ -1999,6 +2025,40 @@ mod tests {
             alt_cost_grant_source: None,
             activation_trigger_collection: None,
         })
+    }
+
+    #[test]
+    fn unless_payment_projection_redacts_private_iteration_members() {
+        let mut state = GameState::new_two_player(42);
+        let mut pending = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "private loop probe".to_string(),
+                description: None,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        pending.context.parent_target_iteration_members = Some(vec![ObjectId(1), ObjectId(2)]);
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(0),
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
+            pending_effect: Box::new(pending),
+            trigger_event: None,
+            effect_description: None,
+            remaining: Vec::new(),
+        };
+
+        let filtered = filter_state_for_viewer(&state, PlayerId(1));
+        let WaitingFor::UnlessPayment { pending_effect, .. } = filtered.waiting_for else {
+            panic!("the viewer projection must retain the payment prompt");
+        };
+        assert_eq!(
+            pending_effect.context.parent_target_iteration_members, None,
+            "a viewer snapshot must not expose the private look-result object ids"
+        );
     }
 
     fn dummy_pending_mana_ability(

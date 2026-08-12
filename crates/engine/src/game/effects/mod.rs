@@ -5894,11 +5894,23 @@ fn rebind_first_object_target(
 
 /// CR 701.20e + CR 608.2c: A carried look-result collection owns every object
 /// target on its immediate looping child, so each iteration must replace the
-/// complete list with its one current member. Ordinary member loops retain the
-/// established first-slot binding for their independent target slots.
+/// complete object list with its one current member while retaining independent
+/// player targets. Ordinary member loops retain the established first-slot
+/// binding for their independent target slots.
 fn rebind_member_driven_parent_target(ability: &mut ResolvedAbility, member: ObjectId) {
     if ability.context.parent_target_iteration_members.is_some() {
-        ability.targets = vec![TargetRef::Object(member)];
+        let insertion_index = ability
+            .targets
+            .iter()
+            .position(|target| matches!(target, TargetRef::Object(_)))
+            .unwrap_or(ability.targets.len());
+        ability
+            .targets
+            .retain(|target| !matches!(target, TargetRef::Object(_)));
+        ability.targets.insert(
+            insertion_index.min(ability.targets.len()),
+            TargetRef::Object(member),
+        );
     } else {
         rebind_first_object_target(&mut ability.targets, member);
     }
@@ -12903,6 +12915,32 @@ mod tests {
             state.resolving_trigger_firing,
             Some(live),
             "a disagreeing continuation carrier must not overwrite active delayed identity"
+        );
+    }
+
+    #[test]
+    fn carried_member_rebind_retains_independent_player_target() {
+        let mut ability = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "member rebind probe".to_string(),
+                description: None,
+            },
+            vec![
+                TargetRef::Object(ObjectId(1)),
+                TargetRef::Player(PlayerId(2)),
+                TargetRef::Object(ObjectId(3)),
+            ],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        ability.context.parent_target_iteration_members = Some(vec![ObjectId(1), ObjectId(3)]);
+
+        rebind_member_driven_parent_target(&mut ability, ObjectId(4));
+
+        assert_eq!(
+            ability.targets,
+            vec![TargetRef::Object(ObjectId(4)), TargetRef::Player(PlayerId(2))],
+            "a carried collection replaces all of its object members but retains an independent selected player target"
         );
     }
 
