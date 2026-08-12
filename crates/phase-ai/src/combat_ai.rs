@@ -980,6 +980,7 @@ pub fn choose_blockers_with_profile(
         let attacker_has_deathtouch = attacker.has_keyword(&Keyword::Deathtouch);
         let attacker_has_first_strike = attacker.has_keyword(&Keyword::FirstStrike)
             || attacker.has_keyword(&Keyword::DoubleStrike);
+        let attacker_has_trample = attacker.has_keyword(&Keyword::Trample);
 
         // Collect eligible unused blockers sorted by value (ascending = sacrifice cheapest)
         let mut gang_candidates: Vec<(ObjectId, i32, f64)> = available_blockers
@@ -1015,10 +1016,43 @@ pub fn choose_blockers_with_profile(
             continue;
         }
 
+        // CR 509.1b + CR 903.10a: the lethal-pressure test for the survival override
+        // below. Hoisted above the two value heuristics that follow because both of
+        // them short-circuit this attacker out of the pass entirely, and whether
+        // that is correct depends on whether a block is the player's last line.
+        let p_life = state.players[player.0 as usize].life;
+        let effective_life = commander_lethal_headroom(state, player, attacker_id)
+            .map(|headroom| p_life.min(headroom as i32))
+            .unwrap_or(p_life);
+
+        // CR 509.1b: an attacker whose minimum-blocker floor exceeds 1 is skipped by
+        // both single-blocker passes, so this gang pass is its only blocking route.
+        let floor_stabilize_route = needed_blockers > 1
+            && matches!(objective, CombatObjective::Stabilize)
+            && effective_life <= attacker_power * 3;
+
+        // CR 510.1c: a blocked creature assigns its combat damage to the creatures
+        // blocking it, and "if no creatures are currently blocking it (if, for
+        // example, they were destroyed or removed from combat), it assigns no combat
+        // damage." So for a *nontrampling* attacker a legal block prevents every
+        // point of damage to the player whether or not the blockers survive it and
+        // whether or not they can kill the attacker — a doomed block is still a full
+        // save. Trample is the exception (CR 702.19b): excess damage past lethal to
+        // the blockers is assigned to the player, and under deathtouch "lethal" is
+        // only 1 per blocker (CR 702.2c), so a trampler's damage still lands.
+        //
+        // The two heuristics below are value heuristics — correct when the question
+        // is "is this trade worth it", wrong when the question is "do I survive".
+        // They may only decline a block that is not the difference between living
+        // and losing (issue #7183).
+        let doomed_block_still_saves = floor_stabilize_route && !attacker_has_trample;
+
         // CR 702.7b: If attacker has first strike and blocker doesn't, the blocker
-        // dies before dealing damage. Skip blockers that would die to first strike.
+        // dies before dealing damage. Skip blockers that would die to first strike —
+        // they contribute no damage, so they cannot be counted toward a kill.
         let effective_candidates: Vec<(ObjectId, i32, f64)> = gang_candidates
-            .into_iter()
+            .iter()
+            .copied()
             .filter(|&(bid, _, _)| {
                 if !attacker_has_first_strike {
                     return true;
@@ -1038,8 +1072,10 @@ pub fn choose_blockers_with_profile(
         // CR 702.2c: Deathtouch means any nonzero damage is lethal, so one
         // blocker with deathtouch is enough — no need to gang-block.
         // Also skip if attacker has deathtouch: every blocker dies, so
-        // gang-blocking just loses more creatures.
-        if attacker_has_deathtouch {
+        // gang-blocking just loses more creatures — unless the block is the
+        // player's only route to surviving the turn, where CR 510.1c makes the
+        // doomed block a full save anyway.
+        if attacker_has_deathtouch && !doomed_block_still_saves {
             continue;
         }
 
@@ -1062,11 +1098,28 @@ pub fn choose_blockers_with_profile(
         // one. Loops rather than adding a single blocker: menace's floor is 2, but a
         // `MinBlockers` restriction can require any number (Pathrazer of Ulamog
         // requires 3), so one top-up is not enough (issue #7183).
+        // Damage-dealing candidates come first so the kill claim below stays honest.
+        // Only when a doomed block is still a full save (CR 510.1c) may the floor be
+        // filled out with blockers that die to first strike before dealing damage
+        // (CR 702.7b) — otherwise a legal, life-saving declaration is impossible to
+        // reach for a floored first- or double-striker at all.
         while gang_set.len() < needed_blockers {
-            let Some(&(bid, power, value)) = effective_candidates
+            let next = effective_candidates
                 .iter()
                 .find(|(bid, _, _)| !gang_set.contains(bid))
-            else {
+                .copied()
+                .or_else(|| {
+                    if !doomed_block_still_saves {
+                        return None;
+                    }
+                    // Contributes no damage, so it is added with zero power: it pads
+                    // the CR 509.1b floor without inflating `combined_power`.
+                    gang_candidates
+                        .iter()
+                        .find(|(bid, _, _)| !gang_set.contains(bid))
+                        .map(|&(bid, _, value)| (bid, 0, value))
+                });
+            let Some((bid, power, value)) = next else {
                 break;
             };
             combined_power += power;
@@ -1094,10 +1147,6 @@ pub fn choose_blockers_with_profile(
         // lethal damage to every blocker before any tramples through, CR 702.19b),
         // and the same exclusion of damage-reflection blockers, which hand the
         // attacker's power straight back to the player and so save nothing.
-        let p_life = state.players[player.0 as usize].life;
-        let effective_life = commander_lethal_headroom(state, player, attacker_id)
-            .map(|headroom| p_life.min(headroom as i32))
-            .unwrap_or(p_life);
         let gang_toughness: i32 = gang_set
             .iter()
             .filter_map(|bid| state.objects.get(bid).and_then(|b| b.toughness))
@@ -1108,19 +1157,22 @@ pub fn choose_blockers_with_profile(
                 .get(bid)
                 .is_some_and(has_damage_reflection_to_controller)
         });
-        let gang_stabilize = needed_blockers > 1
-            && matches!(objective, CombatObjective::Stabilize)
-            && effective_life <= attacker_power * 3
+        let gang_stabilize = floor_stabilize_route
             && !gang_reflects_damage
             && !commander_chump_unsafe(state, player, attacker_id, gang_toughness);
+
+        // CR 702.2c: never gang a deathtouch attacker for *value* — every blocker
+        // assigned any damage dies, so the kill is paid for with the whole gang.
+        // Preserves the pre-existing skip for deathtouch attackers now that the
+        // survival route above no longer short-circuits them out of the pass.
+        let gang_kills_for_value = !attacker_has_deathtouch
+            && combined_power >= attacker_toughness
+            && gang_value <= attacker_value;
 
         // Only gang-block if combined power can kill AND total value risked <=
         // attacker value — or if declining loses the game outright. Never below the
         // CR 509.1b floor, which would make the declaration illegal.
-        if gang_set.len() >= needed_blockers
-            && ((combined_power >= attacker_toughness && gang_value <= attacker_value)
-                || gang_stabilize)
-        {
+        if gang_set.len() >= needed_blockers && (gang_kills_for_value || gang_stabilize) {
             for bid in gang_set {
                 assignments.push((bid, attacker_id));
                 used_blockers.insert(bid);
@@ -4356,9 +4408,20 @@ mod tests {
 
     /// Board where `blockers` 4/4s face one lethal attacker at `life`.
     fn lethal_attacker_board(life: i32, blockers: usize) -> (GameState, ObjectId, Vec<ObjectId>) {
+        lethal_attacker_board_with(life, blockers, vec![])
+    }
+
+    /// Same board, with `keywords` on the 11/11 attacker. Parameterized rather than
+    /// duplicated so each floor source (Menace / `MinBlockers`) can be crossed with
+    /// each combat-damage keyword class (deathtouch, first strike, trample).
+    fn lethal_attacker_board_with(
+        life: i32,
+        blockers: usize,
+        keywords: Vec<Keyword>,
+    ) -> (GameState, ObjectId, Vec<ObjectId>) {
         let mut state = setup();
         state.players[1].life = life;
-        let attacker = add_creature(&mut state, PlayerId(0), "Attacker", 11, 11, vec![]);
+        let attacker = add_creature(&mut state, PlayerId(0), "Attacker", 11, 11, keywords);
         let blocker_ids = (0..blockers)
             .map(|i| {
                 add_creature(
@@ -4468,6 +4531,129 @@ mod tests {
             assignments.is_empty(),
             "at 40 life a 5/5 is not worth three 4/4s — the survival override must not \
              fire outside Stabilize. Got {assignments:?}"
+        );
+    }
+
+    // ── CR 510.1c doomed-but-saving floor blocks (issue #7183 review) ─────────
+    //
+    // A floored attacker reaches the battlefield-clearing gang pass as its ONLY
+    // blocking route. Two value heuristics live on that route — the CR 702.7b
+    // first-strike filter and the CR 702.2c deathtouch skip — and both used to
+    // fire before the survival override, so a menace/min-3 attacker with either
+    // keyword walked past a full board for lethal even though CR 510.1c makes the
+    // block a complete save: a blocked nontrampling attacker assigns its damage to
+    // its blockers, and none to the player even when every blocker is already dead.
+    //
+    // Each test below is discriminating: reverting its half of the fix (the
+    // `!doomed_block_still_saves` guard on the deathtouch skip, or the doomed
+    // top-up pool behind the first-strike filter) drops the block to zero.
+
+    /// Nothing the gang does can save the blockers from an 11/11 deathtouch
+    /// attacker, but CR 510.1c means the block still prevents all 11 damage.
+    /// At 6 life that is the difference between living and losing.
+    #[test]
+    fn min_blockers_three_deathtouch_attacker_is_gang_blocked_at_lethal() {
+        let (mut state, attacker, _) = lethal_attacker_board_with(6, 10, vec![Keyword::Deathtouch]);
+        add_min_blockers_restriction(&mut state, attacker, 3);
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        let on_attacker = assignments.iter().filter(|&&(_, a)| a == attacker).count();
+        assert!(
+            on_attacker >= 3,
+            "CR 510.1c: a min-3 deathtouch attacker must still be gang-blocked at \
+             lethal — the blockers all die, but the player takes 0. Got {assignments:?}"
+        );
+        assert_eq!(
+            engine::game::combat::complete_blocker_proposal(&state, PlayerId(1), &assignments),
+            engine::types::actions::GameAction::DeclareBlockers {
+                assignments: assignments.clone()
+            },
+            "the AI's declaration must survive the CR 509.1c completion authority"
+        );
+    }
+
+    /// Same class through the Menace floor of 2 (CR 702.111b).
+    #[test]
+    fn menace_deathtouch_attacker_is_gang_blocked_at_lethal() {
+        let (state, attacker, _) =
+            lethal_attacker_board_with(6, 10, vec![Keyword::Menace, Keyword::Deathtouch]);
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        let on_attacker = assignments.iter().filter(|&&(_, a)| a == attacker).count();
+        assert!(
+            on_attacker >= 2,
+            "CR 510.1c: a menace deathtouch attacker must still be gang-blocked at \
+             lethal. Got {assignments:?}"
+        );
+    }
+
+    /// CR 702.7b: every 4/4 blocker dies in the first-strike step before dealing
+    /// damage, so the first-strike filter empties the candidate set. CR 510.1c
+    /// still makes the block a full save — the attacker has no blockers left to
+    /// assign to, and no trample to push damage through to the player.
+    #[test]
+    fn min_blockers_three_first_strike_attacker_is_gang_blocked_at_lethal() {
+        let (mut state, attacker, _) =
+            lethal_attacker_board_with(6, 10, vec![Keyword::FirstStrike]);
+        add_min_blockers_restriction(&mut state, attacker, 3);
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        let on_attacker = assignments.iter().filter(|&&(_, a)| a == attacker).count();
+        assert!(
+            on_attacker >= 3,
+            "CR 510.1c: a min-3 first-striker must still be gang-blocked at lethal \
+             even though no blocker survives to deal damage. Got {assignments:?}"
+        );
+        assert_eq!(
+            engine::game::combat::complete_blocker_proposal(&state, PlayerId(1), &assignments),
+            engine::types::actions::GameAction::DeclareBlockers {
+                assignments: assignments.clone()
+            },
+            "the AI's declaration must survive the CR 509.1c completion authority"
+        );
+    }
+
+    /// Double strike takes the same route (CR 702.4b): the blockers die in the
+    /// first-strike step, and CR 510.1c leaves the attacker with nothing to assign
+    /// to in the regular step.
+    #[test]
+    fn menace_double_strike_attacker_is_gang_blocked_at_lethal() {
+        let (state, attacker, _) =
+            lethal_attacker_board_with(6, 10, vec![Keyword::Menace, Keyword::DoubleStrike]);
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        let on_attacker = assignments.iter().filter(|&&(_, a)| a == attacker).count();
+        assert!(
+            on_attacker >= 2,
+            "CR 510.1c: a menace double-striker must still be gang-blocked at lethal. \
+             Got {assignments:?}"
+        );
+    }
+
+    /// CR 702.19b + CR 702.2c: trample is the boundary of the CR 510.1c argument.
+    /// A deathtouch trampler assigns only 1 damage per blocker as "lethal" and
+    /// tramples the remaining 8 through to a player at 6 life, so the gang block
+    /// saves nothing and must not be thrown away. Guards the `!attacker_has_trample`
+    /// term — dropping it makes the AI chump three creatures and still lose.
+    #[test]
+    fn menace_deathtouch_trampler_is_not_chump_ganged_at_lethal() {
+        let (state, attacker, _) = lethal_attacker_board_with(
+            6,
+            10,
+            vec![Keyword::Menace, Keyword::Deathtouch, Keyword::Trample],
+        );
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        let on_attacker = assignments.iter().filter(|&&(_, a)| a == attacker).count();
+        assert_eq!(
+            on_attacker, 0,
+            "a deathtouch trampler tramples past a chump gang (1 lethal per blocker, \
+             CR 702.2c), so the block saves nothing. Got {assignments:?}"
         );
     }
 }
