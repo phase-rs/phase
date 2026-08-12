@@ -1026,11 +1026,11 @@ fn entered_perturbs_quantity(
     })
 }
 
-/// CR 608.2c: Resolve contextual parent-target exclusions before a mass-effect scan.
+/// CR 608.2c: Resolve contextual parent-target references before an object scan.
 ///
-/// This intentionally supports only `Not(ParentTarget)` and
-/// `Not(ParentTargetSlot { index })` inside composite filters. Positive
-/// `ParentTarget` / `ParentTargetSlot` inside `And` / `Or` remains unresolved here.
+/// `ParentTarget` and `ParentTargetSlot` are resolution-time references, not
+/// object-matcher predicates. Normalize them to their concrete parent targets
+/// before a composite filter reaches `matches_target_filter`.
 pub fn normalize_contextual_filter(
     filter: &TargetFilter,
     parent_targets: &[TargetRef],
@@ -1080,6 +1080,11 @@ pub fn normalize_contextual_filter(
         TargetFilter::Not { filter: inner } => TargetFilter::Not {
             filter: Box::new(normalize_contextual_filter(inner, parent_targets)),
         },
+        TargetFilter::ParentTarget => parent_targets_filter(parent_targets),
+        TargetFilter::ParentTargetSlot { index } => parent_targets
+            .get(*index)
+            .map(target_ref_filter)
+            .unwrap_or(TargetFilter::Any),
         TargetFilter::Or { filters } => TargetFilter::Or {
             filters: filters
                 .iter()
@@ -1092,7 +1097,33 @@ pub fn normalize_contextual_filter(
                 .map(|inner| normalize_contextual_filter(inner, parent_targets))
                 .collect(),
         },
+        TargetFilter::TrackedSetFiltered {
+            id,
+            filter,
+            caused_by,
+        } => TargetFilter::TrackedSetFiltered {
+            id: *id,
+            filter: Box::new(normalize_contextual_filter(filter, parent_targets)),
+            caused_by: *caused_by,
+        },
         _ => filter.clone(),
+    }
+}
+
+fn parent_targets_filter(parent_targets: &[TargetRef]) -> TargetFilter {
+    match parent_targets {
+        [] => TargetFilter::Any,
+        [target] => target_ref_filter(target),
+        targets => TargetFilter::Or {
+            filters: targets.iter().map(target_ref_filter).collect(),
+        },
+    }
+}
+
+fn target_ref_filter(target: &TargetRef) -> TargetFilter {
+    match target {
+        TargetRef::Object(id) => TargetFilter::SpecificObject { id: *id },
+        TargetRef::Player(id) => TargetFilter::SpecificPlayer { id: *id },
     }
 }
 
@@ -10463,6 +10494,24 @@ mod tests {
                         filter: Box::new(TargetFilter::SpecificObject { id: ObjectId(7) }),
                     },
                 ],
+            }
+        );
+    }
+
+    #[test]
+    fn normalize_contextual_filter_binds_positive_parent_target_inside_tracked_set() {
+        let filter = TargetFilter::TrackedSetFiltered {
+            id: crate::types::identifiers::TrackedSetId(3),
+            filter: Box::new(TargetFilter::ParentTarget),
+            caused_by: None,
+        };
+
+        assert_eq!(
+            normalize_contextual_filter(&filter, &[TargetRef::Object(ObjectId(7))]),
+            TargetFilter::TrackedSetFiltered {
+                id: crate::types::identifiers::TrackedSetId(3),
+                filter: Box::new(TargetFilter::SpecificObject { id: ObjectId(7) }),
+                caused_by: None,
             }
         );
     }

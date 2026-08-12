@@ -1726,6 +1726,7 @@ pub fn resolve_all(
             .iter()
             .filter(|(&id, obj)| {
                 origin_zones.contains(&obj.zone)
+                    && ability.target_pin_is_current(id, state)
                     && crate::game::filter::matches_target_filter(
                         state,
                         id,
