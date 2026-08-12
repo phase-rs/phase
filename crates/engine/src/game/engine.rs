@@ -18665,7 +18665,7 @@ mod bounded_offer_conjunct_tests {
             (format!("has_kind_driven{}repeat(", '_'), 2),
             (
                 format!("has_member_driven_repeat_after{}hydration(", '_'),
-                2,
+                3,
             ),
             (format!("is_repeated_optional{}payment(", '_'), 2),
             (format!("optional_prompt{}player(", '_'), 1),
@@ -18741,7 +18741,8 @@ mod bounded_offer_conjunct_tests {
             "the CR 603.5 conjunct set gained or lost a production consumer. The surviving \
              non-authority sites are `repeat_for_outermost_with_scope_or_unless` (does a \
              counted repeat wrap scoped/unless-pay instructions), `resolve_chain_body`'s \
-             repeat-driver guard and its CR 603.12a driver dispatch, and \
+             repeat-driver guard, its per-member unless-payment gate, and its CR 603.12a \
+             driver dispatch, and \
              `resolve_chain_body`'s `CastFromZone` decline probe — every one of them selects a \
              DRIVER rather than opening an up-front window, so a NEW site is a decision to \
              adjudicate here and not a number to move.\nsites={sites:#?}"
