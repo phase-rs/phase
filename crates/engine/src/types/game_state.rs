@@ -3446,6 +3446,10 @@ impl PendingZoneChangeDelivery {
         Ok(())
     }
 
+    /// CR 400.7: A zone change creates a new object, so the retained delivery
+    /// event slice — not current object state — identifies whether this exact
+    /// pre-delivery incarnation moved.
+    ///
     /// Returns the terminal completion recorded by the delivery pipeline, or
     /// derives it from this paused delivery's exact event slice once its
     /// resolution has returned to the owning resume driver.
