@@ -187,6 +187,18 @@ function formatQuantityRef(ref: { type: string; [key: string]: unknown }): strin
     case "ExiledFromHandThisResolution": return "cards exiled from hand";
     case "Speed": return "your speed";
     case "ChosenNumber": return "the chosen number";
+    // CR 101.4: the number a player secretly chose. The engine supplies the
+    // player scope (and, for the cross-player scopes, the fold); this only
+    // renders it — "the highest number" / "the lowest number".
+    case "PlayerChosenNumber": {
+      const aggregate =
+        ref.player != null && typeof ref.player === "object" && "aggregate" in ref.player
+          ? (ref.player as { aggregate?: string }).aggregate
+          : undefined;
+      if (aggregate === "Max") return "the highest number";
+      if (aggregate === "Min") return "the lowest number";
+      return "the chosen number";
+    }
     case "PreviousEffectAmount": return "the previous amount";
     case "EventContextAmount": return "the amount";
     case "EventContextSourcePower": return "the source's power";

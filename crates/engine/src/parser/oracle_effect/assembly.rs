@@ -3114,6 +3114,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
 
     // CR 607.2d: fill every committed-choice guess with the head Choose's domain.
     super::propagate_committed_choice_type_to_guesses(&mut result);
+    // CR 607.2d + CR 101.4: persist a secretly-chosen number whenever a later
+    // clause in the same chain reads it back ("the highest number", "each player
+    // who didn't choose the lowest number").
+    super::promote_chosen_number_persistence(&mut result);
     // CR 608.2d: gate the whole "if they guessed wrong/right" branch, including
     // any "and ..." continuation steps.
     super::propagate_guess_branch_condition_to_continuations(&mut result);

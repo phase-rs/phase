@@ -852,6 +852,109 @@ pub(super) fn propagate_committed_choice_type_to_guesses(ability: &mut AbilityDe
     }
 }
 
+/// CR 607.2d + CR 101.4: A `NumberRange` choice must PERSIST whenever a later
+/// clause in the same resolution reads the chosen number back. Without
+/// persistence the answer is dropped the instant the prompt is answered, and
+/// every downstream "the highest number" / "who chose the lowest number"
+/// reference silently resolves against nothing.
+///
+/// The `ChooseImperativeAst` lowering can't make this call: at that point the
+/// clause knows only its own choice type, not whether a LATER chunk consumes it.
+/// This post-pass answers it on the ASSEMBLED tree, so the rule the persist
+/// decision has always claimed to follow — "persist whenever a later clause
+/// refers back to it" — is enforced structurally rather than by a choice-type
+/// whitelist. Sibling of `propagate_committed_choice_type_to_guesses`, run from
+/// the same chokepoint.
+pub(super) fn promote_chosen_number_persistence(ability: &mut AbilityDefinition) {
+    if definition_reads_player_chosen_number(ability) {
+        persist_number_choices(ability);
+    }
+}
+
+fn definition_reads_player_chosen_number(def: &AbilityDefinition) -> bool {
+    if def
+        .player_scope
+        .as_ref()
+        .is_some_and(player_filter_reads_player_chosen_number)
+    {
+        return true;
+    }
+    let mut found = false;
+    def.effect.for_each_quantity_expr(&mut |expr| {
+        found = found || quantity_expr_reads_player_chosen_number(expr);
+    });
+    if found {
+        return true;
+    }
+    // CR 120.3: `DamageEachPlayer`'s recipient set is a `PlayerFilter` rather
+    // than a quantity, so it is not reached by `for_each_quantity_expr`.
+    if let Effect::DamageEachPlayer { player_filter, .. } = def.effect.as_ref() {
+        if player_filter_reads_player_chosen_number(player_filter) {
+            return true;
+        }
+    }
+    def.sub_ability
+        .as_deref()
+        .is_some_and(definition_reads_player_chosen_number)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(definition_reads_player_chosen_number)
+}
+
+fn player_filter_reads_player_chosen_number(filter: &PlayerFilter) -> bool {
+    match filter {
+        PlayerFilter::PlayerAttribute { attr, value, .. } => {
+            matches!(**attr, QuantityRef::PlayerChosenNumber { .. })
+                || quantity_expr_reads_player_chosen_number(value)
+        }
+        PlayerFilter::ControlsCount { count, .. } => {
+            quantity_expr_reads_player_chosen_number(count)
+        }
+        PlayerFilter::AllExcept { exclude } => player_filter_reads_player_chosen_number(exclude),
+        // Every other player filter selects on board/turn/event facts and
+        // carries no embedded quantity, so it cannot name a chosen number.
+        _ => false,
+    }
+}
+
+fn quantity_expr_reads_player_chosen_number(expr: &QuantityExpr) -> bool {
+    match expr {
+        QuantityExpr::Ref { qty } => matches!(qty, QuantityRef::PlayerChosenNumber { .. }),
+        QuantityExpr::Fixed { .. } => false,
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::UpTo { max: inner } => quantity_expr_reads_player_chosen_number(inner),
+        QuantityExpr::Power { exponent, .. } => quantity_expr_reads_player_chosen_number(exponent),
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_reads_player_chosen_number(left)
+                || quantity_expr_reads_player_chosen_number(right)
+        }
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().any(quantity_expr_reads_player_chosen_number)
+        }
+    }
+}
+
+fn persist_number_choices(def: &mut AbilityDefinition) {
+    if let Effect::Choose {
+        choice_type: ChoiceType::NumberRange { .. },
+        persist,
+        ..
+    } = def.effect.as_mut()
+    {
+        *persist = true;
+    }
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        persist_number_choices(sub);
+    }
+    if let Some(els) = def.else_ability.as_deref_mut() {
+        persist_number_choices(els);
+    }
+}
+
 fn find_head_committed_guess_choice_type(ability: &AbilityDefinition) -> Option<ChoiceType> {
     if let Effect::Choose { choice_type, .. } = ability.effect.as_ref() {
         if choice_type_is_committed_guess_domain(choice_type) {
@@ -8592,27 +8695,29 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return clause;
     }
 
-    // CR 608.2d: "[then you] reveal the number you chose" — revealing the
-    // secretly-committed value. The engine models the secret as a redacted
-    // `ChosenAttribute::Number` (visibility.rs) that becomes public the moment
-    // the guess is answered, so the explicit reveal is an engine-level
-    // consequence with no separate effect — a no-op at the AST layer.
+    // CR 101.4 + CR 608.2d: "[then you] reveal the number you chose" / "all
+    // players reveal those numbers simultaneously and determine the highest and
+    // lowest numbers revealed this way" — publishing the secretly-committed
+    // value(s). Revealing information changes no game object: every downstream
+    // clause reads the committed numbers directly (`QuantityRef::ChosenNumber`
+    // off the source, `QuantityRef::PlayerChosenNumber` off each player), and the
+    // "determine the highest/lowest" tail is likewise pure bookkeeping — the
+    // extrema are computed on demand under an `AllPlayers { aggregate }` scope,
+    // never stored. So the reveal is a no-op at the AST layer.
     {
         let lower = text.to_ascii_lowercase();
-        let body = opt(value((), tag::<_, _, OracleError<'_>>("you ")))
-            .parse(lower.as_str())
-            .map(|(rest, _)| rest)
-            .unwrap_or(lower.as_str());
-        if alt((
-            value(
-                (),
-                tag::<_, _, OracleError<'_>>("reveal the number you chose"),
-            ),
-            value((), tag::<_, _, OracleError<'_>>("reveal the chosen number")),
+        let body = opt(value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>("you "),
+                tag("all players "),
+                tag("each player "),
+            )),
         ))
-        .parse(body)
-        .is_ok()
-        {
+        .parse(lower.as_str())
+        .map(|(rest, _)| rest)
+        .unwrap_or(lower.as_str());
+        if parse_reveal_chosen_numbers_clause(body).is_ok() {
             return parsed_clause(Effect::NoOp);
         }
     }
@@ -25403,6 +25508,45 @@ pub(crate) fn parse_named_choice_object(rest: &str) -> Option<ChoiceType> {
         // semantics.
         try_parse_labeled_choice(rest).map(|options| ChoiceType::Labeled { options })
     }
+}
+
+/// CR 101.4 + CR 608.2d: The bookkeeping sentence that publishes secretly-chosen
+/// numbers — "reveal the number you chose" (The Toymaker's Trap), "reveal the
+/// chosen numbers" (Life at Stake), "reveal those numbers simultaneously and
+/// determine the highest and lowest numbers revealed this way" (Wheel of
+/// Misfortune). The leading subject ("you " / "all players ") is stripped by the
+/// caller.
+///
+/// Composed by axis — object phrase × optional manner adverb × optional
+/// "determine" tail, each its own `alt`/`opt` — rather than enumerated as
+/// permutations of whole sentences. Every recognized form lowers to
+/// `Effect::NoOp`: the reveal is an engine-level consequence of the choice
+/// prompts ending (visibility.rs), and the extrema are computed on demand by
+/// `QuantityRef::PlayerChosenNumber`, so there is nothing for an effect to do.
+fn parse_reveal_chosen_numbers_clause(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("reveal ").parse(input)?;
+    let (input, _) = alt((
+        tag("the number you chose"),
+        tag("the chosen numbers"),
+        tag("the chosen number"),
+        tag("those numbers"),
+    ))
+    .parse(input)?;
+    let (input, _) = opt(tag(" simultaneously")).parse(input)?;
+    let (input, _) = opt(preceded(
+        (tag(" and determine "), tag("the ")),
+        (
+            crate::parser::oracle_nom::quantity::parse_chosen_number_extremum,
+            opt(preceded(
+                tag(" and "),
+                crate::parser::oracle_nom::quantity::parse_chosen_number_extremum,
+            )),
+            alt((tag(" numbers"), tag(" number"))),
+            opt(tag(" revealed this way")),
+        ),
+    ))
+    .parse(input)?;
+    Ok((input, ()))
 }
 
 /// CR 608.2d + CR 614.1c: A conjunction of named-choice phrases sharing one

@@ -258,6 +258,20 @@ fn default_contraption_crank_sprocket() -> u8 {
 }
 
 impl Player {
+    /// CR 101.4 + CR 608.2d: The number this player most recently chose for a
+    /// per-player `Effect::Choose { ChoiceType::NumberRange }` ("each player
+    /// secretly chooses a number 0 or greater"). `None` when this player has
+    /// not chosen a number — the aggregate readers of
+    /// [`crate::types::ability::QuantityRef::PlayerChosenNumber`] use that to
+    /// exclude non-choosers from a highest/lowest fold instead of counting them
+    /// as 0.
+    pub fn chosen_number(&self) -> Option<u8> {
+        self.chosen_attributes.iter().find_map(|attr| match attr {
+            crate::types::ability::ChosenAttribute::Number(n) => Some(*n),
+            _ => None,
+        })
+    }
+
     /// CR 122.1: Get the current count of a player counter.
     /// Poison counters route to the dedicated field (SBA at CR 704.5c).
     pub fn player_counter(&self, kind: &PlayerCounterKind) -> u32 {

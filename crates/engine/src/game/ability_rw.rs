@@ -2095,6 +2095,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::TurnsTaken
         | QuantityRef::CrimesCommittedThisTurn
         | QuantityRef::ChosenNumber
+        | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         // CR 701.65b/701.66b/701.67c: controller-scoped per-turn bend accumulator
@@ -5903,6 +5904,12 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         | QuantityRef::TrackedSetSize
         | QuantityRef::FilteredTrackedSetSize { .. }
         | QuantityRef::ChosenNumber
+        // CR 101.4 + CR 608.2d: the player-axis chosen-number read. Its producer
+        // is a persisting `Effect::Choose`, whose own arm below already declares
+        // `reads_member_bound`; classifying the reader the same way keeps the
+        // CR 603.3b same-event ordering gate fail-closed for the producer/consumer
+        // pair, exactly as for the object-axis `ChosenNumber` sibling.
+        | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::CostXPaid
         | QuantityRef::KickerCount
         | QuantityRef::AdditionalCostPaymentCount

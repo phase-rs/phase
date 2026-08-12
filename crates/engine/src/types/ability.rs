@@ -6432,6 +6432,32 @@ pub enum QuantityRef {
     /// A number chosen as the source entered the battlefield (e.g., Talion, the Kindly Lord).
     /// Resolved from the source object's `ChosenAttribute::Number`.
     ChosenNumber,
+    /// CR 101.4 + CR 608.2d: The number a PLAYER chose during this resolution
+    /// ("each player secretly chooses a number 0 or greater"), read off
+    /// `Player::chosen_attributes` (`ChosenAttribute::Number`) — the player-axis
+    /// sibling of the object-axis [`QuantityRef::ChosenNumber`], which reads the
+    /// SOURCE object's persisted number instead. The two subjects have different
+    /// runtime resolvers (per-player scalar vs. source LKI), so they stay
+    /// separate variants rather than one subject-parameterized reference.
+    ///
+    /// A member of the per-player-scalar subset (`HandSize` / `LifeTotal` /
+    /// `GraveyardSize` / `PlayerCounter` / …), so `player` selects both WHICH
+    /// player is read and — for the aggregate scopes — HOW the per-player values
+    /// are folded:
+    /// - `AllPlayers { aggregate: Max }` — "the highest number" (Wheel of
+    ///   Misfortune, Menacing Ogre, Life at Stake).
+    /// - `AllPlayers { aggregate: Min }` — "the lowest number" (Wheel of
+    ///   Misfortune's discard clause).
+    /// - `ScopedPlayer` — the per-candidate read used by
+    ///   [`PlayerFilter::PlayerAttribute`] to select "each player who chose the
+    ///   highest number".
+    ///
+    /// Players who chose no number this resolution are EXCLUDED from the
+    /// aggregate populations (rather than contributing 0), so a card whose
+    /// choosers are a subset of the table — Life at Stake's "you and target
+    /// creature's controller" — still reads the extremum over the actual
+    /// choosers.
+    PlayerChosenNumber { player: PlayerScope },
     /// CR 508.1a: Number of creatures that attacked this turn, scoped by
     /// `scope` and optionally narrowed by `filter` (e.g. "attacked with a
     /// token / a commander / a Wolf"). `Controller` + `filter: None` counts all

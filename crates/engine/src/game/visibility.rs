@@ -278,6 +278,28 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         };
     }
 
+    // CR 101.4 + CR 101.4b + CR 608.2d: A number a player chose
+    // (`Player::chosen_attributes`) is that player's SECRET. Wheel of Misfortune,
+    // Menacing Ogre and Life at Stake all say "secretly", and The Toymaker's
+    // Trap's committed number must survive an opponent's guess unseen — CR 101.4b
+    // would otherwise let a later chooser read the earlier answers.
+    //
+    // The redaction is unconditional rather than scoped to a pending prompt: this
+    // player-axis number is an ENGINE LEDGER, read only server-side by
+    // `QuantityRef::PlayerChosenNumber` (and cleared at every top-level
+    // resolution entry), so no client needs another player's copy at any point.
+    // Making its privacy a property of the field instead of a property of the
+    // current `waiting_for` means no future call path can open a window where it
+    // leaks. The public consequences of the reveal — the damage, the discard, the
+    // life loss — are visible in the ordinary way; only the raw ledger is not.
+    for player in filtered.players.iter_mut() {
+        if !can_view_private_for_player(player.id) {
+            player.chosen_attributes.retain(|attribute| {
+                !matches!(attribute, crate::types::ability::ChosenAttribute::Number(_))
+            });
+        }
+    }
+
     // CR 608.2d: While an `OpponentGuess` is pending, strip the secret the
     // guesser must not see so the round-trip can't be auto-won. Two redactions:
     //
@@ -5308,6 +5330,61 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// CR 101.4b + CR 608.2d: a number a player chose is that player's secret.
+    /// The per-player ledger behind `QuantityRef::PlayerChosenNumber` (Wheel of
+    /// Misfortune's "each player secretly chooses a number 0 or greater") is
+    /// redacted from every other viewer — and, because it is an engine ledger
+    /// rather than a rendered fact, it stays redacted regardless of what the game
+    /// is currently waiting on. A window-scoped rule would leak the moment the
+    /// prompt closed but the secret was still live (The Toymaker's Trap's
+    /// committed number, guessed at during an `OpponentGuess`).
+    ///
+    /// Fail-on-revert: without the redaction the second chooser's client shows
+    /// the first chooser's number and the "secret" is free information.
+    #[test]
+    fn player_chosen_number_is_private_to_that_player() {
+        use crate::types::ability::{ChoiceType, ChosenAttribute, NumberDistinctness};
+        let mut state = GameState::new_two_player(42);
+        // P0 has already answered; P1 is the pending chooser.
+        state.players[0].chosen_attributes = vec![ChosenAttribute::Number(4)];
+        state.waiting_for = WaitingFor::NamedChoice {
+            player: PlayerId(1),
+            choice_type: ChoiceType::NumberRange {
+                min: 0,
+                max: 20,
+                distinctness: NumberDistinctness::Repeatable,
+            },
+            options: (0..=20u8).map(|n| n.to_string()).collect(),
+            source: None,
+            persist_player: None,
+        };
+
+        let chooser_view = filter_state_for_viewer(&state, PlayerId(1));
+        assert!(
+            chooser_view.players[0].chosen_attributes.is_empty(),
+            "the pending chooser must not see the number already chosen by P0"
+        );
+        let owner_view = filter_state_for_viewer(&state, PlayerId(0));
+        assert!(
+            owner_view.players[0]
+                .chosen_attributes
+                .contains(&ChosenAttribute::Number(4)),
+            "a player always sees their own chosen number"
+        );
+
+        // Still redacted once the prompt window has closed — the secret can
+        // outlive the prompt (a pending guess against it, CR 608.2d).
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        assert!(
+            filter_state_for_viewer(&state, PlayerId(1)).players[0]
+                .chosen_attributes
+                .is_empty(),
+            "privacy is a property of the ledger, not of the current prompt"
+        );
     }
 
     /// CR 608.2d: For a `GuessSubject::CommittedChoice` (The Toymaker's Trap),

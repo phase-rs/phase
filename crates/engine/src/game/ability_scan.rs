@@ -2369,6 +2369,13 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             acc
         }
         QuantityRef::ChosenNumber => Axes::NONE,
+        // CR 101.4 + CR 608.2d: the number a player chose this resolution. Like
+        // its object-axis sibling `ChosenNumber` this is a bounded one-shot
+        // answer, not an accumulating projected resource — a re-choose REPLACES
+        // the stored value rather than adding to it (`bind_named_choice`), so it
+        // cannot grow across loop iterations. The only axis it can contribute is
+        // whatever its player scope carries.
+        QuantityRef::PlayerChosenNumber { player } => scan_player_scope(player),
         QuantityRef::AttackedThisTurn { scope, filter } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_count_scope(scope));

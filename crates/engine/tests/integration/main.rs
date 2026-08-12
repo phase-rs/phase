@@ -1298,6 +1298,7 @@ mod vohar_discard_drain;
 mod wand_of_orcus_compound_subject_6965;
 mod weeping_angel_combat_prevention;
 mod wheel_and_deal;
+mod wheel_of_misfortune_secret_numbers;
 mod where_x_coverage_runtime;
 mod where_x_quantity_channel_binds;
 mod where_x_totality_guard;

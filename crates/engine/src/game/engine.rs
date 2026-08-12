@@ -16035,9 +16035,23 @@ mod stage2_injector_tests {
                 // shifts combine with #6958's paid-cast outcome exclusion and
                 // #6976's conditional-branch exclusions. None creates an
                 // `OptionalEffect` prompt. Re-pinned against the merged source.
-                "game/effects/mod.rs:6252".to_string(),
-                "game/effects/mod.rs:6329".to_string(),
-                "game/effects/mod.rs:9522".to_string(),
+                // Wheel of Misfortune round: `:6252/:6329/:9522 => :6257/:6334/:9543`,
+                // `+5/+5/+21`, and the asymmetry IS the measurement. `git diff -U0`
+                // on effects/mod.rs has exactly two non-test hunks:
+                //   `@@ -646,0 +647,5 @@` — the `QuantityRef::PlayerChosenNumber` arm
+                //     added to `candidate_player_scalar`. Above ALL THREE producers,
+                //     and the whole `+5`.
+                //   `@@ -8321,0 +8327,16 @@` — the depth-0 per-player secret-number
+                //     ledger reset in `resolve_ability_chain`. Above the THIRD producer
+                //     only (and below the first two), which is the further `+16`.
+                // Both hunks are a pure scalar READ and a `chosen_attributes` CLEAR
+                // respectively: neither raises a `WaitingFor`, so neither mints a
+                // prompt. All three producers remain byte-identical
+                // `WaitingFor::OptionalEffectChoice` assignments inside the functions
+                // this row names. The remaining hunks are an import line and `mod tests`.
+                "game/effects/mod.rs:6257".to_string(),
+                "game/effects/mod.rs:6334".to_string(),
+                "game/effects/mod.rs:9543".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.

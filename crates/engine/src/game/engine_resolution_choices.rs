@@ -6033,6 +6033,11 @@ pub(super) fn handle_resolution_choice(
                 source.as_mut(),
                 persist_player,
             );
+            // CR 101.4 + CR 608.2d: additionally record a chosen NUMBER on the
+            // player who chose it, so a later clause can read every player's
+            // answer back ("the highest number", "each player who didn't choose
+            // the lowest number"). Additive to the source binding above.
+            effects::choose::record_player_chosen_number(state, player, &choice_type, &choice);
             if let Some(context) = updated_context {
                 if let Some(frame) = state.active_ability_continuation_frame_mut() {
                     frame

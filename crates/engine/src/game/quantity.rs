@@ -681,6 +681,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::ZoneChangeAggregateThisTurn { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::ChosenNumber
+        | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
@@ -979,6 +980,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::ZoneChangeAggregateThisTurn { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::ChosenNumber
+        | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
@@ -1226,6 +1228,7 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         // CR 120.1: damage records store the amount actually dealt.
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::ChosenNumber
+        | QuantityRef::PlayerChosenNumber { .. }
         // CR 508.1: declaration-time attacker snapshots.
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
@@ -1457,6 +1460,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::ZoneChangeAggregateThisTurn { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::ChosenNumber
+        | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
@@ -4213,6 +4217,17 @@ fn resolve_ref(
                 })
             })
             .unwrap_or(0),
+        // CR 101.4 + CR 608.2d: the number a PLAYER secretly chose this
+        // resolution, read off `Player::chosen_attributes`. `AllPlayers { Max }`
+        // / `{ Min }` fold to "the highest/lowest number" over the players who
+        // actually chose one (non-choosers are excluded, not counted as 0);
+        // `ScopedPlayer` is the per-candidate read `PlayerFilter::PlayerAttribute`
+        // uses to select "each player who chose the highest number".
+        QuantityRef::PlayerChosenNumber { player: scope } => {
+            resolve_per_player_scalar_opt(state, scope, controller, ctx, targets, ability, |p| {
+                p.chosen_number().map(i32::from)
+            })
+        }
         // CR 508.1a: Count creatures that attacked this turn. Declaration-time
         // records are the authority for every scoped form so attackers that
         // left the battlefield still count.
@@ -6208,6 +6223,79 @@ where
                 "PlayerScope::AnyTurn is duration-timing-only; never reached via QuantityRef"
             )
         }
+    }
+}
+
+/// CR 101.4 + CR 608.2d: `resolve_per_player_scalar` for a scalar that some
+/// players simply DON'T HAVE. `extract` returns `None` for such a player, and
+/// the aggregate scopes (`Opponent` / `AllPlayers`) then fold over only the
+/// players that do — a non-participant is absent from the population, not a
+/// zero in it.
+///
+/// This matters for `Min`: reading "the lowest number chosen" over a table where
+/// only some players chose must not report 0 because a non-chooser was counted.
+/// Single-player scopes keep the family's `map_or(0, …)` convention (an absent
+/// value reads as 0), so the two helpers agree wherever both are defined.
+fn resolve_per_player_scalar_opt<F>(
+    state: &GameState,
+    scope: &PlayerScope,
+    controller: PlayerId,
+    ctx: QuantityContext,
+    targets: &[TargetRef],
+    ability: Option<&ResolvedAbility>,
+    mut extract: F,
+) -> i32
+where
+    F: FnMut(&crate::types::player::Player) -> Option<i32>,
+{
+    match scope {
+        // CR 102.2 / CR 102.1: the aggregate populations, narrowed to the
+        // players that actually have the scalar.
+        PlayerScope::Opponent { aggregate } => aggregate_over_present_players(
+            state.players.iter().filter(|p| p.id != controller),
+            *aggregate,
+            &mut extract,
+        ),
+        PlayerScope::AllPlayers { aggregate, exclude } => {
+            let excluded_id = exclude.as_deref().and_then(|ex| {
+                resolve_single_player_scope(state, ex, controller, ctx, targets, ability)
+            });
+            aggregate_over_present_players(
+                state.players.iter().filter(|p| Some(p.id) != excluded_id),
+                *aggregate,
+                &mut extract,
+            )
+        }
+        // Single-player scopes: delegate to the shared resolver so the "which
+        // player does this scope name" logic lives in exactly one place. The two
+        // arms above are the ONLY aggregate scopes; a future aggregate variant
+        // must be added there as well, or it would fold non-participants in as
+        // zeroes through this delegation.
+        single => {
+            resolve_per_player_scalar(state, single, controller, ctx, targets, ability, |p| {
+                extract(p).unwrap_or(0)
+            })
+        }
+    }
+}
+
+/// CR 107.3e: `aggregate_over_players` for a partially-defined scalar — players
+/// whose `extract` yields `None` are dropped before the fold. An empty
+/// population reduces to 0, matching the total-scalar helper.
+fn aggregate_over_present_players<'a, I, F>(
+    players: I,
+    aggregate: AggregateFunction,
+    mut extract: F,
+) -> i32
+where
+    I: IntoIterator<Item = &'a crate::types::player::Player>,
+    F: FnMut(&crate::types::player::Player) -> Option<i32>,
+{
+    let values = players.into_iter().filter_map(&mut extract);
+    match aggregate {
+        AggregateFunction::Max => values.max().unwrap_or(0),
+        AggregateFunction::Min => values.min().unwrap_or(0),
+        AggregateFunction::Sum => values.sum(),
     }
 }
 
