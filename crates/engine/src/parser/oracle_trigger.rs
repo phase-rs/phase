@@ -10763,16 +10763,13 @@ fn parse_taps_for_mana_actor_line(
 /// This is structurally distinct from the actor-led forms above because it
 /// constrains the mana source, not who performed the tap.
 fn parse_passive_taps_for_mana_line(i: &str) -> OracleResult<'_, String> {
-    let (rest, ()) = opt(alt((tag("whenever "), tag("when ")))).parse(i)?;
+    let (rest, _) = opt(alt((tag("whenever "), tag("when ")))).parse(i)?;
     let (rest, subject) = terminated(
         take_until(" is tapped for mana"),
         tag(" is tapped for mana"),
     )
     .parse(rest)?;
-    if !rest.trim().is_empty() {
-        return Err(oracle_err(rest));
-    }
-    Ok(("", subject.to_string()))
+    Ok((rest, subject.to_string()))
 }
 
 /// CR 605.1b: Recognizes the aggregate mana-ability condition whose produced
@@ -15084,7 +15081,8 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     if let Ok((_, subject_text)) = parse_passive_taps_for_mana_line(lower) {
         let suffix = " with the same name as the exiled card";
         if let Ok((subject, _)) =
-            terminated(take_until(suffix), tag(suffix)).parse(subject_text.as_str())
+            terminated(take_until::<_, _, OracleError<'_>>(suffix), tag(suffix))
+                .parse(subject_text.as_str())
         {
             let (filter, remainder) = parse_trigger_subject(subject, &mut ParseContext::default());
             if remainder.trim().is_empty() {

@@ -718,6 +718,9 @@ impl EventObjectSnapshot {
             | FilterProp::ManaSymbolCount { .. }
             | FilterProp::Foretold
             | FilterProp::HasAdventure
+            // CR 607.2a: This compares against an object linked in the live
+            // exile-link side table, which event snapshots deliberately omit.
+            | FilterProp::SameNameAsExiledBySource
             | FilterProp::AttachedToSource
             | FilterProp::AttachedToRecipient
             | FilterProp::Unpaired
