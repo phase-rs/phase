@@ -9480,6 +9480,22 @@ impl AbilityCost {
                 filter: None,
                 ..
             } => true,
+            // CR 702.24a + CR 122.1: The existing resolution payment
+            // authority can place a counter on the source through the
+            // replacement pipeline. This covers cumulative-upkeep costs such
+            // as Aboroth's "put a -1/-1 counter on this creature" without
+            // admitting arbitrary effect-as-cost shapes.
+            AbilityCost::EffectCost { effect }
+                if matches!(
+                    effect.as_ref(),
+                    Effect::PutCounter {
+                        target: TargetFilter::SelfRef,
+                        ..
+                    }
+                ) =>
+            {
+                true
+            }
             // CR 118.12a: OneOf at the base must be a disjunction of mana
             // costs; mixed-shape disjunctions are not yet expanded into a
             // payable per-counter form.

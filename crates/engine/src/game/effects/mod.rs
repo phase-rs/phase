@@ -12677,6 +12677,26 @@ fn expand_per_counter(base: &AbilityCost, n: u32) -> AbilityCost {
             zone: Some(Zone::Library),
             filter: None,
         },
+        // CR 702.24a: Aboroth-class cumulative upkeep repeats the source
+        // counter placement once for every age counter. Scaling its quantity
+        // keeps it a single deterministic effect-cost payment, so the shared
+        // counter replacement pipeline sees the complete payment at once.
+        AbilityCost::EffectCost { effect } => match effect.as_ref() {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target: TargetFilter::SelfRef,
+            } => AbilityCost::EffectCost {
+                effect: Box::new(Effect::PutCounter {
+                    counter_type: counter_type.clone(),
+                    count: count.scaled_by(n),
+                    target: TargetFilter::SelfRef,
+                }),
+            },
+            _ => AbilityCost::Composite {
+                costs: vec![base.clone(); n as usize],
+            },
+        },
         // YAGNI fallback: no current cumulative-upkeep card uses these
         // base variants. If a future mechanic does, the
         // Composite-of-N-copies expansion is semantically correct for

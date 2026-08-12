@@ -5757,15 +5757,15 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::ManaAbilityPayment { .. }
                     | PendingCostMoveResume::ActivationMillPayment { .. }
                     | PendingCostMoveResume::LoyaltyActivation { .. }
-                    | PendingCostMoveResume::GetPlayerCountersUnlessPayment { .. }
+                    | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
             )
         ),
         // CR 606.4 + CR 616.1: a fully-prevented loyalty counter add (e.g. an
         // opponent's Solemnity would prevent the counters) must still complete the
         // parked activation instead of wedging, so `LoyaltyActivation` is eligible
-        // at the Prevented boundary as well. `GetPlayerCountersUnlessPayment` is
-        // eligible here too: a prevented Ward player-counter payment is a FAILED
-        // cost (CR 702.21a) that must counter the guarded ability, not wedge.
+        // at the Prevented boundary as well. Counter-addition unless payments
+        // are eligible here too: a prevented counter placement fails the cost
+        // (CR 118.3) and must resolve the pending unless branch, not wedge.
         CostMoveDrainBoundary::ReplacementPrevented { .. } => matches!(
             state.pending_cost_move_resume,
             Some(
@@ -5780,7 +5780,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::ManaAbilityPayment { .. }
                     | PendingCostMoveResume::ActivationMillPayment { .. }
                     | PendingCostMoveResume::LoyaltyActivation { .. }
-                    | PendingCostMoveResume::GetPlayerCountersUnlessPayment { .. }
+                    | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
             )
         ),
         CostMoveDrainBoundary::PriorityBoundary => matches!(
@@ -5854,9 +5854,9 @@ pub(crate) fn drain_pending_cost_move_resume(
         super::planeswalker::resume_loyalty_activation(state, events)?
     } else if matches!(
         state.pending_cost_move_resume,
-        Some(PendingCostMoveResume::GetPlayerCountersUnlessPayment { .. })
+        Some(PendingCostMoveResume::CounterAdditionUnlessPayment { .. })
     ) {
-        engine_payment_choices::resume_get_player_counters_unless_payment(
+        engine_payment_choices::resume_counter_addition_unless_payment(
             state,
             events,
             matches!(boundary, CostMoveDrainBoundary::ReplacementDelivered { .. }),

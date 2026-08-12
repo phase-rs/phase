@@ -699,6 +699,7 @@ mod issue_718_dina_sacrifice_draw;
 mod issue_7212_recruit_sibling_trigger;
 mod issue_7221_forage_trigger;
 mod issue_7232_expend_auto_land_payment;
+mod issue_7234_cumulative_upkeep_effect_cost;
 mod issue_735_amalia_power_threshold;
 mod issue_735_cost_paid_object_non_regression;
 mod issue_735_lily_bowen_power_double;

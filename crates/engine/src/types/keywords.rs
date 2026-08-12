@@ -3119,30 +3119,21 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Dethrone" => Ok(Keyword::Dethrone),
         "DoubleTeam" => Ok(Keyword::DoubleTeam),
         "LivingMetal" => Ok(Keyword::LivingMetal),
-        // CR 702.24a: Legacy serialized data had `Keyword::CumulativeUpkeep`
-        // carry a raw `String` cost (e.g. "{1}"). Task 3 changed the field
-        // to a typed `AbilityCost`, but parsing the legacy string requires
-        // the Oracle parser, which doesn't live in this deserialization
-        // path. Card-data.json is regenerated from MTGJSON+Oracle text by
-        // the pipeline (`./scripts/gen-card-data.sh`), so the practical
-        // fix is to re-run that pipeline rather than recover legacy data
-        // here. The zero-cost sentinel is a well-formed placeholder until
-        // the pipeline rebuilds the typed cost.
-        "Cumulative" => Ok(Keyword::CumulativeUpkeep(AbilityCost::Mana {
-            cost: ManaCost::zero(),
-        })),
-        // CR 702.24a: Legacy serialized data had `Keyword::CumulativeUpkeep`
-        // carry a raw `String` cost (e.g. "{1}"). Task 3 changed the field
-        // to a typed `AbilityCost`, but parsing the legacy string requires
-        // the Oracle parser, which doesn't live in this deserialization
-        // path. Card-data.json is regenerated from MTGJSON+Oracle text by
-        // the pipeline (`./scripts/gen-card-data.sh`), so the practical
-        // fix is to re-run that pipeline rather than recover legacy data
-        // here. The zero-cost sentinel is a well-formed placeholder until
-        // the pipeline rebuilds the typed cost.
-        "CumulativeUpkeep" => Ok(Keyword::CumulativeUpkeep(AbilityCost::Mana {
-            cost: ManaCost::zero(),
-        })),
+        // CR 702.24a: Current serialized keywords carry the typed
+        // `AbilityCost` emitted by this engine. Preserve it faithfully; only
+        // the historic raw-string form falls back because parsing Oracle mana
+        // syntax is outside this deserialization boundary.
+        "Cumulative" | "CumulativeUpkeep" => {
+            let cost = if data.is_string() {
+                AbilityCost::Mana {
+                    cost: ManaCost::zero(),
+                }
+            } else {
+                serde_json::from_value(data.clone())
+                    .map_err(|error| format!("CumulativeUpkeep: {error}"))?
+            };
+            Ok(Keyword::CumulativeUpkeep(cost))
+        }
         "Ripple" => serde_json::from_value(data.clone())
             .map(Keyword::Ripple)
             .map_err(|error| format!("Ripple: {error}")),
