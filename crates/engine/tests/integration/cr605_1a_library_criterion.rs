@@ -291,6 +291,11 @@ fn harsh_mentor_punishes_opponent_nonmana_permanent_abilities_only() {
         runner
             .act(GameAction::PassPriority)
             .expect("the active player must be able to pass priority to P1");
+        assert_eq!(
+            runner.state().objects[&source].zone,
+            Zone::Battlefield,
+            "the activated source must remain on the battlefield after P0 passes priority"
+        );
         runner.activate(source, 0).resolve().life_delta(P1)
     }
 
