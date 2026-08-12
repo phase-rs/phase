@@ -15043,7 +15043,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
 
     if let Ok((_, subject_text)) = parse_passive_taps_for_mana_line(lower) {
         let suffix = " with the same name as the exiled card";
-        if let Ok((subject, _)) =
+        if let Ok((_, subject)) =
             terminated(take_until::<_, _, OracleError<'_>>(suffix), tag(suffix))
                 .parse(subject_text.as_str())
         {
