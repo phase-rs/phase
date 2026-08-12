@@ -224,6 +224,8 @@ fn combat_phase_stops_pause_damage_and_end_combat_windows() {
         )],
         ..Default::default()
     });
+    state.current_combat_attacker_restriction = Some(TargetFilter::Any);
+    state.current_combat_attacker_restriction_source = Some(attacker);
     state.waiting_for = WaitingFor::DeclareBlockers {
         player: PlayerId(1),
         valid_blocker_ids: Vec::new(),
@@ -293,6 +295,14 @@ fn combat_phase_stops_pause_damage_and_end_combat_windows() {
         }
     ));
     assert!(
+        state.combat.is_some(),
+        "combat remains during EndCombat priority"
+    );
+    assert!(
+        state.current_combat_attacker_restriction.is_some(),
+        "EndCombat restriction remains live during its priority window"
+    );
+    assert!(
         !state.auto_pass.contains_key(&PlayerId(0)),
         "EndCombat stop must interrupt the armed auto-pass session"
     );
@@ -300,6 +310,11 @@ fn combat_phase_stops_pause_damage_and_end_combat_windows() {
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     assert_eq!(state.phase, Phase::PostCombatMain);
+    assert!(state.combat.is_none(), "combat clears after EndCombat ends");
+    assert!(
+        state.current_combat_attacker_restriction.is_none(),
+        "EndCombat restriction clears after the step ends"
+    );
 }
 
 /// CR 500.8 + CR 507.2: An inserted combat phase gets the same
