@@ -104,8 +104,6 @@ impl AiDecisionContract {
 
 pub(crate) fn target_selection_requires_reducer_validation(state: &GameState) -> bool {
     let WaitingFor::TargetSelection {
-        player,
-        pending_cast,
         target_slots,
         selection,
         ..
@@ -114,15 +112,11 @@ pub(crate) fn target_selection_requires_reducer_validation(state: &GameState) ->
         return false;
     };
 
-    // Only the final target can lock a target-dependent cost. Earlier
-    // selections are valid reducer continuations regardless of whether the
-    // eventual cost is payable.
+    // CR 601.2c + CR 601.2e-h + CR 602.2b: completing the final target
+    // selection can immediately check legality and pay the proposed spell or
+    // activation cost. Earlier selections cannot complete that transition, but
+    // every final candidate must be reducer-validated before the AI receives it.
     selection.current_slot.checked_add(1) == Some(target_slots.len())
-        && !crate::game::casting::pending_mana_obligation_is_stable_before_targets(
-            state,
-            *player,
-            pending_cast,
-        )
 }
 
 /// Whether a decision can alter the target requirements of an in-progress cast.
