@@ -5740,7 +5740,9 @@ fn effect_parent_ref_slots(effect: &Effect) -> Vec<&TargetFilter> {
         Effect::UnattachAll { attachment, .. } if attachment.is_context_ref() => {
             slots.push(attachment)
         }
-        Effect::ChangeZoneAll { target, .. } if target.is_context_ref() => slots.push(target),
+        Effect::ChangeZoneAll { target, .. } if filter_refs_parent_target(target) => {
+            slots.push(target)
+        }
         _ => {}
     }
     slots
