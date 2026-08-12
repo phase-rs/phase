@@ -22574,6 +22574,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn mana_journal_ignores_a_stale_nested_parent_after_journal_reset() {
         let mut state = GameState::new_two_player(42);
         let source_id = create_object(
