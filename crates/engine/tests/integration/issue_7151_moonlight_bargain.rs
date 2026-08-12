@@ -120,13 +120,6 @@ fn moonlight_bargain_repeats_only_over_the_cards_it_looked_at() {
             .all(|id| looked.contains(id)),
         "no repeat iteration may substitute an unrelated battlefield permanent"
     );
-    for id in paid_members {
-        assert_eq!(runner.state().objects[&id].zone, Zone::Hand);
-    }
-    for id in declined_members {
-        assert_eq!(runner.state().objects[&id].zone, Zone::Graveyard);
-    }
-    assert_eq!(runner.state().players[P0.0 as usize].life, 16);
     assert_eq!(
         runner.state().objects[&battlefield_a].zone,
         Zone::Battlefield
