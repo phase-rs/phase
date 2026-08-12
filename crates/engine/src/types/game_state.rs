@@ -2423,6 +2423,8 @@ impl LatchedBatchedTrigger {
 pub struct LatchedSuppressTrigger {
     pub source_context: TriggerSourceContext,
     pub source_filter: TargetFilter,
+    #[serde(default)]
+    pub trigger_source_filter: Option<TargetFilter>,
     pub events: Vec<crate::types::statics::SuppressedTriggerEvent>,
 }
 

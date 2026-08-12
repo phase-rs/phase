@@ -304,6 +304,7 @@ struct OffZoneTriggerSourceCache {
 struct ActiveSuppressTriggerStatic {
     source_context: TriggerSourceContext,
     source_filter: TargetFilter,
+    trigger_source_filter: Option<TargetFilter>,
     events: Vec<SuppressedTriggerEvent>,
 }
 
@@ -1043,7 +1044,12 @@ fn candidate_passes_batched_filters(
     matcher: TriggerMatcher,
     active_suppress_triggers: &[ActiveSuppressTriggerStatic],
 ) -> bool {
-    if event_is_suppressed_by_static_triggers_cached(state, candidate, active_suppress_triggers) {
+    if event_is_suppressed_by_static_triggers_cached(
+        state,
+        candidate,
+        Some(source_context),
+        active_suppress_triggers,
+    ) {
         return false;
     }
     if !matcher(candidate, trig_def, source_context, state) {
@@ -1520,6 +1526,7 @@ fn latch_logical_zone_change_group_immediately_before(
         .filter_map(|(source, definition)| {
             let StaticMode::SuppressTriggers {
                 source_filter,
+                trigger_source_filter,
                 events,
             } = &definition.mode
             else {
@@ -1528,6 +1535,7 @@ fn latch_logical_zone_change_group_immediately_before(
             Some(LatchedSuppressTrigger {
                 source_context: trigger_source_context_for_latch(state, source),
                 source_filter: source_filter.clone(),
+                trigger_source_filter: trigger_source_filter.clone(),
                 events: events.clone(),
             })
         })
@@ -1673,6 +1681,7 @@ pub(crate) fn latch_logical_zone_change_group_immediately_after(
         .filter_map(|(source, definition)| {
             let StaticMode::SuppressTriggers {
                 source_filter,
+                trigger_source_filter,
                 events,
             } = &definition.mode
             else {
@@ -1681,6 +1690,7 @@ pub(crate) fn latch_logical_zone_change_group_immediately_after(
             Some(LatchedSuppressTrigger {
                 source_context: trigger_source_context_for_latch(state, source),
                 source_filter: source_filter.clone(),
+                trigger_source_filter: trigger_source_filter.clone(),
                 events: events.clone(),
             })
         })
@@ -1946,6 +1956,14 @@ fn collect_matching_triggers_inner(
     };
     let obj_id = source_context.identity.reference.object_id;
     let controller = source_context.lki.controller;
+    if event_is_suppressed_by_static_triggers_cached(
+        state,
+        event,
+        Some(&source_context),
+        active_suppress_triggers,
+    ) {
+        return Vec::new();
+    }
 
     // CR 604.1 + CR 702.62a: Companion triggered abilities for keywords granted
     // to an *off-zone* card. `evaluate_layers` (Layer 6) only installs
@@ -2123,7 +2141,12 @@ fn collect_matching_triggers_inner(
                     .expect("settlement requires its immediately-after latch"),
             };
             let suppressors = latched_suppress_trigger_statics(suppressors);
-            if event_is_suppressed_by_static_triggers_cached(state, event, &suppressors) {
+            if event_is_suppressed_by_static_triggers_cached(
+                state,
+                event,
+                Some(&source_context),
+                &suppressors,
+            ) {
                 continue;
             }
         }
@@ -2702,6 +2725,7 @@ fn active_suppress_trigger_statics(state: &GameState) -> Vec<ActiveSuppressTrigg
         .filter_map(|(bf_obj, def)| {
             let StaticMode::SuppressTriggers {
                 source_filter,
+                trigger_source_filter,
                 events,
             } = &def.mode
             else {
@@ -2710,6 +2734,7 @@ fn active_suppress_trigger_statics(state: &GameState) -> Vec<ActiveSuppressTrigg
             Some(ActiveSuppressTriggerStatic {
                 source_context: trigger_source_context_for_latch(state, bf_obj),
                 source_filter: source_filter.clone(),
+                trigger_source_filter: trigger_source_filter.clone(),
                 events: events.clone(),
             })
         })
@@ -2727,6 +2752,7 @@ fn latched_suppress_trigger_statics(
         .map(|suppressor| ActiveSuppressTriggerStatic {
             source_context: suppressor.source_context.clone(),
             source_filter: suppressor.source_filter.clone(),
+            trigger_source_filter: suppressor.trigger_source_filter.clone(),
             events: suppressor.events.clone(),
         })
         .collect()
@@ -2735,12 +2761,13 @@ fn latched_suppress_trigger_statics(
 #[cfg(test)]
 fn event_is_suppressed_by_static_triggers(state: &GameState, event: &GameEvent) -> bool {
     let active_suppress_triggers = active_suppress_trigger_statics(state);
-    event_is_suppressed_by_static_triggers_cached(state, event, &active_suppress_triggers)
+    event_is_suppressed_by_static_triggers_cached(state, event, None, &active_suppress_triggers)
 }
 
 fn event_is_suppressed_by_static_triggers_cached(
     state: &GameState,
     event: &GameEvent,
+    trigger_source: Option<&TriggerSourceContext>,
     active_suppress_triggers: &[ActiveSuppressTriggerStatic],
 ) -> bool {
     // Classify the event: is it ETB, Dies, or neither?
@@ -2765,6 +2792,20 @@ fn event_is_suppressed_by_static_triggers_cached(
         }
         // CR 603.10a: Zone-change last-known information — use the record snapshot.
         let filter_ctx = FilterContext::from_trigger_source(&suppressor.source_context);
+        if let Some(trigger_source_filter) = &suppressor.trigger_source_filter {
+            let Some(trigger_source) = trigger_source else {
+                continue;
+            };
+            if !matches_target_filter_on_lki_snapshot(
+                state,
+                trigger_source.identity.reference.object_id,
+                &trigger_source.lki,
+                trigger_source_filter,
+                &filter_ctx,
+            ) {
+                continue;
+            }
+        }
         if super::filter::matches_target_filter_on_zone_change_record(
             state,
             record,
@@ -3428,8 +3469,12 @@ fn collect_latched_batched_zone_triggers(
                     .expect("settlement checked its immediately-after latch"),
             };
             let suppressors = latched_suppress_trigger_statics(suppressors);
-            if event_is_suppressed_by_static_triggers_cached(state, event, &suppressors)
-                || !matcher(event, &latched.definition, source_context, state)
+            if event_is_suppressed_by_static_triggers_cached(
+                state,
+                event,
+                Some(source_context),
+                &suppressors,
+            ) || !matcher(event, &latched.definition, source_context, state)
                 || !check_trigger_constraint_with_ref(
                     state,
                     &latched.definition,
@@ -3624,18 +3669,13 @@ fn collect_pending_triggers_with_collection(
         // all reach the same `(obj_id, trig_idx)` pair for this event. Cleared
         // between events so each distinct event can still fire the trigger.
         let mut registered_this_event: HashSet<(ObjectId, usize)> = HashSet::new();
-        // CR 603.2g + CR 603.6a + CR 700.4: If a SuppressTriggers static matches the
-        // subject of an ETB/Dies event, skip all trigger matching for that event —
-        // per CR 603.2g, an event that "won't trigger anything" because the static
-        // declares its trigger registration void. Torpor Orb stops every ETB trigger
-        // caused by a creature entering, including observer triggers like Soul Warden.
+        // CR 603.2g + CR 603.6a + CR 700.4: suppression is applied per trigger
+        // source by `collect_matching_triggers_inner`. Torpor Orb's absent source
+        // filter still rejects every candidate, while Elesh Norn-class statics can
+        // reject only opponents' permanent abilities for the same entry event.
         // CR 603.6d: Static "enters tapped"/"enters with counters"/"as X enters"
         // effects are NOT triggered and are unaffected (they run as part of the ETB
         // event itself, not through process_triggers).
-        if event_is_suppressed_by_static_triggers_cached(state, event, &active_suppress_triggers) {
-            continue;
-        }
-
         // CR 603.2 over-approximation differential check (debug-only):
         // snapshot the dedup sets BEFORE the production loop mutates them so
         // the shadow scan operates on the same pre-event state the production
@@ -12391,6 +12431,7 @@ pub mod tests {
         )
         .push(StaticDefinition::new(StaticMode::SuppressTriggers {
             source_filter: TargetFilter::Typed(TypedFilter::creature()),
+            trigger_source_filter: None,
             events: vec![SuppressedTriggerEvent::EntersBattlefield],
         }));
         state.layers_dirty.mark_full();
@@ -21186,6 +21227,7 @@ pub mod tests {
                 source_filter: TargetFilter::Typed(
                     TypedFilter::creature().controller(ControllerRef::Opponent),
                 ),
+                trigger_source_filter: None,
                 events: vec![SuppressedTriggerEvent::BecomesTargeted],
             })]
             .into();
@@ -24059,6 +24101,7 @@ pub mod tests {
         obj.static_definitions
             .push(StaticDefinition::new(StaticMode::SuppressTriggers {
                 source_filter,
+                trigger_source_filter: None,
                 events,
             }));
         id
@@ -24089,6 +24132,53 @@ pub mod tests {
                 .destination(Zone::Battlefield),
         );
         id
+    }
+
+    #[test]
+    fn source_scoped_etb_suppression_preserves_friendly_triggers() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        let suppressor = add_suppress_triggers_permanent(
+            &mut state,
+            PlayerId(0),
+            TargetFilter::Typed(TypedFilter::permanent()),
+            vec![SuppressedTriggerEvent::EntersBattlefield],
+        );
+        let StaticMode::SuppressTriggers {
+            trigger_source_filter,
+            ..
+        } = &mut state
+            .objects
+            .get_mut(&suppressor)
+            .unwrap()
+            .static_definitions[0]
+            .mode
+        else {
+            unreachable!("test helper installs SuppressTriggers");
+        };
+        *trigger_source_filter = Some(TargetFilter::Typed(
+            TypedFilter::permanent().controller(ControllerRef::Opponent),
+        ));
+        let _friendly = add_etb_observer(&mut state, PlayerId(0));
+        let _opponent = add_etb_observer(&mut state, PlayerId(1));
+
+        process_triggers(
+            &mut state,
+            &[zone_changed_event(
+                ObjectId(0xBEEF),
+                Zone::Hand,
+                Zone::Battlefield,
+                vec![CoreType::Creature],
+                Vec::new(),
+            )],
+        );
+
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "Elesh Norn-class suppression must leave its controller's ETB trigger intact"
+        );
+        assert_eq!(state.stack[0].controller, PlayerId(0));
     }
 
     /// Phase out a permanent via the real `phase_out_object` path so the

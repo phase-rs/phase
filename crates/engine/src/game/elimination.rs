@@ -1457,6 +1457,7 @@ mod tests {
             crate::types::game_state::LatchedSuppressTrigger {
                 source_context: source_context(&state, leaving),
                 source_filter: crate::types::ability::TargetFilter::Any,
+                trigger_source_filter: None,
                 events: vec![crate::types::statics::SuppressedTriggerEvent::Dies],
             },
         );
