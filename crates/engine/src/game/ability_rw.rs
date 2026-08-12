@@ -2602,6 +2602,9 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         // CR 607.2d / CR 607.2m (by analogy): this reads durable per-player anchor
         // state keyed by controller, not per-source member-bound storage.
         FilterProp::ControllerChoseLabel { .. } => false,
+        // CR 607.2a: this consults the resolving source's linked-exile set, so
+        // normalized siblings with different sources are not one shared function.
+        FilterProp::SameNameAsExiledBySource => true,
         // CR 608.2i: reads live per-turn history keyed by the object's controller,
         // not per-source member-bound storage. Mirrors ControllerChoseLabel.
         FilterProp::ControllerMatches { .. } => false,
@@ -2681,7 +2684,6 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::Named { .. }
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
-        | FilterProp::SameNameAsExiledBySource
         | FilterProp::IsCommander
         // CR 205.3m: no nested interior to carry a member-bound referent.
         | FilterProp::SharesCreatureTypeWithCommander
@@ -6896,6 +6898,10 @@ mod tests {
             TargetFilter::TriggeringSourceController,
             TargetFilter::OriginalController,
             typed_ctrl(ControllerRef::SourceChosenPlayer),
+            TargetFilter::Typed(TypedFilter {
+                properties: vec![FilterProp::SameNameAsExiledBySource],
+                ..TypedFilter::creature()
+            }),
         ] {
             assert!(
                 member_bound_target_filter(&f),
