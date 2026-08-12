@@ -205,8 +205,16 @@ fn decision_contract_validates_a_target_before_a_dynamically_empty_optional_tail
             .iter()
             .map(|candidate| &candidate.action)
             .collect::<Vec<_>>(),
-        vec![&GameAction::CancelCast],
-        "a target that completes through a dynamically auto-skipped tail must not be issued"
+        vec![
+            &GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(PlayerId(1))),
+            },
+            &GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(PlayerId(2))),
+            },
+            &GameAction::CancelCast,
+        ],
+        "only the target that completes through the dynamically auto-skipped tail must be excluded"
     );
 }
 

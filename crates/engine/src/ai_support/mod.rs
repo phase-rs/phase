@@ -6232,7 +6232,8 @@ mod tests {
             25
         );
         assert!(actions.contains(&GameAction::ChooseTarget { target: None }));
-        assert_eq!(actions.len(), 26);
+        assert_eq!(actions.len(), 27);
+        assert!(actions.contains(&GameAction::CancelCast));
         assert!(spell_costs.is_empty());
         assert!(grouped.is_empty());
         assert!(actions
