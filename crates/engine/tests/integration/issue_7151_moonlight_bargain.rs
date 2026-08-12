@@ -16,7 +16,10 @@ use engine::types::zones::Zone;
 
 const MOONLIGHT_BARGAIN: &str = "Look at the top five cards of your library. For each card, put that card into your graveyard unless you pay 2 life. Then put the rest into your hand.";
 
-fn pending_member(runner: &mut GameRunner) -> engine::types::identifiers::ObjectId {
+fn pending_member(
+    runner: &mut GameRunner,
+    looked_members: &[engine::types::identifiers::ObjectId],
+) -> engine::types::identifiers::ObjectId {
     for _ in 0..16 {
         match runner.state().waiting_for.clone() {
             WaitingFor::UnlessPayment {
@@ -30,7 +33,7 @@ fn pending_member(runner: &mut GameRunner) -> engine::types::identifiers::Object
                         .context
                         .parent_target_iteration_members
                         .as_deref(),
-                    Some(runner.state().last_revealed_ids.as_slice()),
+                    Some(looked_members),
                     "each payment prompt retains Dig's exact five-card universe"
                 );
                 let members: Vec<_> = pending_effect
@@ -83,7 +86,7 @@ fn moonlight_bargain_repeats_only_over_the_cards_it_looked_at() {
     let mut paid_members = Vec::new();
     let mut declined_members = Vec::new();
     for pay in [true, false, true, false, false] {
-        let member = pending_member(&mut runner);
+        let member = pending_member(&mut runner, &looked_members);
         if pay {
             paid_members.push(member);
         } else {

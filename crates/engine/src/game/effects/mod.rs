@@ -9577,7 +9577,15 @@ fn resolve_chain_body(
     // CR 118.12 + CR 118.12a: "Effect unless [player] pays {cost}" —
     // intercepted here for both tax triggers and counter-target-spell unless
     // costs. Post-fold, the cost is the unified `AbilityCost` taxonomy.
-    if let Some(ref unless_pay) = ability.unless_pay {
+    // CR 608.2c + CR 118.12a: A member-driven "for each" loop offers its
+    // unless payment once for each bound member, not once against the full
+    // parent target collection. Defer interception until the loop below
+    // re-enters this chain with its singleton iteration ability.
+    if let Some(unless_pay) = ability
+        .unless_pay
+        .as_ref()
+        .filter(|_| !has_member_driven_repeat_after_hydration(state, ability))
+    {
         // CR 603.2 + CR 118.12a: Hydrate event-context targets before payer
         // resolution so trigger unless-costs ("that player ... unless they pay")
         // do not silently fall through when `ability.targets` is still empty
