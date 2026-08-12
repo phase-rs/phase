@@ -49,7 +49,9 @@ fn commander_combat_damage_enables_eagle_vision_freerunning() {
     );
 
     runner.advance_to_phase(Phase::PostCombatMain);
-    for _ in 0..2 {
+    // Fund both the printed and alternative costs so the casting-variant
+    // choice is surfaced instead of auto-selecting its sole affordable option.
+    for _ in 0..5 {
         let _ = runner.state_mut().add_mana_to_pool(
             P0,
             ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
@@ -59,14 +61,22 @@ fn commander_combat_damage_enables_eagle_vision_freerunning() {
         .cast(eagle_vision)
         .casting_variant(CastingVariant::Freerunning)
         .commit();
-    assert!(
-        matches!(
-            committed
-                .selected_casting_variant()
-                .map(|option| &option.variant),
-            Some(CastingVariant::Freerunning)
-        ),
-        "the available {{1}}{{U}} pool must select Eagle Vision's Freerunning cost"
+    let selected = committed
+        .selected_casting_variant()
+        .expect("both printed and Freerunning costs should be offered");
+    assert_eq!(selected.variant, CastingVariant::Freerunning);
+    assert_eq!(
+        selected.mana_cost,
+        ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Blue],
+        },
+        "Eagle Vision's selected alternative cost must be {{1}}{{U}}"
+    );
+    assert_eq!(
+        committed.state().players[0].mana_pool.total(),
+        3,
+        "paying Freerunning must leave three of the five blue mana unspent"
     );
 
     let outcome = committed.resolve();
