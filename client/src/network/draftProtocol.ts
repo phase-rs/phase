@@ -393,6 +393,41 @@ const VALID_DRAFT_TYPES = new Set([
   "draft_bo3_match_complete",
 ]);
 
+const MAX_DRAFT_CARD_INSTANCE_ID_LENGTH = 256;
+
+function requireDraftCardInstanceId(value: unknown, field: string): string {
+  if (
+    typeof value !== "string"
+    || value.length === 0
+    || value.length > MAX_DRAFT_CARD_INSTANCE_ID_LENGTH
+  ) {
+    throw new Error(`Invalid draft-effect pick: ${field} must be a bounded string`);
+  }
+  return value;
+}
+
+function validateDraftEffectPick(raw: Record<string, unknown>): DraftP2PMessage {
+  const effectCardInstanceId = requireDraftCardInstanceId(
+    raw.effectCardInstanceId,
+    "effectCardInstanceId",
+  );
+  if (!Array.isArray(raw.cardInstanceIds) || raw.cardInstanceIds.length !== 2) {
+    throw new Error("Invalid draft-effect pick: cardInstanceIds must contain exactly two cards");
+  }
+  const cardInstanceIds = raw.cardInstanceIds.map((cardId, index) =>
+    requireDraftCardInstanceId(cardId, `cardInstanceIds[${index}]`),
+  );
+  if (cardInstanceIds[0] === cardInstanceIds[1]) {
+    throw new Error("Invalid draft-effect pick: cardInstanceIds must be distinct");
+  }
+  return {
+    ...raw,
+    type: "draft_pick_with_draft_effect",
+    effectCardInstanceId,
+    cardInstanceIds,
+  } as DraftP2PMessage;
+}
+
 function normalizeArrayField<T>(record: Record<string, unknown>, field: string): T[] {
   if (!(field in record)) return [];
   const value = record[field];
@@ -436,6 +471,9 @@ export function validateDraftMessage(raw: unknown): DraftP2PMessage {
   const msg = raw as { type: string };
   if (!VALID_DRAFT_TYPES.has(msg.type)) {
     throw new Error(`Invalid draft message type: ${msg.type}`);
+  }
+  if (msg.type === "draft_pick_with_draft_effect") {
+    return validateDraftEffectPick(raw as Record<string, unknown>);
   }
   const viewMessage = raw as { type: string; view?: unknown; seats?: unknown };
   if (["draft_welcome", "draft_reconnect_ack", "draft_state_update", "draft_pick_ack"].includes(msg.type)) {

@@ -461,24 +461,12 @@ export class P2PDraftHost {
   private async handleGuestMessage(seat: number, msg: DraftP2PMessage): Promise<void> {
     switch (msg.type) {
       case "draft_pick": {
-        if (!this.draftStarted || this.paused) {
-          this.guestSessions.get(seat)?.send({
-            type: "draft_error",
-            reason: this.paused ? "Draft is paused" : "Draft not started",
-          });
-          return;
-        }
+        if (!this.canGuestPick(seat)) return;
         await this.handlePick(seat, msg.cardInstanceId);
         break;
       }
       case "draft_pick_with_draft_effect": {
-        if (!this.draftStarted || this.paused) {
-          this.guestSessions.get(seat)?.send({
-            type: "draft_error",
-            reason: this.paused ? "Draft is paused" : "Draft not started",
-          });
-          return;
-        }
+        if (!this.canGuestPick(seat)) return;
         await this.handlePickWithDraftEffect(
           seat,
           msg.effectCardInstanceId,
@@ -624,11 +612,28 @@ export class P2PDraftHost {
     return this.handleDeckSubmission(0, mainDeck);
   }
 
+  private assertPickAllowed(): void {
+    if (!this.draftStarted) throw new Error("Draft not started");
+    if (this.paused) throw new Error("Draft is paused");
+  }
+
+  private canGuestPick(seat: number): boolean {
+    try {
+      this.assertPickAllowed();
+      return true;
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      this.guestSessions.get(seat)?.send({ type: "draft_error", reason });
+      return false;
+    }
+  }
+
   private async handlePick(
     seat: number,
     cardInstanceId: string,
     resolveBots = true,
   ): Promise<DraftPlayerView> {
+    this.assertPickAllowed();
     return this.applyPick(seat, cardInstanceId, {
       acknowledge: true,
       emit: true,
@@ -642,6 +647,7 @@ export class P2PDraftHost {
     effectCardInstanceId: string,
     cardInstanceIds: string[],
   ): Promise<DraftPlayerView> {
+    this.assertPickAllowed();
     return this.applyPick(
       seat,
       effectCardInstanceId,

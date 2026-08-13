@@ -39,6 +39,25 @@ describe("draftProtocol", () => {
       });
     });
 
+    it.each([
+      { effectCardInstanceId: null, cardInstanceIds: ["card-001", "card-002"] },
+      { effectCardInstanceId: {}, cardInstanceIds: ["card-001", "card-002"] },
+      { effectCardInstanceId: "", cardInstanceIds: ["card-001", "card-002"] },
+      { effectCardInstanceId: "x".repeat(257), cardInstanceIds: ["card-001", "card-002"] },
+      { effectCardInstanceId: "cogwork-1", cardInstanceIds: null },
+      { effectCardInstanceId: "cogwork-1", cardInstanceIds: {} },
+      { effectCardInstanceId: "cogwork-1", cardInstanceIds: ["card-001"] },
+      { effectCardInstanceId: "cogwork-1", cardInstanceIds: ["card-001", "card-002", "card-003"] },
+      { effectCardInstanceId: "cogwork-1", cardInstanceIds: ["card-001", "card-001"] },
+      { effectCardInstanceId: "cogwork-1", cardInstanceIds: [null, "card-002"] },
+      { effectCardInstanceId: "cogwork-1", cardInstanceIds: ["x".repeat(257), "card-002"] },
+    ])("rejects malformed draft-effect pick payloads", (payload) => {
+      expect(() => validateDraftMessage({
+        type: "draft_pick_with_draft_effect",
+        ...payload,
+      })).toThrow("Invalid draft-effect pick");
+    });
+
     it("accepts valid draft_welcome message", () => {
       const msg = validateDraftMessage({
         type: "draft_welcome",
@@ -142,7 +161,15 @@ describe("draftProtocol", () => {
       "draft_bo3_score_update",
       "draft_bo3_match_complete",
     ])("accepts message type '%s'", (msgType) => {
-      const msg = validateDraftMessage({ type: msgType });
+      const msg = validateDraftMessage(
+        msgType === "draft_pick_with_draft_effect"
+          ? {
+              type: msgType,
+              effectCardInstanceId: "cogwork-1",
+              cardInstanceIds: ["card-001", "card-002"],
+            }
+          : { type: msgType },
+      );
       expect(msg.type).toBe(msgType);
     });
   });

@@ -56,4 +56,39 @@ describe("P2P draft-effect picks", () => {
       ["card-1", "card-2"],
     );
   });
+
+  it("rejects host normal and draft-effect picks while paused", async () => {
+    const host = new P2PDraftHost(
+      { id: "host" } as never,
+      () => () => {},
+      { type: "Set", data: { set_pool_json: "{}" } } as never,
+      "Premier",
+      8,
+      "Host",
+      "Swiss",
+      "Competitive",
+    );
+    const privateHost = host as unknown as {
+      draftStarted: boolean;
+      paused: boolean;
+      adapter: {
+        submitPickForSeat: ReturnType<typeof vi.fn>;
+        submitPickWithDraftEffectForSeat: ReturnType<typeof vi.fn>;
+      };
+    };
+    privateHost.draftStarted = true;
+    privateHost.paused = true;
+    privateHost.adapter = {
+      submitPickForSeat: vi.fn(),
+      submitPickWithDraftEffectForSeat: vi.fn(),
+    };
+
+    await expect(host.submitHostPick("card-1")).rejects.toThrow("Draft is paused");
+    await expect(
+      host.submitHostPickWithDraftEffect("cogwork-1", ["card-1", "card-2"]),
+    ).rejects.toThrow("Draft is paused");
+
+    expect(privateHost.adapter.submitPickForSeat).not.toHaveBeenCalled();
+    expect(privateHost.adapter.submitPickWithDraftEffectForSeat).not.toHaveBeenCalled();
+  });
 });
