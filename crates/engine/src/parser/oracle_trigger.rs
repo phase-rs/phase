@@ -303,10 +303,8 @@ fn effect_adds_mana_to_triggering_player(effect_lower: &str) -> bool {
 /// retained for both direct and conditional root modals.
 fn optional_player_from_effect_body(effect_text: &str) -> Option<TargetFilter> {
     let lower = effect_text.to_lowercase();
-    tag::<_, _, OracleError<'_>>("they may ")
-        .parse(lower.trim_start())
-        .ok()
-        .map(|_| TargetFilter::TriggeringPlayer)
+    let parsed = tag::<_, _, OracleError<'_>>("they may ").parse(lower.trim_start());
+    parsed.ok().map(|_| TargetFilter::TriggeringPlayer)
 }
 
 /// CR 113.6 + CR 113.6b: Collect every zone the trigger's
