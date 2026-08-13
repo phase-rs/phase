@@ -8369,6 +8369,12 @@ fn apply_single_replacement(
                         | (ProposedEvent::Scry { .. }, Effect::Scry { .. })
                         | (ProposedEvent::Proliferate { .. }, Effect::Proliferate)
                         | (ProposedEvent::LifeGain { .. }, Effect::GainLife { .. })
+                        // CR 614.1a: these specialized appliers already perform
+                        // their exact, unchained execute body inline. Parking it
+                        // would create an un-dispatchable sibling drain for every
+                        // affected event (issue #5676).
+                        | (ProposedEvent::CoinFlip { .. }, Effect::FlipCoins { .. })
+                        | (ProposedEvent::Damage { .. }, Effect::RemoveAllDamage { .. })
                         // CR 614.1a + CR 111.1: Full token substitution
                         // (Divine Visitation) is performed inline by
                         // `create_token_applier`; stashing the same
