@@ -1,3 +1,4 @@
+use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
@@ -24,6 +25,11 @@ fn issue_5271_overencumbered_etb_gives_every_token_to_enchanted_opponent() {
 
     let mut runner = scenario.build();
     runner.cast(aura).target_player(P1).resolve();
+    assert_eq!(
+        runner.state().objects.get(&aura).unwrap().attached_to,
+        Some(AttachTarget::Player(P1)),
+        "the resolving Aura must attach to its chosen opponent before its ETB resolves"
+    );
     runner.advance_until_stack_empty();
 
     for token_name in ["Clue", "Food", "Junk"] {
