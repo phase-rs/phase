@@ -44522,7 +44522,7 @@ fn put_zone_change_lifts_with_counters_suffix() {
     }
 }
 
-/// CR 701.28c + CR 122.1 — Esper Origins class:
+/// CR 712.14a + CR 701.27 + CR 122.1 — Esper Origins class:
 /// "put it onto the battlefield transformed ... with a finality counter"
 /// must carry both the transformed entry flag and the counter replacement.
 #[test]

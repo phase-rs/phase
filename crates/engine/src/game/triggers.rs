@@ -24785,7 +24785,7 @@ pub mod tests {
 
     #[test]
     fn suppress_triggers_does_not_block_transform_on_reentry() {
-        // CR 603.2g + CR 701.28: SuppressTriggers only gates triggered-ability
+        // CR 603.2g + CR 701.27: SuppressTriggers only gates triggered-ability
         // registration. A permanent returning to the battlefield with
         // `enter_transformed=true` (e.g., Ajani, Nacatl Pariah's flip trigger)
         // must still transform — transform is NOT a triggered ability. Any
@@ -24880,7 +24880,7 @@ pub mod tests {
         );
         assert!(
             obj.transformed,
-            "Ajani must flip to his back face — SuppressTriggers must not block CR 701.28 transform"
+            "Ajani must flip to his back face — SuppressTriggers must not block CR 701.27 transform"
         );
         assert_eq!(
             obj.name, "Ajani, Nacatl Avenger",
