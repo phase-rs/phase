@@ -16451,8 +16451,9 @@ mod stage2_injector_tests {
                 //   partition still 5/7/25. The change constructs no `WaitingFor` of any kind;
                 //   it threads an attachment-legality authority through an existing call.
                 // #4155 adds seven lines above this producer for abandoned-cast
-                // finalization, moving only this coordinate to `:12010`.
-                "game/engine.rs:12010".to_string(),
+                // finalization, while its deferred-resume cleanup removes two;
+                // the net +5 moves this coordinate to `:12008`.
+                "game/engine.rs:12008".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \

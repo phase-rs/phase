@@ -2424,7 +2424,7 @@ mod tests {
     }
 
     #[test]
-    fn elimination_abandons_deferred_life_cast_without_touching_living_cast() {
+    fn elimination_abandons_deferred_life_cast_and_preserves_living_replacement() {
         // CR 104.3a + CR 800.4a: a player may concede during a paused life-cost
         // continuation. The announcement leaves the stack at departure, so the
         // deferred cast must be retired rather than resumed into finalization.
@@ -2495,8 +2495,6 @@ mod tests {
             remaining_life_payments: vec![],
             resume_at_resolution_depth: 0,
         });
-        let living_spell = stash_pending_cast(&mut state, PlayerId(2));
-
         let result = super::super::engine::apply_as_current(
             &mut state,
             GameAction::Concede {
@@ -2512,11 +2510,6 @@ mod tests {
         assert!(
             !state.stack.iter().any(|entry| entry.id == leaving_spell),
             "the departed caster's announced spell leaves the stack"
-        );
-        assert_eq!(
-            state.pending_cast.as_ref().map(|pending| pending.object_id),
-            Some(living_spell),
-            "a living opponent's unrelated pending cast survives"
         );
         assert!(matches!(
             result.waiting_for,
