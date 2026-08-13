@@ -1333,7 +1333,8 @@ pub fn fallback_action(
                 source_id: choice.source_id,
                 partner_id: choice.partner_id,
             }),
-        WaitingFor::MeldAttackTargetChoice { valid_targets, .. } => valid_targets
+        WaitingFor::MeldAttackTargetChoice { valid_targets, .. }
+        | WaitingFor::EntryAttackTargetChoice { valid_targets, .. } => valid_targets
             .first()
             .copied()
             .map(|target| GameAction::ChooseEntryAttackTarget { target }),
