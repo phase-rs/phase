@@ -599,6 +599,7 @@ mod issue_5247_kinetic_ooze_conditional_multi_target;
 mod issue_5252_additional_sacrifice_after_mana_abilities;
 mod issue_5254_declaration_in_stone_clue_owner;
 mod issue_5268_invincible_iron_man;
+mod issue_5271_overencumbered_tokens;
 mod issue_5274_call_the_spirit_dragons;
 mod issue_5279_grave_sifter;
 mod issue_5282_nissa_ultimate_emblem_search;
