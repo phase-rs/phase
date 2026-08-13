@@ -5230,14 +5230,14 @@ pub(crate) fn goading_players_for_creature_gated(
 ///
 /// No `CombatStaticGates` field: this is a PER-OBJECT scan of
 /// `active_static_definitions`, exactly like
-/// `must_attack_player_directives_for_creature` — not a battlefield sweep.
+/// `must_attack_defender_directives_for_creature` — not a battlefield sweep.
 ///
 /// Source attribution for the frontend badge is deliberately NOT extended here
 /// (see `must_attack_sources_gated`): this mode does not carry `source_object`,
 /// so the badge renders bare, which the client already handles.
 ///
 /// The scan below deliberately ignores `sd.affected`, mirroring the adjacent
-/// `must_attack_player_directives_for_creature` sibling. This is NOT the #6296
+/// `must_attack_defender_directives_for_creature` sibling. This is NOT the #6296
 /// (`has_local_must_attack`) case where a remote-scoped carrier forced ITSELF to
 /// attack: that bug needs a PRINTED remote-scoped def, which only generic
 /// `MustAttack` has (Fumiko the Lowblood). `MustAttackAwayFromSource` is
@@ -12916,7 +12916,7 @@ mod tests {
     /// shared fixed player set ({P1, P2}, as the pre-fix code did), attacking P1 and
     /// P2 would each score 1 and tie, wrongly permitting P2. This exercises the real
     /// production seam: `AttackDeclarationConstraints::build` →
-    /// `must_attack_player_directives_for_creature` → the `MustAttackAnyOf` /
+    /// `must_attack_defender_directives_for_creature` → the `MustAttackAnyOf` /
     /// `MustAttackDefender` requirement split → `score_single` / `max_no_payment`.
     #[test]
     fn matching_tie_plus_fixed_forces_the_fixed_defender() {

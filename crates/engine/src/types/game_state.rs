@@ -26406,7 +26406,7 @@ mod tests {
         );
     }
 
-    /// CR 104.4b + CR 611.2c + CR 400.7: a materialized `MustAttackPlayer`
+    /// CR 104.4b + CR 611.2c + CR 400.7: a materialized `MustAttackDefender`
     /// static's `source_object` provenance is a layer-DERIVED characteristic that
     /// `object_content_eq` deliberately omits (like the whole `static_definitions`
     /// vec). Two states differing ONLY in a grafted requirement's directing-source

@@ -1773,13 +1773,13 @@ fn tap_all_p0_lands(runner: &mut GameRunner) {
     }
 }
 
-/// CR 508.1d flagship: two INCOMPATIBLE `MustAttackPlayer` requirements on one
+/// CR 508.1d flagship: two INCOMPATIBLE `MustAttackDefender` requirements on one
 /// creature (it can attack only one player). The maximum attainable requirement
 /// count is 1, so a declaration attacking one required player is legal even
 /// though the other requirement is unmet — this is exactly the incompatible-
 /// requirements bug the CR 508.1d solver fixes.
 ///
-/// Revert guard: the old validator required EVERY `MustAttackPlayer` target
+/// Revert guard: the old validator required EVERY `MustAttackDefender` target
 /// individually, so attacking only P1 was rejected (P2's lure unmet). Reverting
 /// `score >= max_no_payment` flips `attack_one_is_legal` back to an error.
 #[test]
@@ -2263,7 +2263,7 @@ fn legacy_object_incarnation_ref_deserializes_to_sentinel() {
 
 /// CR 508.1d (final sentence): "If a creature can't attack unless a player pays a
 /// cost, that player is not required to pay that cost." A creature whose only way
-/// to satisfy its `MustAttackPlayer` lure is a TAXED attack does not raise the
+/// to satisfy its `MustAttackDefender` lure is a TAXED attack does not raise the
 /// no-payment maximum — so declaring NO attackers is legal (the player is never
 /// forced to pay the tax to satisfy the requirement).
 ///

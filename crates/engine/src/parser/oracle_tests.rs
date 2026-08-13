@@ -1711,6 +1711,7 @@ fn gideon_jura_full_parse() {
     let Effect::ForceAttack {
         target,
         required_defender,
+        scope,
         ..
     } = &*r.abilities[0].effect
     else {
@@ -1723,6 +1724,15 @@ fn gideon_jura_full_parse() {
         required_defender,
         &TargetFilter::SelfRef,
         "CR 506.3: the required defender is Gideon Jura itself, not a player"
+    );
+    // CR 611.2c + CR 115.1: the subject is a live POPULATION, not a chosen
+    // target. `Single` here would both surface a spurious creature target slot
+    // and send `force_attack::resolve` down the per-object graft path, freezing
+    // the affected set at resolution against the card's own ruling.
+    assert_eq!(
+        scope,
+        &EffectScope::All,
+        "the +2's subject is a broadcast population"
     );
     let TargetFilter::Typed(typed) = target else {
         panic!("the affected subject is a typed creature population, got {target:?}");
@@ -1801,7 +1811,7 @@ fn gideon_jura_full_parse() {
     assert_eq!(amount, &PreventionAmount::All, "\"prevent ALL damage\"");
 }
 
-/// CR 608.2c + CR 109.5: the building block behind Gideon Jura's shield fix —
+/// CR 201.5 + CR 109.5: the building block behind Gideon Jura's shield fix —
 /// a source-anaphoric GENDERED pronoun recipient binds to the source with NO
 /// `parent_target_available` gate, because Magic templating uses "him"/"her"
 /// only as the printed-name self-reference. Tested at the building-block level

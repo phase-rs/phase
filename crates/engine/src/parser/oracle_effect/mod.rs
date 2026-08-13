@@ -26210,7 +26210,7 @@ fn clause_ir_mass_population(clause: &ClauseIr) -> Option<TargetFilter> {
 /// onto. Mutational Advantage's official ruling: "The set of permanents
 /// affected by Mutational Advantage is determined at the time Mutational
 /// Advantage resolves." Mirrors `is_mass_coerce_static`'s governing-filter
-/// selection but is not restricted to the MustAttack/MustAttackPlayer
+/// selection but is not restricted to the MustAttack/MustAttackDefender
 /// coercion statics that function targets — any Continuous static grant over
 /// a broadcast population qualifies. Only a single static definition is
 /// accepted: a `GenericEffect` carrying two or more static defs has no single
@@ -26538,7 +26538,7 @@ fn rebind_tracked_aggregate_expr(expr: &mut QuantityExpr) {
 
 /// CR 508.1a + CR 508.1d + CR 608.2c: A mass "attack this turn if able" coercion —
 /// a `GenericEffect` carrying a `MustAttack` (CR 508.1a, attack-if-able) or
-/// `MustAttackPlayer` (CR 508.1d, directed attack) static over a BROADCAST
+/// `MustAttackDefender` (CR 508.1d, directed attack) static over a BROADCAST
 /// population (not `SelfRef` and not an inherited-target reference) — identifies
 /// "those creatures" at resolution. When a following "those creatures" clause
 /// reads that frozen population (Maddening Imp), the coerce is the producer that

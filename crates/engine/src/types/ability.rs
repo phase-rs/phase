@@ -12642,7 +12642,6 @@ pub enum Effect {
     /// Jura's "attack Gideon Jura if able") grafts `RequiredDefender::Permanent`.
     /// `force_attack::resolve` is the single place that classifies it.
     ///
-    /// `serde(alias)`: pre-widening payloads named this field `required_defender`.
     /// `scope` is the single-vs-mass axis, exactly as on [`Effect::Transform`]
     /// and [`Effect::SetTapState`] — parameterized rather than split into a
     /// sibling `ForceAttackAll`. `Single` (the default, and every pre-Gideon-Jura
@@ -12654,9 +12653,9 @@ pub enum Effect {
     /// so no creature slot is built; the companion PLAYER slot still surfaces via
     /// `mass_all_target_filter`.
     ///
-    /// `serde(alias)`: pre-widening payloads named `required_defender`
-    /// `required_player`; `scope` defaults to `Single`, which is what every such
-    /// payload meant.
+    /// `serde`: pre-widening payloads named this field `required_player`, which
+    /// the alias below accepts; `scope` is absent from them and defaults to
+    /// `Single`, which is what every such payload meant.
     ForceAttack {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
@@ -22647,7 +22646,7 @@ pub struct StaticDefinition {
     pub source_controller: Option<crate::types::player::PlayerId>,
     /// CR 508.1d + CR 611.2c: The object that grafted this static onto its
     /// carrier (the ForceAttack/Encore/mass-coerce source for a
-    /// `MustAttackPlayer` requirement). Stamped at materialization from the
+    /// `MustAttackDefender` requirement). Stamped at materialization from the
     /// resolving continuous effect's `source_id`, but ONLY for static modes in
     /// the directing-source attribution class (see
     /// `static_mode_carries_directing_source` in game/layers.rs) — mirrors the

@@ -5149,7 +5149,7 @@ fn affected_objects_from_events(
         // Mirrors the broadcast-static binding in `effect.rs` (`Some(filter)`
         // arm). Broader than the parser-side `is_mass_coerce_static`
         // (oracle_effect/mod.rs), which still gates only the MustAttack/
-        // MustAttackPlayer coercion pair for its own (unrelated)
+        // MustAttackDefender coercion pair for its own (unrelated)
         // ParentTarget-rewrite purpose.
         Effect::GenericEffect {
             static_abilities,

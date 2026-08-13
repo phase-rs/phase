@@ -9143,7 +9143,7 @@ fn flavor_labeled_non_forced_attack_line_is_not_hijacked() {
     assert!(
         super::evasion::parse_forced_attack_defender_static("Insatiable Hunger — ~ gets +1/+1.")
             .is_none(),
-        "a flavor-labeled non-forced-attack line must not become a MustAttackPlayer static",
+        "a flavor-labeled non-forced-attack line must not become a MustAttackDefender static",
     );
 }
 

@@ -6007,7 +6007,7 @@ fn attach_neuter_recipient_resolves_via_subject(ctx: &ParseContext) -> bool {
     }
 }
 
-/// CR 608.2c + CR 109.5: the attach path's whole-phrase form of the shared
+/// CR 201.5 + CR 109.5: the attach path's whole-phrase form of the shared
 /// source-anaphoric gendered pronoun recognizer. Delegates to the single
 /// authority (`oracle_target::parse_source_anaphoric_pronoun`) under
 /// `all_consuming` — an attach recipient is the pronoun and nothing else.
@@ -6211,7 +6211,7 @@ pub(super) fn parse_prevention_amount(rest: &str) -> PreventionAmount {
 ///
 /// Tries, in priority order:
 /// 0. A source-anaphoric gendered pronoun ("him"/"her"/"himself"/"herself") →
-///    `SelfRef`, UNGATED (CR 608.2c + CR 109.5). Magic templating uses a
+///    `SelfRef`, UNGATED (CR 201.5 + CR 109.5). Magic templating uses a
 ///    gendered pronoun only as the printed-name self-reference, so unlike the
 ///    neuter "it" it needs no `parent_target_available` gate. This tier must
 ///    run FIRST: with the gate closed, tier 1 declines and tier 2's
@@ -6243,7 +6243,7 @@ pub(super) fn resolve_prevent_recipient(
     recipient: TextPair<'_>,
     parent_target_available: bool,
 ) -> Option<TargetFilter> {
-    // CR 608.2c + CR 109.5: tier 0 — the ungated printed-name self-reference.
+    // CR 201.5 + CR 109.5: tier 0 — the ungated printed-name self-reference.
     if let Some((filter, _)) =
         crate::parser::oracle_target::parse_source_anaphoric_pronoun_ref(recipient.original)
     {
@@ -14001,7 +14001,7 @@ pub(super) fn must_attack_away_static_definition() -> StaticDefinition {
     use crate::types::statics::StaticMode;
     // DELIBERATE GAP (plan §5.9): keying `mode` on the away-from requirement also
     // excludes this def from `is_mass_coerce_static` (oracle_effect/mod.rs), which
-    // publishes the chain tracked set only for `MustAttack`/`MustAttackPlayer`. A
+    // publishes the chain tracked set only for `MustAttack`/`MustAttackDefender`. A
     // future card printing this compound followed by a "those creatures" anaphor
     // (CR 608.2c) would therefore not publish the set, unlike the plain-`MustAttack`
     // sibling above. Unreachable today and not a regression: neither card-data key

@@ -5,8 +5,8 @@
 //!
 //! These drive the REAL pipeline end-to-end: verbatim Oracle text →
 //! `normalize_self_refs_for_static` → parser
-//! (`parse_forced_attack_defender_static`) → `MustAttackPlayer { Matching }` →
-//! `must_attack_player_directives_for_creature` (the changed runtime seam,
+//! (`parse_forced_attack_defender_static`) → `MustAttackDefender { Matching }` →
+//! `must_attack_defender_directives_for_creature` (the changed runtime seam,
 //! re-evaluated each declare-attackers step) → `attacker_constraints_for_active_player`
 //! (the DeclareAttackers waiting payload authority) AND the `declare_attackers`
 //! legality validator via the `GameAction::DeclareAttackers` route.
@@ -84,7 +84,7 @@ fn declare(runner: &mut GameRunner, galactus: ObjectId, defender: PlayerId) -> R
 /// The changed seam surfaces through the production requirement authority: the
 /// required defender resolves to the most-life opponent (CR 604.1 live class).
 /// REVERT-FAIL: if the `RequiredDefender::Matching` arm of
-/// `must_attack_player_directives_for_creature` returned nothing, `players` would
+/// `must_attack_defender_directives_for_creature` returned nothing, `players` would
 /// be empty and this equality fails.
 #[test]
 fn galactus_requirement_surfaces_most_life_opponent() {

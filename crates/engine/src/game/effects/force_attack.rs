@@ -56,18 +56,39 @@ fn filter_denotes_object(filter: &TargetFilter) -> bool {
     )
 }
 
-/// CR 611.2c: For a BROADCAST subject ("creatures that player controls") return
-/// the affected filter to install INTACT, with its player reference lowered to a
-/// resolution-time snapshot. Returns `None` for a chosen-target subject ("target
-/// creature attacks you this combat if able"), which keeps the pre-existing
-/// per-object `SpecificObject` graft — CR 611.2c's dynamic-population concern
-/// does not arise when the effect names specific objects.
+/// CR 611.2c + CR 115.1: how a force-attack subject must be installed.
 ///
-/// Gideon Jura's official ruling is the reason the broadcast form cannot freeze
-/// its set: the "+2" "doesn't lock in what it applies to … whatever creatures
-/// the targeted opponent controls during the declare attackers step of their
-/// next turn must attack Gideon Jura if able. This includes creatures that come
-/// under that player's control after the ability has resolved."
+/// Three OUTCOMES, deliberately distinct rather than collapsed into an
+/// `Option`. "Chosen target" and "broadcast population that could not be
+/// lowered" both mean "no population filter to install", but they call for
+/// opposite handling: the first is correctly grafted per object, while the
+/// second must install NOTHING. Grafting an unlowerable population per object
+/// would freeze it at resolution — exactly the CR 611.2c violation the Gideon
+/// Jura ruling forbids — and would do so silently.
+enum SubjectLowering {
+    /// CR 115.1: a chosen-target subject ("target creature attacks you this
+    /// combat if able"). Per-object `SpecificObject` grafting is correct;
+    /// CR 611.2c's dynamic-population concern does not arise when the effect
+    /// names specific objects.
+    ChosenTarget,
+    /// CR 611.2c: a broadcast population, lowered and ready to install INTACT so
+    /// the layer pass re-derives its members every declare-attackers step.
+    Population(TargetFilter),
+    /// CR 611.2c: a broadcast population whose player reference could not be
+    /// resolved (no player target to bind, or a filter shape this lowering does
+    /// not understand). Unreachable for every printed card today; if it is ever
+    /// reached, installing nothing is the honest failure — a frozen set would
+    /// look like it worked while quietly disobeying the ruling.
+    Unlowerable,
+}
+
+/// CR 611.2c: Classify a force-attack subject for installation.
+///
+/// Gideon Jura's official ruling is why the broadcast form cannot freeze its
+/// set: the "+2" "doesn't lock in what it applies to … whatever creatures the
+/// targeted opponent controls during the declare attackers step of their next
+/// turn must attack Gideon Jura if able. This includes creatures that come under
+/// that player's control after the ability has resolved."
 ///
 /// Only `ControllerRef::TargetPlayer` / `TargetOpponent` need lowering:
 /// `ControllerRef::You` / `Opponent` are resolved by `layers.rs` against the
@@ -77,15 +98,17 @@ fn lower_dynamic_affected(
     ability: &ResolvedAbility,
     target: &TargetFilter,
     scope: EffectScope,
-) -> Option<TargetFilter> {
+) -> SubjectLowering {
     // CR 115.1: the scope is the authority for which form this is — a `Single`
     // subject is a chosen target no matter what filter shape it happens to
     // carry, so it must never take the population path.
     if scope != EffectScope::All {
-        return None;
+        return SubjectLowering::ChosenTarget;
     }
+    // An `All` scope IS a population by construction, so every failure below is
+    // `Unlowerable`, never `ChosenTarget`.
     let TargetFilter::Typed(typed) = target else {
-        return None;
+        return SubjectLowering::Unlowerable;
     };
     let mut typed = typed.clone();
     if matches!(
@@ -95,13 +118,15 @@ fn lower_dynamic_affected(
         // CR 109.4 + CR 611.2: "that player" is fixed when the ability resolves.
         // `ability.targets` no longer exists when the layer pass re-derives the
         // affected set, so bind the id now.
-        let id = ability.targets.iter().find_map(|t| match t {
+        let Some(id) = ability.targets.iter().find_map(|t| match t {
             TargetRef::Player(pid) => Some(*pid),
             TargetRef::Object(_) => None,
-        })?;
+        }) else {
+            return SubjectLowering::Unlowerable;
+        };
         typed.controller = Some(ControllerRef::SpecificPlayer { id });
     }
-    Some(TargetFilter::Typed(typed))
+    SubjectLowering::Population(TargetFilter::Typed(typed))
 }
 
 /// CR 611.2 + CR 514.2: Lower a target-scoped duration to a resolution-time
@@ -173,8 +198,8 @@ pub fn resolve(
         // `MustAttackAwayFromSource` grants down the same path for the same
         // reason (Kardur, Maximum Carnage); this resolver installs directly, so
         // it makes the same call here.
-        if let Some(affected) = lower_dynamic_affected(ability, target, *scope) {
-            state.add_transient_continuous_effect(
+        match lower_dynamic_affected(ability, target, *scope) {
+            SubjectLowering::Population(affected) => state.add_transient_continuous_effect(
                 ability.source_id,
                 ability.controller,
                 duration.clone(),
@@ -183,28 +208,33 @@ pub fn resolve(
                     mode: StaticMode::MustAttackDefender { defender },
                 }],
                 None,
-            );
-        } else {
-            for obj_id in resolved_object_ids_for_filter(state, ability, target) {
-                if !state.objects.contains_key(&obj_id) {
-                    continue;
-                }
+            ),
+            SubjectLowering::ChosenTarget => {
+                for obj_id in resolved_object_ids_for_filter(state, ability, target) {
+                    if !state.objects.contains_key(&obj_id) {
+                        continue;
+                    }
 
-                state.add_transient_continuous_effect(
-                    ability.source_id,
-                    ability.controller,
-                    duration.clone(),
-                    TargetFilter::SpecificObject { id: obj_id },
-                    vec![ContinuousModification::AddStaticMode {
-                        // CR 611.2: the required defender is snapshotted at resolution.
-                        mode: StaticMode::MustAttackDefender {
-                            defender: defender.clone(),
-                        },
-                    }],
-                    None,
-                );
+                    state.add_transient_continuous_effect(
+                        ability.source_id,
+                        ability.controller,
+                        duration.clone(),
+                        TargetFilter::SpecificObject { id: obj_id },
+                        vec![ContinuousModification::AddStaticMode {
+                            // CR 611.2: the required defender is snapshotted at resolution.
+                            mode: StaticMode::MustAttackDefender {
+                                defender: defender.clone(),
+                            },
+                        }],
+                        None,
+                    );
+                }
+                0
             }
-        }
+            // CR 611.2c: install NOTHING rather than a frozen per-object graft.
+            // See `SubjectLowering::Unlowerable`.
+            SubjectLowering::Unlowerable => 0,
+        };
     }
 
     events.push(GameEvent::EffectResolved {

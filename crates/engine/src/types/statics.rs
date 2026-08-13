@@ -4638,11 +4638,15 @@ mod tests {
         assert!(serde_json::from_str::<RequiredDefender>(r#"{"type":"Bogus"}"#).is_err());
     }
 
-    /// The production serde path: `MustAttackPlayer` carries a `RequiredDefender`,
-    /// and BOTH forms must round-trip through the derived `StaticMode`
-    /// (de)serialization (card-data export + game-state snapshots).
+    /// The production serde path: `MustAttackDefender` carries a
+    /// `RequiredDefender`, and EVERY form must round-trip through the derived
+    /// `StaticMode` (de)serialization (card-data export + game-state snapshots).
+    ///
+    /// `Permanent` is the one with a hand-rolled `Deserialize` on both sides —
+    /// `RequiredDefender`'s custom impl plus `ObjectIncarnationRef`'s
+    /// legacy-integer shim — so a missed arm in either would surface only here.
     #[test]
-    fn must_attack_player_round_trips_through_static_mode() {
+    fn must_attack_defender_round_trips_through_static_mode() {
         for mode in [
             StaticMode::MustAttackDefender {
                 defender: RequiredDefender::Fixed {
@@ -4652,6 +4656,12 @@ mod tests {
             StaticMode::MustAttackDefender {
                 defender: RequiredDefender::Matching {
                     filter: PlayerFilter::Opponent,
+                },
+            },
+            // CR 506.3 + CR 400.7: the permanent defender, pinned by incarnation.
+            StaticMode::MustAttackDefender {
+                defender: RequiredDefender::Permanent {
+                    permanent: ObjectIncarnationRef::of(crate::types::identifiers::ObjectId(7), 3),
                 },
             },
         ] {

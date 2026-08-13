@@ -2503,7 +2503,7 @@ fn parse_attacks_required_defender_nom(input: &str) -> OracleResult<'_, PlayerFi
 /// (Galactus: "an opponent with the most life among your opponents"; CR 102.2 /
 /// CR 102.3 scope "opponent", CR 508.1b covers the active player's choice among
 /// tied legal defenders). Emits
-/// `MustAttackPlayer { RequiredDefender::Matching { filter } }`, re-evaluated each
+/// `MustAttackDefender { RequiredDefender::Matching { filter } }`, re-evaluated each
 /// declare-attackers step by the combat resolver.
 ///
 /// The dispatcher receives the self-ref-normalized line WITHOUT the CR 207.2c /

@@ -153,7 +153,7 @@ pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // the attacker that must be blocked (Provoke). Enforced by direct
             // match in combat.rs declare-blockers validation.
             | StaticMode::MustBlockAttacker { .. }
-            // CR 508.1d: MustAttackPlayer carries the `PlayerId` that must be
+            // CR 508.1d: MustAttackDefender carries the `PlayerId` that must be
             // attacked (Alluring Siren). Enforced by direct match in combat.rs
             // declare-attackers validation.
             | StaticMode::MustAttackDefender { .. }
@@ -2426,15 +2426,6 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         | Effect::PhaseIn { target }
-        // CR 508.1d: single-scope ForceAttack reports its chosen `target`
-        // ("Target creature attacks you this combat if able"); the mass scope
-        // (Gideon Jura's "creatures that player controls") reports a `filter`
-        // below, since CR 115.1 makes that population a non-target.
-        | Effect::ForceAttack {
-            scope: EffectScope::Single,
-            target,
-            ..
-        }
         // CR 701.27a: single-scope Transform reports its `target` like other
         // single-target effects; mass Transform (scope:All) reports a `filter` below.
         | Effect::Transform {
@@ -2463,6 +2454,33 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("duration".into(), format!("{duration:?}")));
             }
         }
+        // CR 508.1d + CR 506.3: ForceAttack reports the SUBJECT under the key its
+        // scope earns — `target` for a chosen creature (CR 115.1), `filter` for a
+        // non-targeting population (Gideon Jura's "creatures that player
+        // controls") — plus the REQUIRED DEFENDER, which is the axis that
+        // distinguishes an attack pointed at a player from one pointed at a
+        // planeswalker. Without the defender in the signature those two collapse
+        // to one entry and the coverage/parse-diff artifact cannot tell a
+        // Gideon-Jura-class card from an Alluring-Siren-class one.
+        //
+        // Modelled on the `ForceBlock` arm above, including its non-default
+        // duration rule.
+        Effect::ForceAttack {
+            target,
+            required_defender,
+            duration,
+            scope,
+        } => {
+            let subject_key = match scope {
+                EffectScope::Single => "target",
+                EffectScope::All => "filter",
+            };
+            d.push((subject_key.into(), fmt_target(target)));
+            d.push(("defender".into(), fmt_target(required_defender)));
+            if *duration != Duration::UntilEndOfTurn {
+                d.push(("duration".into(), format!("{duration:?}")));
+            }
+        }
         // CR 702.50a: EpicCopy's parameters live in its snapshotted ability.
         Effect::EpicCopy { .. } => {}
         Effect::Intensify { .. } => {}
@@ -2483,13 +2501,6 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         // CR 701.27a + CR 115.10a: mass Transform ("Transform all Humans") reports its
         // non-targeting population `filter`, like the other mass effects.
         | Effect::Transform {
-            scope: EffectScope::All,
-            target,
-            ..
-        }
-        // CR 508.1d + CR 115.1: the mass forced-attack population (Gideon Jura's
-        // "creatures that player controls") is a `filter`, not a target.
-        | Effect::ForceAttack {
             scope: EffectScope::All,
             target,
             ..

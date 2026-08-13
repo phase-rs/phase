@@ -341,10 +341,31 @@ fn requirement_lapses_when_gideon_leaves_the_battlefield() {
     let (mut runner, gideon, bears) = setup(1);
     activate_plus_two(&mut runner, gideon);
 
-    // CR 400.7: Gideon leaves; the snapshotted incarnation pin no longer names a
-    // live defender.
+    // CR 704.5i + CR 400.7: Gideon leaves the battlefield the way he actually
+    // would — loyalty hits 0 and the state-based action puts him into his
+    // owner's graveyard. Driving the production SBA rather than poking the zone
+    // directly is what makes this a real departure: the object's incarnation is
+    // bumped by the same pipeline a game would use, so the snapshotted pin in
+    // `RequiredDefender::Permanent` goes stale exactly as it does in play.
+    {
+        let obj = runner
+            .state_mut()
+            .objects
+            .get_mut(&gideon)
+            .expect("Gideon is on the battlefield");
+        // CR 306.5b: keep field and counter map in sync, as the engine does.
+        obj.loyalty = Some(0);
+        obj.counters
+            .insert(engine::types::counter::CounterType::Loyalty, 0);
+    }
     let mut events = Vec::new();
-    engine::game::zones::move_to_zone(runner.state_mut(), gideon, Zone::Graveyard, &mut events);
+    engine::game::sba::check_state_based_actions(runner.state_mut(), &mut events);
+    assert_eq!(
+        runner.state().objects.get(&gideon).map(|obj| obj.zone),
+        Some(Zone::Graveyard),
+        "reach-guard: the SBA actually moved Gideon to the graveyard"
+    );
+
     hand_turn_to_p1(&mut runner);
 
     let valid = get_valid_attacker_ids(runner.state());

@@ -197,7 +197,7 @@ fn encore_activation_creates_attacking_haste_copy_per_opponent() {
     );
 
     // CR 702.141a + CR 508.1d: token must attack the opponent (PlayerId(1)) this
-    // turn — a transient MustAttackPlayer requirement bound to the token.
+    // turn — a transient MustAttackDefender requirement bound to the token.
     let must_attack = state
         .transient_continuous_effects
         .iter()
@@ -241,7 +241,7 @@ fn dt_targets_contain(dt: &crate::types::game_state::DelayedTrigger, id: ObjectI
 
 /// CR 702.141a end-to-end (THREE players — the per-opponent case the dedicated
 /// resolver exists for): activating Encore creates one haste-bearing copy token
-/// PER opponent, each bound via `MustAttackPlayer` to the *distinct* opponent it
+/// PER opponent, each bound via `MustAttackDefender` to the *distinct* opponent it
 /// was created for, all collected into one next-end-step sacrifice — and that
 /// sacrifice, when the end step arrives, actually removes both tokens.
 #[test]
@@ -289,7 +289,7 @@ fn encore_three_player_one_token_per_opponent_then_sacrificed_at_end_step() {
     );
 
     // Each token is a haste-bearing copy bound to a DISTINCT opponent's
-    // `MustAttackPlayer` requirement (the whole reason the dedicated resolver
+    // `MustAttackDefender` requirement (the whole reason the dedicated resolver
     // exists — generic ForceAttack can't bind "that opponent").
     let mut bound_opponents = BTreeSet::new();
     for &token in &tokens {
@@ -315,7 +315,7 @@ fn encore_three_player_one_token_per_opponent_then_sacrificed_at_end_step() {
                     _ => None,
                 })
             })
-            .expect("token must carry a MustAttackPlayer requirement");
+            .expect("token must carry a MustAttackDefender requirement");
         bound_opponents.insert(player);
     }
     let expected: BTreeSet<PlayerId> = [PlayerId(1), PlayerId(2)].into_iter().collect();

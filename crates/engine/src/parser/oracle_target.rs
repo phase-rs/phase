@@ -148,9 +148,16 @@ pub(crate) fn parse_anaphoric_target_ref(
     matches!(filter, TargetFilter::ParentTarget).then_some((filter, rest))
 }
 
-/// CR 608.2c + CR 109.5: Recognize a leading **source-anaphoric gendered
+/// CR 201.5 + CR 109.5: Recognize a leading **source-anaphoric gendered
 /// pronoun** ("him" / "himself" / "her" / "herself") and bind it to
 /// [`TargetFilter::SelfRef`] — the ability's own source object.
+///
+/// CR 201.5 is the governing rule: "Text that refers to the object it's on by
+/// name means just that particular object." Magic's templating substitutes a
+/// gendered pronoun for the printed name on cards with a personified character
+/// (Gideon Jura's "dealt to him" is "dealt to Gideon Jura"), so the pronoun is
+/// that same self-reference rather than a CR 608.2c anaphor to something named
+/// earlier in the instruction — which is why it needs no anaphor gate below.
 ///
 /// Unlike the neuter "it" (which may anaphor an earlier clause's chosen target
 /// and therefore needs the `parent_target_available` gate in

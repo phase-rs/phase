@@ -6287,7 +6287,7 @@ mod tests {
     }
 
     /// Regression (multi-requirement residual): a creature directed by
-    /// `MustAttackPlayer` (CR 508.1b) alongside a goaded creature (CR 701.15b)
+    /// `MustAttackDefender` (CR 508.1b) alongside a goaded creature (CR 701.15b)
     /// also forces a mixed-target declaration. The greedy forced-legal candidate
     /// must steer the directed creature onto its *required* player regardless of
     /// `valid_attack_targets` ordering. A goad-only target pick would land the
@@ -6358,7 +6358,7 @@ mod tests {
         });
         assert!(
             has_legal,
-            "forced assignment must direct the MustAttackPlayer creature to its required player"
+            "forced assignment must direct the MustAttackDefender creature to its required player"
         );
     }
 

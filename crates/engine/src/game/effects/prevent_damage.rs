@@ -201,7 +201,7 @@ fn untargeted_damage_filter(
         // matching is `typed_recipient_valid_card_filter`'s job, so this
         // arm must be checked BEFORE the generic `is_context_ref()` catch-all.
         TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => None,
-        // CR 615 + CR 608.2c: the printed-name self-reference ("prevent all
+        // CR 615 + CR 201.5: the printed-name self-reference ("prevent all
         // damage that would be dealt to HIM this turn" — Gideon Jura, Gideon of
         // the Trials) names the source OBJECT, not a player. `SelfRef` is in
         // `is_context_ref()`, so without this arm the catch-all below would
@@ -239,7 +239,7 @@ fn typed_recipient_valid_card_filter(target: &TargetFilter) -> Option<TargetFilt
         filter @ (TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }) => {
             Some(filter.clone())
         }
-        // CR 615 + CR 608.2c: the printed-name self-reference IS an object
+        // CR 615 + CR 201.5: the printed-name self-reference IS an object
         // recipient — the shield rides on the source permanent (the untargeted
         // branch of `resolve`) and `valid_card: SelfRef` scopes it to damage
         // dealt to that host. Checked before the generic `is_context_ref()`
@@ -1325,7 +1325,7 @@ mod tests {
         assert_eq!(state.players[0].life, 20);
     }
 
-    /// CR 615 + CR 608.2c: a `SelfRef` recipient ("prevent all damage that would
+    /// CR 615 + CR 201.5: a `SelfRef` recipient ("prevent all damage that would
     /// be dealt to HIM this turn" — Gideon Jura, Gideon of the Trials) scopes the
     /// shield to the SOURCE OBJECT.
     ///

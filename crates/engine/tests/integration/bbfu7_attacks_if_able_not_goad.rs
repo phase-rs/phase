@@ -758,7 +758,7 @@ fn bound_creature_reports_no_unimplemented_mechanics() {
 /// REVERT PROBE: delete the unconditional `MustAttackGeneric` push in
 /// `AttackDeclarationConstraints::build` ⇒ `max_no_payment == 0` ⇒ declaring no
 /// attackers becomes legal ⇒ leg 1 fails. (Gating the away-from push on
-/// `attackable_players`, like the `MustAttackPlayer` push, would NOT flip leg 1 —
+/// `attackable_players`, like the `MustAttackDefender` push, would NOT flip leg 1 —
 /// `MustAttackGeneric` still carries it — which is why that is not the probe.)
 #[test]
 fn only_avoided_player_attackable_still_forces_the_attack() {
@@ -816,7 +816,7 @@ fn only_avoided_player_attackable_still_forces_the_attack() {
 /// `CombatRequirement::MustAttack::sources` is the term-specific observable.
 /// `must_attack_sources_gated` unions three contributors: gated
 /// `check_static_ability_sources(MustAttack)`, `StaticMode::Goaded` carriers, and
-/// attackable `MustAttackPlayer` carriers. This fixture has neither of the latter
+/// attackable `MustAttackDefender` carriers. This fixture has neither of the latter
 /// two (asserted below), and `MustAttackAwayFromSource` deliberately contributes
 /// NO source (see `players_to_attack_away_from_gated`), so a non-empty `sources`
 /// can only come from the `MustAttack` graft — via the same gate + check pair the

@@ -1,7 +1,7 @@
 //! CR 508.1d + CR 611.2c: true directing-carrier attribution for grafted
-//! `MustAttackPlayer` combat requirements.
+//! `MustAttackDefender` combat requirements.
 //!
-//! A `MustAttackPlayer` requirement is never an intrinsic printed static — it is
+//! A `MustAttackDefender` requirement is never an intrinsic printed static — it is
 //! always grafted onto its carrier creature by a directing object (an
 //! `Effect::ForceAttack` / `Encore` / mass-coerce source) through an
 //! `AddStaticMode` transient continuous effect. Before this change the combat
@@ -31,7 +31,7 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::statics::{CrewAction, CrewContributionKind, StaticMode};
 
-/// Graft a `MustAttackPlayer { player }` requirement onto `creature` from the
+/// Graft a `MustAttackDefender { player }` requirement onto `creature` from the
 /// directing object `source`, exactly as `Effect::ForceAttack` resolves it. The
 /// stamp reads `effect.source_id` (= `source`), so the materialized static gains
 /// `source_object == Some(source)`.
@@ -68,7 +68,7 @@ fn refresh(runner: &mut GameRunner) {
     evaluate_layers(runner.state_mut());
 }
 
-/// 7.1a — a grafted `MustAttackPlayer` requirement attributes the DIRECTING
+/// 7.1a — a grafted `MustAttackDefender` requirement attributes the DIRECTING
 /// object, not the creature. REVERT-FAIL: without the `source_object` stamp in
 /// `layers.rs` (or the carrier threading in `combat.rs`), the carrier falls back
 /// to the creature, so `sources == [creature]` and both the `contains(source)`
@@ -241,7 +241,7 @@ fn departed_directing_source_id_is_surfaced_without_panic() {
 /// crew math is byte-identical to today (`base + 1`, NOT `base + 2`). REVERT-FAIL:
 /// an UNCONDITIONAL stamp (dropping the `static_mode_carries_directing_source`
 /// gate) splits the two crew grafts and yields `base + 2`. Discriminating
-/// positive: the same two-source pattern with `MustAttackPlayer` (7.1c) DOES
+/// positive: the same two-source pattern with `MustAttackDefender` (7.1c) DOES
 /// split — together they prove the gate splits attribution modes and only those.
 #[test]
 fn source_object_stamp_scoped_to_attribution_modes() {
