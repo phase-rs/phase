@@ -1341,7 +1341,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         Effect, EffectKind, PostReplacementContinuation, ReplacementDefinition, ReplacementMode,
-        ResolvedAbility, TargetRef,
+        ResolvedAbility, TargetFilter, TargetRef,
     };
     use crate::types::actions::GameAction;
     use crate::types::counter::CounterType;
@@ -2429,22 +2429,6 @@ mod tests {
         // continuation. The announcement leaves the stack at departure, so the
         // deferred cast must be retired rather than resumed into finalization.
         let mut state = setup_three_player();
-        let replacement_source = create_object(
-            &mut state,
-            CardId(100),
-            PlayerId(2),
-            "Living replacement controller".to_string(),
-            Zone::Battlefield,
-        );
-        state
-            .objects
-            .get_mut(&replacement_source)
-            .expect("replacement source exists")
-            .replacement_definitions
-            .push(
-                ReplacementDefinition::new(ReplacementEvent::Discard)
-                    .mode(ReplacementMode::Optional { decline: None }),
-            );
         let discarded = create_object(
             &mut state,
             CardId(101),
@@ -2452,6 +2436,16 @@ mod tests {
             "Replacement-prompt discard".to_string(),
             Zone::Hand,
         );
+        state
+            .objects
+            .get_mut(&discarded)
+            .expect("discarded card exists")
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::Discard)
+                    .valid_card(TargetFilter::SelfRef)
+                    .mode(ReplacementMode::Optional { decline: None }),
+            );
         let mut setup_events = Vec::new();
         assert!(matches!(
             crate::game::replacement::replace_event(
