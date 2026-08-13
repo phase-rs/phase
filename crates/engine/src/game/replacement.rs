@@ -2408,6 +2408,38 @@ fn damage_done_applier(
         }
     }
 
+    // CR 615.3 + CR 615.1a: One-shot prevention shield ("the next time [target
+    // creature] would deal damage this turn, prevent that damage" — Awe Strike).
+    // Single opportunity bounded by the "the next time" qualifier (CR 615.3);
+    // the `Prevention { All }`-style body absorbs any magnitude of the single
+    // matching damage event. The one-shot consumption itself is handled by the
+    // generic `consume_on_apply` contract (applier `Prevented`/`Modified` arms)
+    // rather than here. Per-event path throughout — even inside a combat-damage
+    // batch the shield matches at most one event (it is consumed on apply), so
+    // the per-event `DamagePrevented` + `last_effect_count` stamp fires the
+    // rider once with the exact prevented amount.
+    if matches!(shield_kind, Some(ShieldKind::PreventionOneShot)) {
+        if let ProposedEvent::Damage {
+            source_id,
+            target,
+            amount: dmg,
+            is_combat: _,
+            applied: _,
+        } = event
+        {
+            events.push(GameEvent::DamagePrevented {
+                source_id,
+                target: target.clone(),
+                amount: dmg,
+            });
+            // CR 615.5: stamp the prevented amount for the rider's
+            // `EventContextAmount` ("You gain life equal to the damage
+            // prevented this way").
+            state.last_effect_count = Some(dmg as i32);
+            return ApplyResult::Prevented;
+        }
+    }
+
     // No modification and no prevention shield — pass through
     ApplyResult::Modified(event)
 }
@@ -5344,8 +5376,12 @@ fn is_damage_prevention_replacement(
     }
 
     // Check for ShieldKind::Prevention or description-based prevention patterns
-    // CR 615: Prevention shields created by prevent_damage.rs
-    matches!(repl.shield_kind, ShieldKind::Prevention { .. })
+    // CR 615: Prevention shields created by prevent_damage.rs. CR 615.3: the
+    // one-shot `PreventionOneShot` shield (Awe Strike) is likewise a prevention.
+    matches!(
+        repl.shield_kind,
+        ShieldKind::Prevention { .. } | ShieldKind::PreventionOneShot
+    )
     // Legacy: description-based prevention from parsed replacement definitions
     || repl.description.as_ref().is_some_and(|d| {
         let lower = d.to_lowercase();
@@ -8210,6 +8246,16 @@ fn apply_single_replacement(
                 // condition `PostReplacementDamageSourceMatchesFilter` (and/or a
                 // `PostReplacementDamageSource` reflection target) is the per-source
                 // marker; Inkshield/New Way Forward carry neither and keep batching.
+                //
+                // CR 615.3 + CR 615.5 (Awe Strike): the one-shot `PreventionOneShot`
+                // shield stays on the per-event path even inside a combat-damage
+                // batch — it is single-opportunity (consumed on first apply), so the
+                // batch contains at most one matching event from the one captured
+                // source, and the per-event stash + inline drain in
+                // `replace_combat_damage_batch` fires its template rider exactly
+                // once. The batch aggregation path would require the post-batch
+                // rider firing in `combat_damage.rs`, which this shield deliberately
+                // does not use.
                 let batched_combat_all_shield = state.combat_prevention_tally.is_some()
                     && repl_def.runtime_execute.is_some()
                     && !repl_def
@@ -8919,8 +8965,12 @@ fn candidate_materiality(
     // double-then-prevent do not commute ((3-2)*2 = 2 vs (3*2)-2 = 4). A bare
     // prevention shield leaves `execute`/`damage_modification` unset, so without
     // this it fell through to `Disjoint` and the CR 616.1 order choice was
-    // silently skipped.
-    if matches!(repl_def.shield_kind, ShieldKind::Prevention { .. }) {
+    // silently skipped. CR 615.3: the one-shot `PreventionOneShot` shield (Awe
+    // Strike) writes the same `Damage` field and is equally order-material.
+    if matches!(
+        repl_def.shield_kind,
+        ShieldKind::Prevention { .. } | ShieldKind::PreventionOneShot
+    ) {
         return CandidateMateriality::Writes {
             field: EventField::Damage,
             commute: CommuteClass::NonCommuting,

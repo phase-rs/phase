@@ -10123,7 +10123,8 @@ pub(super) fn parse_imperative_family_ast(
     // above, before the first-word verb dispatch. The detector is the prefix
     // combinator inside `parse_oneshot_damage_replacement`; on failure it returns
     // `None` and we fall through.
-    if let Some(effect) = crate::parser::oracle_replacement::parse_oneshot_damage_replacement(lower)
+    if let Some(effect) =
+        crate::parser::oracle_replacement::parse_oneshot_damage_replacement(lower, &*ctx)
     {
         return Some(ImperativeFamilyAst::GainKeyword(effect));
     }

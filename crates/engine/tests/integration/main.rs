@@ -38,6 +38,7 @@ mod aura_graft_enchant_restriction;
 mod aura_on_player;
 mod aurification_gold_counter_defender_cant_attack;
 mod awaken_runtime;
+mod awe_strike_prevention;
 mod azors_gateway_transform_condition;
 mod backup_becomes_target_trigger;
 mod balance_equalization;

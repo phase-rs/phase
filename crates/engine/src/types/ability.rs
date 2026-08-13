@@ -1272,6 +1272,16 @@ pub enum ShieldKind {
         recipient: DamageRedirectTarget,
         amount: PreventionAmount,
     },
+    /// CR 614.1a + CR 615.1a + CR 615.3 + CR 514.2: one-shot prevention shield —
+    /// "the next time [source] would deal damage this turn, prevent that damage"
+    /// (Awe Strike). The single opportunity is bounded by the "the next time"
+    /// qualifier (CR 615.3: prevention effects "last until they're used up or
+    /// their duration has expired"); the shield is consumed via
+    /// `consume_on_apply` when the prevention applies, and expires at cleanup
+    /// (CR 514.2). Distinct from the duration-bound continuous
+    /// `Prevention { All }` (Fog), which stays active for every matching damage
+    /// event in its lifetime.
+    PreventionOneShot,
 }
 
 impl ShieldKind {
@@ -1281,6 +1291,37 @@ impl ShieldKind {
 
     pub fn is_shield(&self) -> bool {
         !self.is_none()
+    }
+}
+
+/// CR 615.1a + CR 609.7a + CR 609.7b: EXACT source-filter shape of the
+/// one-shot target-source prevention ("the next time target creature would
+/// deal damage this turn, prevent that damage" — Awe Strike): an `And` of
+/// exactly two legs — a `ParentTargetSlot { 0 }` capture (the chosen target
+/// creature, CR 609.7a) and a `Typed` leaf whose type list is exactly
+/// `[Creature]` with no zone/color properties (the CR 609.7b recheck).
+///
+/// Single authority shared by the parser-side bare-rider gate
+/// (`oracle_effect::assembly::is_oneshot_target_source_prevent_chain`) and the
+/// resolver-side one-shot discriminator (`prevent_damage::resolve`), so the
+/// two cannot drift. Deliberately strict: a `Typed` leaf carrying extra
+/// constraints (e.g. "target creature spell" — `InZone(Stack)` + Creature, or
+/// a controller clause) does NOT match, so a hypothetical future source-scoped
+/// prevent with a qualified creature leaf keeps its continuous
+/// `Prevention { All }` semantics instead of silently becoming one-shot.
+pub fn is_oneshot_target_source_prevent_shape(source_filter: &TargetFilter) -> bool {
+    match source_filter {
+        TargetFilter::And { filters } if filters.len() == 2 => {
+            matches!(&filters[0], TargetFilter::ParentTargetSlot { index: 0 })
+                && matches!(
+                    &filters[1],
+                    TargetFilter::Typed(tf)
+                        if tf.type_filters.as_slice() == [TypeFilter::Creature]
+                            && tf.properties.is_empty()
+                            && tf.controller.is_none()
+                )
+        }
+        _ => false,
     }
 }
 
@@ -23401,6 +23442,15 @@ impl ReplacementDefinition {
     /// The shield absorbs or prevents damage, and is cleaned up at end of turn.
     pub fn prevention_shield(mut self, amount: PreventionAmount) -> Self {
         self.shield_kind = ShieldKind::Prevention { amount };
+        self
+    }
+
+    /// CR 615.1a + CR 615.3 + CR 514.2: Mark this replacement as a one-shot
+    /// prevention shield ("the next time [source] would deal damage this turn,
+    /// prevent that damage" — Awe Strike). Single opportunity per CR 615.3;
+    /// consumed on use, expires at cleanup per CR 514.2.
+    pub fn prevention_oneshot_shield(mut self) -> Self {
+        self.shield_kind = ShieldKind::PreventionOneShot;
         self
     }
 

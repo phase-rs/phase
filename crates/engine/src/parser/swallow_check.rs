@@ -5253,7 +5253,10 @@ mod tests {
             bronze.replacements.iter().any(|r| {
                 r.event == ReplacementEvent::DamageDone
                     && r.valid_card == Some(TargetFilter::SelfRef)
-                    && matches!(r.shield_kind, ShieldKind::Prevention { .. })
+                    && matches!(
+                        r.shield_kind,
+                        ShieldKind::Prevention { .. } | ShieldKind::PreventionOneShot
+                    )
                     && r.description
                         .as_deref()
                         .is_some_and(|d| d.to_ascii_lowercase().contains(as_long_as))

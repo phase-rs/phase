@@ -3,7 +3,7 @@ use crate::game::quantity::resolve_quantity;
 use crate::types::ability::{
     CombatDamageScope, DamageTargetFilter, DamageTargetPlayerScope, Effect, EffectError,
     EffectKind, FilterProp, PreventionAmount, PreventionScope, ReplacementDefinition,
-    ResolvedAbility, SubAbilityLink, TargetFilter, TargetRef,
+    ResolvedAbility, ShieldKind, SubAbilityLink, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingContinuation, WaitingFor};
@@ -347,6 +347,29 @@ pub fn resolve(
         .prevention_shield(amount)
         .description("Prevent damage".to_string());
 
+    // CR 615.1a + CR 615.3 + CR 614.1a: A one-shot "the next time [target
+    // creature] would deal damage this turn, prevent that damage" shield (Awe
+    // Strike) is recognized by its EXACT source-filter shape — the shared
+    // `is_oneshot_target_source_prevent_shape` predicate (the single authority,
+    // also consumed by the parser-side bare-rider gate in assembly.rs). Only
+    // this shape is one-shot: Dromoka's Command's source-scoped shield
+    // (`Typed(instant|sorcery)` leaf) is a duration-bound continuous
+    // `Prevention { All }` that must keep re-firing, so it does NOT match here.
+    //
+    // NOTE: `target: Any` on the parsed effect is deliberately not consulted on
+    // the `source_scoped_prevent` path below — the target slot is carried by
+    // the `damage_source_filter`'s `And`, and `Any` simply means "no recipient
+    // scope" (CR 115.1: the target slot is hosted by the source-filter `And`).
+    let oneshot_source_shape = effect_source_filter
+        .as_ref()
+        .is_some_and(crate::types::ability::is_oneshot_target_source_prevent_shape);
+    if oneshot_source_shape {
+        // CR 615.3: the single opportunity is bounded by the "the next time"
+        // qualifier — consumed on apply; CR 514.2: expires at cleanup.
+        shield.consume_on_apply = true;
+        shield.shield_kind = ShieldKind::PreventionOneShot;
+    }
+
     // CR 511.2 + CR 615: Apply the parsed prevention window as the shield's
     // expiry. "this combat" -> `RestrictionExpiry::EndOfCombat`, pruned at the
     // EndCombat phase (turns.rs) so a Suppressor Skyguard shield from combat 1
@@ -445,6 +468,23 @@ pub fn resolve(
     // sub is an independent instruction (CR 700.2d — a separate chosen mode of a
     // modal spell, e.g. Dromoka's Command mode 3), NOT a rider; it is resolved
     // on its own by the chain walker and must not become the shield rider.
+    //
+    // CR 615.5: AWE STRIKE — "You gain life equal to the damage prevented this
+    // way" is a bare prevented-this-way rider (no when/whenever/if prelude). It
+    // reaches this resolver as a `ContinuationStep` only for the one-shot
+    // shape: the assembly gate (assembly.rs) forces `ContinuationStep` for the
+    // bare rider only when the chain root's prevention carries the
+    // `And{[ParentTargetSlot, Typed(creature)]}` source filter; for every other
+    // chain root (e.g. Reverse Damage's `ChosenDamageSource` shape) the bare
+    // rider stays a `SequentialSibling` and must NOT install here.
+    //
+    // The rider is installed via the SAME `runtime_execute` slot as every other
+    // prevention rider — the resolution-time `ResolvedAbility` payload. The
+    // applier resolves `EventContextAmount` in the rider against
+    // `last_effect_count` (stamped with the prevented amount at apply time), so
+    // no parse-time template reconstruction is needed; the whole sub-ability is
+    // cloned verbatim, preserving every field the canonical
+    // `build_resolved_from_def` converter round-trips.
     if let Some(sub_ability) = &ability.sub_ability {
         if sub_ability.sub_link == SubAbilityLink::ContinuationStep {
             shield = shield.runtime_execute(sub_ability.as_ref().clone());

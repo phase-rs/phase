@@ -23,6 +23,7 @@ use crate::parser::oracle_ir::effect_chain::{
 };
 use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CastFromZoneDriver,
     CastingPermission, ControllerRef, Effect, PlayerFilter, QuantityExpr, QuantityRef,
@@ -1352,6 +1353,31 @@ fn damage_amount_reads_event_context(effect: &Effect) -> bool {
     reads
 }
 
+/// CR 615.5 + CR 609.7a + CR 609.7b: true when the chain's most recent
+/// `PreventDamage` is the one-shot TARGET-SOURCE shape — a
+/// `damage_source_filter` matching the shared
+/// `crate::types::ability::is_oneshot_target_source_prevent_shape` predicate
+/// (the single authority, also consumed by the resolver discriminator in
+/// `prevent_damage::resolve`). The bare "prevented this way" rider folds into
+/// the shield only for this root; other prevention roots (Reverse Damage's
+/// `ChosenDamageSource`, Comeuppance's color-axis source filter, ...) keep
+/// their bare rider as an independent `SequentialSibling`.
+fn is_oneshot_target_source_prevent_chain(defs: &[AbilityDefinition]) -> bool {
+    defs.iter()
+        .rfind(|d| matches!(&*d.effect, Effect::PreventDamage { .. }))
+        .is_some_and(|d| {
+            matches!(
+                &*d.effect,
+                Effect::PreventDamage {
+                    damage_source_filter: Some(source_filter),
+                    ..
+                } if crate::types::ability::is_oneshot_target_source_prevent_shape(
+                    source_filter
+                )
+            )
+        })
+}
+
 pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     let kind = ir.kind;
     let continuation_kind = ir.continuation_kind.unwrap_or(AbilityKind::Spell);
@@ -2119,13 +2145,35 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // prevention — `any` covers Comeuppance's TWO riders, whose second rider's
         // immediate predecessor is the first rider, not the PreventDamage) so the
         // clause is folded into the prevention rather than dropped as a sibling.
+        //
+        // CR 615.5: AWE STRIKE — "You gain life equal to the damage prevented
+        // this way." is a BARE rider (no when/whenever/if prelude; the "this
+        // way" binds to the preceding prevention sentence). It folds into the
+        // shield ONLY when the chain root's prevention is the one-shot
+        // target-source shape (`And { [ParentTargetSlot, Typed(creature)] }`
+        // damage_source_filter) — that is the Awe Strike class. Reverse Damage's
+        // chain root (`ChosenDamageSource`) must NOT fold: its bare rider stays a
+        // `SequentialSibling` (its "equal to the damage prevented this way"
+        // quantity still resolves via `last_effect_count`).
         let prevented_this_way_gate = if defs
             .iter()
             .any(|d| matches!(&*d.effect, Effect::PreventDamage { .. }))
         {
-            crate::parser::oracle_replacement::prevented_this_way_rider_source_gate(
-                clause_ir.source.fragment().unwrap_or_default(),
-            )
+            let fragment = clause_ir.source.fragment().unwrap_or_default();
+            let gate =
+                crate::parser::oracle_replacement::prevented_this_way_rider_source_gate(fragment);
+            // Bare-rider arm (no when/whenever/if): recognized only for the
+            // one-shot target-source prevention chain root. The gate's explicit
+            // when/whenever/if forms are unchanged and shape-unrestricted.
+            if gate.is_none() && is_oneshot_target_source_prevent_chain(&defs) {
+                nom_primitives::scan_at_word_boundaries(
+                    fragment,
+                    tag::<_, _, OracleError<'_>>("prevented this way"),
+                )
+                .map(|_| None)
+            } else {
+                gate
+            }
         } else {
             None
         };

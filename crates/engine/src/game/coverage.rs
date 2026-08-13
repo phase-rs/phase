@@ -4562,7 +4562,8 @@ fn replacement_details(repl: &ReplacementDefinition) -> Vec<(String, String)> {
         ReplacementMode::Optional { .. } => d.push(("mode".into(), "optional".into())),
         ReplacementMode::MayCost { .. } => d.push(("mode".into(), "may pay cost".into())),
     }
-    // Shield kind, including the prevented amount (ShieldKind::Prevention).
+    // Shield kind, including the prevented amount (ShieldKind::Prevention /
+    // the one-shot ShieldKind::PreventionOneShot).
     if !repl.shield_kind.is_none() {
         d.push(("shield".into(), format!("{:?}", repl.shield_kind)));
     }
