@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 1742
 expression: "&ir"
 ---
 {
@@ -140,6 +141,7 @@ expression: "&ir"
                         },
                         "destination": "Hand",
                         "rest_destination": null,
+                        "rest_order": "preserve",
                         "enter_tapped": false,
                         "reveal_verb": true
                       }

@@ -86,6 +86,7 @@ pub fn resolve(
         up_to: false,
         kept_destination: None,
         rest_destination: None,
+        rest_order: crate::types::ability::DigRestOrder::Preserve,
         source_id: Some(ability.source_id),
         enter_tapped: false,
     };

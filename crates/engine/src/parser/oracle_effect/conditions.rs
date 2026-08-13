@@ -4235,6 +4235,7 @@ pub(crate) fn try_parse_dig_instead_alternative(
         player: prev_player,
         count: prev_count,
         rest_destination: prev_rest,
+        rest_order: prev_rest_order,
         reveal: prev_reveal,
         ..
     } = &*prev.effect
@@ -4312,6 +4313,7 @@ pub(crate) fn try_parse_dig_instead_alternative(
         filter: alt_filter,
         destination: alt_destination,
         rest_destination: alt_rest,
+        rest_order: alt_rest_order,
         enter_tapped: alt_enter_tapped,
         ..
     } = alt_continuation
@@ -4348,6 +4350,7 @@ pub(crate) fn try_parse_dig_instead_alternative(
         up_to: alt_up_to,
         filter: alt_filter,
         rest_destination: alt_rest.or(*prev_rest),
+        rest_order: alt_rest.map_or(*prev_rest_order, |_| alt_rest_order),
         reveal: *prev_reveal,
         enter_tapped: alt_enter_tapped,
         source: DigSource::Library,
