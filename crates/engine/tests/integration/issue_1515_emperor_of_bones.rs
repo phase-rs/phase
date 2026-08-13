@@ -6,7 +6,7 @@ use engine::game::effects::resolve_ability_chain;
 use engine::game::scenario::{GameScenario, P0};
 use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ChosenAttribute,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ChosenAttribute,
     ContinuousModification, ControllerRef, DelayedTriggerCondition, Effect, FilterProp,
     QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility, TargetChoiceTiming,
     TargetFilter, TypedFilter,
@@ -32,6 +32,8 @@ creature onto the battlefield under your control with a finality counter on it. 
 Sacrifice it at the beginning of the next end step.";
 const PUT_COUNTER_ORACLE: &str = "Put a +1/+1 counter on target creature.";
 const YAWGMOTHS_VILE_OFFERING_ORACLE: &str = "Put up to one target creature or planeswalker card from a graveyard onto the battlefield under your control. Destroy up to one target creature or planeswalker. Exile Yawgmoth's Vile Offering.";
+const REANIMATION_RESPONSE_ORACLE: &str =
+    "Return target creature card from a graveyard to the battlefield under your control.";
 
 const ANOINTED_PEACEKEEPER: &str = "Vigilance\n\
 As this creature enters, look at an opponent's hand, then choose any card name.\n\
@@ -345,6 +347,15 @@ fn empty_forward_result_preserves_independent_sequential_siblings() {
         )
         .with_mana_cost(engine::types::mana::ManaCost::zero())
         .id();
+    let response = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Reanimation Response",
+            true,
+            REANIMATION_RESPONSE_ORACLE,
+        )
+        .with_mana_cost(engine::types::mana::ManaCost::zero())
+        .id();
 
     let mut runner = scenario.build();
     let card_id = runner.state().objects[&offering].card_id;
@@ -371,9 +382,7 @@ fn empty_forward_result_preserves_independent_sequential_siblings() {
                     .act(GameAction::ChooseTarget { target })
                     .expect("target choice must be accepted");
             }
-            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
-                runner.pass_both_players();
-            }
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => break,
             _ => break,
         }
     }
@@ -381,11 +390,19 @@ fn empty_forward_result_preserves_independent_sequential_siblings() {
     // CR 608.2b: Make the first selected target illegal between announcement
     // and resolution, so its forward-result move returns no object while the
     // independently targeted Destroy sibling remains legal.
-    engine::game::zones::move_to_zone(
-        runner.state_mut(),
-        graveyard_creature,
+    runner
+        .cast(response)
+        .target_object(graveyard_creature)
+        .commit();
+    runner.pass_both_players();
+    assert_eq!(
+        runner.state().objects[&graveyard_creature].zone,
         Zone::Battlefield,
-        &mut Vec::new(),
+        "the production cast/resolution pipeline must move the reanimation target first"
+    );
+    assert!(
+        !runner.state().stack.is_empty(),
+        "Yawgmoth's Vile Offering must remain on the stack after the response resolves"
     );
     runner.advance_until_stack_empty();
 
@@ -492,6 +509,119 @@ fn empty_forward_result_resolves_independent_sibling_before_dependent_tail() {
         runner.state().delayed_triggers.len(),
         0,
         "the dependent ParentTarget tail must remain a no-op without a moved object"
+    );
+}
+
+#[test]
+fn empty_forward_result_suppresses_dependent_else_and_resumes_later_sibling() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario.add_creature(P0, "Untapped Source", 2, 2).id();
+    let destroy_target = scenario.add_creature(P1, "Reach Guard Target", 2, 2).id();
+
+    let dependent_else = ResolvedAbility::new(
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+            effect: Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Sacrifice {
+                    target: TargetFilter::ParentTarget,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    min_count: 0,
+                },
+            )),
+            uses_tracked_set: false,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    let mut later_sibling = ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 2 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    later_sibling.sub_link = engine::types::ability::SubAbilityLink::SequentialSibling;
+
+    let mut false_condition_sibling = ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    false_condition_sibling.condition = Some(AbilityCondition::SourceIsTapped);
+    false_condition_sibling.sub_link = engine::types::ability::SubAbilityLink::SequentialSibling;
+    false_condition_sibling.else_ability = Some(Box::new(dependent_else));
+    false_condition_sibling.sub_ability = Some(Box::new(later_sibling));
+
+    let mut first_independent_sibling = ResolvedAbility::new(
+        Effect::Destroy {
+            target: TargetFilter::SpecificObject { id: destroy_target },
+            cant_regenerate: false,
+        },
+        vec![engine::types::ability::TargetRef::Object(destroy_target)],
+        source,
+        P0,
+    );
+    first_independent_sibling.sub_link = engine::types::ability::SubAbilityLink::SequentialSibling;
+    first_independent_sibling.sub_ability = Some(Box::new(false_condition_sibling));
+
+    let mut forward_result = ResolvedAbility::new(
+        Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Battlefield,
+            target: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![engine::types::ability::TypeFilter::Creature],
+                controller: None,
+                properties: vec![FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                }],
+            }),
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: Some(ControllerRef::You),
+            enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: true,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        },
+        vec![],
+        source,
+        P0,
+    )
+    .sub_ability(first_independent_sibling);
+    forward_result.target_choice_timing = TargetChoiceTiming::Resolution;
+    forward_result.forward_result = true;
+
+    let mut runner = scenario.build();
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &forward_result, &mut events, 0)
+        .expect("conditional empty forward-result chain must resolve");
+
+    assert_eq!(
+        runner.state().players[usize::from(P0.0)].life,
+        22,
+        "the false sibling must skip its own effect and resume the later independent sibling"
+    );
+    assert_ne!(
+        runner.state().objects[&destroy_target].zone,
+        Zone::Battlefield,
+        "the first independent sibling must resolve and prove the handoff was reached"
+    );
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        0,
+        "the dependent ParentTarget else branch must remain a no-op"
     );
 }
 

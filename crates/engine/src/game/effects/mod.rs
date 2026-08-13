@@ -11216,24 +11216,14 @@ fn resolve_chain_body(
             // original ability source. Walk past dependent sequential siblings
             // and resume at the first independent sibling instead of terminating
             // the entire printed instruction chain.
-            let mut current = Some(sub.as_ref());
-            while let Some(sibling) = current {
-                if sibling.sub_link == SubAbilityLink::SequentialSibling {
-                    if effect_chain_refs_parent_target(&sibling.effect) {
-                        current = sibling.sub_ability.as_deref();
-                        continue;
-                    }
-                    let mut sibling_resolved = sibling.clone();
-                    sibling_resolved.sub_ability = None;
-                    apply_parent_chain_context(
-                        &mut sibling_resolved,
-                        ability,
-                        effect_context_object.as_ref(),
-                        state,
-                    );
-                    resolve_ability_chain(state, &sibling_resolved, events, depth + 1)?;
-                }
-                current = sibling.sub_ability.as_deref();
+            if let Some(mut remaining) = without_missing_forward_result_dependencies(sub) {
+                apply_parent_chain_context(
+                    &mut remaining,
+                    ability,
+                    effect_context_object.as_ref(),
+                    state,
+                );
+                resolve_ability_chain(state, &remaining, events, depth + 1)?;
             }
             return Ok(());
         } else if !forwarded_objects.is_empty() {
@@ -11602,6 +11592,45 @@ fn effect_chain_refs_parent_target(effect: &Effect) -> bool {
             Effect::CreateDelayedTrigger { effect: definition, .. }
                 if ability_definition_chain_refs_parent_target(definition)
         )
+}
+
+/// CR 608.2c: Remove only continuation nodes whose effects require the absent
+/// forward-result object. Preserve independent instructions and both of their
+/// continuation edges; when a dependent node is removed, resume at its next
+/// `SequentialSibling` rather than treating a dependent `ContinuationStep` as
+/// independently executable.
+fn without_missing_forward_result_dependencies(
+    ability: &ResolvedAbility,
+) -> Option<ResolvedAbility> {
+    if effect_chain_refs_parent_target(&ability.effect) {
+        return first_independent_forward_result_sibling(ability.sub_ability.as_deref());
+    }
+
+    let mut remaining = ability.clone();
+    remaining.sub_ability = ability
+        .sub_ability
+        .as_deref()
+        .and_then(without_missing_forward_result_dependencies)
+        .map(Box::new);
+    remaining.else_ability = ability
+        .else_ability
+        .as_deref()
+        .and_then(without_missing_forward_result_dependencies)
+        .map(Box::new);
+    Some(remaining)
+}
+
+fn first_independent_forward_result_sibling(
+    ability: Option<&ResolvedAbility>,
+) -> Option<ResolvedAbility> {
+    let mut current = ability;
+    while let Some(sibling) = current {
+        if sibling.sub_link == SubAbilityLink::SequentialSibling {
+            return without_missing_forward_result_dependencies(sibling);
+        }
+        current = sibling.sub_ability.as_deref();
+    }
+    None
 }
 
 fn effect_depends_on_missing_chosen_player(ability: &ResolvedAbility) -> bool {
