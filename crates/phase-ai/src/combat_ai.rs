@@ -1045,7 +1045,7 @@ pub fn choose_blockers_with_profile(
         // is "is this trade worth it", wrong when the question is "do I survive".
         // They may only decline a block that is not the difference between living
         // and losing (issue #7183).
-        let doomed_block_still_saves = floor_stabilize_route && !attacker_has_trample;
+        let survival_route_is_live = floor_stabilize_route;
 
         // CR 702.7b: If attacker has first strike and blocker doesn't, the blocker
         // dies before dealing damage. Skip blockers that would die to first strike —
@@ -1075,7 +1075,7 @@ pub fn choose_blockers_with_profile(
         // gang-blocking just loses more creatures — unless the block is the
         // player's only route to surviving the turn, where CR 510.1c makes the
         // doomed block a full save anyway.
-        if attacker_has_deathtouch && !doomed_block_still_saves {
+        if attacker_has_deathtouch && !survival_route_is_live {
             continue;
         }
 
@@ -1109,7 +1109,7 @@ pub fn choose_blockers_with_profile(
                 .find(|(bid, _, _)| !gang_set.contains(bid))
                 .copied()
                 .or_else(|| {
-                    if !doomed_block_still_saves {
+                    if !survival_route_is_live {
                         return None;
                     }
                     // Contributes no damage, so it is added with zero power: it pads
@@ -1127,6 +1127,61 @@ pub fn choose_blockers_with_profile(
             gang_value += value;
         }
 
+        // CR 702.19b: how much a gang actually absorbs. A trampling attacker must
+        // assign each blocker its lethal damage before any excess is assigned to the
+        // player, so absorption is the sum of those per-blocker minimums — NOT raw
+        // toughness. `lethal_damage_needed` is the resolver's own authority: it
+        // subtracts damage already marked, and returns 1 under deathtouch (CR
+        // 702.2c), which is why a deathtouch trampler absorbs almost nothing however
+        // large the gang. Summing raw toughness here approved gangs that left lethal
+        // trample damage against already-damaged blockers.
+        let gang_absorption = |set: &[ObjectId]| -> i32 {
+            set.iter()
+                .map(|&bid| {
+                    engine::game::combat_damage::lethal_damage_needed(
+                        state,
+                        bid,
+                        attacker_has_deathtouch,
+                    ) as i32
+                })
+                .sum()
+        };
+        // CR 510.1c + CR 702.19b: only trample can put damage past a legal block, so
+        // a nontrampler is unconditionally survivable once blocked. The `>= 2` floor
+        // mirrors the single-blocker pass's `damage_prevented >= 2`.
+        let averts_lethal = |set: &[ObjectId]| -> bool {
+            if !attacker_has_trample {
+                return true;
+            }
+            let absorbed = gang_absorption(set);
+            absorbed >= 2 && attacker_power.saturating_sub(absorbed) < effective_life
+        };
+
+        // CR 509.1b + CR 510.1c + CR 702.7b + CR 702.19b: the survival gang answers a
+        // different question from the kill gang, so it draws from a different pool.
+        // EVERY legal blocker absorbs, including one the attacker kills in the
+        // first-strike step — trample still has to assign that blocker its lethal
+        // damage before excess reaches the player, and a nontrampler assigns nothing
+        // to the player once blocked whatever becomes of its blockers. Filtering the
+        // first-strike casualties out is right for a kill estimate and wrong here: it
+        // left an 11/11 menace first-strike trampler unblockable by two 4/4s at 4
+        // life, though that block absorbs 4+4 and tramples only 3.
+        //
+        // Grows cheapest-first past the floor until the residual is survivable, so it
+        // spends the fewest creatures that actually save the game.
+        let survival_gang: Option<Vec<ObjectId>> = if floor_stabilize_route {
+            let mut set: Vec<ObjectId> = Vec::new();
+            for &(bid, _, _) in &gang_candidates {
+                if set.len() >= needed_blockers && averts_lethal(&set) {
+                    break;
+                }
+                set.push(bid);
+            }
+            (set.len() >= needed_blockers && averts_lethal(&set)).then_some(set)
+        } else {
+            None
+        };
+
         // CR 509.1b + CR 704.5a: Survival override, restricted to attackers that a
         // minimum-blocker floor routes here. Such an attacker is skipped by BOTH
         // single-blocker chump passes, which are the only places carrying a
@@ -1143,53 +1198,44 @@ pub fn choose_blockers_with_profile(
         // Mirrors the single-blocker pass guard-for-guard: the same
         // `effective_life <= attacker_power * 3` threshold with the CR 903.10a
         // commander-damage tightening, the same `commander_chump_unsafe` rejection
-        // (evaluated against the gang's combined toughness, since trample assigns
-        // lethal damage to every blocker before any tramples through, CR 702.19b),
-        // and the same exclusion of damage-reflection blockers, which hand the
-        // attacker's power straight back to the player and so save nothing.
-        let gang_toughness: i32 = gang_set
-            .iter()
-            .filter_map(|bid| state.objects.get(bid).and_then(|b| b.toughness))
-            .sum();
-        let gang_reflects_damage = gang_set.iter().any(|bid| {
-            state
-                .objects
-                .get(bid)
-                .is_some_and(has_damage_reflection_to_controller)
-        });
-        // CR 702.19b: the trample term the single-blocker pass carries as
-        // `damage_prevented = blocker_toughness`, without which the "guard-for-guard"
-        // parity claimed above is false for tramplers. A trampling attacker assigns
-        // only lethal damage (the blockers' toughness) to the gang and tramples the
-        // excess to the player, so the gang has to absorb enough to actually avert
-        // the kill — a floor-sized gang that leaves a still-lethal residual spends
-        // every creature in it and the player dies anyway. `block_is_futile` catches
-        // this for a lone attacker only: its absorption bound is optimistic and
-        // board-wide, while this gang sees just the blockers earlier passes left.
-        //
-        // Non-tramplers need no such term: once blocked they assign nothing to the
-        // player whatever happens to the blockers (CR 510.1c), which is what makes
-        // the doomed block above a full save.
-        let trample_gang_averts_lethal = !attacker_has_trample
-            || (gang_toughness >= 2
-                && attacker_power.saturating_sub(gang_toughness) < effective_life);
-        let gang_stabilize = floor_stabilize_route
-            && trample_gang_averts_lethal
-            && !gang_reflects_damage
-            && !commander_chump_unsafe(state, player, attacker_id, gang_toughness);
+        // (evaluated against the gang's absorption, since trample assigns lethal
+        // damage to every blocker before any tramples through, CR 702.19b), and the
+        // same exclusion of damage-reflection blockers, which hand the attacker's
+        // power straight back to the player and so save nothing.
+        let reflects_damage = |set: &[ObjectId]| -> bool {
+            set.iter().any(|bid| {
+                state
+                    .objects
+                    .get(bid)
+                    .is_some_and(has_damage_reflection_to_controller)
+            })
+        };
 
         // CR 702.2c: never gang a deathtouch attacker for *value* — every blocker
         // assigned any damage dies, so the kill is paid for with the whole gang.
         // Preserves the pre-existing skip for deathtouch attackers now that the
-        // survival route above no longer short-circuits them out of the pass.
+        // survival route no longer short-circuits them out of the pass.
         let gang_kills_for_value = !attacker_has_deathtouch
             && combined_power >= attacker_toughness
-            && gang_value <= attacker_value;
+            && gang_value <= attacker_value
+            && gang_set.len() >= needed_blockers
+            && !reflects_damage(&gang_set);
 
-        // Only gang-block if combined power can kill AND total value risked <=
-        // attacker value — or if declining loses the game outright. Never below the
-        // CR 509.1b floor, which would make the declaration illegal.
-        if gang_set.len() >= needed_blockers && (gang_kills_for_value || gang_stabilize) {
+        // The survival route already proved its own set legal and lethal-averting;
+        // it only remains to reject the two shapes that save nothing.
+        let stabilizing_gang = survival_gang.filter(|set| {
+            !reflects_damage(set)
+                && !commander_chump_unsafe(state, player, attacker_id, gang_absorption(set))
+        });
+
+        // Gang-block to kill when the trade is worth it, else to survive. Never below
+        // the CR 509.1b floor, which would make the declaration illegal.
+        let declared_gang = if gang_kills_for_value {
+            Some(gang_set)
+        } else {
+            stabilizing_gang
+        };
+        if let Some(gang_set) = declared_gang {
             for bid in gang_set {
                 assignments.push((bid, attacker_id));
                 used_blockers.insert(bid);
@@ -4651,13 +4697,17 @@ mod tests {
         );
     }
 
-    /// CR 702.19b + CR 702.2c: trample is the boundary of the CR 510.1c argument.
-    /// A deathtouch trampler assigns only 1 damage per blocker as "lethal" and
-    /// tramples the remaining 8 through to a player at 6 life, so the gang block
-    /// saves nothing and must not be thrown away. Guards the `!attacker_has_trample`
-    /// term — dropping it makes the AI chump three creatures and still lose.
+    /// CR 702.19b + CR 702.2c: a deathtouch trampler assigns only 1 damage per
+    /// blocker as "lethal", so each blocker absorbs 1 and the rest tramples through.
+    /// With ten 4/4s available against an 11/11 at 6 life the AI must still block —
+    /// six blockers absorb 6 and leave 5, surviving at 1 — and must spend exactly
+    /// the six that achieve it rather than the whole board.
+    ///
+    /// The absorption is what decides, not the trample keyword: an earlier revision
+    /// refused every deathtouch trampler outright, which declines a block that
+    /// saves the game.
     #[test]
-    fn menace_deathtouch_trampler_is_not_chump_ganged_at_lethal() {
+    fn menace_deathtouch_trampler_is_ganged_only_as_far_as_survival_needs() {
         let (state, attacker, _) = lethal_attacker_board_with(
             6,
             10,
@@ -4668,9 +4718,90 @@ mod tests {
 
         let on_attacker = assignments.iter().filter(|&&(_, a)| a == attacker).count();
         assert_eq!(
+            on_attacker, 6,
+            "CR 702.2c: deathtouch makes 1 damage lethal, so N blockers absorb N. \
+             At 6 life facing 11 power the AI needs 6 (residual 5) and must not \
+             spend more. Got {assignments:?}"
+        );
+    }
+
+    /// The other side of that boundary: when absorption cannot get under the life
+    /// total the block is a pure loss and must be declined. Three 4/4s absorb only
+    /// 3 against a deathtouch trampler, leaving 8 against 6 life.
+    ///
+    /// Note `block_is_futile` does not catch this — it bounds absorption by raw
+    /// toughness (12 here) and so believes the board survives. The gang gate's
+    /// `lethal_damage_needed` accounting is what declines it.
+    #[test]
+    fn menace_deathtouch_trampler_is_declined_when_absorption_cannot_save() {
+        let (state, attacker, _) = lethal_attacker_board_with(
+            6,
+            3,
+            vec![Keyword::Menace, Keyword::Deathtouch, Keyword::Trample],
+        );
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        let on_attacker = assignments.iter().filter(|&&(_, a)| a == attacker).count();
+        assert_eq!(
             on_attacker, 0,
-            "a deathtouch trampler tramples past a chump gang (1 lethal per blocker, \
-             CR 702.2c), so the block saves nothing. Got {assignments:?}"
+            "three blockers absorb 3 under deathtouch, leaving 8 against 6 life — \
+             the gang dies and the player still dies. Got {assignments:?}"
+        );
+    }
+
+    /// CR 702.7b + CR 702.19b: a first-striker kills these blockers before their
+    /// damage step, so they are excluded from the *kill* estimate — but trample must
+    /// still assign each of them its lethal damage before any excess reaches the
+    /// player. An 11/11 menace first-strike trampler against two 4/4s at 4 life
+    /// assigns 4+4 and tramples 3, leaving the player alive at 1.
+    ///
+    /// Regression for deriving the survival gang from `effective_candidates`: that
+    /// filter emptied the pool, so this legal, life-saving block could not be formed
+    /// at all.
+    #[test]
+    fn menace_first_strike_trampler_is_gang_blocked_by_doomed_absorbers() {
+        let (state, attacker, _) = lethal_attacker_board_with(
+            4,
+            2,
+            vec![Keyword::Menace, Keyword::FirstStrike, Keyword::Trample],
+        );
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        let on_attacker = assignments.iter().filter(|&&(_, a)| a == attacker).count();
+        assert_eq!(
+            on_attacker, 2,
+            "CR 702.19b: blockers that die in the first-strike step still absorb \
+             their lethal damage — 4+4 of 11 leaves 3 against 4 life. Got \
+             {assignments:?}"
+        );
+    }
+
+    /// CR 702.19b: "take into account damage already marked on the creature" — a
+    /// 4/4 with 3 damage marked needs only 1 more to be lethal, so it absorbs 1, not
+    /// 4. Two of them absorb 2 against an 11/11 menace trampler, leaving 9 against
+    /// 4 life, and the block must be declined.
+    ///
+    /// Summing raw toughness reads this board as absorbing 8 and approves a gang
+    /// that leaves the player dead — the reason absorption goes through the
+    /// resolver's own `lethal_damage_needed` rather than the toughness field.
+    #[test]
+    fn marked_damage_lowers_absorption_below_the_survival_threshold() {
+        let (mut state, attacker, blockers) =
+            lethal_attacker_board_with(4, 2, vec![Keyword::Menace, Keyword::Trample]);
+        for &bid in &blockers {
+            state.objects.get_mut(&bid).unwrap().damage_marked = 3;
+        }
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        let on_attacker = assignments.iter().filter(|&&(_, a)| a == attacker).count();
+        assert_eq!(
+            on_attacker, 0,
+            "CR 702.19b: damage already marked lowers each blocker's lethal minimum \
+             to 1, so the gang absorbs 2 of 11 and the player still dies. Got \
+             {assignments:?}"
         );
     }
 

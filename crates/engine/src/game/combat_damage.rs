@@ -1089,7 +1089,13 @@ fn assign_attacker_damage(
 
 /// How much damage is needed to kill this creature.
 /// CR 702.2c: Deathtouch — any amount of damage from a deathtouch source is lethal.
-fn lethal_damage_needed(
+///
+/// Public because this is the single authority for "how much does this blocker
+/// absorb": CR 702.19b requires a trampling attacker to assign this much to each
+/// blocker before any excess is assigned to the player, so a consumer estimating
+/// trample absorption must read the same number this resolver assigns rather than
+/// re-deriving it from raw toughness and silently ignoring damage already marked.
+pub fn lethal_damage_needed(
     state: &GameState,
     object_id: ObjectId,
     source_has_deathtouch: bool,
