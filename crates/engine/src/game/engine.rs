@@ -6143,7 +6143,14 @@ fn drain_pending_deferred_life_cost_resume(
             }
         }
     })();
-    if result.is_err() && state.pending_deferred_life_cost_resume.is_none() {
+    if result.is_err()
+        && !matches!(
+            &result,
+            Err(EngineError::InvalidAction(message))
+                if message == super::casting_costs::ABANDONED_CAST_FINALIZATION_ERROR
+        )
+        && state.pending_deferred_life_cost_resume.is_none()
+    {
         state.pending_deferred_life_cost_resume = Some(resume_for_restore);
     }
     result
