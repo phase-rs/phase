@@ -2802,6 +2802,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             target,
             enters_under,
             enter_tapped,
+            enters_attacking,
             enter_with_counters,
             face_down_profile,
             library_position,
@@ -2820,6 +2821,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             if !matches!(enter_tapped, EtbTapState::Unspecified) {
                 d.push(("enter_tapped".into(), format!("{enter_tapped:?}")));
+            }
+            if *enters_attacking {
+                d.push(("enters_attacking".into(), "true".into()));
             }
             if !enter_with_counters.is_empty() {
                 d.push((
