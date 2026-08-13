@@ -5266,8 +5266,10 @@ mod tests {
             selectable_cards: top_three.clone(),
             kept_destination: Some(Zone::Library),
             rest_destination: Some(Zone::Library),
+            rest_order: engine::types::ability::DigRestOrder::Preserve,
             source_id: None,
             enter_tapped: false,
+            enters_attacking: false,
         };
 
         // Non-canonical permutation [c, a, b] — not an enumerated candidate.

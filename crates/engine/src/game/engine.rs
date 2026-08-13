@@ -9940,14 +9940,13 @@ fn apply_action(
                     grants,
                 } => (enchant_filter.clone(), grants.clone()),
                 _ => {
-                    let old_target = match chosen {
-                        TargetRef::Object(chosen_id) => {
-                            super::effects::attach::attach_to(state, returned, chosen_id)
-                        }
-                        TargetRef::Player(chosen_player) => {
-                            super::effects::attach::attach_to_player(state, returned, chosen_player)
-                        }
-                    };
+                    // CR 303.4f + CR 701.3b: attach through the entering-Aura
+                    // authority, so the CR 701.3a gate judges the same entrant
+                    // the host list was offered for. Seams that park none get
+                    // the stored object, i.e. their prior behaviour exactly.
+                    let old_target = super::zone_pipeline::attach_chosen_entering_aura_host(
+                        state, returned, &chosen,
+                    );
                     if let Some(old_target) = old_target {
                         events.push(crate::types::events::GameEvent::Unattached {
                             attachment_id: returned,
@@ -16145,9 +16144,27 @@ mod stage2_injector_tests {
                 // out in prose here adds a phantom `in_test` hit per mention. Two such
                 // mentions in an earlier draft of this very note pushed the partition to
                 // 27 and reded the row — the instrument working exactly as intended.
-                "game/effects/mod.rs:6315".to_string(),
-                "game/effects/mod.rs:6392".to_string(),
-                "game/effects/mod.rs:9606".to_string(),
+                //
+                // SECOND merge with main (#7221's typed player-action completion seam and
+                // its contemporaries). Same rule, applied again: `main` re-derived these to
+                // `:6640/:6717/:9922` for ITS tree and the branch carried `:6315/:6392/:9606`
+                // for its own; the merged file measures `:6653/:6730/:9954`, a uniform `+13`
+                // over main's coordinates. That `+13` is exactly this branch's four
+                // additions above all three producers: `pub mod reveal_chosen_numbers;` (1),
+                // the `Effect::RevealChosenNumbers` dispatch arm (3), the
+                // `QuantityRef::PlayerChosenNumber` arm in `candidate_player_scalar` (5),
+                // and its arm in main's new `quantity_ref_counts_population_matching` (4).
+                // It is uniform this time — unlike the first merge — because main's own
+                // churn moved the depth-0 ledger reset and the third producer together, so
+                // the branch's extra offset there is already inside main's baseline rather
+                // than stacked on top of it.
+                //
+                // Measure AFTER the last edit to effects/mod.rs, not during: an earlier
+                // pass here recorded `+9` from a measurement taken before that fourth arm
+                // was added, and the row caught the 4-line discrepancy.
+                "game/effects/mod.rs:6653".to_string(),
+                "game/effects/mod.rs:6730".to_string(),
+                "game/effects/mod.rs:9954".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
@@ -16465,7 +16482,24 @@ mod stage2_injector_tests {
                 //
                 // SET PRESERVATION: unchanged. Upstream adds no line matching the needle to this file and
                 // neither does this branch — total still 37, partition still 5/7/25.
-                "game/engine.rs:12004".to_string(),
+                //
+                // #7303 fix round 3: `:12004 ⇒ :12003`, −1, and ONLY this entry moved.
+                //   Re-derived, not assumed. `git diff -U0` on this file has exactly ONE hunk,
+                //   `@@ -9943,8 +9943,7 @@` inside `apply_action` — the `ReturnAsAuraTarget`
+                //   resume arm's two raw attach calls replaced by one call to the entering-Aura
+                //   attachment authority plus its four-line rationale (`-8 +7`). It sits ABOVE
+                //   this producer, and the whole-file delta is also `-1`, so nothing was
+                //   inserted or removed below it. Predicted `12004-1` equals the observed
+                //   coordinate exactly. IDENTITY re-established rather than assumed: the
+                //   producer at its new coordinate is md5-identical to `a0bca5197:engine.rs`
+                //   at its old one, and so is its ±6-line window (`4f7522fc…`) — the window is
+                //   what discriminates here, since the same one-line mint text appears at
+                //   several coordinates in the crate. The other four entries did not move and
+                //   were re-read in place. SET PRESERVATION: the two asserts above this one ran
+                //   FIRST and both fired GREEN on the run that caught this — total still 37,
+                //   partition still 5/7/25. The change constructs no `WaitingFor` of any kind;
+                //   it threads an attachment-legality authority through an existing call.
+                "game/engine.rs:12003".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \

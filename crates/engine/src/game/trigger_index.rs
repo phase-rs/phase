@@ -967,6 +967,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::RuntimeHandled
         | EffectKind::Learn
         | EffectKind::Forage
+        | EffectKind::CompletePlayerAction
         | EffectKind::Harness
         | EffectKind::CollectEvidence
         | EffectKind::Endure

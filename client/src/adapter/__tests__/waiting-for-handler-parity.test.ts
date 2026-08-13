@@ -30,6 +30,7 @@ describe("WaitingFor handler parity", () => {
   it("registers both interactive meld waiting states", () => {
     expect(HANDLED_WAITING_FOR_TYPES.has("MeldPairChoice")).toBe(true);
     expect(HANDLED_WAITING_FOR_TYPES.has("MeldAttackTargetChoice")).toBe(true);
+    expect(HANDLED_WAITING_FOR_TYPES.has("EntryAttackTargetChoice")).toBe(true);
   });
 
   it("every engine WaitingFor variant has a frontend UI handler", () => {

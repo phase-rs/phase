@@ -80,6 +80,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * of silently corrupting state.
  *
  * Bumps to date:
+ *  20 — Serialized player-action completion provenance and modal continuations.
  *  19 — Added an action_noop acknowledgement for accepted transport no-ops.
  *  18 — DebugCardEntries added a serialized, private resolution frame for
  *       multi-card sandbox battlefield entries that pause for replacement or
@@ -111,7 +112,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 19 as const;
+export const WIRE_PROTOCOL_VERSION = 20 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | { type: "guest_deck"; deckData: unknown; displayName?: string; reservationToken?: string }

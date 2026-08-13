@@ -2518,7 +2518,12 @@ pub(super) fn granted_spell_alternative_cost_for(
         });
         if matches {
             return Some(GrantedSpellAlternativeCost {
-                cost: cost.clone(),
+                // CR 107.3c + CR 118.9: A static's alternative cost can bind X
+                // to the affected spell's mana value (Kentaro). Concretize the
+                // typed placeholder before affordability or payment; the mana
+                // payment layer otherwise treats unresolved placeholders as a
+                // zero mana component.
+                cost: super::keywords::resolve_self_mana_in_ability_cost(state, object_id, cost),
                 timing_permission: *timing_permission,
                 once_per_turn_source: (*frequency == CastFrequency::OncePerTurn)
                     .then_some(source_obj.id),

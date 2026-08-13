@@ -260,6 +260,7 @@ pub fn resolve(
                                     source_id: Some(ability.source_id),
                                     rest_cards: revealed_misses,
                                     rest_destination,
+                                    rest_order: crate::types::ability::DigRestOrder::Preserve,
                                     clear_markers,
                                     publish_tracked_set: None,
                                     emit_reveal_until_resolved: Some(ability.source_id),
@@ -310,6 +311,7 @@ pub fn resolve(
                                     source_id: Some(ability.source_id),
                                     rest_cards: revealed_misses,
                                     rest_destination,
+                                    rest_order: crate::types::ability::DigRestOrder::Preserve,
                                     clear_markers,
                                     publish_tracked_set: None,
                                     emit_reveal_until_resolved: Some(ability.source_id),
@@ -343,6 +345,7 @@ pub fn resolve(
                                     source_id: Some(ability.source_id),
                                     rest_cards: revealed_misses,
                                     rest_destination,
+                                    rest_order: crate::types::ability::DigRestOrder::Preserve,
                                     clear_markers,
                                     publish_tracked_set: None,
                                     emit_reveal_until_resolved: Some(ability.source_id),
@@ -383,6 +386,7 @@ pub fn resolve(
                     source_id: Some(ability.source_id),
                     rest_cards: Vec::new(),
                     rest_destination,
+                    rest_order: crate::types::ability::DigRestOrder::Preserve,
                     clear_markers,
                     publish_tracked_set: None,
                     emit_reveal_until_resolved: Some(ability.source_id),
@@ -517,8 +521,10 @@ fn resolve_choose_any_number(
         selectable_cards: matched,
         kept_destination: Some(kept_destination),
         rest_destination: Some(rest_destination),
+        rest_order: crate::types::ability::DigRestOrder::Preserve,
         source_id: Some(ability.source_id),
         enter_tapped: enter_tapped.is_tapped(),
+        enters_attacking: false,
     };
 
     events.push(GameEvent::EffectResolved {

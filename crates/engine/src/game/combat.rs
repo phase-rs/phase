@@ -486,6 +486,18 @@ pub fn enter_attacking(
     push_attacker_and_journal(state, object_id, defending_player, attack_target);
 }
 
+/// CR 508.4: Seat a creature that entered the battlefield attacking against an
+/// explicitly chosen legal defender. Unlike Ninjutsu and Sneak, this does not
+/// tap the creature: entering attacking alone is not a declaration.
+pub fn enter_attacking_at_target(
+    state: &mut GameState,
+    object_id: ObjectId,
+    defending_player: PlayerId,
+    attack_target: AttackTarget,
+) {
+    push_attacker_and_journal(state, object_id, defending_player, attack_target);
+}
+
 /// CR 508.4 + CR 733: seat `object_id` as an attacking creature against an
 /// already-decided defender and journal the settled pair.
 ///
@@ -646,6 +658,39 @@ pub fn place_attacking_alongside(
     // `enter_attacking` — the caller already chose the defender, so the recorded
     // pair is its argument rather than an ambient derivation.
     push_attacker_and_journal(state, object_id, defending_player, attack_target);
+}
+
+/// CR 508.4a: seat an entering creature against its sole legal defender, or
+/// park the controller's required destination choice when several are legal.
+/// Returns the chooser only when resolution must pause.
+pub fn choose_entry_attack_target_or_enter(
+    state: &mut GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+) -> Option<PlayerId> {
+    let valid_targets = valid_entry_attack_targets(
+        state,
+        controller,
+        &crate::types::ability::EntryAttackDestination::AnyDefender,
+    );
+    match valid_targets.as_slice() {
+        [] => None,
+        [target] => {
+            if let Some(defending_player) = entry_attack_target_defender(state, controller, *target)
+            {
+                enter_attacking_at_target(state, object_id, defending_player, *target);
+            }
+            None
+        }
+        _ => {
+            state.waiting_for = crate::types::game_state::WaitingFor::EntryAttackTargetChoice {
+                player: controller,
+                object_id,
+                valid_targets,
+            };
+            Some(controller)
+        }
+    }
 }
 
 /// CR 509.1g + CR 506.3e + CR 509.1h: Put a permanent onto the battlefield as a

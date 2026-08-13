@@ -10,8 +10,8 @@ use std::collections::BTreeSet;
 
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ChoiceType,
-    ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition, DigSource,
-    Duration, Effect, EffectScope, FilterProp, LibraryPosition, ManaProduction,
+    ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition, DigRestOrder,
+    DigSource, Duration, Effect, EffectScope, FilterProp, LibraryPosition, ManaProduction,
     ManaSpendRestriction, ModalSelectionConstraint, MultiTargetSpec, PileSource, PlayerFilter,
     PlayerScope, PtValue, QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality,
     StaticDefinition, TapStateChange, TargetFilter, TriggerDefinition, TypedFilter, VoterScope,
@@ -3239,8 +3239,10 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
+            rest_order: DigRestOrder::Preserve,
             reveal: false,
             enter_tapped: false,
+            enters_attacking: false,
             source: DigSource::Library,
         },
 
@@ -4902,8 +4904,10 @@ fn convert_look_at_top(
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
+            rest_order: DigRestOrder::Preserve,
             reveal: false,
             enter_tapped: false,
+            enters_attacking: false,
             source: DigSource::Library,
         }),
 
@@ -4922,8 +4926,17 @@ fn convert_look_at_top(
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: Some(Zone::Library),
+                rest_order: if matches!(
+                    dispositions.last(),
+                    Some(L::PutTheRemainingCardsOnTheBottomOfLibraryInARandomOrder)
+                ) {
+                    DigRestOrder::Random
+                } else {
+                    DigRestOrder::Preserve
+                },
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -4941,8 +4954,10 @@ fn convert_look_at_top(
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -4963,8 +4978,17 @@ fn convert_look_at_top(
                 up_to: true,
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: Some(Zone::Library),
+                rest_order: if matches!(
+                    dispositions.last(),
+                    Some(L::PutTheRemainingCardsOnTheBottomOfLibraryInARandomOrder)
+                ) {
+                    DigRestOrder::Random
+                } else {
+                    DigRestOrder::Preserve
+                },
                 reveal: true,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -4981,8 +5005,10 @@ fn convert_look_at_top(
                 up_to: true,
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: Some(Zone::Graveyard),
+                rest_order: DigRestOrder::Preserve,
                 reveal: true,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -5042,8 +5068,10 @@ fn convert_reveal_top_dig(
                 up_to: true,
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: None,
+                rest_order: DigRestOrder::Preserve,
                 reveal: true,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -5057,8 +5085,10 @@ fn convert_reveal_top_dig(
                 up_to: false,
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: None,
+                rest_order: DigRestOrder::Preserve,
                 reveal: true,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -5072,8 +5102,10 @@ fn convert_reveal_top_dig(
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_order: DigRestOrder::Preserve,
                 reveal: true,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -5088,8 +5120,17 @@ fn convert_reveal_top_dig(
                 up_to: true,
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: Some(Zone::Library),
+                rest_order: if matches!(
+                    dispositions.last(),
+                    Some(RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsOnTheBottomOfLibraryInARandomOrder)
+                ) {
+                    DigRestOrder::Random
+                } else {
+                    DigRestOrder::Preserve
+                },
                 reveal: true,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -5104,8 +5145,17 @@ fn convert_reveal_top_dig(
                 up_to: false,
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: Some(Zone::Library),
+                rest_order: if matches!(
+                    dispositions.last(),
+                    Some(RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsOnTheBottomOfLibraryInARandomOrder)
+                ) {
+                    DigRestOrder::Random
+                } else {
+                    DigRestOrder::Preserve
+                },
                 reveal: true,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }

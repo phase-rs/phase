@@ -352,8 +352,10 @@ pub(crate) fn resolve_explore_effect(
             up_to: true,
             kept_destination: Some(crate::types::zones::Zone::Library),
             rest_destination: Some(crate::types::zones::Zone::Graveyard),
+            rest_order: crate::types::ability::DigRestOrder::Preserve,
             source_id: Some(ability.source_id),
             enter_tapped: false,
+            enters_attacking: false,
         };
 
         events.push(GameEvent::EffectResolved {

@@ -137,10 +137,16 @@ export async function buildLegalAiDeckCatalog(
     knownFormat: candidate.knownFormat,
   }));
 
-  const legal = await Promise.all(
-    rawCandidates.map((candidate) => legalCandidate(candidate, options)),
-  );
-  return { candidates: legal.filter((candidate): candidate is AiDeckCandidate => candidate !== null) };
+  // The shared engine worker owns a full card database. Issuing the complete
+  // catalog at once fills its message queue with cloned deck lists before the
+  // worker can service any of them, which can exhaust WebKit's process budget
+  // while the setup page opens. Keep only one compatibility request in flight.
+  const candidates: AiDeckCandidate[] = [];
+  for (const candidate of rawCandidates) {
+    const legalCandidateResult = await legalCandidate(candidate, options);
+    if (legalCandidateResult !== null) candidates.push(legalCandidateResult);
+  }
+  return { candidates };
 }
 
 export function useAiDeckCatalog({

@@ -103,6 +103,7 @@ pub fn resolve(
             ability.duration.as_ref(),
             false,
             crate::types::zones::EtbTapState::Unspecified,
+            false,
             None,
             &[],
             None,
