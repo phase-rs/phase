@@ -529,6 +529,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         sub_ability,
         else_ability,
         optional,
+        optional_player: _, // selects the optional actor; `optional` already records the choice
         optional_for,
         optional_targeting,
         unless_pay,

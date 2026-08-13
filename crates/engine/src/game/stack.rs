@@ -3084,6 +3084,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         context,
         optional_targeting,
         optional,
+        optional_player,
         optional_for,
         multi_target,
         target_constraints,
@@ -3144,6 +3145,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && *context == SpellContext::default()
         && !*optional_targeting
         && !*optional
+        && optional_player.is_none()
         && optional_for.is_none()
         && multi_target.is_none()
         && target_constraints.is_empty()
@@ -3297,6 +3299,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         context,
         optional_targeting,
         optional,
+        optional_player,
         optional_for,
         multi_target,
         target_constraints,
@@ -3352,6 +3355,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         && *context == SpellContext::default()
         && !*optional_targeting
         && !*optional
+        && optional_player.is_none()
         && optional_for.is_none()
         && multi_target.is_none()
         && target_constraints.is_empty()
@@ -3490,6 +3494,7 @@ fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility
         context,
         optional_targeting,
         optional,
+        optional_player,
         optional_for,
         multi_target,
         target_constraints,
@@ -3545,6 +3550,7 @@ fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility
         && *context == SpellContext::default()
         && !*optional_targeting
         && !*optional
+        && optional_player.is_none()
         && optional_for.is_none()
         && multi_target.is_none()
         && target_constraints.is_empty()
@@ -4130,6 +4136,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         context: a_context,
         optional_targeting: a_optional_targeting,
         optional: a_optional,
+        optional_player: a_optional_player,
         optional_for: a_optional_for,
         multi_target: a_multi_target,
         target_constraints: a_target_constraints,
@@ -4186,6 +4193,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         context: b_context,
         optional_targeting: b_optional_targeting,
         optional: b_optional,
+        optional_player: b_optional_player,
         optional_for: b_optional_for,
         multi_target: b_multi_target,
         target_constraints: b_target_constraints,
@@ -4254,6 +4262,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         && a_context == b_context
         && a_optional_targeting == b_optional_targeting
         && a_optional == b_optional
+        && a_optional_player == b_optional_player
         && a_optional_for == b_optional_for
         && a_multi_target == b_multi_target
         && a_target_constraints == b_target_constraints

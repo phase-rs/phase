@@ -291,6 +291,9 @@ pub(crate) struct TriggerModifiers {
     /// CR 603.5: Some triggered abilities' effects are optional (they contain
     /// "may"). They go on the stack regardless; the choice is made on resolution.
     pub(crate) optional: bool,
+    /// CR 608.2d: Event-relative player explicitly named by the root optional
+    /// subject, after any intervening-if wrapper has been removed.
+    pub(crate) optional_player: Option<TargetFilter>,
     /// CR 118.12: "unless [player] pays {cost}" tax modifier.
     pub(crate) unless_pay: Option<UnlessPayModifier>,
     /// Intervening-if condition extracted from effect text.

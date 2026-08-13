@@ -590,6 +590,7 @@ mod issue_4955_greenbelt_rampager;
 mod issue_4956_gift_of_immortality_reattach;
 mod issue_4960_nova_flame;
 mod issue_4962_volo_guide_to_monsters;
+mod issue_4963_charismatic_conqueror;
 mod issue_4966_waterbenders_ascension;
 mod issue_4991_vigorous_farming;
 mod issue_4999_treasure_cruise_delve_tokens;

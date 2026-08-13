@@ -3753,6 +3753,7 @@ fn walk_ability(
         context: _,
         optional_targeting: _,
         optional: _,
+        optional_player,
         optional_for: _,
         target_choice_timing: _,
         description: _,
@@ -3832,6 +3833,9 @@ fn walk_ability(
     if let Some(tc) = target_chooser {
         acc.merge(rw_target_filter(tc));
     }
+    if let Some(player) = optional_player {
+        acc.merge(rw_target_filter(player));
+    }
     if let Some(ru) = repeat_until {
         acc.merge(rw_repeat_continuation(ru));
     }
@@ -3886,6 +3890,7 @@ fn walk_definition(
         ability_tag: _,
         optional_targeting: _,
         optional: _,
+        optional_player,
         optional_for: _,
         target_choice_timing: _,
         distribute: _,
@@ -3950,6 +3955,9 @@ fn walk_definition(
     }
     if let Some(tc) = target_chooser {
         acc.merge(rw_target_filter(tc));
+    }
+    if let Some(player) = optional_player {
+        acc.merge(rw_target_filter(player));
     }
     if let Some(ru) = repeat_until {
         acc.merge(rw_repeat_continuation(ru));

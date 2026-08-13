@@ -242,6 +242,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         context: _,                // SpellContext: cast-time fact snapshot, not a live read
         optional_targeting: _,     // bool
         optional: _,               // bool
+        optional_player,
         optional_for: _,           // OpponentMayScope: AnyOpponent/AnyPlayer, no read
         target_choice_timing: _,   // Stack/Resolution tag
         description: _,            // display string
@@ -320,6 +321,13 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
     if let Some(chooser) = target_chooser {
         acc = acc.or(scan_target_filter(
             chooser,
+            FilterReadContext::SnapshotOrEvent,
+            mode,
+        ));
+    }
+    if let Some(player) = optional_player {
+        acc = acc.or(scan_target_filter(
+            player,
             FilterReadContext::SnapshotOrEvent,
             mode,
         ));
@@ -4353,6 +4361,7 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
         ability_tag: _,
         optional_targeting: _,
         optional: _,
+        optional_player,
         optional_for: _,
         target_choice_timing: _,
         min_x_value: _,
@@ -4409,6 +4418,13 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
     if let Some(chooser) = target_chooser {
         acc = acc.or(scan_target_filter(
             chooser,
+            FilterReadContext::SnapshotOrEvent,
+            mode,
+        ));
+    }
+    if let Some(player) = optional_player {
+        acc = acc.or(scan_target_filter(
+            player,
             FilterReadContext::SnapshotOrEvent,
             mode,
         ));

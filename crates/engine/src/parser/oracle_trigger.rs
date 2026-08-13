@@ -51,12 +51,13 @@ use crate::types::ability::{
     AdditionalCostOrigin, AdditionalCostPaymentSource, AggregateFunction, AttachmentKind,
     AttackersDeclaredCountSubject, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid,
     CoinFlipResult, Comparator, ControllerRef, CountScope, CounterTriggerFilter, DamageKindFilter,
-    DestinationConstraint, DieResultFilter, Effect, FilterProp, ManaAbilityProducedFilter,
-    ObjectScope, OriginConstraint, ParsedCondition, PlayerFilter, PlayerScope, PtStat,
+    DestinationConstraint, DieResultFilter, Effect, EffectScope, FilterProp,
+    ManaAbilityProducedFilter, ObjectScope, OriginConstraint, ParsedCondition, PlayerFilter,
+    PlayerScope, PtStat,
     PtValueScope, QuantityExpr, QuantityRef, RenownSubject, SacrificeAggregateStat, SacrificeCost,
     SacrificeRequirement, SharedQuality, StaticCondition, SubAbilityLink, TapCreaturesRequirement,
-    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessPayModifier, ZoneChangeClause,
+    TapStateChange, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
+    TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
@@ -294,6 +295,18 @@ fn effect_adds_mana_to_triggering_player(effect_lower: &str) -> bool {
     )
     .parse(effect_lower.trim_start())
     .is_ok()
+}
+
+/// CR 608.2d + CR 603.2: A leading "they may" in a normalized trigger body
+/// names the player recorded by that trigger event, rather than the ability's
+/// controller. Call after stripping an intervening-if wrapper so the actor is
+/// retained for both direct and conditional root modals.
+fn optional_player_from_effect_body(effect_text: &str) -> Option<TargetFilter> {
+    let lower = effect_text.to_lowercase();
+    tag::<_, _, OracleError<'_>>("they may ")
+        .parse(lower.trim_start())
+        .ok()
+        .map(|_| TargetFilter::TriggeringPlayer)
 }
 
 /// CR 113.6 + CR 113.6b: Collect every zone the trigger's
@@ -1376,6 +1389,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 (without_if, cond, None)
             }
         };
+    let optional_player = optional_player_from_effect_body(&effect_without_if);
 
     // CR 608.2c (resolution-order instructions): "You may" at the start of
     // the effect text makes the triggered effect optional at resolution.
@@ -1606,6 +1620,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         body,
         modifiers: TriggerModifiers {
             optional,
+            optional_player,
             unless_pay,
             intervening_if: if_condition,
             trigger_subject,
@@ -1805,6 +1820,11 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     // quantities to `PlayerScope::ScopedPlayer` so they resolve against the
     // damaged/attacked player rather than an absent chosen target.
     let mut execute = execute;
+    if let Some(optional_player) = &modifiers.optional_player {
+        if let Some(ability) = execute.as_deref_mut() {
+            ability.optional_player = Some(optional_player.clone());
+        }
+    }
     // CR 603.2c: A `TrackedSetAggregate { source: TriggeringBatch }` reduces the
     // objects of THIS trigger's event, read back through
     // `extract_sources_from_event`. That only yields anything for the events that
@@ -2123,7 +2143,7 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         }
     }
 
-    // CR 608.2k + CR 603.7c: For event-source-bearing trigger modes, the "that
+    // CR 603.2 + CR 603.6 + CR 608.2k: For event-source-bearing trigger modes, the "that
     // card / that creature / that permanent" anaphor in the effect body
     // refers to the *triggering object* carried by the event (the just-
     // discarded card, sacrificed permanent, drawn card, etc.) — not a chosen
@@ -2225,7 +2245,7 @@ fn valid_target_blocks_event_source_lift(
 /// TargetFilter` and whose runtime semantics make sense against the event
 /// object (e.g. `ChangeZone` operating on the just-discarded card). Other
 /// effect variants are left untouched.
-fn lift_parent_target_to_triggering_source(effect: &mut Effect) {
+fn lift_parent_target_to_triggering_source(effect: &mut Effect, allow_set_tap_lift: bool) {
     // CR 608.2k: each variant carries a top-level `target` that, when the
     // surface anaphor was "that <object>", refers to the event object.
     let target = match effect {
@@ -2234,6 +2254,15 @@ fn lift_parent_target_to_triggering_source(effect: &mut Effect) {
         // "create a token that's a copy of that creature" (Necroduality) — the
         // copy source is the entering object, not the trigger's own source.
         Effect::CopyTokenOf { target, .. } => target,
+        // CR 608.2k + CR 701.26a: on a single-object zone-change trigger,
+        // "they may tap that permanent" refers to the entering object. The
+        // caller limits this to the trigger's top-level, untargeted Tap effect;
+        // a reflexive or targeted tap has its own chosen referent instead.
+        Effect::SetTapState {
+            target,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        } if allow_set_tap_lift => target,
         _ => return,
     };
     if matches!(target, TargetFilter::ParentTarget) {
@@ -2260,7 +2289,8 @@ fn first_independent_sibling_after_search(
     None
 }
 
-/// CR 608.2k + CR 603.7c: Recurse `lift_parent_target_to_triggering_source`
+/// CR 603.2 + CR 603.6 + CR 608.2k: Recurse
+/// `lift_parent_target_to_triggering_source`
 /// through an ability's effect AND every chained `sub_ability`. Required
 /// for the punisher-trigger class: a chained Tergrid-shape ability like
 /// "...exile that card, then create a token" carries the "that card"
@@ -2276,6 +2306,7 @@ fn lift_parent_target_to_triggering_source_in_ability(ability: &mut AbilityDefin
     // Necroduality (top-level `CopyTokenOf` with no prior choice) and Tergrid
     // ("put that card …, then create a token") still lift correctly.
     let mut node = Some(ability);
+    let mut is_top_level = true;
     while let Some(link) = node {
         // CR 701.23a: A library search's continuation receives the found cards
         // as its parent targets. In an event-source-bearing trigger, the
@@ -2294,8 +2325,11 @@ fn lift_parent_target_to_triggering_source_in_ability(ability: &mut AbilityDefin
         if introduces_chosen_object_target(link.effect.as_ref()) {
             break;
         }
-        lift_parent_target_to_triggering_source(link.effect.as_mut());
+        let allow_set_tap_lift =
+            is_top_level && link.multi_target.is_none() && !link.optional_targeting;
+        lift_parent_target_to_triggering_source(link.effect.as_mut(), allow_set_tap_lift);
         node = link.sub_ability.as_deref_mut();
+        is_top_level = false;
     }
 }
 
