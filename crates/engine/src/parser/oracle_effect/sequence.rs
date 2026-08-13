@@ -1,6 +1,6 @@
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, tag_no_case, take_until};
+use nom::bytes::complete::{tag, tag_no_case, take_till, take_until};
 use nom::character::complete::multispace1;
 use nom::combinator::{all_consuming, eof, map, opt, rest, value};
 use nom::sequence::{preceded, terminated};
@@ -5876,7 +5876,12 @@ fn parse_dig_destination_tail(input: &str) -> Option<(Option<Zone>, bool, bool)>
     ))
     .parse(input)
     {
-        let (tapped, attacking) = super::parse_battlefield_entry_qualifiers(rest);
+        // Qualifiers belong to the kept-card clause. The continuation may
+        // have a later sentence that describes the rest pile (for example,
+        // "put the rest ... onto the battlefield tapped"), which must not
+        // affect the kept-card entry mode.
+        let (_, qualifier_tail) = take_till(|character| character == '.').parse(rest).ok()?;
+        let (tapped, attacking) = super::parse_battlefield_entry_qualifiers(qualifier_tail);
         return Some((Some(Zone::Battlefield), tapped, attacking));
     }
 
