@@ -505,6 +505,7 @@ fn missing_look_referent_does_not_play_inherited_unrelated_object() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
+            rest_order: engine::types::ability::DigRestOrder::Preserve,
             reveal: false,
             enter_tapped: false,
             source: DigSource::Library,

@@ -1,8 +1,8 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
-    DigSource, Effect, EffectError, EffectKind, ParentTargetMissingReason, ResolvedAbility,
-    TargetFilter,
+    DigRestOrder, DigSource, Effect, EffectError, EffectKind, ParentTargetMissingReason,
+    ResolvedAbility, TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
@@ -23,6 +23,7 @@ pub fn resolve(
         filter,
         kept_dest,
         rest_dest,
+        rest_order,
         is_reveal,
         enter_tapped,
         dig_source,
@@ -36,6 +37,7 @@ pub fn resolve(
             filter,
             destination,
             rest_destination,
+            rest_order,
             reveal,
             enter_tapped,
             source,
@@ -63,6 +65,7 @@ pub fn resolve(
                 filter.clone(),
                 *destination,
                 *rest_destination,
+                *rest_order,
                 *reveal,
                 *enter_tapped,
                 *source,
@@ -76,6 +79,7 @@ pub fn resolve(
             TargetFilter::Any,
             None,
             None,
+            DigRestOrder::Preserve,
             false,
             false,
             DigSource::Library,
@@ -107,6 +111,7 @@ pub fn resolve(
             filter,
             kept_dest,
             rest_dest,
+            rest_order,
             enter_tapped,
         );
     }
@@ -241,6 +246,7 @@ pub fn resolve(
                 &selectable_cards,
                 dest,
                 rest_dest,
+                rest_order,
                 enter_tapped,
                 events,
             );
@@ -263,6 +269,7 @@ pub fn resolve(
         up_to: is_up_to,
         kept_destination: kept_dest,
         rest_destination: rest_dest,
+        rest_order,
         source_id: Some(ability.source_id),
         enter_tapped,
     };
@@ -300,6 +307,7 @@ fn resolve_from_prior_look(
     filter: TargetFilter,
     kept_dest: Option<Zone>,
     rest_dest: Option<Zone>,
+    rest_order: DigRestOrder,
     enter_tapped: bool,
 ) -> Result<(), EffectError> {
     let cards = state.private_look_ids.clone();
@@ -327,6 +335,7 @@ fn resolve_from_prior_look(
                 state,
                 &cards,
                 dest,
+                rest_order,
                 Some(ability.source_id),
                 events,
             ) {
@@ -374,6 +383,7 @@ fn resolve_from_prior_look(
                 state,
                 &cards,
                 dest,
+                rest_order,
                 Some(ability.source_id),
                 events,
             ) {
@@ -417,6 +427,7 @@ fn resolve_from_prior_look(
         up_to: is_up_to,
         kept_destination: kept_dest,
         rest_destination: rest_dest,
+        rest_order,
         source_id: Some(ability.source_id),
         enter_tapped,
     };
@@ -450,6 +461,7 @@ fn resolve_mass_put_all(
     selectable: &[crate::types::identifiers::ObjectId],
     dest: Zone,
     rest_destination: Option<Zone>,
+    rest_order: DigRestOrder,
     enter_tapped: bool,
     events: &mut Vec<GameEvent>,
 ) {
@@ -465,6 +477,7 @@ fn resolve_mass_put_all(
         state,
         &rest,
         rest_destination.unwrap_or(Zone::Library),
+        rest_order,
         Some(ability.source_id),
         events,
     ) {
@@ -550,6 +563,7 @@ mod tests {
     use crate::types::mana::{ManaCost, ManaCostShard};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+    use rand::seq::SliceRandom;
 
     fn make_dig_ability(dig_num: u32) -> ResolvedAbility {
         ResolvedAbility::new(
@@ -564,6 +578,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
                 source: DigSource::Library,
@@ -658,6 +673,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
                 source: DigSource::Library,
@@ -711,6 +727,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
                 source: DigSource::Library,
@@ -764,6 +781,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: Some(Zone::Library),
+                rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
                 source: DigSource::Library,
@@ -834,6 +852,7 @@ mod tests {
             up_to: true,
             kept_destination: None,
             rest_destination: Some(Zone::Library),
+            rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
         };
@@ -915,6 +934,7 @@ mod tests {
             up_to: true,
             kept_destination: None,
             rest_destination: Some(Zone::Library),
+            rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
         };
@@ -975,6 +995,7 @@ mod tests {
             up_to: false,
             kept_destination: Some(Zone::Library),
             rest_destination: Some(Zone::Library),
+            rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
         };
@@ -1046,6 +1067,7 @@ mod tests {
             up_to: false,
             kept_destination: Some(Zone::Library),
             rest_destination: Some(Zone::Library),
+            rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
         };
@@ -1109,6 +1131,7 @@ mod tests {
             up_to: true,
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Graveyard),
+            rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
         };
@@ -1169,6 +1192,7 @@ mod tests {
             up_to: true,
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Graveyard),
+            rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
         };
@@ -1238,6 +1262,7 @@ mod tests {
             up_to: true,
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Library),
+            rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
         };
@@ -1310,6 +1335,7 @@ mod tests {
             up_to: true,
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Library),
+            rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
         };
@@ -1376,6 +1402,7 @@ mod tests {
             up_to: true,
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Library),
+            rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
         };
@@ -1453,6 +1480,7 @@ mod tests {
                 up_to: false,
                 filter,
                 rest_destination: None,
+                rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
                 source: DigSource::Library,
@@ -1529,6 +1557,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Typed(TypedFilter::creature()),
                 rest_destination: Some(Zone::Library),
+                rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
                 source: DigSource::Library,
@@ -1834,6 +1863,7 @@ mod tests {
                 up_to: true,
                 filter: filter.clone(),
                 rest_destination: Some(Zone::Library),
+                rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
                 source: DigSource::Library,
@@ -1890,6 +1920,7 @@ mod tests {
                 up_to: true,
                 filter: filter_you,
                 rest_destination: Some(Zone::Library),
+                rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
                 source: DigSource::Library,
@@ -1957,6 +1988,7 @@ mod tests {
             up_to: true,
             kept_destination: Some(Zone::Battlefield),
             rest_destination: Some(Zone::Library),
+            rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
         };
@@ -2026,6 +2058,7 @@ mod tests {
                 up_to,
                 destination,
                 rest_destination,
+                rest_order,
                 ..
             } => {
                 assert_eq!(
@@ -2040,6 +2073,11 @@ mod tests {
                     Some(Zone::Library),
                     "the in-clause 'and the rest on the bottom' rider must set rest=Library, \
                      not fall through to the graveyard default"
+                );
+                assert_eq!(
+                    *rest_order,
+                    DigRestOrder::Random,
+                    "Muxus's exact random-order rider must reach the mass Dig resolver"
                 );
             }
             other => panic!("expected a Dig effect, got {other:?}"),
@@ -2083,6 +2121,9 @@ mod tests {
 
         let ability =
             ResolvedAbility::new((*def.effect).clone(), vec![], ObjectId(100), PlayerId(0));
+        let mut expected_rest = rest.clone();
+        let mut expected_rng = state.rng.clone();
+        expected_rest.shuffle(&mut expected_rng);
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
@@ -2115,6 +2156,15 @@ mod tests {
                 "non-matching card {id:?} must remain in the library"
             );
         }
+        assert_eq!(
+            library, expected_rest,
+            "Muxus's random-order rest pile must use the seeded shuffle before bottom placement"
+        );
+        assert_eq!(
+            state.rng.get_word_pos(),
+            expected_rng.get_word_pos(),
+            "the deterministic mass path must consume exactly its rest-pile shuffle"
+        );
         let bottom: Vec<_> = library
             .iter()
             .rev()

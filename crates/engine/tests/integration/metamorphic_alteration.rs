@@ -616,6 +616,7 @@ fn non_spell_aura_entry_copies_chosen_creature() {
         selectable_cards: vec![aura],
         kept_destination: Some(Zone::Battlefield),
         rest_destination: Some(Zone::Graveyard),
+        rest_order: engine::types::ability::DigRestOrder::Preserve,
         source_id: None,
         enter_tapped: false,
     };

@@ -64,6 +64,7 @@ fn dig_rest_pile_not_stranded_when_kept_aura_pauses_on_attachment_choice() {
         selectable_cards: vec![kept, rest0, rest1],
         kept_destination: Some(Zone::Battlefield),
         rest_destination: Some(Zone::Graveyard),
+        rest_order: engine::types::ability::DigRestOrder::Preserve,
         source_id: None,
         enter_tapped: false,
     };

@@ -11,11 +11,12 @@ use super::ability::{
     CastTimingPermission, CastVariantPaid, CategoryChooserScope, ChoiceType, ChoiceValue,
     ChooseFromZoneConstraint, ChosenAttribute, CoinFlipResult, Comparator, ContinuousModification,
     ControlWindow, CopiableValues, CopyChooseScope, CopyScale, CopyTargetPurpose,
-    CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind,
-    FaceDownProfile, GameRestriction, KeywordAction, KickerVariant, LibraryPosition, ModalChoice,
-    PermanentEntryMode, PileSource, QuantityExpr, ResolvedAbility, SearchDestinationSplit,
-    SearchSelectionConstraint, StaticCondition, TapCreaturesAggregate, TargetFilter, TargetRef,
-    ThisWayCause, TriggerCondition, TriggerDefinition, TriggerDefinitionRef, TriggerEntry,
+    CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition, DigRestOrder, Duration,
+    EffectKind, FaceDownProfile, GameRestriction, KeywordAction, KickerVariant, LibraryPosition,
+    ModalChoice, PermanentEntryMode, PileSource, QuantityExpr, ResolvedAbility,
+    SearchDestinationSplit, SearchSelectionConstraint, StaticCondition, TapCreaturesAggregate,
+    TargetFilter, TargetRef, ThisWayCause, TriggerCondition, TriggerDefinition,
+    TriggerDefinitionRef, TriggerEntry,
 };
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, PrintedCardRef, TokenImageRef};
@@ -4999,6 +5000,8 @@ pub enum BatchCompletion {
         source_id: Option<ObjectId>,
         rest_cards: Vec<ObjectId>,
         rest_destination: Zone,
+        #[serde(default)]
+        rest_order: DigRestOrder,
         publish_tracked_set: Vec<ObjectId>,
         continuation_targets: Vec<ObjectId>,
     },
@@ -5051,6 +5054,10 @@ pub enum BatchCompletion {
         /// Where the rest pile goes (`Library` => bottom in a reposition, else
         /// the destination zone).
         rest_destination: Zone,
+        /// Dig-only rest piles preserve this policy across a replacement pause.
+        /// Reveal-until uses the serde-default Preserve value.
+        #[serde(default)]
+        rest_order: DigRestOrder,
         /// CR 701.20b: reveal markers to clear once the cards have moved (the
         /// kept card plus the misses).
         clear_markers: Vec<ObjectId>,
@@ -10262,6 +10269,9 @@ pub enum WaitingFor {
         /// Where unchosen cards go (None = Graveyard, Some(Library) = bottom).
         #[serde(default)]
         rest_destination: Option<Zone>,
+        /// CR 400.5 + CR 608.2c: Ordering instruction for a library rest pile.
+        #[serde(default)]
+        rest_order: DigRestOrder,
         /// Source ability's object ID for filter context.
         #[serde(default)]
         source_id: Option<ObjectId>,
@@ -27201,6 +27211,7 @@ mod tests {
             selectable_cards: vec![ObjectId(1)],
             kept_destination: None,
             rest_destination: None,
+            rest_order: crate::types::ability::DigRestOrder::Preserve,
             source_id: None,
             enter_tapped: false,
         }));

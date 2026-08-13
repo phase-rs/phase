@@ -849,6 +849,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         ref selectable_cards,
         kept_destination,
         rest_destination,
+        rest_order,
         source_id,
         enter_tapped,
     } = state.waiting_for
@@ -863,6 +864,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 selectable_cards: selectable_cards.iter().map(|_| ObjectId(0)).collect(),
                 kept_destination,
                 rest_destination,
+                rest_order,
                 source_id,
                 enter_tapped,
             };
