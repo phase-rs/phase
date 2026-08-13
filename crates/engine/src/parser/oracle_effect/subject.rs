@@ -7554,10 +7554,15 @@ mod tests {
         let effect = super::super::parse_effect(
             "Each creature target player controls deals damage equal to its power to another random creature that player controls",
         );
-        assert!(
-            matches!(effect, Effect::Unimplemented { .. }),
-            "Season's Beatings random-recipient rider must fail closed to Unimplemented, got {effect:?}"
-        );
+        const RIDER_KEY: &str = "each_source_unrepresentable_rider";
+        match &effect {
+            Effect::Unimplemented { name, .. } if name.as_str() == RIDER_KEY => {}
+            other => panic!(
+                "Season's Beatings random-recipient rider must fail closed to \
+                 each_source_unrepresentable_rider (random recipient is an unmodeled \
+                 per-source rider, not a degradation to Typed{{Another}}), got {other:?}"
+            ),
+        }
     }
 
     // CR 120.1 + CR 608.2c (DEFERRED §9): Master of the Wild Hunt's source rider
@@ -7569,10 +7574,15 @@ mod tests {
         let effect = super::super::parse_effect(
             "Each Wolf tapped this way deals damage equal to its power to target creature",
         );
-        assert!(
-            matches!(effect, Effect::Unimplemented { .. }),
-            "Master of the Wild Hunt tapped-this-way source rider must fail closed to Unimplemented, got {effect:?}"
-        );
+        const RIDER_KEY: &str = "each_source_unrepresentable_rider";
+        match &effect {
+            Effect::Unimplemented { name, .. } if name.as_str() == RIDER_KEY => {}
+            other => panic!(
+                "Master of the Wild Hunt tapped-this-way source rider must fail closed to \
+                 each_source_unrepresentable_rider (per-source tapped-by-this-ability is \
+                 unmodeled, not a degradation to bare Typed{{Wolf}}), got {other:?}"
+            ),
+        }
     }
 
     // Negative: the targeted own-power team-up shape still routes to

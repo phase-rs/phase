@@ -2084,7 +2084,7 @@ pub(crate) fn resolve_quantity_with_targets_and_recipient(
 /// (`ObjectScope::BatchSource`). Threaded through every composite wrapper so
 /// "twice its power" / "its power plus its toughness" read the same batch
 /// member. Matches the source against its live object, falling back to LKI
-/// (CR 113.7a) at each characteristic read.
+/// (CR 608.2h) at each characteristic read.
 pub(crate) fn resolve_quantity_with_targets_and_damage_source(
     state: &GameState,
     expr: &QuantityExpr,
@@ -5482,7 +5482,7 @@ fn resolve_counters_on_scope(
         }
         ObjectScope::Source
         | ObjectScope::Anaphoric
-        // CR 120.1 + CR 113.7a: the per-iteration batch member's counters are
+        // CR 120.1 + CR 608.2h: the per-iteration batch member's counters are
         // read via its live object, falling back to LKI (mirrors the
         // `Source`/`Anaphoric` live-with-LKI shape; `object_id_for_scope`
         // reads `ctx.damage_source`).
@@ -5989,7 +5989,7 @@ where
         ObjectScope::OtherRevealedCard => 0,
         // MV-only referent; no P/T semantics.
         ObjectScope::OwnedLinkedExileCard => 0,
-        // CR 120.1 + CR 208.3 + CR 113.7a: the per-iteration damage source of an
+        // CR 120.1 + CR 208.3 + CR 608.2h: the per-iteration damage source of an
         // `EachSourceDealsDamage` batch reads its OWN characteristic ("deals
         // damage equal to ITS power"). Guarded live-then-LKI read (a batch
         // member that leaves the battlefield mid-batch still contributes its
@@ -6254,7 +6254,7 @@ fn resolve_object_mana_value(
                 current_mana_value.unwrap_or(0)
             }
         }
-        // CR 120.1 + CR 202.3 + CR 113.7a: the per-iteration damage source of an
+        // CR 120.1 + CR 202.3 + CR 608.2h: the per-iteration damage source of an
         // `EachSourceDealsDamage` batch reads its OWN mana value. Live object
         // first, LKI fallback (mirrors the `EventSource` arm), so a batch member
         // that leaves the battlefield mid-batch still contributes its pre-leave
@@ -15874,7 +15874,7 @@ mod tests {
         );
     }
 
-    /// CR 120.1 + CR 208.3 + CR 113.7a: the `ObjectScope::BatchSource` power
+    /// CR 120.1 + CR 208.3 + CR 608.2h: the `ObjectScope::BatchSource` power
     /// read binding-block — `resolve_quantity_with_targets_and_damage_source`
     /// resolves a `Power { BatchSource }` ref to the SUPPLIED batch member's
     /// own power (live object first, LKI fallback when the member leaves the
@@ -15970,7 +15970,7 @@ mod tests {
         );
     }
 
-    /// CR 120.1 + CR 202.3 + CR 113.7a: `ObjectManaValue { BatchSource }` reads
+    /// CR 120.1 + CR 202.3 + CR 608.2h: `ObjectManaValue { BatchSource }` reads
     /// the batch member's own mana value (live, then LKI).
     #[test]
     fn resolve_batch_source_mana_value_live_and_lki() {

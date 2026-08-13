@@ -2528,7 +2528,7 @@ pub fn resolve_each_source_deals_damage(
     // marked). Each source carries its OWN `DamageContext` (CR 120.1 identity).
     let mut entries: Vec<(ObjectId, DamageContext, TargetRef, u32)> = Vec::new();
     for &source_id in &source_ids {
-        // CR 120.1 + CR 113.7a: each batch member deals its OWN characteristic;
+        // CR 120.1 + CR 608.2h: each batch member deals its OWN characteristic;
         // resolved per source (live object, LKI fallback via the new scope's
         // resolve arms — the same instant semantics as the one-time uniform
         // resolution, but read against each batch member). Zero/sourceless

@@ -30,7 +30,7 @@
 //! CR 120.1: the object that deals damage is the source of that damage.
 //! CR 120.6: lethal damage is total marked damage ≥ toughness (definition).
 //! CR 704.5g: a creature with lethal damage marked on it is destroyed (SBA).
-//! CR 113.7a: LKI fallback for sources that leave the battlefield mid-batch.
+//! CR 608.2h: LKI fallback for sources that leave the battlefield mid-batch.
 //! CR 208.1 + CR 608.2: a creature's power is a modifiable characteristic read at
 //!            resolution.
 
@@ -78,6 +78,7 @@ fn bartz_each_other_bird_deals_own_power_sum_kills_0_9() {
 
     let bartz = scenario
         .add_creature_to_hand_from_oracle(P0, "Bartz and Boko", 4, 3, BARTZ_AND_BOKO)
+        .with_subtypes(vec!["Human", "Bird"])
         .with_mana_cost(ManaCost::zero())
         .id();
 
@@ -133,6 +134,7 @@ fn bartz_no_other_bird_deals_zero_target_survives() {
     // Only Bartz — he is a Human Bird, but "other" excludes him from his own filter.
     let bartz = scenario
         .add_creature_to_hand_from_oracle(P0, "Bartz and Boko", 4, 3, BARTZ_AND_BOKO)
+        .with_subtypes(vec!["Human", "Bird"])
         .with_mana_cost(ManaCost::zero())
         .id();
     let recipient = scenario.add_vanilla(P1, 0, 9);
