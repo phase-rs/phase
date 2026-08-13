@@ -1360,6 +1360,27 @@ mod tests {
     }
 
     #[test]
+    fn authorize_rebinds_draft_effect_pick_seat_to_authenticated_seat() {
+        let action = authorize_client_draft_action(
+            2,
+            DraftAction::PickWithDraftEffect {
+                seat: 0,
+                effect_card_instance_id: "cogwork-1".to_string(),
+                card_instance_ids: vec!["card-1".to_string(), "card-2".to_string()],
+            },
+        )
+        .expect("seat-scoped action is allowed for any seat");
+        assert_eq!(
+            action,
+            DraftAction::PickWithDraftEffect {
+                seat: 2,
+                effect_card_instance_id: "cogwork-1".to_string(),
+                card_instance_ids: vec!["card-1".to_string(), "card-2".to_string()],
+            }
+        );
+    }
+
+    #[test]
     fn authorize_rebinds_submit_deck_seat() {
         let action = authorize_client_draft_action(
             3,
