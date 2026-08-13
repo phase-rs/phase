@@ -2533,13 +2533,19 @@ pub(super) fn parse_subject_application(
             is_optional: false,
         });
     }
-    // CR 303.4b + CR 702.5a + CR 701.17a (issue #5947): "enchanted player"
-    // names the Aura's attached player host — `AttachedTo`, not a Typed
-    // EnchantedBy filter (which is object-only). Used by curse bodies such as
-    // Fraying Sanity's "enchanted player mills X cards".
-    if all_consuming(tag::<_, _, OracleError<'_>>("enchanted player"))
-        .parse(lower.as_str())
-        .is_ok()
+    // CR 303.4b + CR 702.5a + CR 701.17a (issues #5947, #5271): "enchanted
+    // player" / "enchanted opponent" name the Aura's attached player host —
+    // `AttachedTo`, not a Typed EnchantedBy filter (which is object-only).
+    // The opponent qualifier constrains attachment when the Aura enters; its
+    // later anaphoric subject is still the attached player. Used by curse bodies
+    // such as Fraying Sanity's "enchanted player mills X cards" and
+    // Overencumbered's token trigger.
+    if all_consuming(alt((
+        tag::<_, _, OracleError<'_>>("enchanted player"),
+        tag("enchanted opponent"),
+    )))
+    .parse(lower.as_str())
+    .is_ok()
     {
         return subject_filter_application(TargetFilter::AttachedTo, false);
     }
@@ -8357,6 +8363,44 @@ mod tests {
         assert_eq!(name, "Cordyceps Infected");
         assert!(*tapped);
         assert!(*enters_attacking);
+    }
+
+    /// CR 303.4b + CR 111.2 + CR 608.2c: An Aura's "enchanted opponent"
+    /// subject is its attached player, and that same player creates every token
+    /// in a shared-verb sequence rather than only its first item.
+    #[test]
+    fn enchanted_opponent_owns_each_shared_token_sequence_item() {
+        use crate::parser::oracle_effect::parse_effect_clause;
+        use crate::types::ability::Effect;
+
+        let mut ctx = ParseContext::default();
+        let clause = parse_effect_clause(
+            "enchanted opponent creates a Clue token, a Food token, and a Junk token",
+            &mut ctx,
+        );
+
+        let mut names = Vec::new();
+        let mut effect = &clause.effect;
+        let mut next = clause.sub_ability.as_deref();
+        loop {
+            let Effect::Token { name, owner, .. } = effect else {
+                panic!("expected shared token sequence, got {effect:?}");
+            };
+            names.push(name.as_str());
+            assert_eq!(
+                owner,
+                &TargetFilter::AttachedTo,
+                "{name} must be created by the enchanted opponent"
+            );
+
+            let Some(definition) = next else {
+                break;
+            };
+            effect = definition.effect.as_ref();
+            next = definition.sub_ability.as_deref();
+        }
+
+        assert_eq!(names, ["Clue", "Food", "Junk"]);
     }
 
     #[test]

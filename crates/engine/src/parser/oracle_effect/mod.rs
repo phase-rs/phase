@@ -15830,7 +15830,9 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     }
 
     let (stripped, duration) = strip_trailing_duration(text);
-    let mut clause = parse_imperative_effect(stripped, ctx);
+    let stripped_lower = stripped.to_ascii_lowercase();
+    let mut clause = try_parse_create_token_sequence(TextPair::new(stripped, &stripped_lower), ctx)
+        .unwrap_or_else(|| parse_imperative_effect(stripped, ctx));
     // CR 601.2c: paired with the reset at the top of this function. The count is
     // produced by the same parse that produced the target filter
     // (`parse_each_of_target_distribution`), so it is the primary authority for
@@ -21102,6 +21104,7 @@ fn lower_subject_predicate_ast(
                 }
             }
             inject_subject_target(&mut clause.effect, &subject);
+            inject_subject_into_shared_token_sequence(&mut clause, &subject);
             sync_subject_into_nested_shuffle_sub(&mut clause, &subject);
             // CR 109.4 + CR 608.2c (issue #534): When the subject phrase
             // resolved to the chosen player ("That player" after a
@@ -22475,6 +22478,29 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
             }
         }
         _ => {}
+    }
+}
+
+/// CR 111.2 + CR 608.2c: A subject preceding a shared-verb token list applies
+/// to every token creation in that list. `try_parse_create_token_sequence`
+/// lowers each noun phrase as a linked `Effect::Token`, so thread the same
+/// already-bound subject through the contiguous token tail rather than leaving
+/// later tokens at their `Controller` default.
+fn inject_subject_into_shared_token_sequence(
+    clause: &mut ParsedEffectClause,
+    subject: &SubjectPhraseAst,
+) {
+    if !matches!(&clause.effect, Effect::Token { .. }) {
+        return;
+    }
+
+    let mut next = clause.sub_ability.as_deref_mut();
+    while let Some(definition) = next {
+        if !matches!(definition.effect.as_ref(), Effect::Token { .. }) {
+            return;
+        }
+        inject_subject_target(&mut definition.effect, subject);
+        next = definition.sub_ability.as_deref_mut();
     }
 }
 
