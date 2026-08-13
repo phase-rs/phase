@@ -529,6 +529,7 @@ export class WebSocketAdapter implements EngineAdapter {
         return;
       }
 
+      this.seedNativeReconnectSession();
       const setupFrame =
         this.options.nativeAi
           ? this.nativeAiSetupFrame(this.options.nativeAi)
@@ -564,12 +565,7 @@ export class WebSocketAdapter implements EngineAdapter {
     if (!options) {
       throw new AdapterError("WS_ERROR", "Pregame initialization requires a native socket", false);
     }
-    if (options.kind === "reconnect") {
-      this._gameCode = options.gameCode;
-      this._playerId = options.playerId;
-      this.playerToken = options.playerToken;
-      this.fullSessionKey = options.fullKey;
-    }
+    this.seedNativeReconnectSession();
     return new Promise<NativeSessionAttachment>((resolve, reject) => {
       this.pregameResolve = resolve;
       this.pregameReject = reject;
@@ -1118,6 +1114,18 @@ export class WebSocketAdapter implements EngineAdapter {
     };
   }
 
+  /** Seeds persisted native credentials before either initialization path
+   * attaches the socket, so its first reconnect response can be authenticated. */
+  private seedNativeReconnectSession(): void {
+    const options = this.options.nativePregame;
+    if (options?.kind !== "reconnect") return;
+
+    this._gameCode = options.gameCode;
+    this._playerId = options.playerId;
+    this.playerToken = options.playerToken;
+    this.fullSessionKey = options.fullKey;
+  }
+
   private nativeSocketOptions(): NativeSocketAdapterOptions | null {
     return this.options.nativeAi ?? this.options.nativePregame ?? null;
   }
@@ -1324,6 +1332,22 @@ export class WebSocketAdapter implements EngineAdapter {
 
       case "GameStarted": {
         const data = msg.data as { state_revision: number; state: GameState; your_player: PlayerId; opponent_name?: string; player_names?: string[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; end_continuous_effect_offers?: LegalActionsResult["endContinuousEffectOffers"]; mana_payment_shortcut_actions?: GameAction[]; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; viewer_interaction?: LegalActionsResult["viewerInteraction"]; derived?: GameState["derived"]; player_token?: string; full_key?: FullSessionKey; events?: GameEvent[]; rewind_targets?: RewindOption[] };
+        const nativeReconnect = this.options.nativePregame?.kind === "reconnect"
+          ? this.options.nativePregame
+          : null;
+        if (nativeReconnect) {
+          if (data.your_player !== nativeReconnect.playerId) {
+            const error = new AdapterError(
+              "WS_ERROR",
+              `Native reconnect attached player ${data.your_player}, expected ${nativeReconnect.playerId}`,
+              false,
+            );
+            this.rejectInitialization(error);
+            this.emit({ type: "error", message: error.message });
+            break;
+          }
+          if (!this.acceptFullSessionKey(data.full_key)) break;
+        }
         if (this.reconnectInFlight) {
           this.reconnectInFlight = false;
           this.reconnectAttempt = 0;
@@ -1348,23 +1372,12 @@ export class WebSocketAdapter implements EngineAdapter {
           },
         );
         this._playerId = data.your_player;
-        if (this.options.nativePregame?.kind === "reconnect") {
-          const expected = this.options.nativePregame;
-          if (data.your_player !== expected.playerId) {
-            const error = new AdapterError(
-              "WS_ERROR",
-              `Native reconnect attached player ${data.your_player}, expected ${expected.playerId}`,
-              false,
-            );
-            this.rejectInitialization(error);
-            this.emit({ type: "error", message: error.message });
-            break;
-          }
+        if (nativeReconnect) {
           const attachment: NativeSessionAttachment = {
-            gameCode: expected.gameCode,
-            playerId: expected.playerId,
-            playerToken: expected.playerToken,
-            fullKey: expected.fullKey,
+            gameCode: nativeReconnect.gameCode,
+            playerId: nativeReconnect.playerId,
+            playerToken: nativeReconnect.playerToken,
+            fullKey: nativeReconnect.fullKey,
           };
           this.emit({ type: "sessionChanged", session: this.currentSession() });
           this.emit({ type: "sessionAttached", attachment });
@@ -1378,7 +1391,7 @@ export class WebSocketAdapter implements EngineAdapter {
         if (!this._gameCode && this.joinGameCode) {
           this._gameCode = this.joinGameCode;
         }
-        if (data.full_key && !this.acceptFullSessionKey(data.full_key)) break;
+        if (!nativeReconnect && data.full_key && !this.acceptFullSessionKey(data.full_key)) break;
         if (data.player_token) {
           this.playerToken = data.player_token;
           this.emit({ type: "sessionChanged", session: this.currentSession() });

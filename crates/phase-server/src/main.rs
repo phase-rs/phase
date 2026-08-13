@@ -502,6 +502,38 @@ fn build_state_update_message(
 /// state; the requester acknowledgement carries progress metadata separately.
 const MAX_RESOLVE_ALL_LOG_ENTRIES: usize = 128;
 
+/// Resolving the batch and then resuming normal AI play are one authoritative
+/// transition. Retain their engine-authored logs in that order while keeping
+/// the compact final snapshot bounded.
+fn resolve_all_log_tail(
+    batch_log_entries: &[GameLogEntry],
+    ai_results: &[RevisionedActionResult],
+) -> Vec<GameLogEntry> {
+    fn append_tail(tail: &mut Vec<GameLogEntry>, entries: &[GameLogEntry]) {
+        if entries.len() >= MAX_RESOLVE_ALL_LOG_ENTRIES {
+            tail.clear();
+            tail.extend_from_slice(&entries[entries.len() - MAX_RESOLVE_ALL_LOG_ENTRIES..]);
+            return;
+        }
+
+        let overflow = tail
+            .len()
+            .saturating_add(entries.len())
+            .saturating_sub(MAX_RESOLVE_ALL_LOG_ENTRIES);
+        if overflow > 0 {
+            tail.drain(..overflow);
+        }
+        tail.extend_from_slice(entries);
+    }
+
+    let mut tail = Vec::with_capacity(MAX_RESOLVE_ALL_LOG_ENTRIES);
+    append_tail(&mut tail, batch_log_entries);
+    for (_, (_, _, _, log_entries, _, _, _)) in ai_results {
+        append_tail(&mut tail, log_entries);
+    }
+    tail
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_resolve_all_state_update_message(
     raw_state: &GameState,
@@ -4206,82 +4238,110 @@ async fn handle_resolve_all(
     let processed = {
         let mut mgr = state.lock().await;
         match mgr.resolve_all_for_player(&game_code, &player_token, max_resolutions) {
-            Ok((transition, summary)) => {
-                let session = mgr
-                    .sessions
-                    .get(&game_code)
-                    .expect("Resolve All retains its session");
-                let eliminated = session.state.eliminated_players.clone();
-                let rewind_targets = session.rewind_options();
-                let player_count = session.player_count;
-                let game_over_winner = match &session.state.waiting_for {
-                    engine::types::game_state::WaitingFor::GameOver { winner } => Some(*winner),
-                    _ => None,
-                };
-                let terminal = if let Some(winner) = game_over_winner {
-                    let ranked_result = ranked_duel_players(session).and_then(|players| {
-                        ranked_result_for_duel(game_db, &game_code, &players, winner)
-                    });
-                    terminal_artifact(session, winner, "Game ended".to_string(), ranked_result)
-                        .map(Some)
-                } else if transition.is_some() {
-                    persist_full_session_async(game_db, session);
-                    Ok(None)
-                } else {
-                    Ok(None)
-                };
-                terminal.map(|terminal| {
-                    (
-                        transition,
-                        summary,
-                        eliminated,
-                        rewind_targets,
-                        player_count,
-                        game_over_winner,
-                        terminal,
-                    )
-                })
-            }
+            Ok((transition, summary)) => match transition {
+                None => Ok((summary, None)),
+                Some((_, (_, _, _, batch_log_entries, _, _, _))) => {
+                    let session = mgr
+                        .sessions
+                        .get_mut(&game_code)
+                        .expect("Resolve All retains its session");
+                    // Resolve All is a shortcut through a human-authorized batch,
+                    // not a replacement for the session's ordinary AI hand-off.
+                    // Keep that hand-off under the same lock, then derive the one
+                    // final payload from the current session rather than the batch
+                    // transition it has already moved past.
+                    let ai_results = session.run_ai();
+                    let (raw_state, legal_actions, _auto_pass, spell_costs, by_object) =
+                        session.current_broadcast_snapshot();
+                    let revision = session.state_revision;
+                    let log_entries = resolve_all_log_tail(&batch_log_entries, &ai_results);
+                    let eliminated = session.state.eliminated_players.clone();
+                    let rewind_targets = session.rewind_options();
+                    let player_count = session.player_count;
+                    let game_over_winner = match &session.state.waiting_for {
+                        engine::types::game_state::WaitingFor::GameOver { winner } => Some(*winner),
+                        _ => None,
+                    };
+                    let terminal = if let Some(winner) = game_over_winner {
+                        let ranked_result = ranked_duel_players(session).and_then(|players| {
+                            ranked_result_for_duel(game_db, &game_code, &players, winner)
+                        });
+                        terminal_artifact(session, winner, "Game ended".to_string(), ranked_result)
+                            .map(Some)
+                    } else {
+                        persist_full_session_async(game_db, session);
+                        Ok(None)
+                    };
+                    terminal.map(|terminal| {
+                        (
+                            summary,
+                            Some((
+                                revision,
+                                raw_state,
+                                legal_actions,
+                                log_entries,
+                                spell_costs,
+                                by_object,
+                                eliminated,
+                                rewind_targets,
+                                player_count,
+                                game_over_winner,
+                                terminal,
+                            )),
+                        )
+                    })
+                }
+            },
             Err(error) => Err(error),
         }
     };
 
-    let (transition, summary, eliminated, rewind_targets, player_count, game_over_winner, terminal) =
-        match processed {
-            Ok(processed) => processed,
-            Err(reason) => {
-                let _ = tx.send(ServerMessage::ResolveAllRejected { request_id, reason });
-                return;
-            }
-        };
+    let (summary, payload) = match processed {
+        Ok(processed) => processed,
+        Err(reason) => {
+            let _ = tx.send(ServerMessage::ResolveAllRejected { request_id, reason });
+            return;
+        }
+    };
 
     let acknowledgement = ServerMessage::ResolveAllResult {
         request_id,
         items_resolved: summary.items_resolved,
         total: summary.total,
     };
-    let Some((revision, result)) = transition else {
+    let Some((
+        revision,
+        raw_state,
+        legal_actions,
+        log_entries,
+        spell_costs,
+        by_object,
+        eliminated,
+        rewind_targets,
+        player_count,
+        game_over_winner,
+        terminal,
+    )) = payload
+    else {
         let _ = tx.send(acknowledgement);
         return;
     };
-    let (raw_state, _events, legal_actions, logs, _auto_pass, spell_costs, by_object) = &result;
-    let log_entries = &logs[logs.len().saturating_sub(MAX_RESOLVE_ALL_LOG_ENTRIES)..];
 
     if let Err(reason) = guard_state_snapshot_broadcast(StateSnapshotParts {
-        state: raw_state,
+        state: &raw_state,
         events: &[],
-        log_entries,
-        legal_actions,
-        legal_actions_by_object: by_object,
-        spell_costs,
+        log_entries: &log_entries,
+        legal_actions: &legal_actions,
+        legal_actions_by_object: &by_object,
+        spell_costs: &spell_costs,
     }) {
         warn!(game = %game_code, %reason, "Resolve All snapshot exceeds broadcast bounds after commit");
         let _ = tx.send(build_resolve_all_state_update_message(
-            raw_state,
-            log_entries,
-            legal_actions,
-            spell_costs,
-            by_object,
+            &raw_state,
+            &log_entries,
+            &legal_actions,
+            &spell_costs,
+            &by_object,
             revision,
             requester,
             eliminated.clone(),
@@ -4297,11 +4357,11 @@ async fn handle_resolve_all(
             Err(error) => {
                 error!(game = %game_code, %error, "Resolve All terminal preparation failed after commit");
                 let _ = tx.send(build_resolve_all_state_update_message(
-                    raw_state,
-                    log_entries,
-                    legal_actions,
-                    spell_costs,
-                    by_object,
+                    &raw_state,
+                    &log_entries,
+                    &legal_actions,
+                    &spell_costs,
+                    &by_object,
                     revision,
                     requester,
                     eliminated.clone(),
@@ -4317,11 +4377,11 @@ async fn handle_resolve_all(
     // Queue the requester's final state and acknowledgement through its direct
     // sender in order; the adapter resolves only after this cached snapshot.
     let requester_update = build_resolve_all_state_update_message(
-        raw_state,
-        log_entries,
-        legal_actions,
-        spell_costs,
-        by_object,
+        &raw_state,
+        &log_entries,
+        &legal_actions,
+        &spell_costs,
+        &by_object,
         revision,
         requester,
         eliminated.clone(),
@@ -4339,11 +4399,11 @@ async fn handle_resolve_all(
                 }
                 if let Some(sender) = players.get(&player) {
                     let _ = sender.send(build_resolve_all_state_update_message(
-                        raw_state,
-                        log_entries,
-                        legal_actions,
-                        spell_costs,
-                        by_object,
+                        &raw_state,
+                        &log_entries,
+                        &legal_actions,
+                        &spell_costs,
+                        &by_object,
                         revision,
                         player,
                         eliminated.clone(),
@@ -4354,7 +4414,7 @@ async fn handle_resolve_all(
         }
     }
     if let Ok(spectator_update) =
-        build_spectator_state_update_message(raw_state, &[], log_entries, revision)
+        build_spectator_state_update_message(&raw_state, &[], &log_entries, revision)
     {
         let mut spectators = game_spectators.lock().await;
         if let Some(senders) = spectators.get_mut(&game_code) {
@@ -7778,6 +7838,49 @@ mod state_transport_derived_tests {
             }
             other => panic!("expected StateUpdate, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn resolve_all_final_log_tail_orders_batch_before_ai_follow_up_logs() {
+        let state = GameState::new_two_player(42);
+        let batch_logs: Vec<_> = (0..=MAX_RESOLVE_ALL_LOG_ENTRIES)
+            .map(|seq| GameLogEntry {
+                seq: seq as u32,
+                turn: 1,
+                phase: Phase::PreCombatMain,
+                category: LogCategory::Game,
+                segments: vec![LogSegment::Text(format!("batch {seq}"))],
+                presentation: Default::default(),
+            })
+            .collect();
+        let ai_logs: Vec<_> = (0..2)
+            .map(|seq| GameLogEntry {
+                seq: (100 + seq) as u32,
+                turn: 1,
+                phase: Phase::PreCombatMain,
+                category: LogCategory::Game,
+                segments: vec![LogSegment::Text(format!("ai {seq}"))],
+                presentation: Default::default(),
+            })
+            .collect();
+        let ai_results = vec![(
+            2,
+            (
+                state,
+                Vec::new(),
+                Vec::new(),
+                ai_logs.clone(),
+                false,
+                HashMap::new(),
+                HashMap::new(),
+            ),
+        )];
+
+        let tail = resolve_all_log_tail(&batch_logs, &ai_results);
+
+        assert_eq!(tail.len(), MAX_RESOLVE_ALL_LOG_ENTRIES);
+        assert_eq!(tail.first(), batch_logs.get(3));
+        assert_eq!(&tail[tail.len() - ai_logs.len()..], ai_logs.as_slice());
     }
 
     #[test]
