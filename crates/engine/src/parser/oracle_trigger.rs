@@ -8856,7 +8856,10 @@ fn continues_player_action_list(after_comma: &str) -> bool {
         .next()
         .unwrap_or(trimmed)
         .trim();
-    if parse_player_action_phrase(candidate).is_some() {
+    if all_consuming(parse_player_action_phrase_nom)
+        .parse(candidate)
+        .is_ok()
+    {
         return true;
     }
     // Avatar crossover: a comma-separated bending-verb disjunction
@@ -15901,63 +15904,68 @@ fn is_bare_discover_subject(text: &str) -> bool {
 }
 
 fn parse_player_action_list(text: &str) -> Option<Vec<PlayerActionKind>> {
-    let normalized = text
-        .replace(", or ", "|")
-        .replace(" or ", "|")
-        .replace(", ", "|");
-    let parts: Vec<_> = normalized.split('|').collect();
-    if parts.is_empty() {
-        return None;
-    }
-
-    let mut actions = Vec::with_capacity(parts.len());
-    for part in parts {
-        actions.push(parse_player_action_phrase(part.trim())?);
-    }
-    Some(actions)
+    all_consuming(terminated(
+        separated_list1(
+            alt((tag(", or "), tag(" or "), tag(", "))),
+            parse_player_action_phrase_nom,
+        ),
+        opt(one_of(".;")),
+    ))
+    .parse(text)
+    .ok()
+    .map(|(_, actions)| actions)
 }
 
-fn parse_player_action_phrase(text: &str) -> Option<PlayerActionKind> {
-    if let Ok(("", action)) = parse_proliferate_player_action(text) {
-        return Some(action);
-    }
-    if let Ok(("", action)) = parse_forage_player_action(text) {
-        return Some(action);
-    }
-    match text {
-        "search your library" | "searches their library" => Some(PlayerActionKind::SearchedLibrary),
-        "scry" | "scries" => Some(PlayerActionKind::Scry),
-        "surveil" | "surveils" => Some(PlayerActionKind::Surveil),
-        // CR 701.59a: Collect evidence — exile cards from your graveyard with total mana value N or more.
-        "collect evidence" | "collects evidence" => Some(PlayerActionKind::CollectEvidence),
-        // CR 701.16a: Investigate — create a Clue artifact token.
-        "investigate" | "investigates" => Some(PlayerActionKind::Investigate),
-        "shuffle your library"
-        | "shuffles their library"
-        | "shuffle their library"
-        | "shuffles his or her library"
-        | "shuffle his or her library"
-        | "shuffles a library"
-        | "shuffle a library" => Some(PlayerActionKind::ShuffledLibrary),
-        _ => None,
-    }
-}
+fn parse_player_action_phrase_nom(input: &str) -> OracleResult<'_, PlayerActionKind> {
+    let search = value(
+        PlayerActionKind::SearchedLibrary,
+        (
+            alt((tag("searches"), tag("search"))),
+            space1,
+            alt((tag("his or her"), tag("your"), tag("their"), tag("a"))),
+            space1,
+            tag("library"),
+        ),
+    );
+    let shuffle = value(
+        PlayerActionKind::ShuffledLibrary,
+        (
+            alt((tag("shuffles"), tag("shuffle"))),
+            space1,
+            alt((tag("his or her"), tag("your"), tag("their"), tag("a"))),
+            space1,
+            tag("library"),
+        ),
+    );
 
-fn parse_proliferate_player_action(input: &str) -> OracleResult<'_, PlayerActionKind> {
-    // CR 701.34a: Proliferate — choose permanents/players with counters.
-    all_consuming(alt((
-        value(PlayerActionKind::Proliferate, tag("proliferate")),
-        value(PlayerActionKind::Proliferate, tag("proliferates")),
-    )))
-    .parse(input)
-}
-
-fn parse_forage_player_action(input: &str) -> OracleResult<'_, PlayerActionKind> {
-    // CR 701.61a: Forage — exile three cards from your graveyard or sacrifice a Food.
-    all_consuming(alt((
-        value(PlayerActionKind::Forage, tag("forage")),
-        value(PlayerActionKind::Forage, tag("forages")),
-    )))
+    alt((
+        search,
+        shuffle,
+        value(
+            PlayerActionKind::CollectEvidence,
+            alt((tag("collects evidence"), tag("collect evidence"))),
+        ),
+        value(
+            PlayerActionKind::Investigate,
+            alt((tag("investigates"), tag("investigate"))),
+        ),
+        // CR 701.34a: Proliferate — choose permanents/players with counters.
+        value(
+            PlayerActionKind::Proliferate,
+            alt((tag("proliferates"), tag("proliferate"))),
+        ),
+        value(
+            PlayerActionKind::Surveil,
+            alt((tag("surveils"), tag("surveil"))),
+        ),
+        value(PlayerActionKind::Scry, alt((tag("scries"), tag("scry")))),
+        // CR 701.61a: Forage — exile three cards from your graveyard or
+        // sacrifice a Food.
+        value(
+            PlayerActionKind::Forage,
+            alt((tag("forages"), tag("forage"))),
+        ),
+    ))
     .parse(input)
 }
 

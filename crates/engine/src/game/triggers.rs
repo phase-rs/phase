@@ -24862,6 +24862,7 @@ pub mod tests {
             None,
             true, // enter_transformed
             crate::types::zones::EtbTapState::Unspecified,
+            false, // enters_attacking
             None,  // controller_override
             &[],   // effect_enter_with_counters
             None,  // face_down_profile
@@ -34332,6 +34333,7 @@ pub mod tests {
                 target: TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -34673,6 +34675,7 @@ pub mod tests {
                 target: TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -34733,6 +34736,7 @@ pub mod tests {
                 target: TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,

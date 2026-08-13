@@ -619,6 +619,7 @@ fn non_spell_aura_entry_copies_chosen_creature() {
         rest_order: engine::types::ability::DigRestOrder::Preserve,
         source_id: None,
         enter_tapped: false,
+        enters_attacking: false,
     };
 
     runner

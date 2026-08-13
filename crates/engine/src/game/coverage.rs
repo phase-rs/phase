@@ -1357,6 +1357,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectScope::OtherRevealedCard => "other revealed card",
                 ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card",
                 ObjectScope::AmassedArmy => "amassed Army",
+                ObjectScope::BatchSource => "batch source",
             };
             match counter_type {
                 Some(ct) => format!("{} counters on {scope_str}", ct.as_str()),
@@ -1384,6 +1385,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::OtherRevealedCard => "other revealed card's power".into(),
             ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card's power".into(),
             ObjectScope::AmassedArmy => "amassed Army's power".into(),
+            ObjectScope::BatchSource => "batch source's power".into(),
         },
         QuantityRef::Toughness { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1397,6 +1399,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::OtherRevealedCard => "other revealed card's toughness".into(),
             ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card's toughness".into(),
             ObjectScope::AmassedArmy => "amassed Army's toughness".into(),
+            ObjectScope::BatchSource => "batch source's toughness".into(),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1410,6 +1413,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::OtherRevealedCard => "other revealed card's mana value".into(),
             ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card's mana value".into(),
             ObjectScope::AmassedArmy => "amassed Army's mana value".into(),
+            ObjectScope::BatchSource => "batch source's mana value".into(),
         },
         QuantityRef::TargetObjectManaValue { .. } => "target object's mana value".into(),
         QuantityRef::ObjectColorCount { scope } => match scope {
@@ -1424,6 +1428,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::OtherRevealedCard => "other revealed card's colors".into(),
             ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card's colors".into(),
             ObjectScope::AmassedArmy => "amassed Army's colors".into(),
+            ObjectScope::BatchSource => "batch source's colors".into(),
         },
         QuantityRef::ObjectTypelineComponentCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1439,6 +1444,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 "typeline components on owned linked-exiled card".into()
             }
             ObjectScope::AmassedArmy => "typeline components on amassed Army".into(),
+            ObjectScope::BatchSource => "typeline components on batch source".into(),
         },
         QuantityRef::ObjectNameWordCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -1452,6 +1458,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::OtherRevealedCard => "words in other revealed card's name".into(),
             ObjectScope::OwnedLinkedExileCard => "words in owned linked-exiled card's name".into(),
             ObjectScope::AmassedArmy => "words in amassed Army's name".into(),
+            ObjectScope::BatchSource => "words in batch source's name".into(),
         },
         QuantityRef::ManaSymbolsInManaCost { scope, color } => {
             let scope_str = match scope {
@@ -1464,6 +1471,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectScope::OtherRevealedCard => "other revealed card",
                 ObjectScope::OwnedLinkedExileCard => "owned linked-exiled card",
                 ObjectScope::AmassedArmy => "amassed Army",
+                ObjectScope::BatchSource => "batch source",
             };
             match color {
                 Some(c) => format!("{c:?} mana symbols in {scope_str}'s mana cost"),
@@ -2794,6 +2802,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             target,
             enters_under,
             enter_tapped,
+            enters_attacking,
             enter_with_counters,
             face_down_profile,
             library_position,
@@ -2812,6 +2821,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             if !matches!(enter_tapped, EtbTapState::Unspecified) {
                 d.push(("enter_tapped".into(), format!("{enter_tapped:?}")));
+            }
+            if *enters_attacking {
+                d.push(("enters_attacking".into(), "true".into()));
             }
             if !enter_with_counters.is_empty() {
                 d.push((
@@ -3712,6 +3724,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::ChangeTargets { .. }
         | Effect::ExchangeControl { .. }
         | Effect::Forage
+        | Effect::CompletePlayerAction { .. }
         | Effect::Harness
         | Effect::Learn
         | Effect::NoteManaSpent
@@ -3818,6 +3831,24 @@ fn ability_details(def: &AbilityDefinition) -> Vec<(String, String)> {
                 modal.min_choices, modal.max_choices, modal.mode_count
             ),
         ));
+    }
+    // CR 113.6b + CR 113.6j + CR 113.6m: the zone this ability functions from.
+    // `None` is the CR 113.6 battlefield default and emits nothing, so an
+    // unqualified signature stays byte-identical.
+    //
+    // Emitted UNCONDITIONALLY, unlike the narrowly scoped `repeat_for` above.
+    // This is a rules-load-bearing parse output — `can_activate_ability_now`
+    // gates legality on it and the candidate enumerators key their hand,
+    // graveyard and library loops off it, so a change to this field moves cards
+    // between "offered" and "not offered". Scoping it would reproduce exactly
+    // the blindness this exists to remove.
+    //
+    // The key is "activates from", NOT "from": `effect_details` already emits
+    // "from" for a `ChangeZone` origin and `trigger_details` for a trigger
+    // origin, and `build_ability_item` silently drops duplicate keys — reusing
+    // "from" would hide this on precisely the abilities it exists to watch.
+    if let Some(zone) = &def.activation_zone {
+        d.push(("activates from".into(), fmt_zone(zone)));
     }
     d
 }
@@ -6586,6 +6617,7 @@ fn visit_direct_effect_ability_payloads<'a>(
         | Effect::Adapt { .. }
         | Effect::Learn
         | Effect::Forage
+        | Effect::CompletePlayerAction { .. }
         | Effect::Harness
         | Effect::CollectEvidence { .. }
         | Effect::Endure { .. }
@@ -7945,6 +7977,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardPower", Handled),
             ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardPower", Handled),
             ObjectScope::AmassedArmy => ("AmassedArmyPower", Handled),
+            ObjectScope::BatchSource => ("BatchSourcePower", Handled),
         },
         QuantityRef::Toughness { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -7958,6 +7991,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardToughness", Handled),
             ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardToughness", Handled),
             ObjectScope::AmassedArmy => ("AmassedArmyToughness", Handled),
+            ObjectScope::BatchSource => ("BatchSourceToughness", Handled),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -7971,6 +8005,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardManaValue", Handled),
             ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardManaValue", Handled),
             ObjectScope::AmassedArmy => ("AmassedArmyManaValue", Handled),
+            ObjectScope::BatchSource => ("BatchSourceManaValue", Handled),
         },
         QuantityRef::TargetObjectManaValue { .. } => ("TargetObjectManaValue", Handled),
         QuantityRef::ObjectColorCount { scope } => match scope {
@@ -7985,6 +8020,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardColorCount", Handled),
             ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardColorCount", Handled),
             ObjectScope::AmassedArmy => ("AmassedArmyObjectColorCount", Handled),
+            ObjectScope::BatchSource => ("BatchSourceObjectColorCount", Handled),
         },
         QuantityRef::ObjectNameWordCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -7998,6 +8034,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::OtherRevealedCard => ("OtherRevealedCardNameWordCount", Handled),
             ObjectScope::OwnedLinkedExileCard => ("OwnedLinkedExileCardNameWordCount", Handled),
             ObjectScope::AmassedArmy => ("AmassedArmyObjectNameWordCount", Handled),
+            ObjectScope::BatchSource => ("BatchSourceObjectNameWordCount", Handled),
         },
         QuantityRef::ObjectTypelineComponentCount { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -8013,6 +8050,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
                 ("OwnedLinkedExileCardTypelineComponentCount", Handled)
             }
             ObjectScope::AmassedArmy => ("AmassedArmyObjectTypelineComponentCount", Handled),
+            ObjectScope::BatchSource => ("BatchSourceObjectTypelineComponentCount", Handled),
         },
         QuantityRef::ManaSymbolsInManaCost { scope, .. } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
@@ -8028,6 +8066,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
                 ("OwnedLinkedExileCardManaSymbolsInManaCost", Handled)
             }
             ObjectScope::AmassedArmy => ("AmassedArmyManaSymbolsInManaCost", Handled),
+            ObjectScope::BatchSource => ("BatchSourceManaSymbolsInManaCost", Handled),
         },
         QuantityRef::SelfManaValue => ("SelfManaValue", Handled),
         QuantityRef::Aggregate { .. } => ("Aggregate", Handled),
@@ -11276,6 +11315,83 @@ pub fn format_semantic_audit_markdown(summary: &SemanticAuditSummary) -> String 
 
 #[cfg(test)]
 mod tests {
+
+    /// #7317 — an ability's `activation_zone` must reach the parse-diff
+    /// signature, under a key that does NOT collide with the `from` that
+    /// `effect_details` already emits for a `ChangeZone` origin.
+    ///
+    /// The collision is the whole point. `build_ability_item` drops duplicate
+    /// keys, and the abilities this field matters most on are exactly the ones
+    /// whose effect already occupies `from` — a graveyard self-return carries
+    /// `from: graveyard` for the effect's origin and needs a second, distinct
+    /// key for the zone it is activated from. Naming this one `from` would make
+    /// it invisible on precisely those abilities.
+    ///
+    /// The `None` row is the #5507 requirement restated: an ordinary
+    /// battlefield ability must emit NO zone key at all, byte-identical to
+    /// before, so this addition cannot churn the ~12k abilities that default to
+    /// the battlefield under CR 113.6.
+    #[test]
+    fn activation_zone_reaches_parse_details_without_colliding_with_effect_origin() {
+        use crate::types::ability::AbilityKind;
+        use crate::types::zones::Zone;
+
+        // A graveyard self-return: the shape where the collision bites.
+        let graveyard_self_return = || Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Hand,
+            target: TargetFilter::SelfRef,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        };
+        let details = |zone: Option<Zone>| -> Vec<(String, String)> {
+            let mut def = AbilityDefinition::new(AbilityKind::Activated, graveyard_self_return());
+            def.activation_zone = zone;
+            build_ability_item(&def).details
+        };
+
+        // (1) `None` — the CR 113.6 battlefield default. No zone key emitted.
+        let default_zone = details(None);
+        assert!(
+            !default_zone.iter().any(|(k, _)| k == "activates from"),
+            "a battlefield-default ability must emit no activation-zone key, so \
+             existing signatures stay byte-identical (#5507's requirement)"
+        );
+
+        // (2) `Some(Graveyard)` — both keys present, and distinct.
+        let gated = details(Some(Zone::Graveyard));
+        assert!(
+            gated.iter().any(|(k, v)| k == "from" && v == "graveyard"),
+            "the effect's own origin must still render under `from`: {gated:?}"
+        );
+        assert!(
+            gated
+                .iter()
+                .any(|(k, v)| k == "activates from" && v == "graveyard"),
+            "the activation zone must render under its own key; had it been \
+             named `from`, build_ability_item's dedup would have dropped it \
+             silently and this ability would look unchanged (#7317): {gated:?}"
+        );
+
+        // The point of the separate key: the two zones are independent, and a
+        // signature must distinguish them. Cage of Hands returns itself to hand
+        // from the battlefield; Gutterbones returns itself to hand from the
+        // graveyard. Same effect shape, different activation zone.
+        assert_ne!(
+            details(Some(Zone::Graveyard)),
+            details(Some(Zone::Exile)),
+            "two activation zones on the same effect are different parses and \
+             must not collapse to the same sticky signature"
+        );
+    }
 
     /// Matrix row 19 — `parse_details` renders each DECLARED mana role under its
     /// OWN key. Under the old role-blind rendering, Carpet of Flowers (count

@@ -50,6 +50,7 @@ fn filtered_dig_runner() -> (engine::game::scenario::GameRunner, Vec<ObjectId>) 
         rest_order: engine::types::ability::DigRestOrder::Preserve,
         source_id: None,
         enter_tapped: false,
+        enters_attacking: false,
     };
     (runner, looked_at)
 }

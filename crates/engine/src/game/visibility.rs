@@ -143,6 +143,13 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // payloads; the separately projected `WaitingFor` prompt is the complete
     // viewer-facing interaction surface.
     filtered.resolution_stack = Default::default();
+    // ChooseOneOf retains its runtime tail inside the authoritative prompt so
+    // resolution can resume after the branch selection. Like every other
+    // resolved continuation, that carrier can contain private object IDs and
+    // last-known information; clients need only the branch presentation.
+    if let WaitingFor::ChooseOneOfBranch { continuation, .. } = &mut filtered.waiting_for {
+        *continuation = None;
+    }
     // The provenance journal contains exact source identities, restrictions,
     // and cost-recipient relationships. It is server authority and must not
     // expose one player's mana history to another viewer.
@@ -852,6 +859,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         rest_order,
         source_id,
         enter_tapped,
+        enters_attacking,
     } = state.waiting_for
     {
         if !can_view_private_for_player(player) {
@@ -867,6 +875,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 rest_order,
                 source_id,
                 enter_tapped,
+                enters_attacking,
             };
         }
     }
@@ -1978,6 +1987,53 @@ mod tests {
     use rand::RngCore;
 
     #[test]
+    fn choose_one_prompt_redacts_runtime_continuation_for_every_viewer() {
+        let mut state = GameState::new_two_player(42);
+        let hidden = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Private Card".to_string(),
+            Zone::Hand,
+        );
+        state.waiting_for = WaitingFor::ChooseOneOfBranch {
+            player: PlayerId(0),
+            controller: PlayerId(0),
+            source_id: ObjectId(9),
+            branches: Vec::new(),
+            branch_descriptions: Vec::new(),
+            parent_targets: Vec::new(),
+            context: Default::default(),
+            continuation: Some(Box::new(ResolvedAbility::new(
+                Effect::NoOp,
+                vec![crate::types::ability::TargetRef::Object(hidden)],
+                ObjectId(9),
+                PlayerId(0),
+            ))),
+            replacement_applied: Default::default(),
+            remaining_players: Vec::new(),
+        };
+
+        for viewer in [PlayerId(0), PlayerId(1)] {
+            let filtered = filter_state_for_viewer(&state, viewer);
+            assert!(matches!(
+                filtered.waiting_for,
+                WaitingFor::ChooseOneOfBranch {
+                    continuation: None,
+                    ..
+                }
+            ));
+        }
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ChooseOneOfBranch {
+                continuation: Some(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn priority_passing_preferences_are_visible_only_to_their_owner() {
         use crate::types::game_state::PriorityPassingMode;
 
@@ -2248,12 +2304,16 @@ mod tests {
         state.liminal_entries.insert(
             entry_ref,
             crate::types::game_state::LiminalEntry {
-                object: crate::game::game_object::GameObject::new(
-                    entry_ref,
-                    CardId(99),
-                    PlayerId(0),
-                    "Liminal Token".to_string(),
-                    Zone::Battlefield,
+                object: crate::types::game_state::LiminalEntrant::Token(
+                    crate::types::game_state::TokenProjection::materialize(
+                        crate::game::game_object::GameObject::new(
+                            entry_ref,
+                            CardId(99),
+                            PlayerId(0),
+                            "Liminal Token".to_string(),
+                            Zone::Battlefield,
+                        ),
+                    ),
                 ),
                 name: "Liminal Token".to_string(),
                 source_id: ObjectId(1),

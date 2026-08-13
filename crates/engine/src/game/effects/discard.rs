@@ -67,6 +67,7 @@ pub(crate) fn complete_discard_to_graveyard(
         cause: source_id,
         attach_to: None,
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enters_attacking: false,
         enter_with_counters: Vec::new(),
         controller_override: None,
         enter_transformed: false,

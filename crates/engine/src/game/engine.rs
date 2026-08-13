@@ -9955,14 +9955,13 @@ fn apply_action(
                     grants,
                 } => (enchant_filter.clone(), grants.clone()),
                 _ => {
-                    let old_target = match chosen {
-                        TargetRef::Object(chosen_id) => {
-                            super::effects::attach::attach_to(state, returned, chosen_id)
-                        }
-                        TargetRef::Player(chosen_player) => {
-                            super::effects::attach::attach_to_player(state, returned, chosen_player)
-                        }
-                    };
+                    // CR 303.4f + CR 701.3b: attach through the entering-Aura
+                    // authority, so the CR 701.3a gate judges the same entrant
+                    // the host list was offered for. Seams that park none get
+                    // the stored object, i.e. their prior behaviour exactly.
+                    let old_target = super::zone_pipeline::attach_chosen_entering_aura_host(
+                        state, returned, &chosen,
+                    );
                     if let Some(old_target) = old_target {
                         events.push(crate::types::events::GameEvent::Unattached {
                             attachment_id: returned,
@@ -16143,9 +16142,12 @@ mod stage2_injector_tests {
                 // shifts combine with #6958's paid-cast outcome exclusion and
                 // #6976's conditional-branch exclusions. None creates an
                 // `OptionalEffect` prompt. Re-pinned against the merged source.
-                "game/effects/mod.rs:6306".to_string(),
-                "game/effects/mod.rs:6383".to_string(),
-                "game/effects/mod.rs:9578".to_string(),
+                // Current-main port: #7221's typed player-action completion seam and the
+                // contemporaneous upstream changes moved these three producers. Re-derived
+                // in the merged source, still in their named production functions.
+                "game/effects/mod.rs:6640".to_string(),
+                "game/effects/mod.rs:6717".to_string(),
+                "game/effects/mod.rs:9922".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
@@ -16463,7 +16465,30 @@ mod stage2_injector_tests {
                 //
                 // SET PRESERVATION: unchanged. Upstream adds no line matching the needle to this file and
                 // neither does this branch — total still 37, partition still 5/7/25.
-                "game/engine.rs:12019".to_string(),
+                //
+                // #7303 shifts this producer from `:12004` to `:12003` (-1), while this
+                // PR's random-discard continuation adds +15 lines above it. Re-derived in the
+                // merged tree by content: `12004 - 1 + 15 = 12018`; the line below is the
+                // announcement-time optional-effect producer in
+                // `begin_pending_trigger_target_selection`.
+                //
+                // #7303 fix round 3: `:12004 ⇒ :12003`, −1, and ONLY this entry moved.
+                //   Re-derived, not assumed. `git diff -U0` on this file has exactly ONE hunk,
+                //   `@@ -9943,8 +9943,7 @@` inside `apply_action` — the `ReturnAsAuraTarget`
+                //   resume arm's two raw attach calls replaced by one call to the entering-Aura
+                //   attachment authority plus its four-line rationale (`-8 +7`). It sits ABOVE
+                //   this producer, and the whole-file delta is also `-1`, so nothing was
+                //   inserted or removed below it. Predicted `12004-1` equals the observed
+                //   coordinate exactly. IDENTITY re-established rather than assumed: the
+                //   producer at its new coordinate is md5-identical to `a0bca5197:engine.rs`
+                //   at its old one, and so is its ±6-line window (`4f7522fc…`) — the window is
+                //   what discriminates here, since the same one-line mint text appears at
+                //   several coordinates in the crate. The other four entries did not move and
+                //   were re-read in place. SET PRESERVATION: the two asserts above this one ran
+                //   FIRST and both fired GREEN on the run that caught this — total still 37,
+                //   partition still 5/7/25. The change constructs no `WaitingFor` of any kind;
+                //   it threads an attachment-legality authority through an existing call.
+                "game/engine.rs:12018".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \

@@ -587,6 +587,16 @@ fn batch_or_drain_observer_triggers(
                         || !matches!(ev, GameEvent::ZoneChanged { .. }))
             })
             .cloned()
+            .chain(
+                // CR 603.2 + CR 608.2c: a typed completion continuation may
+                // publish the player action that the interactive move just
+                // completed. Include that semantic event without widening the
+                // owner-bounded zone slice to continuation-produced zone moves.
+                events[event_slice_end..]
+                    .iter()
+                    .filter(|event| matches!(event, GameEvent::PlayerPerformedAction { .. }))
+                    .cloned(),
+            )
             .collect();
         super::triggers::collect_triggers_into_deferred(state, &trigger_events);
         if let Some(wf) = super::triggers::drain_deferred_trigger_queue(state, events) {
@@ -606,6 +616,15 @@ fn batch_or_drain_observer_triggers(
                         || !matches!(ev, GameEvent::ZoneChanged { .. }))
             })
             .cloned()
+            .chain(
+                // CR 603.2 + CR 608.2c: see the settled branch above. Park a
+                // completion action across a further continuation prompt, but
+                // do not fold that continuation's zone changes into this owner.
+                events[event_slice_end..]
+                    .iter()
+                    .filter(|event| matches!(event, GameEvent::PlayerPerformedAction { .. }))
+                    .cloned(),
+            )
             .collect();
         super::triggers::collect_triggers_into_deferred(state, &trigger_events);
         None
@@ -656,6 +675,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
         waiting_for,
         WaitingFor::MeldPairChoice { .. }
             | WaitingFor::MeldAttackTargetChoice { .. }
+            | WaitingFor::EntryAttackTargetChoice { .. }
             | WaitingFor::ScryChoice { .. }
             | WaitingFor::ArrangePlanarDeckTopChoice { .. }
             | WaitingFor::RedistributeLifeTotals { .. }
@@ -1537,6 +1557,9 @@ pub(super) fn handle_resolution_choice(
             },
             GameAction::ChooseEntryAttackTarget { target },
         ) => {
+            // CR 508.4: the entering creature's controller chooses one of the
+            // engine-issued defending players, planeswalkers, or battles.
+            // `entry_attack_target_defender` applies CR 508.4a if it went stale.
             if !valid_targets.contains(&target) {
                 return Err(EngineError::InvalidAction(
                     "entry attack target is not one of the offered destinations".to_string(),
@@ -1545,6 +1568,35 @@ pub(super) fn handle_resolution_choice(
             state.waiting_for = WaitingFor::Priority { player };
             crate::game::meld::finish_meld_attack_choice(state, context, target, events);
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
+        (
+            WaitingFor::EntryAttackTargetChoice {
+                player,
+                object_id,
+                valid_targets,
+            },
+            GameAction::ChooseEntryAttackTarget { target },
+        ) => {
+            // CR 508.4: the entering creature's controller chooses one of the
+            // engine-issued defending players, planeswalkers, or battles.
+            // `entry_attack_target_defender` applies CR 508.4a if it went stale.
+            if !valid_targets.contains(&target) {
+                return Err(EngineError::InvalidAction(
+                    "entry attack target is not one of the offered destinations".to_string(),
+                ));
+            }
+            state.waiting_for = WaitingFor::Priority { player };
+            if let Some(defending_player) =
+                crate::game::combat::entry_attack_target_defender(state, player, target)
+            {
+                crate::game::combat::enter_attacking_at_target(
+                    state,
+                    object_id,
+                    defending_player,
+                    target,
+                );
+            }
+            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (
             WaitingFor::ScryChoice { player, cards },
@@ -1983,6 +2035,7 @@ pub(super) fn handle_resolution_choice(
                         source_id,
                     );
                     req.mods.enter_tapped = enter_tapped;
+                    req.mods.enters_attacking = enters_attacking;
                     match crate::game::zone_pipeline::move_object(state, req, events) {
                         crate::game::zone_pipeline::ZoneMoveResult::Done => {}
                         // CR 303.4f / CR 616.1: the accepted card's battlefield
@@ -2013,19 +2066,6 @@ pub(super) fn handle_resolution_choice(
                                 state.waiting_for.clone(),
                             ));
                         }
-                    }
-                    // CR 508.4: "...tapped and attacking" — place the accepted card
-                    // in combat. `source_id` (the ability source / trigger attacker)
-                    // supplies the defending player, matching the synchronous path.
-                    if enters_attacking {
-                        let controller = state
-                            .objects
-                            .get(&hit_card)
-                            .map(|obj| obj.controller)
-                            .unwrap_or(player);
-                        crate::game::combat::enter_attacking(
-                            state, hit_card, source_id, controller,
-                        );
                     }
                 } else {
                     // CR 614.6: a kept card accepted to a non-battlefield zone
@@ -3318,6 +3358,7 @@ pub(super) fn handle_resolution_choice(
                 rest_destination,
                 rest_order,
                 enter_tapped,
+                enters_attacking,
                 source_id: dig_source_id,
                 ..
             },
@@ -3524,6 +3565,7 @@ pub(super) fn handle_resolution_choice(
                     );
                     req.mods.enter_tapped =
                         crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped);
+                    req.mods.enters_attacking = enters_attacking;
                     match crate::game::zone_pipeline::move_object(state, req, events) {
                         crate::game::zone_pipeline::ZoneMoveResult::Done => {}
                         // CR 303.4f / CR 616.1: the kept card's battlefield
@@ -4401,6 +4443,7 @@ pub(super) fn handle_resolution_choice(
                 branch_descriptions: _,
                 parent_targets,
                 context,
+                continuation,
                 replacement_applied,
                 remaining_players,
             },
@@ -4416,6 +4459,7 @@ pub(super) fn handle_resolution_choice(
                     branches,
                     parent_targets,
                     context,
+                    continuation,
                     replacement_applied,
                     remaining_players,
                     index,
@@ -4966,7 +5010,16 @@ pub(super) fn handle_resolution_choice(
                     effects::PendingPlayerScopeSacrificeOutcome::Completed {
                         events_before_sacrifice,
                         events_after_sacrifice,
+                        sacrificed_count,
                     } => {
+                        effects::stamp_active_player_action_completion(
+                            state,
+                            source_id,
+                            crate::types::ability::EffectResolutionResult {
+                                cause: crate::types::ability::ThisWayCause::Sacrificed,
+                                count: sacrificed_count,
+                            },
+                        );
                         // CR 614.12a + CR 614.13a: a direct sacrifice selection can be the
                         // complete body of a paused post-replacement dispatch
                         // (Devour). Retire that exact resident before its outer
@@ -5117,6 +5170,22 @@ pub(super) fn handle_resolution_choice(
                     source_id,
                     subject: None,
                 });
+                let result = match effect_kind {
+                    EffectKind::Sacrifice => Some(crate::types::ability::EffectResolutionResult {
+                        cause: crate::types::ability::ThisWayCause::Sacrificed,
+                        count: 0,
+                    }),
+                    EffectKind::ChangeZone => destination
+                        .and_then(effects::this_way_cause_for_zone)
+                        .map(|cause| crate::types::ability::EffectResolutionResult {
+                            cause,
+                            count: 0,
+                        }),
+                    _ => None,
+                };
+                if let Some(result) = result {
+                    effects::stamp_active_player_action_completion(state, source_id, result);
+                }
                 set_priority(state, player);
                 resume_with_error_propagation(state, events)?;
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
@@ -5154,7 +5223,16 @@ pub(super) fn handle_resolution_choice(
                         effects::PendingPlayerScopeSacrificeOutcome::Completed {
                             events_before_sacrifice,
                             events_after_sacrifice,
+                            sacrificed_count,
                         } => {
+                            effects::stamp_active_player_action_completion(
+                                state,
+                                source_id,
+                                crate::types::ability::EffectResolutionResult {
+                                    cause: crate::types::ability::ThisWayCause::Sacrificed,
+                                    count: sacrificed_count,
+                                },
+                            );
                             // CR 614.12a + CR 614.13a: see the matching player-scope
                             // sacrifice completion above. This EffectZoneChoice
                             // path can complete a Devour drain without an
@@ -5193,6 +5271,10 @@ pub(super) fn handle_resolution_choice(
                         )
                     })?;
                     let chosen_ids: Vec<_> = chosen.to_vec();
+                    let completion_cause = effects::this_way_cause_for_zone(dest_zone);
+                    let tracks_player_action_completion = completion_cause.is_some_and(|cause| {
+                        effects::active_player_action_completion_requires(state, source_id, cause)
+                    });
                     let mut logical_zone_change_group =
                         crate::game::triggers::allocate_logical_zone_change_group(
                             state,
@@ -5315,7 +5397,16 @@ pub(super) fn handle_resolution_choice(
                                             conditional_enter_with_counters.clone(),
                                         duration: ctx.duration.clone(),
                                         track_exiled_by_source: ctx.track_exiled_by_source,
-                                        moved_count: None,
+                                        moved_count: tracks_player_action_completion.then(|| {
+                                                i32::try_from(
+                                                    effects::change_zone::count_selected_zone_arrivals(
+                                                        &events[events_before_effect..],
+                                                        &chosen_ids,
+                                                        dest_zone,
+                                                    ),
+                                                )
+                                                .expect("selected zone arrivals fit in i32")
+                                            }),
                                         // CR 708.2a + CR 708.3: preserve the
                                         // face-down profile across a further pause.
                                         face_down_profile: ctx.face_down_profile.clone(),
@@ -5388,7 +5479,16 @@ pub(super) fn handle_resolution_choice(
                                             conditional_enter_with_counters.clone(),
                                         duration: ctx.duration.clone(),
                                         track_exiled_by_source: ctx.track_exiled_by_source,
-                                        moved_count: None,
+                                        moved_count: tracks_player_action_completion.then(|| {
+                                                i32::try_from(
+                                                    effects::change_zone::count_selected_zone_arrivals(
+                                                        &events[events_before_effect..],
+                                                        &chosen_ids,
+                                                        dest_zone,
+                                                    ),
+                                                )
+                                                .expect("selected zone arrivals fit in i32")
+                                            }),
                                         // CR 708.2a + CR 708.3: preserve the
                                         // face-down profile across a further pause.
                                         face_down_profile: ctx.face_down_profile.clone(),
@@ -5911,6 +6011,20 @@ pub(super) fn handle_resolution_choice(
                     library_position,
                     false,
                 );
+            }
+            if matches!(effect_kind, EffectKind::ChangeZone) {
+                if let Some(cause) = destination.and_then(effects::this_way_cause_for_zone) {
+                    let count = effects::change_zone::count_selected_zone_arrivals(
+                        &events[events_before_effect..],
+                        &chosen,
+                        destination.expect("ChangeZone destination checked above"),
+                    );
+                    effects::stamp_active_player_action_completion(
+                        state,
+                        source_id,
+                        crate::types::ability::EffectResolutionResult { cause, count },
+                    );
+                }
             }
             state.last_effect_count = Some(chosen.len() as i32);
             events.push(GameEvent::EffectResolved {
@@ -7940,6 +8054,7 @@ pub(crate) fn run_batch_completion(
             selected,
             destination,
             enter_tapped,
+            enters_attacking,
         } => {
             crate::game::effects::dig::move_mass_put_all_selected(
                 state,
@@ -7948,6 +8063,7 @@ pub(crate) fn run_batch_completion(
                 selected,
                 destination,
                 enter_tapped,
+                enters_attacking,
                 events,
             );
             crate::game::zone_pipeline::BatchMoveResult::Done
@@ -9821,6 +9937,7 @@ mod tests {
                 rest_order: DigRestOrder::Preserve,
                 source_id: None,
                 enter_tapped: false,
+                enters_attacking: false,
             },
             GameAction::SelectCards { cards: vec![white] },
             &mut events,
@@ -9903,6 +10020,7 @@ mod tests {
                 rest_order: DigRestOrder::Random,
                 source_id: None,
                 enter_tapped: false,
+                enters_attacking: false,
             },
             GameAction::SelectCards { cards: vec![keep] },
             &mut events,
@@ -9942,6 +10060,7 @@ mod tests {
                 rest_order: DigRestOrder::Preserve,
                 source_id: None,
                 enter_tapped: false,
+                enters_attacking: false,
             },
             GameAction::SelectCards { cards: vec![keep] },
             &mut events,

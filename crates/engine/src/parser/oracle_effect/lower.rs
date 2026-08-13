@@ -12430,6 +12430,7 @@ mod where_x_tests {
                                 rest_order: crate::types::ability::DigRestOrder::Preserve,
                                 reveal: true,
                                 enter_tapped: false,
+                                enters_attacking: false,
                                 source: DigSource::Library,
                             },
                         ),

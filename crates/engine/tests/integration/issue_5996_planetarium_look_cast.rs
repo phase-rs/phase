@@ -508,6 +508,7 @@ fn missing_look_referent_does_not_play_inherited_unrelated_object() {
             rest_order: engine::types::ability::DigRestOrder::Preserve,
             reveal: false,
             enter_tapped: false,
+            enters_attacking: false,
             source: DigSource::Library,
         },
         vec![TargetRef::Object(unrelated)],

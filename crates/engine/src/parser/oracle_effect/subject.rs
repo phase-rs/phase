@@ -17,7 +17,7 @@ use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_ir::ast::*;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChosenSubtypeKind, ColorChangeMode, ContinuousModification,
-    ControllerRef, Duration, EachDamageRecipient, Effect, FilterProp, MultiTargetSpec,
+    ControllerRef, Duration, EachDamageRecipient, Effect, FilterProp, MultiTargetSpec, ObjectScope,
     PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, StaticCondition,
     StaticDefinition, TargetFilter, TypedFilter,
 };
@@ -2533,13 +2533,19 @@ pub(super) fn parse_subject_application(
             is_optional: false,
         });
     }
-    // CR 303.4b + CR 702.5a + CR 701.17a (issue #5947): "enchanted player"
-    // names the Aura's attached player host — `AttachedTo`, not a Typed
-    // EnchantedBy filter (which is object-only). Used by curse bodies such as
-    // Fraying Sanity's "enchanted player mills X cards".
-    if all_consuming(tag::<_, _, OracleError<'_>>("enchanted player"))
-        .parse(lower.as_str())
-        .is_ok()
+    // CR 303.4b + CR 303.4m + CR 702.5a (issues #5947, #5271): "enchanted
+    // player" / "enchanted opponent" name the Aura's attached player host —
+    // `AttachedTo`, not a Typed EnchantedBy filter (which is object-only).
+    // The opponent qualifier constrains attachment when the Aura enters; its
+    // later anaphoric subject is still the attached player. Used by curse bodies
+    // such as Fraying Sanity's "enchanted player mills X cards" and
+    // Overencumbered's token trigger.
+    if all_consuming(alt((
+        tag::<_, _, OracleError<'_>>("enchanted player"),
+        tag("enchanted opponent"),
+    )))
+    .parse(lower.as_str())
+    .is_ok()
     {
         return subject_filter_application(TargetFilter::AttachedTo, false);
     }
@@ -6206,6 +6212,33 @@ pub(super) fn try_parse_each_source_deals_damage(
     // The recipient phrase: everything after the "deals N damage to " marker.
     let recipient_phrase = damage_recipient_phrase(&predicate_lower);
 
+    // CR 120.1 + CR 608.2c (DEFERRED §9): two unrepresentable rider shapes the
+    // filter model cannot express, which would otherwise SILENTLY DEGRADE to a
+    // supported-but-wrong `EachSourceDealsDamage`:
+    //   * a damage predicate carrying "random" — "another random creature that
+    //     player controls" (Season's Beatings) degrades to `Typed{Another}` with
+    //     the random selection AND the "that player controls" scope dropped;
+    //   * a source subject ending in "tapped this way" — "Each Wolf tapped this
+    //     way" (Master of the Wild Hunt) carries a per-source tapped-by-this-
+    //     ability rider the source filter cannot hold, degrading to bare `Typed{Wolf}`.
+    // In both cases fail CLOSED to an honest `Unimplemented` — the same precedent
+    // as the Aura-Barbs attached-host check below. Detection is structural
+    // (word-boundary scan / all_consuming end-anchor), never substring dispatch.
+    // The random scan is on the whole damage predicate (not `damage_recipient_phrase`,
+    // which only fires on the fixed-"N damage to" form — the own-power recipient is
+    // introduced by "to " after the amount, so no clean recipient slice exists); the
+    // own-power each-source grammar is the only predicate kind that reaches here, and
+    // "random" never appears in a supported damage amount, so a word-boundary match is
+    // always a random RECIPIENT.
+    if nom_primitives::scan_contains(&predicate_lower, "random")
+        || subject_sources_tapped_this_way(&subject.to_lowercase())
+    {
+        return Some(super::parsed_clause(Effect::unimplemented(
+            "each_source_unrepresentable_rider",
+            text,
+        )));
+    }
+
     // CR 303.4 (DEFERRED §9): "...to the creature/permanent it's attached to" — a
     // per-attachment host recipient not yet modeled. Fail CLOSED to an honest
     // `Unimplemented` BEFORE the subject-parse requirement, so the clause never
@@ -6229,7 +6262,7 @@ pub(super) fn try_parse_each_source_deals_damage(
     // Delegate the predicate to the shared damage parser so the amount and the
     // recipient anaphora (`ParentTarget`, `TriggeringSource`, `Any`) resolve
     // identically to the `DealDamage` the misparse produced — no re-implementation.
-    let (amount, target, damage_source) =
+    let (mut amount, target, damage_source) =
         match super::lower::try_parse_damage(&predicate_lower, predicate, ctx)? {
             Effect::DealDamage {
                 amount,
@@ -6243,11 +6276,19 @@ pub(super) fn try_parse_each_source_deals_damage(
     if damage_source.is_some() {
         return None;
     }
-    // CR 120.1: only a FIXED, source-INDEPENDENT amount. The amount is resolved
-    // ONCE (uniform across the batch), so a per-source dynamic amount ("equal to
-    // its power", "equal to its mana value") would be wrong — that filter-source
-    // own-power class is deferred (see §1/§9).
-    if !matches!(amount, QuantityExpr::Fixed { .. }) {
+    // CR 120.1 + CR 608.2: a per-source amount ("deals damage equal to its
+    // power") reads each source OBJECT's own characteristic. "its power"
+    // parses to `QuantityExpr::Ref { Power { scope: Anaphoric } }`; the
+    // "each <filter>" clause subject establishes the per-source antecedent
+    // (CR 120.1: each matching object is the source of its own damage), so
+    // rebind the deferred pronoun to the per-batch-source scope. Structurally
+    // detected (recursion, no string matching): a composed amount ("twice its
+    // power") rebinds through every wrapper via
+    // `rebind_anaphoric_object_scope`. A uniform dynamic amount (no anaphoric
+    // pronoun) stays on the prior `None` path — fail-closed unchanged.
+    if crate::game::quantity::quantity_expr_contains_scope(&amount, ObjectScope::Anaphoric) {
+        super::rebind_anaphoric_object_scope(&mut amount, ObjectScope::BatchSource);
+    } else if !matches!(amount, QuantityExpr::Fixed { .. }) {
         return None;
     }
 
@@ -6272,6 +6313,24 @@ fn damage_recipient_phrase(predicate_lower: &str) -> Option<&str> {
     let (_rest, (_before, after)) =
         nom_primitives::split_once_on(predicate_lower, " damage to ").ok()?;
     Some(after.trim_end_matches('.').trim())
+}
+
+/// CR 120.1 + CR 608.2c (DEFERRED §9): the source subject ends in
+/// "tapped this way" ("Each Wolf tapped this way deals damage ..." — Master of
+/// the Wild Hunt), a per-source tapped-by-this-ability rider the filter model
+/// cannot hold. `parse_subject_application` degrades it to a bare `Typed{Wolf}`,
+/// dropping the tapped restriction, so the each-source intercept must fail
+/// CLOSED to `Unimplemented`. Pattern 2 (`oracle_nom/PATTERNS.md`): the whole
+/// subject is parsed and the trailing phrase consumed LAST via `all_consuming`,
+/// anchoring the tag to the END so an interior/non-terminal "tapped this way"
+/// is not matched (mirrors `ends_with_of_your_choice`).
+fn subject_sources_tapped_this_way(subject_lower: &str) -> bool {
+    all_consuming(terminated(
+        take_until::<_, _, OracleError<'_>>("tapped this way"),
+        tag("tapped this way"),
+    ))
+    .parse(subject_lower)
+    .is_ok()
 }
 
 /// CR 109.4 + CR 120.3a: the recipient phrase is exactly "its controller".
@@ -7145,18 +7204,391 @@ mod tests {
         );
     }
 
-    // Negative: a per-source DYNAMIC amount ("each creature you control deals damage
-    // equal to its power") is the deferred filter-source own-power class — the
-    // single uniform resolve would be wrong, so it must NOT be captured.
+    // CR 120.1 + CR 608.2: a per-source OWN-power amount ("each creature you
+    // control deals damage equal to its power") now parses to
+    // `EachSourceDealsDamage` with the deferred pronoun rebound to the
+    // per-batch-source scope — the per-source resolver reads each batch
+    // member's OWN power (the filter-source own-power class). The guard change
+    // captures a 10-card class — Bartz and Boko, Judgment of
+    // Alexander, Kamahl's Will, Master of the Wild Hunt, Moonlight Hunt, Nissa's
+    // Judgment, Sarkhan the Mad, Season's Beatings, Signature Slam, and The Bears
+    // of Littjara. Two of those ten (Master of the Wild Hunt's "tapped this way"
+    // source rider and Season's Beatings' "random" recipient) carry riders the
+    // filter model cannot express and are pinned to fail CLOSED as `Unimplemented`
+    // (see `each_master_of_the_wild_hunt_tapped_this_way_fails_closed` /
+    // `each_seasons_beatings_random_recipient_fails_closed`), leaving EIGHT clean
+    // BatchSource members; the tests below pin each distinct source-filter shape
+    // (own-power "any target", "each other", composed amount, union subtype,
+    // +1/+1-counter property). The "any target" recipient
+    // stays `Shared(Any)` (pinned by `each_source_deals_damage_any_target_recipient`
+    // for the fixed-amount form; this flips the own-power form to the same
+    // shape).
     #[test]
-    fn each_source_own_power_amount_is_not_each_source_deals_damage() {
+    fn each_source_own_power_amount_is_each_source_deals_damage() {
         let effect = super::super::parse_effect(
             "each creature you control deals damage equal to its power to any target",
         );
         assert!(
-            !matches!(effect, Effect::EachSourceDealsDamage { .. }),
-            "per-source dynamic amount wrongly captured: {effect:?}"
+            matches!(
+                effect,
+                Effect::EachSourceDealsDamage {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::Power { scope: ObjectScope::BatchSource }
+                    },
+                    ..
+                }
+            ),
+            "own-power amount must now parse as EachSourceDealsDamage with BatchSource scope: {effect:?}"
         );
+        let Effect::EachSourceDealsDamage { recipient, .. } = effect else {
+            unreachable!("matched above");
+        };
+        assert_eq!(
+            recipient,
+            EachDamageRecipient::Shared(TargetFilter::Any),
+            "own-power 'any target' recipient must stay Shared(Any)"
+        );
+    }
+
+    // CR 120.1 + CR 608.2: Bartz and Boko's ETB trigger BODY — verbatim Oracle.
+    // The "each other Bird you control" subject binds the "its power" pronoun to
+    // the per-batch-source scope, and the "other" exclusion is preserved on the
+    // source filter.
+    #[test]
+    fn bartz_trigger_each_other_bird_own_power_is_each_source_deals_damage() {
+        let effect = super::super::parse_effect(
+            "each other Bird you control deals damage equal to its power to target creature an opponent controls",
+        );
+        let Effect::EachSourceDealsDamage {
+            sources,
+            amount,
+            recipient,
+        } = effect
+        else {
+            panic!("expected EachSourceDealsDamage, got {effect:?}");
+        };
+        assert!(
+            matches!(
+                amount,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::BatchSource
+                    }
+                }
+            ),
+            "Bartz amount must be Ref(Power{{BatchSource}}), got {amount:?}"
+        );
+        let TargetFilter::Typed(filter) = sources else {
+            panic!("expected a Typed source filter, got {sources:?}");
+        };
+        assert!(
+            filter
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::Another)),
+            "Bartz 'each other Bird' must carry FilterProp::Another, got {filter:?}"
+        );
+        assert_eq!(filter.controller, Some(ControllerRef::You));
+        assert!(
+            filter
+                .type_filters
+                .iter()
+                .any(|tf| matches!(tf, TypeFilter::Subtype(s) if s == "Bird")),
+            "expected a Bird subtype, got {filter:?}"
+        );
+        assert_eq!(
+            recipient,
+            EachDamageRecipient::Shared(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::Opponent)
+            )),
+            "Bartz recipient is a creature an opponent controls"
+        );
+    }
+
+    // CR 120.1 + CR 608.2: Judgment of Alexander's delayed-trigger BODY — verbatim
+    // Oracle. "that creature" (the prevented-damage source) resolves to
+    // `TriggeringSource`, unchanged.
+    #[test]
+    fn judgment_of_alexander_each_commander_own_power_is_each_source_deals_damage() {
+        let effect = super::super::parse_effect(
+            "each commander creature you control deals damage equal to its power to that creature",
+        );
+        let Effect::EachSourceDealsDamage {
+            amount, recipient, ..
+        } = effect
+        else {
+            panic!("expected EachSourceDealsDamage, got {effect:?}");
+        };
+        assert!(
+            matches!(
+                amount,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::BatchSource
+                    }
+                }
+            ),
+            "Judgment of Alexander amount must be Ref(Power{{BatchSource}}), got {amount:?}"
+        );
+        assert_eq!(
+            recipient,
+            EachDamageRecipient::Shared(TargetFilter::TriggeringSource),
+            "Judgment of Alexander 'that creature' recipient is TriggeringSource"
+        );
+    }
+
+    // CR 120.1 + CR 608.2: Signature Slam's spell-chain clause — verbatim Oracle.
+    #[test]
+    fn signature_slam_each_modified_own_power_is_each_source_deals_damage() {
+        let effect = super::super::parse_effect(
+            "each modified creature you control deals damage equal to its power to target creature you don't control",
+        );
+        let Effect::EachSourceDealsDamage {
+            amount, recipient, ..
+        } = effect
+        else {
+            panic!("expected EachSourceDealsDamage, got {effect:?}");
+        };
+        assert!(
+            matches!(
+                amount,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::BatchSource
+                    }
+                }
+            ),
+            "Signature Slam amount must be Ref(Power{{BatchSource}}), got {amount:?}"
+        );
+        assert_eq!(
+            recipient,
+            EachDamageRecipient::Shared(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::Opponent)
+            )),
+            "Signature Slam recipient is a creature you don't control"
+        );
+    }
+
+    // CR 120.1 + CR 608.2: a COMPOSED per-source amount rebinds the pronoun
+    // through every wrapper — "its power plus its toughness" →
+    // Sum{Power{BatchSource}, Toughness{BatchSource}} (both leaves rebound).
+    //
+    // The composed rebind is exercised with the "plus" sum rather than
+    // "twice its power": the shared amount parser binds the "its" in "twice
+    // its power" to `ObjectScope::Source` before the anaphoric guard ever
+    // runs (pre-existing parser behavior; only DIRECT "its power" / "its
+    // toughness" and the "plus" sum preserve the deferred `Anaphoric`
+    // scope). The Sum fixture proves the identical mechanism — rebind
+    // through composition — with a form that genuinely keeps the pronoun
+    // deferred.
+    #[test]
+    fn composed_per_source_amount_rebinds_through_wrappers() {
+        let effect = super::super::parse_effect(
+            "each Bird you control deals damage equal to its power plus its toughness to target creature",
+        );
+        let Effect::EachSourceDealsDamage { amount, .. } = effect else {
+            panic!("expected EachSourceDealsDamage, got {effect:?}");
+        };
+        assert_eq!(
+            amount,
+            QuantityExpr::Sum {
+                exprs: vec![
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::BatchSource
+                        }
+                    },
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Toughness {
+                            scope: ObjectScope::BatchSource
+                        }
+                    },
+                ],
+            },
+            "composed per-source amount must rebind both inner pronouns to BatchSource: {amount:?}"
+        );
+    }
+
+    // Regression: the FIXED-amount form is unchanged.
+    #[test]
+    fn each_source_deals_damage_fixed_amount_regression() {
+        let effect =
+            super::super::parse_effect("each Dwarf you control deals 1 damage to any target");
+        let Effect::EachSourceDealsDamage { amount, .. } = effect else {
+            panic!("expected EachSourceDealsDamage, got {effect:?}");
+        };
+        assert_eq!(amount, QuantityExpr::Fixed { value: 1 });
+    }
+
+    // Negative + reach-guard pair: a UNIFORM dynamic amount ("equal to the number
+    // of artifacts you control") has no anaphoric pronoun, so it stays on the
+    // prior rejection path — NOT captured. The positive control (same input minus
+    // nothing, with the "its power" pronoun) parses to `EachSourceDealsDamage` in
+    // the SAME test, so if the guard were wrongly loosened to accept every
+    // non-Fixed, the positive still parses and the negative fails — the negative
+    // is not vacuous (the only delta is the pronoun).
+    #[test]
+    fn uniform_dynamic_amount_rejected_with_pronoun_positive_reach_guard() {
+        let negative = super::super::parse_effect(
+            "each Bird you control deals damage equal to the number of artifacts you control to target creature",
+        );
+        assert!(
+            !matches!(negative, Effect::EachSourceDealsDamage { .. }),
+            "uniform dynamic amount must NOT be captured (non-anaphoric): {negative:?}"
+        );
+        let positive = super::super::parse_effect(
+            "each Bird you control deals damage equal to its power to target creature",
+        );
+        assert!(
+            matches!(
+                positive,
+                Effect::EachSourceDealsDamage {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::Power { scope: ObjectScope::BatchSource }
+                    },
+                    ..
+                }
+            ),
+            "reach-guard: the pronoun form must still parse as EachSourceDealsDamage(BatchSource): {positive:?}"
+        );
+    }
+
+    // CR 120.1 + CR 608.2: Moonlight Hunt — verbatim Oracle clause. The source
+    // filter carries the Wolf-or-Werewolf subtype UNION (TypeFilter::AnyOf) with
+    // controller You, the own-power amount is Ref(Power{BatchSource}), and the
+    // "that creature" recipient (the Werewolf that transformed and caused the
+    // trigger) resolves to TriggeringSource. Distinct source-filter shape from
+    // Bartz's "other Bird" and the composed-amount tests.
+    #[test]
+    fn moonlight_hunt_union_subtype_own_power_is_each_source_deals_damage() {
+        let effect = super::super::parse_effect(
+            "Each creature you control that's a Wolf or a Werewolf deals damage equal to its power to that creature",
+        );
+        let Effect::EachSourceDealsDamage {
+            sources,
+            amount,
+            recipient,
+        } = effect
+        else {
+            panic!("expected EachSourceDealsDamage, got {effect:?}");
+        };
+        assert_eq!(
+            sources,
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![
+                    TypeFilter::AnyOf(vec![
+                        TypeFilter::Subtype("Wolf".to_string()),
+                        TypeFilter::Subtype("Werewolf".to_string()),
+                    ]),
+                    TypeFilter::Creature,
+                ],
+                controller: Some(ControllerRef::You),
+                ..Default::default()
+            }),
+            "Moonlight Hunt source must carry the Wolf-or-Werewolf union, got {sources:?}"
+        );
+        assert_eq!(
+            amount,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::BatchSource
+                }
+            },
+            "Moonlight Hunt amount must be Ref(Power{{BatchSource}}), got {amount:?}"
+        );
+        assert_eq!(
+            recipient,
+            EachDamageRecipient::Shared(TargetFilter::TriggeringSource),
+            "Moonlight Hunt 'that creature' recipient is TriggeringSource"
+        );
+    }
+
+    // CR 120.1 + CR 608.2: Nissa's Judgment — verbatim Oracle clause. The source
+    // filter carries the +1/+1-counter property (`FilterProp::Counters { OfType(P1P1),
+    // GE, 1 }`) — a distinct source-filter shape from the union-subtype and
+    // "other"-property pins above.
+    #[test]
+    fn nissas_judgment_counter_property_own_power_is_each_source_deals_damage() {
+        use crate::types::ability::{Comparator, FilterProp};
+        use crate::types::counter::{CounterMatch, CounterType};
+        let effect = super::super::parse_effect(
+            "Each creature you control with a +1/+1 counter on it deals damage equal to its power to that creature",
+        );
+        let Effect::EachSourceDealsDamage {
+            sources,
+            amount,
+            recipient,
+        } = effect
+        else {
+            panic!("expected EachSourceDealsDamage, got {effect:?}");
+        };
+        assert_eq!(
+            sources,
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::Counters {
+                    counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                    comparator: Comparator::GE,
+                    count: QuantityExpr::Fixed { value: 1 },
+                }],
+            }),
+            "Nissa's Judgment source must carry the +1/+1-counter property, got {sources:?}"
+        );
+        assert_eq!(
+            amount,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::BatchSource
+                }
+            },
+            "Nissa's Judgment amount must be Ref(Power{{BatchSource}}), got {amount:?}"
+        );
+        assert_eq!(
+            recipient,
+            EachDamageRecipient::Shared(TargetFilter::TriggeringSource),
+            "Nissa's Judgment 'that creature' recipient is TriggeringSource"
+        );
+    }
+
+    // CR 120.1 + CR 608.2c (DEFERRED §9): Season's Beatings' "random" recipient
+    // ("another random creature that player controls") is an unmodeled random
+    // selection — fail CLOSED to `Unimplemented` rather than degrade the recipient
+    // to `Typed{Another}` (which drops both "random" and the controller scope).
+    #[test]
+    fn each_seasons_beatings_random_recipient_fails_closed() {
+        let effect = super::super::parse_effect(
+            "Each creature target player controls deals damage equal to its power to another random creature that player controls",
+        );
+        const RIDER_KEY: &str = "each_source_unrepresentable_rider";
+        match &effect {
+            Effect::Unimplemented { name, .. } if name.as_str() == RIDER_KEY => {}
+            other => panic!(
+                "Season's Beatings random-recipient rider must fail closed to \
+                 each_source_unrepresentable_rider (random recipient is an unmodeled \
+                 per-source rider, not a degradation to Typed{{Another}}), got {other:?}"
+            ),
+        }
+    }
+
+    // CR 120.1 + CR 608.2c (DEFERRED §9): Master of the Wild Hunt's source rider
+    // ("Each Wolf tapped this way") is a per-source tapped-by-this-ability
+    // constraint the source filter cannot hold — fail CLOSED to `Unimplemented`
+    // rather than degrade the sources to bare `Typed{Wolf}`.
+    #[test]
+    fn each_master_of_the_wild_hunt_tapped_this_way_fails_closed() {
+        let effect = super::super::parse_effect(
+            "Each Wolf tapped this way deals damage equal to its power to target creature",
+        );
+        const RIDER_KEY: &str = "each_source_unrepresentable_rider";
+        match &effect {
+            Effect::Unimplemented { name, .. } if name.as_str() == RIDER_KEY => {}
+            other => panic!(
+                "Master of the Wild Hunt tapped-this-way source rider must fail closed to \
+                 each_source_unrepresentable_rider (per-source tapped-by-this-ability is \
+                 unmodeled, not a degradation to bare Typed{{Wolf}}), got {other:?}"
+            ),
+        }
     }
 
     // Negative: the targeted own-power team-up shape still routes to
@@ -8357,6 +8789,44 @@ mod tests {
         assert_eq!(name, "Cordyceps Infected");
         assert!(*tapped);
         assert!(*enters_attacking);
+    }
+
+    /// CR 303.4b + CR 111.2 + CR 608.2c: An Aura's "enchanted opponent"
+    /// subject is its attached player, and that same player creates every token
+    /// in a shared-verb sequence rather than only its first item.
+    #[test]
+    fn enchanted_opponent_owns_each_shared_token_sequence_item() {
+        use crate::parser::oracle_effect::parse_effect_clause;
+        use crate::types::ability::Effect;
+
+        let mut ctx = ParseContext::default();
+        let clause = parse_effect_clause(
+            "enchanted opponent creates a Clue token, a Food token, and a Junk token",
+            &mut ctx,
+        );
+
+        let mut names = Vec::new();
+        let mut effect = &clause.effect;
+        let mut next = clause.sub_ability.as_deref();
+        loop {
+            let Effect::Token { name, owner, .. } = effect else {
+                panic!("expected shared token sequence, got {effect:?}");
+            };
+            names.push(name.as_str());
+            assert_eq!(
+                owner,
+                &TargetFilter::AttachedTo,
+                "{name} must be created by the enchanted opponent"
+            );
+
+            let Some(definition) = next else {
+                break;
+            };
+            effect = definition.effect.as_ref();
+            next = definition.sub_ability.as_deref();
+        }
+
+        assert_eq!(names, ["Clue", "Food", "Junk"]);
     }
 
     #[test]

@@ -248,7 +248,10 @@ pub(crate) fn finish_meld_entry(
     state.liminal_entries.insert(
         context.source_id,
         LiminalEntry {
-            object: projected,
+            // CR 701.42a: the meld result is card-backed — its two component
+            // cards are real objects in exile — so it is not a CR 111.1 token
+            // projection and never enters through `ProposedEvent::TokenEntry`.
+            object: crate::types::game_state::LiminalEntrant::Card(projected),
             name: context.result.clone(),
             source_id: context.source_id,
             controller: context.controller,

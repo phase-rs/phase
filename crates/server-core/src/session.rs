@@ -5269,6 +5269,7 @@ mod tests {
             rest_order: engine::types::ability::DigRestOrder::Preserve,
             source_id: None,
             enter_tapped: false,
+            enters_attacking: false,
         };
 
         // Non-canonical permutation [c, a, b] — not an enumerated candidate.

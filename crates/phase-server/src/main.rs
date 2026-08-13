@@ -502,6 +502,38 @@ fn build_state_update_message(
 /// state; the requester acknowledgement carries progress metadata separately.
 const MAX_RESOLVE_ALL_LOG_ENTRIES: usize = 128;
 
+/// Resolving the batch and then resuming normal AI play are one authoritative
+/// transition. Retain their engine-authored logs in that order while keeping
+/// the compact final snapshot bounded.
+fn resolve_all_log_tail(
+    batch_log_entries: &[GameLogEntry],
+    ai_results: &[RevisionedActionResult],
+) -> Vec<GameLogEntry> {
+    fn append_tail(tail: &mut Vec<GameLogEntry>, entries: &[GameLogEntry]) {
+        if entries.len() >= MAX_RESOLVE_ALL_LOG_ENTRIES {
+            tail.clear();
+            tail.extend_from_slice(&entries[entries.len() - MAX_RESOLVE_ALL_LOG_ENTRIES..]);
+            return;
+        }
+
+        let overflow = tail
+            .len()
+            .saturating_add(entries.len())
+            .saturating_sub(MAX_RESOLVE_ALL_LOG_ENTRIES);
+        if overflow > 0 {
+            tail.drain(..overflow);
+        }
+        tail.extend_from_slice(entries);
+    }
+
+    let mut tail = Vec::with_capacity(MAX_RESOLVE_ALL_LOG_ENTRIES);
+    append_tail(&mut tail, batch_log_entries);
+    for (_, (_, _, _, log_entries, _, _, _)) in ai_results {
+        append_tail(&mut tail, log_entries);
+    }
+    tail
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_resolve_all_state_update_message(
     raw_state: &GameState,
@@ -4206,82 +4238,110 @@ async fn handle_resolve_all(
     let processed = {
         let mut mgr = state.lock().await;
         match mgr.resolve_all_for_player(&game_code, &player_token, max_resolutions) {
-            Ok((transition, summary)) => {
-                let session = mgr
-                    .sessions
-                    .get(&game_code)
-                    .expect("Resolve All retains its session");
-                let eliminated = session.state.eliminated_players.clone();
-                let rewind_targets = session.rewind_options();
-                let player_count = session.player_count;
-                let game_over_winner = match &session.state.waiting_for {
-                    engine::types::game_state::WaitingFor::GameOver { winner } => Some(*winner),
-                    _ => None,
-                };
-                let terminal = if let Some(winner) = game_over_winner {
-                    let ranked_result = ranked_duel_players(session).and_then(|players| {
-                        ranked_result_for_duel(game_db, &game_code, &players, winner)
-                    });
-                    terminal_artifact(session, winner, "Game ended".to_string(), ranked_result)
-                        .map(Some)
-                } else if transition.is_some() {
-                    persist_full_session_async(game_db, session);
-                    Ok(None)
-                } else {
-                    Ok(None)
-                };
-                terminal.map(|terminal| {
-                    (
-                        transition,
-                        summary,
-                        eliminated,
-                        rewind_targets,
-                        player_count,
-                        game_over_winner,
-                        terminal,
-                    )
-                })
-            }
+            Ok((transition, summary)) => match transition {
+                None => Ok((summary, None)),
+                Some((_, (_, _, _, batch_log_entries, _, _, _))) => {
+                    let session = mgr
+                        .sessions
+                        .get_mut(&game_code)
+                        .expect("Resolve All retains its session");
+                    // Resolve All is a shortcut through a human-authorized batch,
+                    // not a replacement for the session's ordinary AI hand-off.
+                    // Keep that hand-off under the same lock, then derive the one
+                    // final payload from the current session rather than the batch
+                    // transition it has already moved past.
+                    let ai_results = session.run_ai();
+                    let (raw_state, legal_actions, _auto_pass, spell_costs, by_object) =
+                        session.current_broadcast_snapshot();
+                    let revision = session.state_revision;
+                    let log_entries = resolve_all_log_tail(&batch_log_entries, &ai_results);
+                    let eliminated = session.state.eliminated_players.clone();
+                    let rewind_targets = session.rewind_options();
+                    let player_count = session.player_count;
+                    let game_over_winner = match &session.state.waiting_for {
+                        engine::types::game_state::WaitingFor::GameOver { winner } => Some(*winner),
+                        _ => None,
+                    };
+                    let terminal = if let Some(winner) = game_over_winner {
+                        let ranked_result = ranked_duel_players(session).and_then(|players| {
+                            ranked_result_for_duel(game_db, &game_code, &players, winner)
+                        });
+                        terminal_artifact(session, winner, "Game ended".to_string(), ranked_result)
+                            .map(Some)
+                    } else {
+                        persist_full_session_async(game_db, session);
+                        Ok(None)
+                    };
+                    terminal.map(|terminal| {
+                        (
+                            summary,
+                            Some((
+                                revision,
+                                raw_state,
+                                legal_actions,
+                                log_entries,
+                                spell_costs,
+                                by_object,
+                                eliminated,
+                                rewind_targets,
+                                player_count,
+                                game_over_winner,
+                                terminal,
+                            )),
+                        )
+                    })
+                }
+            },
             Err(error) => Err(error),
         }
     };
 
-    let (transition, summary, eliminated, rewind_targets, player_count, game_over_winner, terminal) =
-        match processed {
-            Ok(processed) => processed,
-            Err(reason) => {
-                let _ = tx.send(ServerMessage::ResolveAllRejected { request_id, reason });
-                return;
-            }
-        };
+    let (summary, payload) = match processed {
+        Ok(processed) => processed,
+        Err(reason) => {
+            let _ = tx.send(ServerMessage::ResolveAllRejected { request_id, reason });
+            return;
+        }
+    };
 
     let acknowledgement = ServerMessage::ResolveAllResult {
         request_id,
         items_resolved: summary.items_resolved,
         total: summary.total,
     };
-    let Some((revision, result)) = transition else {
+    let Some((
+        revision,
+        raw_state,
+        legal_actions,
+        log_entries,
+        spell_costs,
+        by_object,
+        eliminated,
+        rewind_targets,
+        player_count,
+        game_over_winner,
+        terminal,
+    )) = payload
+    else {
         let _ = tx.send(acknowledgement);
         return;
     };
-    let (raw_state, _events, legal_actions, logs, _auto_pass, spell_costs, by_object) = &result;
-    let log_entries = &logs[logs.len().saturating_sub(MAX_RESOLVE_ALL_LOG_ENTRIES)..];
 
     if let Err(reason) = guard_state_snapshot_broadcast(StateSnapshotParts {
-        state: raw_state,
+        state: &raw_state,
         events: &[],
-        log_entries,
-        legal_actions,
-        legal_actions_by_object: by_object,
-        spell_costs,
+        log_entries: &log_entries,
+        legal_actions: &legal_actions,
+        legal_actions_by_object: &by_object,
+        spell_costs: &spell_costs,
     }) {
         warn!(game = %game_code, %reason, "Resolve All snapshot exceeds broadcast bounds after commit");
         let _ = tx.send(build_resolve_all_state_update_message(
-            raw_state,
-            log_entries,
-            legal_actions,
-            spell_costs,
-            by_object,
+            &raw_state,
+            &log_entries,
+            &legal_actions,
+            &spell_costs,
+            &by_object,
             revision,
             requester,
             eliminated.clone(),
@@ -4297,11 +4357,11 @@ async fn handle_resolve_all(
             Err(error) => {
                 error!(game = %game_code, %error, "Resolve All terminal preparation failed after commit");
                 let _ = tx.send(build_resolve_all_state_update_message(
-                    raw_state,
-                    log_entries,
-                    legal_actions,
-                    spell_costs,
-                    by_object,
+                    &raw_state,
+                    &log_entries,
+                    &legal_actions,
+                    &spell_costs,
+                    &by_object,
                     revision,
                     requester,
                     eliminated.clone(),
@@ -4317,11 +4377,11 @@ async fn handle_resolve_all(
     // Queue the requester's final state and acknowledgement through its direct
     // sender in order; the adapter resolves only after this cached snapshot.
     let requester_update = build_resolve_all_state_update_message(
-        raw_state,
-        log_entries,
-        legal_actions,
-        spell_costs,
-        by_object,
+        &raw_state,
+        &log_entries,
+        &legal_actions,
+        &spell_costs,
+        &by_object,
         revision,
         requester,
         eliminated.clone(),
@@ -4339,11 +4399,11 @@ async fn handle_resolve_all(
                 }
                 if let Some(sender) = players.get(&player) {
                     let _ = sender.send(build_resolve_all_state_update_message(
-                        raw_state,
-                        log_entries,
-                        legal_actions,
-                        spell_costs,
-                        by_object,
+                        &raw_state,
+                        &log_entries,
+                        &legal_actions,
+                        &spell_costs,
+                        &by_object,
                         revision,
                         player,
                         eliminated.clone(),
@@ -4354,7 +4414,7 @@ async fn handle_resolve_all(
         }
     }
     if let Ok(spectator_update) =
-        build_spectator_state_update_message(raw_state, &[], log_entries, revision)
+        build_spectator_state_update_message(&raw_state, &[], &log_entries, revision)
     {
         let mut spectators = game_spectators.lock().await;
         if let Some(senders) = spectators.get_mut(&game_code) {
@@ -7682,10 +7742,12 @@ async fn handle_client_message(
 #[cfg(test)]
 mod state_transport_derived_tests {
     use super::*;
-    use engine::types::ability::SearchSelectionConstraint;
+    use engine::game::deck_loading::PlayerDeckPayload;
+    use engine::types::ability::{Effect, ResolvedAbility, SearchSelectionConstraint};
     use engine::types::actions::GameAction;
     use engine::types::game_state::{
-        ActiveSearchDecisionAuthority, ActiveSearchDecisionControl, PriorityPassingMode, WaitingFor,
+        ActiveSearchDecisionAuthority, ActiveSearchDecisionControl, PriorityPassingMode,
+        StackEntry, StackEntryKind, WaitingFor,
     };
     use engine::types::identifiers::ObjectId;
     use engine::types::log::{GameLogEntry, LogCategory, LogSegment};
@@ -7777,6 +7839,189 @@ mod state_transport_derived_tests {
                 assert_eq!(log_entries.len(), MAX_RESOLVE_ALL_LOG_ENTRIES);
             }
             other => panic!("expected StateUpdate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_all_final_log_tail_orders_batch_before_ai_follow_up_logs() {
+        let state = GameState::new_two_player(42);
+        let batch_logs: Vec<_> = (0..=MAX_RESOLVE_ALL_LOG_ENTRIES)
+            .map(|seq| GameLogEntry {
+                seq: seq as u32,
+                turn: 1,
+                phase: Phase::PreCombatMain,
+                category: LogCategory::Game,
+                segments: vec![LogSegment::Text(format!("batch {seq}"))],
+                presentation: Default::default(),
+            })
+            .collect();
+        let ai_logs: Vec<_> = (0..2)
+            .map(|seq| GameLogEntry {
+                seq: (100 + seq) as u32,
+                turn: 1,
+                phase: Phase::PreCombatMain,
+                category: LogCategory::Game,
+                segments: vec![LogSegment::Text(format!("ai {seq}"))],
+                presentation: Default::default(),
+            })
+            .collect();
+        let ai_results = vec![(
+            2,
+            (
+                state,
+                Vec::new(),
+                Vec::new(),
+                ai_logs.clone(),
+                false,
+                HashMap::new(),
+                HashMap::new(),
+            ),
+        )];
+
+        let tail = resolve_all_log_tail(&batch_logs, &ai_results);
+
+        assert_eq!(tail.len(), MAX_RESOLVE_ALL_LOG_ENTRIES);
+        assert_eq!(tail.first(), batch_logs.get(3));
+        assert_eq!(&tail[tail.len() - ai_logs.len()..], ai_logs.as_slice());
+    }
+
+    #[tokio::test]
+    async fn resolve_all_handler_sends_the_final_snapshot_before_its_acknowledgement() {
+        let mut manager = SessionManager::new();
+        let (game_code, player_token) = manager.create_game(PlayerDeckPayload::default());
+        let ai_player = PlayerId(1);
+        let session = manager
+            .sessions
+            .get_mut(&game_code)
+            .expect("new game retains its session");
+        session.ai_seats.insert(ai_player);
+        session.ai_configs.insert(
+            ai_player,
+            phase_ai::config::create_config_for_players(
+                phase_ai::config::AiDifficulty::Easy,
+                phase_ai::config::Platform::Native,
+                2,
+            ),
+        );
+        let stack_object = ObjectId(1);
+        session.state.active_player = ai_player;
+        session.state.priority_player = PlayerId(0);
+        session.state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        // The AI has already passed in this priority cycle, so the requesting
+        // human's pass deterministically resolves the stack entry.
+        session.state.priority_passes.insert(ai_player);
+        session.state.stack.push_back(StackEntry {
+            id: stack_object,
+            source_id: stack_object,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: stack_object,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    Vec::new(),
+                    stack_object,
+                    PlayerId(0),
+                )),
+            },
+        });
+        let revision_before = session.state_revision;
+
+        let state: SharedState = Arc::new(Mutex::new(manager));
+        let draft_state: SharedDraftState = Arc::new(Mutex::new(DraftSessionManager::new()));
+        let connections: SharedConnections = Arc::new(Mutex::new(HashMap::new()));
+        let game_spectators: SharedGameSpectators = Arc::new(Mutex::new(HashMap::new()));
+        let db_file = tempfile::NamedTempFile::new().expect("temporary game database");
+        let game_db = Arc::new(
+            persistence::GameDb::open(db_file.path(), persistence::SessionRetention::Multiplayer)
+                .expect("open temporary game database"),
+        );
+        let (requester_tx, mut requester_rx) = mpsc::unbounded_channel();
+        let (ai_tx, mut ai_rx) = mpsc::unbounded_channel();
+        connections
+            .lock()
+            .await
+            .insert(game_code.clone(), HashMap::from([(ai_player, ai_tx)]));
+        let identity = SocketIdentity {
+            game_code: Some(game_code.clone()),
+            player_id: Some(PlayerId(0)),
+            player_token: Some(player_token),
+            lobby_subscribed: false,
+            session_span: None,
+            client_hello: None,
+            lobby_host_game: None,
+            seat_reservations: Vec::new(),
+            lobby_reservations: Vec::new(),
+            draft_code: None,
+            draft_seat: None,
+            draft_token: None,
+            spectator_draft_code: None,
+            spectator_visibility: None,
+            spectator_game_code: None,
+        };
+
+        handle_resolve_all(
+            41,
+            1,
+            &state,
+            &draft_state,
+            &connections,
+            &requester_tx,
+            &game_db,
+            &game_spectators,
+            &identity,
+        )
+        .await;
+
+        let (expected_revision, expected_waiting_for) = {
+            let manager = state.lock().await;
+            let session = manager
+                .sessions
+                .get(&game_code)
+                .expect("Resolve All retains its session");
+            assert!(
+                session.state_revision > revision_before,
+                "the resolved batch must advance the authoritative revision"
+            );
+            (session.state_revision, session.state.waiting_for.clone())
+        };
+
+        match tokio::time::timeout(std::time::Duration::from_secs(1), requester_rx.recv())
+            .await
+            .expect("Resolve All must send the requester state update")
+            .expect("requester state update channel remains open")
+        {
+            ServerMessage::StateUpdate {
+                state_revision,
+                state,
+                ..
+            } => {
+                assert_eq!(state_revision, expected_revision);
+                assert_eq!(state.waiting_for, expected_waiting_for);
+            }
+            other => panic!("expected requester StateUpdate, got {other:?}"),
+        }
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), requester_rx.recv())
+                .await
+                .expect("Resolve All must acknowledge after its state update")
+                .expect("requester acknowledgement channel remains open"),
+            ServerMessage::ResolveAllResult {
+                request_id: 41,
+                items_resolved: 1,
+                total: 1,
+            }
+        ));
+        match tokio::time::timeout(std::time::Duration::from_secs(1), ai_rx.recv())
+            .await
+            .expect("Resolve All must fan out the final state to the AI seat")
+            .expect("AI recipient channel remains open")
+        {
+            ServerMessage::StateUpdate { state_revision, .. } => {
+                assert_eq!(state_revision, expected_revision);
+            }
+            other => panic!("expected AI recipient StateUpdate, got {other:?}"),
         }
     }
 

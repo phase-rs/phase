@@ -3669,7 +3669,10 @@ function MeldChoiceModal() {
     );
   }
 
-  if (waitingFor?.type === "MeldAttackTargetChoice") {
+  if (
+    waitingFor?.type === "MeldAttackTargetChoice" ||
+    waitingFor?.type === "EntryAttackTargetChoice"
+  ) {
     const targets = waitingFor.data.valid_targets;
     return (
       <ChoiceModal

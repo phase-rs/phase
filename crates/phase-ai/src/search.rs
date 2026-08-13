@@ -1333,7 +1333,8 @@ pub fn fallback_action(
                 source_id: choice.source_id,
                 partner_id: choice.partner_id,
             }),
-        WaitingFor::MeldAttackTargetChoice { valid_targets, .. } => valid_targets
+        WaitingFor::MeldAttackTargetChoice { valid_targets, .. }
+        | WaitingFor::EntryAttackTargetChoice { valid_targets, .. } => valid_targets
             .first()
             .copied()
             .map(|target| GameAction::ChooseEntryAttackTarget { target }),
@@ -11838,6 +11839,7 @@ mod tests {
             rest_order: engine::types::ability::DigRestOrder::Preserve,
             source_id: None,
             enter_tapped: false,
+            enters_attacking: false,
         };
 
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);
@@ -11963,6 +11965,7 @@ mod tests {
                 rest_order: engine::types::ability::DigRestOrder::Preserve,
                 source_id: None,
                 enter_tapped: false,
+                enters_attacking: false,
             }
         });
         push("SurveilChoice", &|state| WaitingFor::SurveilChoice {

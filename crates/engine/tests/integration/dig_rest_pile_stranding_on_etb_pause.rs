@@ -67,6 +67,7 @@ fn dig_rest_pile_not_stranded_when_kept_aura_pauses_on_attachment_choice() {
         rest_order: engine::types::ability::DigRestOrder::Preserve,
         source_id: None,
         enter_tapped: false,
+        enters_attacking: false,
     };
 
     runner

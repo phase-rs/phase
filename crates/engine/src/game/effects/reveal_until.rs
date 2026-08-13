@@ -524,6 +524,7 @@ fn resolve_choose_any_number(
         rest_order: crate::types::ability::DigRestOrder::Preserve,
         source_id: Some(ability.source_id),
         enter_tapped: enter_tapped.is_tapped(),
+        enters_attacking: false,
     };
 
     events.push(GameEvent::EffectResolved {

@@ -3838,6 +3838,10 @@ pub struct PendingChooseOneOf {
     pub parent_targets: Vec<TargetRef>,
     #[serde(default)]
     pub context: super::ability::SpellContext,
+    /// CR 608.2c: Runtime tail retained until the final queued chooser selects
+    /// a branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<Box<super::ability::ResolvedAbility>>,
     /// CR 614.5 + CR 616.1f: replacement effects already applied to the event
     /// that produced this queued branch choice.
     #[serde(
@@ -4805,6 +4809,8 @@ pub struct PendingBatchZoneMoveRequest {
     pub cause: PendingBatchZoneChangeCause,
     #[serde(default, skip_serializing_if = "EtbTapState::is_unspecified")]
     pub enter_tapped: EtbTapState,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub enters_attacking: bool,
     #[serde(default)]
     pub enter_transformed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -5081,6 +5087,8 @@ pub enum BatchCompletion {
         selected: Vec<ObjectId>,
         destination: Zone,
         enter_tapped: EtbTapState,
+        #[serde(default)]
+        enters_attacking: bool,
     },
     /// CR 608.2c + CR 616.1: Every selected card of a deterministic mass Dig
     /// has settled. Publish only cards that actually reached `destination`, then
@@ -5357,6 +5365,28 @@ pub struct PendingTokenBattlefieldEntry {
     pub source_id: ObjectId,
 }
 
+/// CR 707.2 + CR 614.1c: everything the non-liminal copy-token entry tail still
+/// has to do for ONE token after its body is materialized — the copy exceptions,
+/// its entry counters, its entry events, and the rest of the batch.
+///
+/// Split out of the batch loop so the tail has exactly one implementation
+/// (`token_copy::finish_non_liminal_copy_token_entry`), reachable both inline and
+/// from the [`PendingCounterPostAction::ContinueCopyTokenEntryAfterAuraHost`]
+/// resume.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopyTokenEntryTail {
+    pub owner: PlayerId,
+    pub copy: Box<CopyTokenSpec>,
+    pub enter_tapped: EtbTapState,
+    pub enter_with_counters: Vec<(CounterType, u32)>,
+    /// CR 306.5b + CR 614.1c: the entry counters the copy path seeds itself
+    /// (copied loyalty, "enters with N counters" self-replacements, and the
+    /// creating effect's own additions), already merged in application order.
+    pub etb_counters: Vec<(CounterType, u32)>,
+    /// How many tokens of this batch are still unstarted after this one.
+    pub remaining_count: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PendingCounterPostAction {
     EmitEffectResolved {
@@ -5421,6 +5451,19 @@ pub enum PendingCounterPostAction {
         controller: PlayerId,
         remaining_modifications: Vec<ContinuousModification>,
     },
+    /// CR 303.4f: finish a NON-liminal copy-token entry whose CR 303.4f Aura-host
+    /// choice paused it between the body's materialization and the rest of its
+    /// entry.
+    ///
+    /// Deliberately NOT `ApplyCopyTokenModificationsAndFinalize`: that action's
+    /// handler resumes a copy whose ETB counters have ALREADY been applied and
+    /// therefore skips `etb_counters` entirely, while this pause happens BEFORE
+    /// them — reusing it would silently drop a copied planeswalker's CR 306.5b
+    /// loyalty and every CR 614.1c "enters with counters" self-replacement.
+    ContinueCopyTokenEntryAfterAuraHost {
+        object_id: ObjectId,
+        tail: Box<CopyTokenEntryTail>,
+    },
     FinalizeCommittedLiminalTokenEntry {
         object_id: ObjectId,
         name: String,
@@ -5463,6 +5506,10 @@ pub enum PendingCounterPostAction {
         source_id: Option<ObjectId>,
         duration: Option<Duration>,
         exile_tracking: ZoneDeliveryExileTracking,
+        /// CR 508.4: The completed battlefield entry joins combat after any
+        /// as-enters replacement choice has settled.
+        #[serde(default)]
+        enters_attacking: bool,
         /// Who drains `post_replacement_continuation` when this deferred tail
         /// finally runs (CR 614.12a). `#[serde(default)]` = `DeliveryTail`,
         /// matching every record minted before the field existed.
@@ -9845,11 +9892,18 @@ pub enum WaitingFor {
         player: PlayerId,
         choices: Vec<MeldSelection>,
     },
-    /// CR 508.4a: choose what the meld result enters attacking. The engine
+    /// CR 508.4: choose what the meld result enters attacking. The engine
     /// supplies the complete legal topology; clients only return one member.
     MeldAttackTargetChoice {
         player: PlayerId,
         context: MeldSelection,
+        valid_targets: Vec<AttackTarget>,
+    },
+    /// CR 508.4: choose a defending player, planeswalker, or battle for a
+    /// creature that entered the battlefield attacking during resolution.
+    EntryAttackTargetChoice {
+        player: PlayerId,
+        object_id: ObjectId,
         valid_targets: Vec<AttackTarget>,
     },
     /// CR 103.5 + 103.5b: London mulligan — each un-kept player decides
@@ -10279,6 +10333,10 @@ pub enum WaitingFor {
         /// dig are tapped.
         #[serde(default)]
         enter_tapped: bool,
+        /// CR 508.4: Kept cards entering the battlefield via this dig enter
+        /// attacking rather than being declared as attackers.
+        #[serde(default)]
+        enters_attacking: bool,
     },
     SurveilChoice {
         player: PlayerId,
@@ -10409,6 +10467,11 @@ pub enum WaitingFor {
         parent_targets: Vec<TargetRef>,
         #[serde(default)]
         context: super::ability::SpellContext,
+        /// CR 608.2c: Runtime continuation that follows the complete modal
+        /// choice. It is attached only to the final selected branch, after all
+        /// CR 701.55d choosers have resolved their instances.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continuation: Option<Box<super::ability::ResolvedAbility>>,
         /// CR 614.5 + CR 616.1f: replacement effects already applied to the
         /// event that produced this choice.
         #[serde(
@@ -12097,6 +12160,7 @@ impl WaitingFor {
             WaitingFor::Priority { .. } => "Priority",
             WaitingFor::MeldPairChoice { .. } => "MeldPairChoice",
             WaitingFor::MeldAttackTargetChoice { .. } => "MeldAttackTargetChoice",
+            WaitingFor::EntryAttackTargetChoice { .. } => "EntryAttackTargetChoice",
             WaitingFor::MulliganDecision { .. } => "MulliganDecision",
             WaitingFor::OpeningHandBottomCards { .. } => "OpeningHandBottomCards",
             WaitingFor::ManaPayment { .. } => "ManaPayment",
@@ -12250,6 +12314,7 @@ impl WaitingFor {
             WaitingFor::Priority { player }
             | WaitingFor::MeldPairChoice { player, .. }
             | WaitingFor::MeldAttackTargetChoice { player, .. }
+            | WaitingFor::EntryAttackTargetChoice { player, .. }
             | WaitingFor::ManaPayment { player, .. }
             | WaitingFor::ManaSourceSelection { player, .. }
             | WaitingFor::ChooseXValue { player, .. }
@@ -13738,9 +13803,156 @@ impl ResolvingTriggerContext {
     }
 }
 
+/// CR 303.4f + CR 614.12: the entrant an entering Aura's host choice was decided
+/// against, parked across the [`WaitingFor::ReturnAsAuraTarget`] pause that asks
+/// its controller which of several legal hosts to enchant.
+///
+/// CR 303.4f requires the chooser to pick "a legal object or player according to
+/// the Aura's enchant ability and any other applicable effects" — i.e. according
+/// to the Aura AS IT ENTERS. When the choice pauses, the act half runs in a later
+/// `apply` call and can no longer see the deciding seam's stack frame, so the
+/// entrant travels here. Without it the act half re-derives CR 701.3a legality
+/// from `state.objects[aura_id]`, which on the non-liminal copy-token path still
+/// holds the PRE-exception body: a copy exception that changes the Aura's color
+/// (CR 707.9b) would make the chosen host's protection (CR 702.16c) reject an
+/// attachment CR 303.4f had legally offered, and CR 701.3b would turn the attach
+/// into a silent no-op, leaving the token for the CR 704.5m sweep.
+///
+/// `None` for every seam whose stored object already IS the entrant, so the
+/// shared resume path is unchanged for them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnteringAuraAuthority {
+    /// The Aura the parked entrant belongs to. The `ReturnAsAuraTarget` resume
+    /// path is shared with seams that park nothing, so the id is matched before
+    /// the entrant is honoured.
+    pub aura_id: ObjectId,
+    /// CR 614.12: the characteristics the Aura will have on the battlefield.
+    pub entrant: Box<GameObject>,
+}
+
+/// CR 111.1: a token projection — "a marker used to represent any permanent
+/// that isn't represented by a card".
+///
+/// A witness type, not a convenience wrapper. CR 303.4g ends with "If the Aura
+/// is a token, it isn't created", so the seam that denies an unhosted entry has
+/// to know whether its entrant is a token — and a plain [`GameObject`] can only
+/// be *expected* to have `is_token` set, never proven to. That left the seam
+/// carrying a disposition for a card-backed entrant the type still admitted.
+/// The single constructor sets the flag and no accessor hands out a
+/// `&mut GameObject`, so "this entrant is a token" holds by construction
+/// wherever this type appears.
+#[derive(Debug, Clone)]
+pub struct TokenProjection(GameObject);
+
+impl TokenProjection {
+    /// CR 111.1: project characteristics as a token. Marking is part of the
+    /// construction, so the invariant cannot be missed by a caller that forgot.
+    pub fn materialize(mut object: GameObject) -> Self {
+        object.is_token = true;
+        Self(object)
+    }
+
+    pub fn projected(&self) -> &GameObject {
+        &self.0
+    }
+
+    pub fn into_projected(self) -> GameObject {
+        self.0
+    }
+
+    /// CR 614.1c: an entry replacement can still settle the entrant's tapped
+    /// state before it enters. Deliberately narrow — a general
+    /// `&mut GameObject` would let a caller clear the CR 111.1 flag this type
+    /// exists to carry.
+    pub fn set_tapped(&mut self, tapped: bool) {
+        self.0.tapped = tapped;
+    }
+}
+
+/// CR 614.12: the entrant of a liminal (decided-but-not-yet-entered) projection.
+///
+/// Two kinds of entrant reach `GameState::liminal_entries`, and CR 303.4g makes
+/// the difference load-bearing rather than cosmetic:
+///
+/// * a token, which exists in no zone at all until its entry commits, and
+/// * the CR 701.42 meld result, whose components are real cards sitting in
+///   exile.
+///
+/// Storing both as a bare `GameObject` erased that distinction at exactly the
+/// seam that has to act on it.
+#[derive(Debug, Clone)]
+pub enum LiminalEntrant {
+    /// CR 111.1: the entrant of a `ProposedEvent::TokenEntry`. It is in no zone,
+    /// so CR 303.4g's zone-phrased dispositions cannot apply to it — only the
+    /// rule's token clause can.
+    Token(TokenProjection),
+    /// CR 701.42: a card-backed projection. It always enters from a real prior
+    /// zone through `ProposedEvent::ZoneChange`, so CR 303.4g's card
+    /// dispositions ("remains in its current zone", or the stack's
+    /// owner's-graveyard placement) are decided on that path — which
+    /// re-proposes the graveyard placement as a fresh, replacement-consulted
+    /// event (CR 614.6).
+    Card(GameObject),
+}
+
+impl LiminalEntrant {
+    /// CR 614.12: the characteristics the entrant will have on the battlefield,
+    /// whichever kind of entrant it is.
+    pub fn projected(&self) -> &GameObject {
+        match self {
+            Self::Token(token) => token.projected(),
+            Self::Card(object) => object,
+        }
+    }
+
+    pub fn into_projected(self) -> GameObject {
+        match self {
+            Self::Token(token) => token.into_projected(),
+            Self::Card(object) => object,
+        }
+    }
+
+    /// CR 111.1: whether this projection is a token, answered by the stored
+    /// witness rather than by trusting a flag on the projected object.
+    pub fn is_token_projection(&self) -> bool {
+        matches!(self, Self::Token(_))
+    }
+
+    /// CR 614.1c: settle the entrant's tapped state before it enters.
+    pub fn set_tapped(&mut self, tapped: bool) {
+        match self {
+            Self::Token(token) => token.set_tapped(tapped),
+            Self::Card(object) => object.tapped = tapped,
+        }
+    }
+}
+
+/// The serialized form is the projected object itself, unchanged from when this
+/// field was a bare `GameObject`: the witness is a compile-time distinction, and
+/// CR 111.1 token-ness is already a persisted characteristic of the projection.
+impl Serialize for LiminalEntrant {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.projected().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for LiminalEntrant {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let object = GameObject::deserialize(deserializer)?;
+        // CR 111.1: reading the witness back off the projection is exact — the
+        // two constructors are the two sides of this test, and nothing else can
+        // produce a `LiminalEntrant`.
+        Ok(if object.is_token {
+            Self::Token(TokenProjection(object))
+        } else {
+            Self::Card(object)
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LiminalEntry {
-    pub object: GameObject,
+    pub object: LiminalEntrant,
     pub name: String,
     pub source_id: ObjectId,
     pub controller: PlayerId,
@@ -14086,6 +14298,24 @@ declare_game_state! {
     pub liminal_entries: HashMap<ObjectId, LiminalEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_liminal_entry_resume: Option<PendingLiminalEntryResume>,
+    /// CR 303.4f + CR 614.12: see [`EnteringAuraAuthority`]. Written only by
+    /// `zone_pipeline::apply_entering_aura_hosts` when it hands an entering
+    /// Aura's host choice to a player and the deciding seam judged legality
+    /// against a projection the stored object does not match yet; taken by the
+    /// `WaitingFor::ReturnAsAuraTarget` resume arm.
+    ///
+    /// Pause-scoped, and therefore INTENTIONALLY omitted from
+    /// `impl PartialEq for GameState` (same treatment as
+    /// `resolving_continuation_attach_host`): the pause it belongs to is already
+    /// compared through `waiting_for`, and a projection snapshot is not board
+    /// state a CR 104.4b loop can accumulate in.
+    ///
+    /// Not redacted by `visibility::filter_state_for_viewer` (unlike
+    /// `liminal_entries`, which can hold a face-down/meld projection no viewer
+    /// may see): this entrant is a token that is already on the battlefield, so
+    /// its characteristics are public information.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entering_aura_authority: Option<EnteringAuraAuthority>,
     /// CR 614.12a: set by `continue_replacement` when an optional `MayCost`
     /// accept's payment paused for an interactive sub-choice (e.g. Mox Diamond's
     /// "discard a land card" with multiple eligible lands). It re-parks the
@@ -19680,6 +19910,7 @@ impl GameState {
             pending_replacement: None,
             liminal_entries: HashMap::new(),
             pending_liminal_entry_resume: None,
+            entering_aura_authority: None,
             replacement_may_cost_paused: false,
             post_replacement_token_choice_applied: None,
             post_replacement_token_substitution_count: None,
@@ -21611,6 +21842,15 @@ fn _gamestate_partition_is_total(s: &GameState) {
         // never involve these, so no certification-death.
         liminal_entries: _,
         pending_liminal_entry_resume: _,
+        // `entering_aura_authority` (CR 303.4f entering-Aura host authority):
+        // EXCLUDED from `impl PartialEq for GameState`, and that is the SAFE
+        // direction here rather than the dangerous one. It is `Some` only while
+        // `waiting_for == ReturnAsAuraTarget` — a state the loop sampler never
+        // records (samples are taken at the Priority window) — and it is taken
+        // by the resume arm, so it is `None` at every sample beat. It is a
+        // read-only snapshot of an object `objects` already carries, never an
+        // accumulator: no value can grow across iterations in it.
+        entering_aura_authority: _,
         last_discover_value: _,
         // Post-rebase upstream additions (rebased onto d1a1e995e), classified by ONE-SIDED-SAFETY
         // (COMPARED is fail-safe; EXCLUSION is the fail-DANGEROUS direction — a field is excluded
@@ -22720,6 +22960,45 @@ mod tests {
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
     };
     use crate::types::resolved_commands::ResolvedDelayedTriggerCommand;
+
+    /// The `LiminalEntrant` witness is a compile-time distinction with no wire
+    /// footprint: it serializes as the bare projected object, exactly as this
+    /// field did before the witness existed, and CR 111.1 token-ness — already a
+    /// persisted characteristic — selects the variant on the way back in.
+    #[test]
+    fn a_liminal_entrant_round_trips_as_its_projected_object() {
+        for is_token in [true, false] {
+            let mut object = GameObject::new(
+                ObjectId(7),
+                CardId(3),
+                PlayerId(0),
+                "Projection".to_string(),
+                Zone::Battlefield,
+            );
+            object.is_token = is_token;
+            let entrant = if is_token {
+                LiminalEntrant::Token(TokenProjection::materialize(object.clone()))
+            } else {
+                LiminalEntrant::Card(object.clone())
+            };
+
+            let entrant_json = serde_json::to_string(&entrant).expect("entrant serializes");
+            assert_eq!(
+                entrant_json,
+                serde_json::to_string(&object).expect("object serializes"),
+                "the wire form is the projected object itself"
+            );
+
+            let restored: LiminalEntrant =
+                serde_json::from_str(&entrant_json).expect("entrant restores");
+            assert_eq!(
+                restored.is_token_projection(),
+                is_token,
+                "CR 111.1: the witness survives the round trip"
+            );
+            assert_eq!(restored.projected().name, object.name);
+        }
+    }
 
     #[derive(Serialize)]
     struct TupleKeyFixture<'a> {
@@ -27214,6 +27493,7 @@ mod tests {
             rest_order: crate::types::ability::DigRestOrder::Preserve,
             source_id: None,
             enter_tapped: false,
+            enters_attacking: false,
         }));
         variants.push(Box::new(WaitingFor::SurveilChoice {
             player: PlayerId(0),
@@ -27241,6 +27521,7 @@ mod tests {
             branch_descriptions: vec!["Draw a card.".to_string()],
             parent_targets: vec![],
             context: crate::types::ability::SpellContext::default(),
+            continuation: None,
             replacement_applied: Default::default(),
             remaining_players: vec![],
         }));

@@ -4315,6 +4315,7 @@ pub(crate) fn try_parse_dig_instead_alternative(
         rest_destination: alt_rest,
         rest_order: alt_rest_order,
         enter_tapped: alt_enter_tapped,
+        enters_attacking: alt_enters_attacking,
         ..
     } = alt_continuation
     else {
@@ -4353,6 +4354,7 @@ pub(crate) fn try_parse_dig_instead_alternative(
         rest_order: alt_rest.map_or(*prev_rest_order, |_| alt_rest_order),
         reveal: *prev_reveal,
         enter_tapped: alt_enter_tapped,
+        enters_attacking: alt_enters_attacking,
         source: DigSource::Library,
     };
 

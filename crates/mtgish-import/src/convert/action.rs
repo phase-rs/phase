@@ -3242,6 +3242,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             rest_order: DigRestOrder::Preserve,
             reveal: false,
             enter_tapped: false,
+            enters_attacking: false,
             source: DigSource::Library,
         },
 
@@ -4906,6 +4907,7 @@ fn convert_look_at_top(
             rest_order: DigRestOrder::Preserve,
             reveal: false,
             enter_tapped: false,
+            enters_attacking: false,
             source: DigSource::Library,
         }),
 
@@ -4934,6 +4936,7 @@ fn convert_look_at_top(
                 },
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -4954,6 +4957,7 @@ fn convert_look_at_top(
                 rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -4984,6 +4988,7 @@ fn convert_look_at_top(
                 },
                 reveal: true,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -5003,6 +5008,7 @@ fn convert_look_at_top(
                 rest_order: DigRestOrder::Preserve,
                 reveal: true,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -5065,6 +5071,7 @@ fn convert_reveal_top_dig(
                 rest_order: DigRestOrder::Preserve,
                 reveal: true,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -5081,6 +5088,7 @@ fn convert_reveal_top_dig(
                 rest_order: DigRestOrder::Preserve,
                 reveal: true,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -5097,6 +5105,7 @@ fn convert_reveal_top_dig(
                 rest_order: DigRestOrder::Preserve,
                 reveal: true,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -5121,6 +5130,7 @@ fn convert_reveal_top_dig(
                 },
                 reveal: true,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -5145,6 +5155,7 @@ fn convert_reveal_top_dig(
                 },
                 reveal: true,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }

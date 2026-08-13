@@ -996,7 +996,7 @@ pub fn move_to_zone(
             state
                 .liminal_entries
                 .get(&object_id)
-                .map(|entry| entry.object.clone())
+                .map(|entry| entry.object.projected().clone())
         })
         .flatten();
     let liminal_attack_target = (to == Zone::Battlefield)

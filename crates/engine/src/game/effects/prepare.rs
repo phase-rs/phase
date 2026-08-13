@@ -648,6 +648,7 @@ mod tests {
             None,
             false,
             crate::types::zones::EtbTapState::Unspecified,
+            false,
             None,
             &[],
             None,

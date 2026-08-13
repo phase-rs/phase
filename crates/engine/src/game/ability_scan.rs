@@ -712,6 +712,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             rest_order: _,
             reveal: _,
             enter_tapped: _,
+            enters_attacking: _,
             source: _,
             keep_count_expr,
         } => {
@@ -1735,6 +1736,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
         }
         Effect::Learn => Axes::NONE,
         Effect::Forage => Axes::NONE,
+        Effect::CompletePlayerAction { .. } => Axes::NONE,
         Effect::Harness => Axes::NONE,
         Effect::CollectEvidence { amount: _ } => Axes::NONE,
         Effect::Endure { amount, subject } => {
@@ -3117,6 +3119,9 @@ fn scan_object_scope(x: &ObjectScope) -> Axes {
         // CR 607.2a: source-persistent exile-pile member read — no event/sibling
         // projected axis (mirrors AmassedArmy).
         ObjectScope::OwnedLinkedExileCard => Axes::NONE,
+        // CR 120.1: per-iteration batch source — a resolution-filtered object
+        // with no event/sibling axis (mirrors Source/Target).
+        ObjectScope::BatchSource => Axes::NONE,
         ObjectScope::EventTarget => Axes {
             event: true,
             sibling: false,
@@ -5569,6 +5574,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::Adapt { .. }
         | Effect::Learn
         | Effect::Forage
+        | Effect::CompletePlayerAction { .. }
         | Effect::Harness
         | Effect::CollectEvidence { .. }
         | Effect::Endure { .. }
@@ -5947,6 +5953,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::Adapt { .. }
         | Effect::Learn
         | Effect::Forage
+        | Effect::CompletePlayerAction { .. }
         | Effect::Harness
         | Effect::Endure { .. }
         | Effect::BlightEffect { .. }
@@ -6207,6 +6214,7 @@ pub(crate) fn effect_is_randomness_bearing(e: &Effect) -> bool {
         | Effect::Adapt { .. }
         | Effect::Learn
         | Effect::Forage
+        | Effect::CompletePlayerAction { .. }
         | Effect::Harness
         | Effect::CollectEvidence { .. }
         | Effect::Endure { .. }

@@ -331,6 +331,7 @@ fn opponent_library_bottom_order_prompts_owner_and_applies_submitted_order() {
             target: TargetFilter::LastRevealed,
             enters_under: None,
             enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: Some(LibraryPosition::Bottom),
