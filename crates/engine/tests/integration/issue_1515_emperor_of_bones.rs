@@ -7,8 +7,9 @@ use engine::game::scenario::{GameScenario, P0};
 use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ChosenAttribute,
-    ContinuousModification, DelayedTriggerCondition, Effect, QuantityExpr, QuantityRef,
-    ReplacementDefinition, TargetFilter,
+    ContinuousModification, ControllerRef, DelayedTriggerCondition, Effect, FilterProp,
+    QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility, TargetChoiceTiming,
+    TargetFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -402,6 +403,95 @@ fn empty_forward_result_preserves_independent_sequential_siblings() {
         runner.state().objects[&offering].zone,
         Zone::Exile,
         "the later self-exile sibling must still resolve"
+    );
+}
+
+#[test]
+fn empty_forward_result_resolves_independent_sibling_before_dependent_tail() {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Forward Result Source", 2, 2)
+        .id();
+    let destroy_target = scenario.add_creature(P1, "Independent Target", 2, 2).id();
+
+    let dependent_tail = ResolvedAbility::new(
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+            effect: Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Sacrifice {
+                    target: TargetFilter::ParentTarget,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    min_count: 0,
+                },
+            )),
+            uses_tracked_set: false,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    let mut independent_sibling = ResolvedAbility::new(
+        Effect::Destroy {
+            target: TargetFilter::SpecificObject { id: destroy_target },
+            cant_regenerate: false,
+        },
+        vec![engine::types::ability::TargetRef::Object(destroy_target)],
+        source,
+        P0,
+    );
+    independent_sibling.sub_link = engine::types::ability::SubAbilityLink::SequentialSibling;
+    independent_sibling.sub_ability = Some(Box::new({
+        let mut tail = dependent_tail;
+        tail.sub_link = engine::types::ability::SubAbilityLink::SequentialSibling;
+        tail
+    }));
+
+    let mut forward_result = ResolvedAbility::new(
+        Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Battlefield,
+            target: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![engine::types::ability::TypeFilter::Creature],
+                controller: None,
+                properties: vec![FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                }],
+            }),
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: Some(ControllerRef::You),
+            enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: true,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        },
+        vec![],
+        source,
+        P0,
+    )
+    .sub_ability(independent_sibling);
+    forward_result.target_choice_timing = TargetChoiceTiming::Resolution;
+    forward_result.forward_result = true;
+
+    let mut runner = scenario.build();
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &forward_result, &mut events, 0)
+        .expect("empty forward-result chain must resolve");
+
+    assert_ne!(
+        runner.state().objects[&destroy_target].zone,
+        Zone::Battlefield,
+        "the independent sibling must resolve even when a later dependent tail is skipped"
+    );
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        0,
+        "the dependent ParentTarget tail must remain a no-op without a moved object"
     );
 }
 

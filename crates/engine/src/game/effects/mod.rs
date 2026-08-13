@@ -11216,14 +11216,15 @@ fn resolve_chain_body(
             // original ability source. Walk past dependent sequential siblings
             // and resume at the first independent sibling instead of terminating
             // the entire printed instruction chain.
-            let mut current = sub.sub_ability.as_deref();
+            let mut current = Some(sub.as_ref());
             while let Some(sibling) = current {
                 if sibling.sub_link == SubAbilityLink::SequentialSibling {
-                    if ability_chain_refs_parent_target(sibling) {
+                    if effect_chain_refs_parent_target(&sibling.effect) {
                         current = sibling.sub_ability.as_deref();
                         continue;
                     }
                     let mut sibling_resolved = sibling.clone();
+                    sibling_resolved.sub_ability = None;
                     apply_parent_chain_context(
                         &mut sibling_resolved,
                         ability,
@@ -11231,7 +11232,6 @@ fn resolve_chain_body(
                         state,
                     );
                     resolve_ability_chain(state, &sibling_resolved, events, depth + 1)?;
-                    break;
                 }
                 current = sibling.sub_ability.as_deref();
             }
