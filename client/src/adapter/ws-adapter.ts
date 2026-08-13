@@ -1223,6 +1223,11 @@ export class WebSocketAdapter implements EngineAdapter {
           player_token: string;
           full_key?: FullSessionKey;
         };
+        if (!this.acceptNativeReconnectIdentity({
+          gameCode: data.game_code,
+          playerToken: data.player_token,
+          fullKey: data.full_key,
+        })) break;
         this._gameCode = data.game_code;
         this.playerToken = data.player_token;
         if (data.full_key && !this.acceptFullSessionKey(data.full_key)) break;
@@ -1240,6 +1245,12 @@ export class WebSocketAdapter implements EngineAdapter {
           player_token: string;
           full_key?: FullSessionKey;
         };
+        if (!this.acceptNativeReconnectIdentity({
+          gameCode: data.game_code,
+          playerId: data.player_id,
+          playerToken: data.player_token,
+          fullKey: data.full_key,
+        })) break;
         this._gameCode = data.game_code;
         const fullKey = data.full_key;
         if (!fullKey) {
@@ -1335,17 +1346,12 @@ export class WebSocketAdapter implements EngineAdapter {
         const nativeReconnect = this.options.nativePregame?.kind === "reconnect"
           ? this.options.nativePregame
           : null;
+        if (!this.acceptNativeReconnectIdentity({
+          playerId: data.your_player,
+          playerToken: data.player_token,
+          fullKey: data.full_key,
+        })) break;
         if (nativeReconnect) {
-          if (data.your_player !== nativeReconnect.playerId) {
-            const error = new AdapterError(
-              "WS_ERROR",
-              `Native reconnect attached player ${data.your_player}, expected ${nativeReconnect.playerId}`,
-              false,
-            );
-            this.rejectInitialization(error);
-            this.emit({ type: "error", message: error.message });
-            break;
-          }
           if (!this.acceptFullSessionKey(data.full_key)) break;
         }
         if (this.reconnectInFlight) {
@@ -1392,7 +1398,7 @@ export class WebSocketAdapter implements EngineAdapter {
           this._gameCode = this.joinGameCode;
         }
         if (!nativeReconnect && data.full_key && !this.acceptFullSessionKey(data.full_key)) break;
-        if (data.player_token) {
+        if (!nativeReconnect && data.player_token) {
           this.playerToken = data.player_token;
           this.emit({ type: "sessionChanged", session: this.currentSession() });
         }
@@ -1781,5 +1787,37 @@ export class WebSocketAdapter implements EngineAdapter {
     }
     this.fullSessionKey = key;
     return true;
+  }
+
+  /** Reject identity-bearing reconnect frames before they can update session state. */
+  private acceptNativeReconnectIdentity(frame: {
+    gameCode?: string;
+    playerId?: PlayerId;
+    playerToken?: string;
+    fullKey?: FullSessionKey;
+  }): boolean {
+    const expected = this.options.nativePregame?.kind === "reconnect"
+      ? this.options.nativePregame
+      : null;
+    if (!expected) return true;
+
+    const errorMessage = frame.gameCode !== undefined && frame.gameCode !== expected.gameCode
+      ? `Native reconnect attached game ${frame.gameCode}, expected ${expected.gameCode}`
+      : frame.playerId !== undefined && frame.playerId !== expected.playerId
+        ? `Native reconnect attached player ${frame.playerId}, expected ${expected.playerId}`
+        : frame.playerToken !== undefined && frame.playerToken !== expected.playerToken
+          ? "Native reconnect changed the player token"
+          : !frame.fullKey
+            ? "Server omitted a valid Full session identity"
+            : frame.fullKey.game_code !== expected.fullKey.game_code
+                || frame.fullKey.generation !== expected.fullKey.generation
+              ? "Server changed the Full session identity"
+              : null;
+    if (!errorMessage) return true;
+
+    const error = new AdapterError("WS_ERROR", errorMessage, false);
+    this.rejectInitialization(error);
+    this.emit({ type: "error", message: error.message });
+    return false;
   }
 }

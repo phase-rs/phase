@@ -7742,10 +7742,12 @@ async fn handle_client_message(
 #[cfg(test)]
 mod state_transport_derived_tests {
     use super::*;
-    use engine::types::ability::SearchSelectionConstraint;
+    use engine::game::deck_loading::PlayerDeckPayload;
+    use engine::types::ability::{Effect, ResolvedAbility, SearchSelectionConstraint};
     use engine::types::actions::GameAction;
     use engine::types::game_state::{
-        ActiveSearchDecisionAuthority, ActiveSearchDecisionControl, PriorityPassingMode, WaitingFor,
+        ActiveSearchDecisionAuthority, ActiveSearchDecisionControl, PriorityPassingMode,
+        StackEntry, StackEntryKind, WaitingFor,
     };
     use engine::types::identifiers::ObjectId;
     use engine::types::log::{GameLogEntry, LogCategory, LogSegment};
@@ -7881,6 +7883,135 @@ mod state_transport_derived_tests {
         assert_eq!(tail.len(), MAX_RESOLVE_ALL_LOG_ENTRIES);
         assert_eq!(tail.first(), batch_logs.get(3));
         assert_eq!(&tail[tail.len() - ai_logs.len()..], ai_logs.as_slice());
+    }
+
+    #[tokio::test]
+    async fn resolve_all_handler_sends_the_post_ai_snapshot_before_its_acknowledgement() {
+        let mut manager = SessionManager::new();
+        let (game_code, player_token) = manager.create_game(PlayerDeckPayload::default());
+        let ai_player = PlayerId(1);
+        let session = manager
+            .sessions
+            .get_mut(&game_code)
+            .expect("new game retains its session");
+        session.ai_seats.insert(ai_player);
+        session.ai_configs.insert(
+            ai_player,
+            phase_ai::config::create_config_for_players(
+                phase_ai::config::AiDifficulty::Easy,
+                phase_ai::config::Platform::Native,
+                2,
+            ),
+        );
+        let stack_object = ObjectId(1);
+        session.state.active_player = ai_player;
+        session.state.priority_player = PlayerId(0);
+        session.state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        session.state.stack.push(StackEntry {
+            id: stack_object,
+            source_id: stack_object,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: stack_object,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    Vec::new(),
+                    stack_object,
+                    PlayerId(0),
+                )),
+            },
+        });
+        let revision_before = session.state_revision;
+
+        let state: SharedState = Arc::new(Mutex::new(manager));
+        let draft_state: SharedDraftState = Arc::new(Mutex::new(DraftSessionManager::new()));
+        let connections: SharedConnections = Arc::new(Mutex::new(HashMap::new()));
+        let game_spectators: SharedGameSpectators = Arc::new(Mutex::new(HashMap::new()));
+        let db_file = tempfile::NamedTempFile::new().expect("temporary game database");
+        let game_db = Arc::new(
+            persistence::GameDb::open(db_file.path(), persistence::SessionRetention::Multiplayer)
+                .expect("open temporary game database"),
+        );
+        let (requester_tx, mut requester_rx) = mpsc::unbounded_channel();
+        let (ai_tx, mut ai_rx) = mpsc::unbounded_channel();
+        connections
+            .lock()
+            .await
+            .insert(game_code.clone(), HashMap::from([(ai_player, ai_tx)]));
+        let identity = SocketIdentity {
+            game_code: Some(game_code.clone()),
+            player_id: Some(PlayerId(0)),
+            player_token: Some(player_token),
+            lobby_subscribed: false,
+            session_span: None,
+            client_hello: None,
+            lobby_host_game: None,
+            seat_reservations: Vec::new(),
+            lobby_reservations: Vec::new(),
+            draft_code: None,
+            draft_seat: None,
+            draft_token: None,
+            spectator_draft_code: None,
+            spectator_visibility: None,
+            spectator_game_code: None,
+        };
+
+        handle_resolve_all(
+            41,
+            1,
+            &state,
+            &draft_state,
+            &connections,
+            &requester_tx,
+            &game_db,
+            &game_spectators,
+            &identity,
+        )
+        .await;
+
+        let (expected_revision, expected_waiting_for) = {
+            let manager = state.lock().await;
+            let session = manager
+                .sessions
+                .get(&game_code)
+                .expect("Resolve All retains its session");
+            assert!(
+                session.state_revision >= revision_before + 2,
+                "one batch resolution and the AI priority action must both advance the revision"
+            );
+            (session.state_revision, session.state.waiting_for.clone())
+        };
+
+        match requester_rx.recv().await.expect("requester state update") {
+            ServerMessage::StateUpdate {
+                state_revision,
+                state,
+                ..
+            } => {
+                assert_eq!(state_revision, expected_revision);
+                assert_eq!(state.waiting_for, expected_waiting_for);
+            }
+            other => panic!("expected requester StateUpdate, got {other:?}"),
+        }
+        assert!(matches!(
+            requester_rx
+                .recv()
+                .await
+                .expect("Resolve All acknowledgement"),
+            ServerMessage::ResolveAllResult {
+                request_id: 41,
+                items_resolved: 1,
+                total: 1,
+            }
+        ));
+        match ai_rx.recv().await.expect("AI recipient state update") {
+            ServerMessage::StateUpdate { state_revision, .. } => {
+                assert_eq!(state_revision, expected_revision);
+            }
+            other => panic!("expected AI recipient StateUpdate, got {other:?}"),
+        }
     }
 
     #[test]

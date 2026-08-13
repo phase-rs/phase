@@ -725,6 +725,7 @@ describe("WebSocketAdapter", () => {
             state_revision: 7,
             state: createMockState(),
             your_player: 1,
+            player_token: "guest-token",
             full_key: { game_code: "NATIVE", generation: 1 },
           },
         }),
@@ -735,6 +736,71 @@ describe("WebSocketAdapter", () => {
         playerToken: "guest-token",
         fullKey: { game_code: "NATIVE", generation: 1 },
       });
+    });
+
+    it("rejects a hostile GameCreated before it can replace native reconnect credentials", async () => {
+      const nativeAdapter = nativeReconnectAdapter();
+      const listener = vi.fn();
+      nativeAdapter.onEvent(listener);
+      const attached = nativeAdapter.initializePregame();
+      const nativeSocket = await completeHandshake(nativeAdapter);
+      listener.mockClear();
+
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "GameCreated",
+          data: {
+            game_code: "ATTACK",
+            player_token: "attacker-token",
+            full_key: { game_code: "ATTACK", generation: 9 },
+          },
+        }),
+      );
+
+      await expect(attached).rejects.toThrow("Native reconnect attached game ATTACK, expected NATIVE");
+      await expect(nativeAdapter.getSnapshot()).rejects.toThrow("No game state available");
+      expect(nativeAdapter.nativeSession).toEqual({
+        gameCode: "NATIVE",
+        playerId: 1,
+        playerToken: "guest-token",
+        fullKey: { game_code: "NATIVE", generation: 1 },
+      });
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(listener).toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
+    });
+
+    it("rejects a hostile SessionAttached before it can settle native reconnect", async () => {
+      const nativeAdapter = nativeReconnectAdapter();
+      const listener = vi.fn();
+      nativeAdapter.onEvent(listener);
+      const attached = nativeAdapter.initializePregame();
+      const nativeSocket = await completeHandshake(nativeAdapter);
+      listener.mockClear();
+
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "SessionAttached",
+          data: {
+            game_code: "NATIVE",
+            player_id: 1,
+            player_token: "attacker-token",
+            full_key: { game_code: "NATIVE", generation: 1 },
+          },
+        }),
+      );
+
+      await expect(attached).rejects.toThrow("Native reconnect changed the player token");
+      await expect(nativeAdapter.getSnapshot()).rejects.toThrow("No game state available");
+      expect(nativeAdapter.nativeSession).toEqual({
+        gameCode: "NATIVE",
+        playerId: 1,
+        playerToken: "guest-token",
+        fullKey: { game_code: "NATIVE", generation: 1 },
+      });
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(listener).toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
     });
 
     it("seeds a native reconnect before direct initialize attaches the socket", async () => {
@@ -836,6 +902,40 @@ describe("WebSocketAdapter", () => {
 
       await expect(attached).rejects.toThrow("Server omitted a valid Full session identity");
       await expect(nativeAdapter.getSnapshot()).rejects.toThrow("No game state available");
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(listener).toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
+    });
+
+    it("rejects a native reconnect GameStarted token before caching or attaching", async () => {
+      const nativeAdapter = nativeReconnectAdapter();
+      const listener = vi.fn();
+      nativeAdapter.onEvent(listener);
+      const attached = nativeAdapter.initializePregame();
+      const nativeSocket = await completeHandshake(nativeAdapter);
+      listener.mockClear();
+
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "GameStarted",
+          data: {
+            state_revision: 7,
+            state: createMockState(),
+            your_player: 1,
+            player_token: "attacker-token",
+            full_key: { game_code: "NATIVE", generation: 1 },
+          },
+        }),
+      );
+
+      await expect(attached).rejects.toThrow("Native reconnect changed the player token");
+      await expect(nativeAdapter.getSnapshot()).rejects.toThrow("No game state available");
+      expect(nativeAdapter.nativeSession).toEqual({
+        gameCode: "NATIVE",
+        playerId: 1,
+        playerToken: "guest-token",
+        fullKey: { game_code: "NATIVE", generation: 1 },
+      });
       expect(listener).toHaveBeenCalledTimes(1);
       expect(listener).toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
     });
