@@ -7909,6 +7909,9 @@ mod state_transport_derived_tests {
         session.state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
         };
+        // The AI has already passed in this priority cycle, so the requesting
+        // human's pass deterministically resolves the stack entry.
+        session.state.priority_passes.insert(ai_player);
         session.state.stack.push_back(StackEntry {
             id: stack_object,
             source_id: stack_object,
