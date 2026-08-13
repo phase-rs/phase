@@ -2042,6 +2042,7 @@
     "searchPlaceholder": "Szukaj po nazwie...",
     "noCardsFound": "Nie znaleziono kart",
     "buttonSubtitle": "Wybierz jedną opcję",
+    "numberSubtitle": "Wpisz liczbę {{min}} lub większą",
     "filterPlaceholder": "Filtruj opcje...",
     "noOptionsMatch": "Brak pasujących opcji"
   },

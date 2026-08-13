@@ -65,13 +65,13 @@ fn drive_to_wait(runner: &mut GameRunner, want: &str) {
 /// Build The Toymaker's Trap as a 0/0 enchantment P0 controls, set up P0's
 /// upkeep, and advance until its trigger is on the stack. Returns the runner and
 /// the enchantment's id.
-fn toymaker_at_upkeep(seeded_numbers: &[u8]) -> (GameRunner, ObjectId) {
+fn toymaker_at_upkeep(seeded_numbers: &[u32]) -> (GameRunner, ObjectId) {
     toymaker_at_upkeep_with_player_count(2, seeded_numbers)
 }
 
 fn toymaker_at_upkeep_with_player_count(
     player_count: u8,
-    seeded_numbers: &[u8],
+    seeded_numbers: &[u32],
 ) -> (GameRunner, ObjectId) {
     let mut scenario = if player_count == 2 {
         GameScenario::new()
@@ -343,7 +343,7 @@ fn toymakers_trap_exhausted_numbers_makes_no_guess() {
         .objects
         .get_mut(&trap)
         .unwrap()
-        .chosen_attributes = (1u8..=5).map(ChosenAttribute::Number).collect();
+        .chosen_attributes = (1u32..=5).map(ChosenAttribute::Number).collect();
     {
         let state = runner.state_mut();
         state.turn_number = 2;

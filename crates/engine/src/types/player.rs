@@ -270,7 +270,7 @@ impl Player {
     /// number changes who may SEE it, never what it is, so every rules read
     /// ("the highest number", "each player who chose the lowest number") must
     /// return the same value on both sides of the reveal.
-    pub fn chosen_number(&self) -> Option<u8> {
+    pub fn chosen_number(&self) -> Option<u32> {
         use crate::types::ability::ChosenAttribute;
         self.chosen_attributes.iter().find_map(|attr| match attr {
             ChosenAttribute::Number(n) | ChosenAttribute::RevealedNumber(n) => Some(*n),
@@ -284,7 +284,7 @@ impl Player {
     /// chose no number (CR 609.3 — revealing nothing is a legal no-op, which is
     /// what lets a card name every player when only some of them chose).
     /// Idempotent: an already-revealed number stays revealed.
-    pub fn reveal_chosen_number(&mut self) -> Option<u8> {
+    pub fn reveal_chosen_number(&mut self) -> Option<u32> {
         use crate::types::ability::ChosenAttribute;
         let value = self.chosen_number()?;
         self.chosen_attributes.retain(|attribute| {

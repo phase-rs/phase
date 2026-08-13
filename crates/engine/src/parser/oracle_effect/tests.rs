@@ -25689,7 +25689,7 @@ fn committed_choice_guess_chooses_single_opponent_before_guess() {
             Effect::Choose {
                 choice_type: ChoiceType::NumberRange {
                     min: 1,
-                    max: 5,
+                    max: Some(5),
                     distinctness: NumberDistinctness::DistinctFromSourceHistory
                 },
                 ..
@@ -25732,7 +25732,7 @@ fn committed_choice_guess_chooses_single_opponent_before_guess() {
                 GuessSubject::CommittedChoice {
                     choice_type: ChoiceType::NumberRange {
                         min: 1,
-                        max: 5,
+                        max: Some(5),
                         distinctness: NumberDistinctness::DistinctFromSourceHistory
                     }
                 }
@@ -27903,6 +27903,162 @@ fn wheel_of_misfortune_lowers_every_clause() {
         })
         .expect("the draw continuation must carry a scope");
     assert_eq!(draw_scope, wheel_scope);
+}
+
+/// CR 101.4 + CR 608.2c: the reveal grammar covers both voices and both persons,
+/// and — critically — consumes its WHOLE clause. A prefix-accepting reveal would
+/// lower a chunk to a bare publication and silently drop everything after it,
+/// which is the swallow class this parser exists to prevent.
+#[test]
+fn reveal_chosen_numbers_grammar_is_complete_clause_and_covers_both_voices() {
+    fn lowers_to_reveal(text: &str) -> bool {
+        matches!(
+            &*parse_effect_chain(text, AbilityKind::Spell).effect,
+            Effect::RevealChosenNumbers { .. }
+        )
+    }
+
+    // Voice × person × object phrase, each an independent axis.
+    for accepted in [
+        "Then you reveal the number you chose.",
+        "Each player reveals the number they chose.",
+        "All players reveal those numbers simultaneously.",
+        "Then, reveal the chosen numbers.",
+        "Then those numbers are revealed.",
+        "All players reveal those numbers simultaneously and determine the highest and lowest numbers revealed this way.",
+    ] {
+        assert!(
+            lowers_to_reveal(accepted),
+            "must lower to RevealChosenNumbers: {accepted}"
+        );
+    }
+
+    // ANTI-SWALLOW. A reveal followed by another instruction must keep that
+    // instruction. The clause splitter separates these before the reveal grammar
+    // sees them, so the head legitimately IS a reveal — what matters is that the
+    // TAIL survives as a chained link rather than being discarded. Asserting the
+    // head "is not a reveal" would be testing the splitter's boundary choice
+    // instead of the property that matters.
+    for (text, tail_present) in [
+        (
+            "Reveal the chosen numbers, then each player loses 3 life.",
+            "LoseLife",
+        ),
+        (
+            "Reveal those numbers and sacrifice a creature.",
+            "Sacrifice",
+        ),
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            matches!(&*def.effect, Effect::RevealChosenNumbers { .. }),
+            "the head clause is still the reveal: {text}"
+        );
+        let tail = def
+            .sub_ability
+            .as_ref()
+            .unwrap_or_else(|| panic!("the trailing instruction was swallowed: {text}"));
+        assert!(
+            format!("{:?}", tail.effect).contains(tail_present),
+            "expected a surviving {tail_present} tail for {text}, got {:#?}",
+            tail.effect
+        );
+    }
+}
+
+/// CR 608.2c: a chosen-number reference in a link's CONDITION must force the
+/// upstream `NumberRange` choice to persist. Without the condition walk the
+/// answer is cleared before the condition is evaluated, so the gate reads
+/// against nothing — a silent wrong-branch rather than a visible failure.
+///
+/// Fail-on-revert: drop the `.condition` arm from
+/// `definition_reads_player_chosen_number` and the first assertion flips.
+#[test]
+fn chosen_number_read_from_a_condition_forces_persistence() {
+    use crate::types::ability::{
+        AbilityCondition, AggregateFunction, ChoiceType, Comparator, NumberDistinctness,
+        PlayerScope, TargetSelectionMode,
+    };
+
+    // CR 608.2c: a chain whose ONLY chosen-number reference lives in a link's
+    // condition. `promote_chosen_number_persistence` must still persist the
+    // upstream choice, or the answer is cleared before the condition is
+    // evaluated and the gate reads against nothing.
+    //
+    // Built directly rather than via Oracle text: no shipped card reaches this
+    // shape today, and the point is the walker's coverage, not a parse. The
+    // reference is buried under Not(And(...)) so a shallow check fails.
+    fn number_choice() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Choose {
+                choice_type: ChoiceType::NumberRange {
+                    min: 0,
+                    max: Some(20),
+                    distinctness: NumberDistinctness::Repeatable,
+                },
+                persist: false,
+                selection: TargetSelectionMode::Chosen,
+            },
+        )
+    }
+
+    let extremum = QuantityExpr::Ref {
+        qty: QuantityRef::PlayerChosenNumber {
+            player: PlayerScope::AllPlayers {
+                aggregate: AggregateFunction::Max,
+                exclude: None,
+            },
+        },
+    };
+
+    let mut gated = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    );
+    gated.condition = Some(AbilityCondition::Not {
+        condition: Box::new(AbilityCondition::And {
+            conditions: vec![AbilityCondition::QuantityCheck {
+                lhs: extremum,
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }],
+        }),
+    });
+
+    let mut chain = number_choice();
+    chain.sub_ability = Some(Box::new(gated));
+
+    // Control: the identical chain with no condition must NOT persist, which is
+    // what proves the assertion below is measuring the condition walk and not
+    // some unconditional promotion.
+    let mut unconditional = number_choice();
+    unconditional.sub_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    )));
+    super::promote_chosen_number_persistence(&mut unconditional);
+    assert!(
+        matches!(
+            &*unconditional.effect,
+            Effect::Choose { persist: false, .. }
+        ),
+        "a chain that never reads the number must not persist it"
+    );
+
+    super::promote_chosen_number_persistence(&mut chain);
+    assert!(
+        matches!(&*chain.effect, Effect::Choose { persist: true, .. }),
+        "a chosen-number read nested in Not(And(QuantityCheck)) must force the \
+         upstream choice to persist, got {:#?}",
+        chain.effect
+    );
 }
 
 /// CR 101.4 + CR 608.2d: sweep of every card the CI parse-diff flagged for this

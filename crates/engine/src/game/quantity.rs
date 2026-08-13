@@ -3115,7 +3115,12 @@ fn resolve_ref(
             .last_named_choice
             .as_ref()
             .and_then(|choice| match choice {
-                crate::types::ability::ChoiceValue::Number(value) => Some(i32::from(*value)),
+                // CR 107.1a/b: a chosen number can now be any value the rules
+                // permit, so the conversion into the engine's `i32` quantity
+                // domain saturates rather than assuming it fits.
+                crate::types::ability::ChoiceValue::Number(value) => {
+                    Some(crate::game::arithmetic::u32_to_i32_saturating(*value))
+                }
                 _ => None,
             })
             .unwrap_or(0),
@@ -4395,7 +4400,8 @@ fn resolve_ref(
         // uses to select "each player who chose the highest number".
         QuantityRef::PlayerChosenNumber { player: scope } => {
             resolve_per_player_scalar_opt(state, scope, controller, ctx, targets, ability, |p| {
-                p.chosen_number().map(i32::from)
+                p.chosen_number()
+                    .map(crate::game::arithmetic::u32_to_i32_saturating)
             })
         }
         // CR 508.1a: Count creatures that attacked this turn. Declaration-time

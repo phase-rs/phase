@@ -6141,6 +6141,18 @@ pub(super) fn handle_resolution_choice(
                         choice
                     )));
                 }
+            } else if let Some(accepted) = choice_type.accepts_free_entry_answer(&choice) {
+                // CR 107.1a/b + CR 608.2d: a free-entry choice has no option list
+                // to check membership against, so it is validated by RULE instead
+                // — "a number 0 or greater" accepts any nonnegative integer the
+                // engine's `i32` quantity domain can represent. Routed through the
+                // shared authority on `ChoiceType` so the AI's legal-action
+                // enumeration cannot disagree with this seam about what is legal.
+                if !accepted {
+                    return Err(EngineError::InvalidAction(format!(
+                        "Invalid number '{choice}' for this choice"
+                    )));
+                }
             } else if !options.contains(&choice) {
                 return Err(EngineError::InvalidAction(format!(
                     "Invalid choice '{}', must be one of: {:?}",

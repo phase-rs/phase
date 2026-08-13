@@ -1895,10 +1895,10 @@ fn build_replacement_exec(
         // values are out of range or inverted (defensive — the engine
         // would generate a degenerate option list).
         A::ChooseANumberBetween(min, max) => {
-            let (Ok(min_u8), Ok(max_u8)) = (u8::try_from(*min), u8::try_from(*max)) else {
+            let (Ok(min_u8), Ok(max_u8)) = (u32::try_from(*min), u32::try_from(*max)) else {
                 return Err(ConversionGap::EnginePrerequisiteMissing {
                     engine_type: "ChoiceType::NumberRange",
-                    needed_variant: format!("number-range bounds out of u8 ({min}, {max})"),
+                    needed_variant: format!("number-range bounds out of u32 ({min}, {max})"),
                 });
             };
             if min_u8 > max_u8 {
@@ -1910,7 +1910,9 @@ fn build_replacement_exec(
             Effect::Choose {
                 choice_type: ChoiceType::NumberRange {
                     min: min_u8,
-                    max: max_u8,
+                    // CR 107.1a: "between X and Y" states an upper bound, so this
+                    // converts to the BOUNDED form.
+                    max: Some(max_u8),
                     distinctness: engine::types::ability::NumberDistinctness::Repeatable,
                 },
                 persist: true,

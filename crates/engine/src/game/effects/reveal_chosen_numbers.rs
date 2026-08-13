@@ -48,7 +48,7 @@ pub fn resolve(
     })
     .collect();
 
-    let mut numbers: Vec<(PlayerId, u8)> = Vec::new();
+    let mut numbers: Vec<(PlayerId, u32)> = Vec::new();
     for pid in candidates {
         if let Some(player) = state.players.iter_mut().find(|p| p.id == pid) {
             if let Some(value) = player.reveal_chosen_number() {

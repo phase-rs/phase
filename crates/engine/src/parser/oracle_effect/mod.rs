@@ -893,6 +893,19 @@ fn definition_reads_player_chosen_number(def: &AbilityDefinition) -> bool {
             return true;
         }
     }
+    // CR 608.2c: a link's CONDITION is a read site too. "If you are one of those
+    // players …" gates on the chosen number just as surely as an amount does, and
+    // the condition is evaluated DURING the same resolution — so a chain whose
+    // only reference lives in a condition still needs the upstream choice to
+    // persist, or the answer is cleared before the condition is evaluated and the
+    // gate silently reads against nothing.
+    if def
+        .condition
+        .as_ref()
+        .is_some_and(condition_reads_player_chosen_number)
+    {
+        return true;
+    }
     def.sub_ability
         .as_deref()
         .is_some_and(definition_reads_player_chosen_number)
@@ -900,6 +913,28 @@ fn definition_reads_player_chosen_number(def: &AbilityDefinition) -> bool {
             .else_ability
             .as_deref()
             .is_some_and(definition_reads_player_chosen_number)
+}
+
+/// CR 608.2c: Does this condition read a secretly-chosen number? Recurses
+/// through the boolean combinators so a reference nested inside
+/// `And`/`Or`/`Not`/`ConditionInstead` is found — a shallow check would miss
+/// exactly the compound gates ("if you chose the highest number and …") that
+/// make the reference worth having.
+fn condition_reads_player_chosen_number(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+            quantity_expr_reads_player_chosen_number(lhs)
+                || quantity_expr_reads_player_chosen_number(rhs)
+        }
+        AbilityCondition::ConditionInstead { inner } => condition_reads_player_chosen_number(inner),
+        AbilityCondition::Not { condition } => condition_reads_player_chosen_number(condition),
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().any(condition_reads_player_chosen_number)
+        }
+        // Every other condition gates on board/turn/event facts and carries no
+        // embedded quantity, so it cannot name a chosen number.
+        _ => false,
+    }
 }
 
 fn player_filter_reads_player_chosen_number(filter: &PlayerFilter) -> bool {
@@ -8260,9 +8295,14 @@ fn effect_has_guess_outcome_authority(effect: &Effect, has_choice: bool) -> bool
 fn is_placeholder_committed_guess_choice(choice_type: &ChoiceType) -> bool {
     matches!(
         choice_type,
+        // The sentinel is `max: Some(0)` — an empty-in-practice range containing
+        // only 0, which no card text produces. It must NOT be `max: None`: since
+        // CR 107.1a/b made that the real shape of "choose a number 0 or greater",
+        // a `None` sentinel would classify every genuine unbounded choice as an
+        // unfilled placeholder.
         ChoiceType::NumberRange {
             min: 0,
-            max: 0,
+            max: Some(0),
             distinctness: NumberDistinctness::Repeatable,
         }
     )
@@ -8738,7 +8778,16 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
                 crate::game::effects::reveal_chosen_numbers::default_players(),
             )
         });
-        if parse_reveal_chosen_numbers_clause(body).is_ok() {
+        // COMPLETE-CLAUSE consumption. A prefix match would lower the whole chunk
+        // to a bare reveal and silently discard whatever followed — the swallow
+        // this parser is built to avoid. Only trailing punctuation and whitespace
+        // may remain, so a clause the grammar does not fully model falls through
+        // to the general dispatcher (and, if nothing claims it, to an honest
+        // `Unimplemented`) instead of being quietly truncated.
+        if all_consuming(parse_reveal_chosen_numbers_clause)
+            .parse(body.trim().trim_end_matches(['.', ',']).trim())
+            .is_ok()
+        {
             return parsed_clause(Effect::RevealChosenNumbers { players });
         }
     }
@@ -25262,7 +25311,7 @@ fn try_parse_guess_clause(text: &str, ctx: &ParseContext) -> Option<ParsedEffect
             .clone()
             .unwrap_or(ChoiceType::NumberRange {
                 min: 0,
-                max: 0,
+                max: Some(0),
                 distinctness: NumberDistinctness::Repeatable,
             });
         let subject = GuessSubject::CommittedChoice { choice_type };
@@ -25271,7 +25320,7 @@ fn try_parse_guess_clause(text: &str, ctx: &ParseContext) -> Option<ParsedEffect
             GuessSubject::CommittedChoice {
                 choice_type: ChoiceType::NumberRange {
                     min: 0,
-                    max: 0,
+                    max: Some(0),
                     distinctness: NumberDistinctness::Repeatable
                 }
             }
@@ -25474,7 +25523,10 @@ pub(crate) fn parse_named_choice_object(rest: &str) -> Option<ChoiceType> {
     } else if let Ok((range_rest, _)) = tag::<_, _, E>("a number between ").parse(rest) {
         // "choose a number between 1 and 5 [that hasn't been chosen]"
         let mut parts = range_rest.splitn(3, ' ');
-        let min = parts.next().and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
+        let min = parts
+            .next()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0);
         let and = parts.next();
         // Split the leading max digits from any trailing distinctness clause
         // ("...5 that hasn't been chosen") with a nom digit combinator so the
@@ -25482,45 +25534,52 @@ pub(crate) fn parse_named_choice_object(rest: &str) -> Option<ChoiceType> {
         // impossible option), not silently dropped.
         let max_token = parts.next().unwrap_or("");
         let (max, tail) = match nom::character::complete::digit1::<_, ()>(max_token) {
-            Ok((rest_after, digits)) => (digits.parse::<u8>().unwrap_or(20), rest_after),
-            Err(_) => (20, ""),
+            Ok((rest_after, digits)) => (digits.parse::<u32>().ok(), rest_after),
+            Err(_) => (None, ""),
         };
         let distinctness = parse_number_distinctness(tail);
-        if and == Some("and") {
-            Some(ChoiceType::NumberRange {
+        // CR 107.1a: "between X and Y" states BOTH bounds, so a missing/unparsable
+        // upper token means the phrase was not actually this shape — decline
+        // rather than substituting an invented ceiling.
+        match (and, max) {
+            (Some("and"), Some(max)) => Some(ChoiceType::NumberRange {
                 min,
-                max,
+                max: Some(max),
                 distinctness,
-            })
-        } else {
-            None
+            }),
+            _ => None,
         }
     } else if let Ok((gt_rest, _)) = tag::<_, _, E>("a number greater than ").parse(rest) {
-        // "choose a number greater than 0" — open-ended, cap at 20
+        // CR 107.1a/b: "choose a number greater than N" states a lower bound and
+        // NO upper one, so the range is unbounded above.
         let (n, tail) = match nom::character::complete::digit1::<_, ()>(gt_rest.trim_start()) {
-            Ok((rest_after, digits)) => (digits.parse::<u8>().unwrap_or(0), rest_after),
+            Ok((rest_after, digits)) => (digits.parse::<u32>().unwrap_or(0), rest_after),
             Err(_) => (0, ""),
         };
         Some(ChoiceType::NumberRange {
-            min: n + 1,
-            max: 20,
+            min: n.saturating_add(1),
+            max: None,
             distinctness: parse_number_distinctness(tail),
         })
     } else if tag::<_, _, E>("a number").parse(rest).is_ok() {
-        // Generic "choose a number" (default range 0-20). A bare-prefix `tag`,
-        // mirroring the "a color" branch above, so a sentence-ending clause such
-        // as "As ~ enters, choose a number." parses (Squall, Gunblade Duelist,
-        // #722). The previous exact/trailing-space match dropped the period and
-        // produced no choice. The bounded "a number between" / "a number greater
-        // than" forms are consumed by the earlier branches, so this arm is reached
-        // only for a bare "a number".
+        // CR 107.1a/b: bare "choose a number", and the explicit "a number 0 or
+        // greater" (Wheel of Misfortune, Menacing Ogre, Itazura). Neither states a
+        // maximum, so neither gets one — the rules permit any nonnegative integer,
+        // and on Wheel the size of the number is the entire decision, so an
+        // invented ceiling would make a legal choice illegal.
+        //
+        // A bare-prefix `tag`, mirroring the "a color" branch above, so a
+        // sentence-ending clause such as "As ~ enters, choose a number." parses
+        // (Squall, Gunblade Duelist, #722). The bounded "a number between" form is
+        // consumed by the earlier branch, so this arm is reached only for the
+        // unbounded shapes.
         let tail = tag::<_, _, ()>("a number")
             .parse(rest)
             .map(|(tail, _)| tail)
             .unwrap_or("");
         Some(ChoiceType::NumberRange {
             min: 0,
-            max: 20,
+            max: None,
             distinctness: parse_number_distinctness(tail),
         })
     } else if alt((tag::<_, _, E>("a land type"), tag("a nonbasic land type")))
@@ -25595,9 +25654,13 @@ fn parse_reveal_chosen_numbers_clause(input: &str) -> OracleResult<'_, ()> {
     {
         return Ok((input, ()));
     }
-    let (input, _) = tag("reveal ").parse(input)?;
+    // Active voice, both persons: an imperative "reveal …" and a third-person
+    // "each player revealS …". The `s` is its own `opt`, not a duplicated tag,
+    // so the person axis costs nothing to extend.
+    let (input, _) = (tag("reveal"), opt(tag("s")), tag(" ")).parse(input)?;
     let (input, _) = alt((
         tag("the number you chose"),
+        tag("the number they chose"),
         tag("the chosen numbers"),
         tag("the chosen number"),
         tag("those numbers"),

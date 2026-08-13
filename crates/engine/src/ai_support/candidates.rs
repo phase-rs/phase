@@ -4704,6 +4704,52 @@ fn named_choice_actions(
     choice_type: &ChoiceType,
     source_display_name: Option<&str>,
 ) -> Vec<CandidateAction> {
+    // CR 107.1a/b: an unbounded number choice ("a number 0 or greater") offers no
+    // option list, so the AI must SAMPLE a domain it cannot enumerate. The sample
+    // is deliberately small and game-relevant rather than a truncated 0..=N walk:
+    // on Wheel of Misfortune the meaningful decisions are "bid nothing", "bid just
+    // enough to wheel", and "bid past a life total", so the ladder is anchored to
+    // the live life totals rather than to an arbitrary ceiling.
+    //
+    // Every candidate is filtered through `accepts_free_entry_answer`, the same
+    // authority the answer seam uses, so the AI can never propose a value the
+    // engine would then reject.
+    if options.is_empty() {
+        if let ChoiceType::NumberRange { min, max: None, .. } = choice_type {
+            let highest_life = state
+                .players
+                .iter()
+                .map(|p| p.life.max(0) as u32)
+                .max()
+                .unwrap_or(0);
+            let mut sample: Vec<u32> = vec![
+                *min,
+                min.saturating_add(1),
+                min.saturating_add(2),
+                highest_life,
+                highest_life.saturating_add(1),
+            ];
+            sample.sort_unstable();
+            sample.dedup();
+            return sample
+                .into_iter()
+                .map(|n| n.to_string())
+                .filter(|choice| {
+                    choice_type
+                        .accepts_free_entry_answer(choice)
+                        .unwrap_or(false)
+                })
+                .map(|choice| {
+                    candidate(
+                        GameAction::ChooseOption { choice },
+                        TacticalClass::Selection,
+                        Some(player),
+                    )
+                })
+                .collect();
+        }
+    }
+
     if options.is_empty() && matches!(choice_type, ChoiceType::CardName) {
         return card_name_choice_candidates(state, player, source_display_name)
             .into_iter()

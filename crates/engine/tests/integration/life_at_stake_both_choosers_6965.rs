@@ -119,10 +119,21 @@ fn life_at_stake_prompts_the_caster_then_the_targets_controller() {
                 if matches!(choice_type, ChoiceType::NumberRange { .. }) {
                     number_choosers.push(player);
                 }
-                let choice = options
-                    .first()
-                    .cloned()
-                    .expect("a number choice must offer options");
+                // CR 107.1a/b: Life at Stake says "a number 0 or greater", which
+                // states no maximum — so the prompt enumerates nothing and the
+                // value is supplied by the player. Answer from the free-entry
+                // path when there is no option list; the bounded prompts this
+                // loop also sees (target selection, etc.) still pick an option.
+                let choice = match options.first() {
+                    Some(option) => option.clone(),
+                    None => {
+                        assert!(
+                            choice_type.options_supplied_by_player(),
+                            "an optionless prompt must be a free-entry one, got {choice_type:?}"
+                        );
+                        "3".to_string()
+                    }
+                };
                 runner
                     .act(GameAction::ChooseOption { choice })
                     .expect("answering the number choice must succeed");

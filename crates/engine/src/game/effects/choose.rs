@@ -415,7 +415,7 @@ pub(crate) fn record_player_chosen_number(
     if !matches!(choice_type, ChoiceType::NumberRange { .. }) {
         return;
     }
-    let Ok(value) = choice.parse::<u8>() else {
+    let Ok(value) = choice.parse::<u32>() else {
         return;
     };
     if let Some(player) = state.players.iter_mut().find(|p| p.id == chooser) {
@@ -640,9 +640,16 @@ fn compute_options(
             max,
             distinctness,
         } => match distinctness {
-            crate::types::ability::NumberDistinctness::Repeatable => {
-                (*min..=*max).map(|n| n.to_string()).collect()
-            }
+            // CR 107.1a/b: an UNBOUNDED range has no list to enumerate. Return
+            // empty and let `options_supplied_by_player` route it to the
+            // free-entry path (the same one `CardName` uses) — the client renders
+            // a numeric input and the answer seam validates it. Materializing a
+            // stand-in ceiling here is exactly the bug that made a legal choice
+            // illegal on Wheel of Misfortune.
+            _ if max.is_none() => Vec::new(),
+            crate::types::ability::NumberDistinctness::Repeatable => (*min..=max.unwrap_or(*min))
+                .map(|n| n.to_string())
+                .collect(),
             // CR 609.3 + "...that hasn't been chosen": each successive COMMIT
             // excludes numbers already committed on this source across prior
             // resolutions. Chosen numbers persist as `ChosenAttribute::Number`
@@ -657,7 +664,7 @@ fn compute_options(
             // offers a separate DistinctFromSourceHistory NumberRange on the same
             // source, scope the read to a per-choice tag.
             crate::types::ability::NumberDistinctness::DistinctFromSourceHistory => {
-                let used: Vec<u8> = state
+                let used: Vec<u32> = state
                     .objects
                     .get(&source_id)
                     .map(|o| {
@@ -670,7 +677,7 @@ fn compute_options(
                             .collect()
                     })
                     .unwrap_or_default();
-                (*min..=*max)
+                (*min..=max.unwrap_or(*min))
                     .filter(|n| !used.contains(n))
                     .map(|n| n.to_string())
                     .collect()
@@ -1191,7 +1198,7 @@ mod tests {
             Effect::Choose {
                 choice_type: ChoiceType::NumberRange {
                     min: 0,
-                    max: 5,
+                    max: Some(5),
                     distinctness: crate::types::ability::NumberDistinctness::Repeatable,
                 },
                 persist: false,
@@ -1232,7 +1239,7 @@ mod tests {
 
         let distinct = ChoiceType::NumberRange {
             min: 1,
-            max: 5,
+            max: Some(5),
             distinctness: crate::types::ability::NumberDistinctness::DistinctFromSourceHistory,
         };
         assert_eq!(
@@ -1244,7 +1251,7 @@ mod tests {
         // Same history under Repeatable: full range is still offered.
         let repeatable = ChoiceType::NumberRange {
             min: 1,
-            max: 5,
+            max: Some(5),
             distinctness: crate::types::ability::NumberDistinctness::Repeatable,
         };
         assert_eq!(

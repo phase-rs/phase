@@ -49,12 +49,81 @@ function getChoiceTypeKey(choiceType: string | Record<string, unknown>): string 
 
 const MAX_RESULTS = 10;
 
+/** CR 107.1a/b: the minimum of an unbounded number choice, or null when this is
+ *  not one. The engine omits `max` entirely for "choose a number 0 or greater",
+ *  so an absent max — not an empty option list — is what identifies the
+ *  free-entry numeric form. A bounded range keeps its options and its grid. */
+function unboundedNumberMin(
+  choiceType: string | Record<string, unknown>,
+): number | null {
+  if (typeof choiceType === "string") return null;
+  const payload = (choiceType as Record<string, unknown>).NumberRange;
+  if (payload == null || typeof payload !== "object") return null;
+  const fields = payload as { min?: unknown; max?: unknown };
+  if (fields.max != null) return null;
+  return typeof fields.min === "number" ? fields.min : 0;
+}
+
 export function NamedChoiceModal({ data }: { data: OptionChoice["data"] }) {
   const typeKey = getChoiceTypeKey(data.choice_type);
   if (typeKey === "CardName") {
     return <CardNameSearch />;
   }
+  const unboundedMin = unboundedNumberMin(data.choice_type);
+  if (unboundedMin !== null) {
+    return <NumberEntry min={unboundedMin} />;
+  }
   return <ButtonGrid data={data} typeKey={typeKey} />;
+}
+
+/** CR 107.1a/b: free-entry numeric prompt for a choice with no stated maximum.
+ *  The engine validates the answer authoritatively (`accepts_free_entry_answer`);
+ *  this only keeps the player from submitting something it would reject. */
+function NumberEntry({ min }: { min: number }) {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+  const [value, setValue] = useState(String(min));
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+
+  // Mirrors the engine's rule: a nonnegative integer at least `min`, within the
+  // i32 quantity domain the rest of the engine can represent.
+  const parsed = /^\d+$/.test(value.trim()) ? Number(value.trim()) : null;
+  const valid =
+    parsed !== null && Number.isSafeInteger(parsed) && parsed >= min && parsed <= 2147483647;
+
+  const confirm = useCallback(() => {
+    if (valid) {
+      dispatch({ type: "ChooseOption", data: { choice: String(parsed) } });
+    }
+  }, [dispatch, parsed, valid]);
+
+  return (
+    <ChoiceOverlay
+      title={t("namedChoice.title.numberRange")}
+      subtitle={t("namedChoice.numberSubtitle", { min })}
+      footer={<ConfirmButton onClick={confirm} disabled={!valid} />}
+    >
+      <input
+        ref={inputRef}
+        type="text"
+        inputMode="numeric"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && valid) {
+            e.preventDefault();
+            confirm();
+          }
+        }}
+        className="w-40 rounded-lg border-2 border-gray-600 bg-gray-900/90 px-4 py-3 text-center text-xl text-white outline-none transition focus:border-cyan-400"
+      />
+    </ChoiceOverlay>
+  );
 }
 
 function CardNameSearch() {

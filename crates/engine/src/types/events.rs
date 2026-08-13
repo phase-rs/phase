@@ -1331,7 +1331,7 @@ pub enum GameEvent {
     /// `ChosenAttribute::RevealedNumber`.
     ChosenNumbersRevealed {
         /// Each revealing player and the number they had chosen, in APNAP order.
-        numbers: Vec<(PlayerId, u8)>,
+        numbers: Vec<(PlayerId, u32)>,
     },
     CombatDamageDealtToPlayer {
         player_id: PlayerId,

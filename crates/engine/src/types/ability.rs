@@ -548,9 +548,31 @@ pub enum ChoiceType {
     },
     CardName,
     /// "Choose a number between X and Y" — generates string options "0", "1", ..., "Y".
+    /// CR 107.1a/b + CR 608.2d: choose a number from `min` up to `max`.
+    ///
+    /// `max: None` is the UNBOUNDED form — "choose a number 0 or greater" (Wheel
+    /// of Misfortune, Menacing Ogre, Itazura). The rules state no maximum, so the
+    /// engine must not invent one: a bounded stand-in silently makes a legal
+    /// choice illegal, and on Wheel the magnitude of the number IS the decision.
+    ///
+    /// The practical ceiling on an unbounded choice is `i32::MAX`, enforced at the
+    /// answer seam rather than here. That is not an arbitrary UI cap but the
+    /// engine's own arithmetic domain: every quantity resolves through `i32`
+    /// (`game::quantity`), and damage and life totals are `i32`, so a number the
+    /// engine could not represent could not be acted on either. Within that
+    /// domain, every value the rules permit is accepted.
+    ///
+    /// Unbounded ranges enumerate no options — `compute_options` returns empty and
+    /// `options_supplied_by_player` is true, the same free-entry path `CardName`
+    /// already uses — so the client renders a numeric input instead of a button
+    /// per value.
     NumberRange {
-        min: u8,
-        max: u8,
+        min: u32,
+        /// `None` = no maximum (CR 107.1a/b). Bounded card text ("a number
+        /// between 1 and 5") keeps `Some`. The serde attributes that keep the
+        /// bounded form byte-identical on the wire live on the `ChoiceTypeData`
+        /// mirror, because `ChoiceType` itself has a hand-written `Serialize`.
+        max: Option<u32>,
         /// CR 609.3: distinctness requirement, parse-detected from "that hasn't
         /// been chosen". Default `Repeatable` for every existing card.
         distinctness: NumberDistinctness,
@@ -781,7 +803,38 @@ impl ChoiceType {
     /// predicate is true) from an impossible choice that must resolve as a
     /// no-op per CR 609.3 (this predicate is false).
     pub fn options_supplied_by_player(&self) -> bool {
-        matches!(self, Self::CardName | Self::Word | Self::Artist)
+        matches!(
+            self,
+            Self::CardName
+                | Self::Word
+                | Self::Artist
+                // CR 107.1a/b: an unbounded number choice cannot be enumerated,
+                // so the player supplies the value. Bounded ranges keep their
+                // option list and their button-per-value rendering.
+                | Self::NumberRange { max: None, .. }
+        )
+    }
+
+    /// CR 107.1a/b + CR 608.2d: Is `answer` a legal value for this choice when
+    /// the engine cannot offer an option list to check it against?
+    ///
+    /// The single authority for validating a free-entry answer, shared by the
+    /// interactive handler and the AI's legal-action enumeration so a value one
+    /// accepts cannot be rejected by the other. Returns `None` for choice kinds
+    /// whose answers are validated by membership instead.
+    ///
+    /// The upper bound is `i32::MAX` — not a UI cap, but the engine's own
+    /// arithmetic domain: every quantity resolves through `i32`, so a number
+    /// beyond it could not be dealt as damage or compared against a life total.
+    /// Within that domain every value the rules permit is accepted.
+    pub fn accepts_free_entry_answer(&self, answer: &str) -> Option<bool> {
+        match self {
+            Self::NumberRange { min, max: None, .. } => {
+                let parsed = answer.trim().parse::<u32>();
+                Some(parsed.is_ok_and(|n| n >= *min && n <= i32::MAX as u32))
+            }
+            _ => None,
+        }
     }
 }
 
@@ -840,7 +893,17 @@ impl Serialize for ChoiceType {
             } => {
                 // Emit `distinctness` only when non-default so existing
                 // `{min,max}` card-data stays byte-stable.
-                let field_count = 2 + (*distinctness != NumberDistinctness::Repeatable) as usize;
+                //
+                // CR 107.1a/b: emit `max` only when the range HAS one. This is a
+                // hand-written `Serialize`, so the `skip_serializing_if` on the
+                // `ChoiceTypeData` deserialize mirror does not apply here and has
+                // to be mirrored by hand — otherwise an unbounded range writes
+                // `"max": null`, which round-trips correctly but needlessly
+                // changes the wire shape and reads as "a null bound" rather than
+                // "no bound".
+                let field_count = 1
+                    + max.is_some() as usize
+                    + (*distinctness != NumberDistinctness::Repeatable) as usize;
                 let mut variant = serializer.serialize_struct_variant(
                     "ChoiceType",
                     6,
@@ -848,7 +911,9 @@ impl Serialize for ChoiceType {
                     field_count,
                 )?;
                 variant.serialize_field("min", min)?;
-                variant.serialize_field("max", max)?;
+                if let Some(max) = max {
+                    variant.serialize_field("max", max)?;
+                }
                 if *distinctness != NumberDistinctness::Repeatable {
                     variant.serialize_field("distinctness", distinctness)?;
                 }
@@ -977,8 +1042,13 @@ impl<'de> Deserialize<'de> for ChoiceType {
                 excluded: Vec<CoreType>,
             },
             NumberRange {
-                min: u8,
-                max: u8,
+                min: u32,
+                /// CR 107.1a/b: absent = no maximum. A bounded range keeps
+                /// emitting `"max": N` exactly as before, so existing card-data
+                /// round-trips byte-identically; only the unbounded form omits
+                /// the key.
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                max: Option<u32>,
                 #[serde(default)]
                 distinctness: NumberDistinctness,
             },
@@ -1386,7 +1456,7 @@ pub enum ChosenAttribute {
     /// every viewer but its owner. `Effect::RevealChosenNumbers` converts it to
     /// [`ChosenAttribute::RevealedNumber`], which is public — that conversion is
     /// the card's "reveal" instruction as an observable state transition.
-    Number(u8),
+    Number(u32),
     /// CR 101.4 + CR 608.2c: A chosen number that a reveal instruction has
     /// PUBLISHED ("then all players reveal those numbers simultaneously").
     /// Identical in value to [`ChosenAttribute::Number`] and read
@@ -1395,7 +1465,7 @@ pub enum ChosenAttribute {
     /// distinct variant rather than a flag so the secret and published states
     /// cannot be confused at a read site, and so `game::visibility` redacts on
     /// the type rather than on a condition it might forget to check.
-    RevealedNumber(u8),
+    RevealedNumber(u32),
     /// Stores the chosen opponent/player ID (CR 800.4a).
     Player(PlayerId),
     /// Stores two chosen colors as a pair.
@@ -1481,9 +1551,12 @@ impl ChosenAttribute {
             Self::CardName(_) => ChoiceType::CardName,
             // CR 101.4: the secret and the published number came from the same
             // `NumberRange` prompt; revealing changes visibility, not category.
+            // CR 107.1a/b: recovering the CATEGORY from a stored value cannot
+            // recover the card's original bounds, so report the widest form the
+            // rules allow rather than inventing a ceiling this value never had.
             Self::Number(_) | Self::RevealedNumber(_) => ChoiceType::NumberRange {
                 min: 0,
-                max: 20,
+                max: None,
                 distinctness: NumberDistinctness::Repeatable,
             },
             // Player covers both Player and Opponent choice types
@@ -1584,7 +1657,7 @@ pub enum ChoiceValue {
     CardType(CoreType),
     OddOrEven(Parity),
     CardName(String),
-    Number(u8),
+    Number(u32),
     Label(String),
     CardPredicate(CardPredicateChoice),
     LandType(String),
@@ -1618,7 +1691,7 @@ impl ChoiceValue {
             }
             ChoiceType::OddOrEven => value.parse::<Parity>().ok().map(Self::OddOrEven),
             ChoiceType::CardName => Some(Self::CardName(value.to_string())),
-            ChoiceType::NumberRange { .. } => value.parse::<u8>().ok().map(Self::Number),
+            ChoiceType::NumberRange { .. } => value.parse::<u32>().ok().map(Self::Number),
             ChoiceType::Labeled { .. } => Some(Self::Label(value.to_string())),
             ChoiceType::CardPredicate { options } | ChoiceType::CardPredicateGuess { options } => {
                 let predicate = CardPredicateChoice::from_label(value)?;
@@ -26158,7 +26231,7 @@ mod tests {
             legacy,
             ChoiceType::NumberRange {
                 min: 1,
-                max: 5,
+                max: Some(5),
                 distinctness: NumberDistinctness::Repeatable,
             }
         );
@@ -26168,10 +26241,32 @@ mod tests {
             "Repeatable must not emit the distinctness field"
         );
 
+        // CR 107.1a/b: making `max` optional must not disturb the BOUNDED wire
+        // shape — the assertions above already prove `"max":5` both reads and
+        // writes unchanged, so existing card-data round-trips byte-identically.
+        // The UNBOUNDED form is the new shape: it omits the key entirely, and a
+        // payload with no `max` reads back as unbounded rather than defaulting to
+        // some ceiling.
+        let unbounded = ChoiceType::NumberRange {
+            min: 0,
+            max: None,
+            distinctness: NumberDistinctness::Repeatable,
+        };
+        assert_eq!(
+            serde_json::to_string(&unbounded).unwrap(),
+            r#"{"NumberRange":{"min":0}}"#,
+            "an unbounded range must omit max rather than emit a stand-in"
+        );
+        assert_eq!(
+            serde_json::from_str::<ChoiceType>(r#"{"NumberRange":{"min":0}}"#).unwrap(),
+            unbounded,
+            "a payload with no max is unbounded, not defaulted"
+        );
+
         // A DistinctFromSourceHistory value round-trips and emits the field.
         let distinct = ChoiceType::NumberRange {
             min: 1,
-            max: 5,
+            max: Some(5),
             distinctness: NumberDistinctness::DistinctFromSourceHistory,
         };
         let json = serde_json::to_string(&distinct).unwrap();

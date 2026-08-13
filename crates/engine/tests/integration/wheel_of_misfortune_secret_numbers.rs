@@ -134,15 +134,31 @@ fn wheel_of_misfortune_burns_the_highest_choosers_and_wheels_everyone_but_the_lo
                     .expect("mana payment must auto-finalize");
             }
             WaitingFor::NamedChoice {
-                player, options, ..
+                player,
+                options,
+                choice_type,
+                ..
             } => {
                 let (_, choice) = CHOICES
                     .iter()
                     .find(|(seat, _)| *seat == player)
                     .unwrap_or_else(|| panic!("unexpected chooser {player:?}"));
+                // CR 107.1a/b: "a number 0 or greater" states no maximum, so the
+                // prompt enumerates NOTHING and the value is supplied by the
+                // player. An option list here would mean the engine had invented
+                // a ceiling — the bug that made 21 illegal.
                 assert!(
-                    options.iter().any(|option| option == choice),
-                    "{choice} must be offered to {player:?}; got {options:?}"
+                    options.is_empty(),
+                    "an unbounded number choice must not enumerate options; got {options:?}"
+                );
+                assert!(
+                    choice_type.options_supplied_by_player(),
+                    "the prompt must route to the free-entry path"
+                );
+                assert_eq!(
+                    choice_type.accepts_free_entry_answer(choice),
+                    Some(true),
+                    "{choice} must be a legal answer for {player:?}"
                 );
                 number_choosers.push(player);
                 // CR 101.4b: BEFORE the reveal, a chooser must not be able to
@@ -185,7 +201,7 @@ fn wheel_of_misfortune_burns_the_highest_choosers_and_wheels_everyone_but_the_lo
     for viewer in [P0, P1, P2] {
         let view = engine::game::visibility::filter_state_for_viewer(runner.state(), viewer);
         for (seat, chosen) in CHOICES {
-            let expected: u8 = chosen.parse().expect("scripted choice is numeric");
+            let expected: u32 = chosen.parse().expect("scripted choice is numeric");
             assert!(
                 view.players[seat.0 as usize]
                     .chosen_attributes
@@ -228,5 +244,122 @@ fn wheel_of_misfortune_burns_the_highest_choosers_and_wheels_everyone_but_the_lo
         hand_size(state, P2),
         2,
         "P2 chose the lowest number and keeps its hand — no discard, no draw"
+    );
+}
+
+/// CR 107.1a/b: "a number 0 or greater" states NO maximum, so a number past any
+/// ceiling the engine might have invented must be both choosable and effective.
+///
+/// This is the case the three-seat test above structurally cannot detect: it only
+/// ever chooses 1 and 4, both inside the range the engine used to invent
+/// (`min: 0, max: 20`), so it stayed green while 21 was rejected outright. Here
+/// P1 bids exactly 21 and P0 bids 40 — past both the old ceiling and a starting
+/// life total — and every assertion below is reachable only if those values were
+/// accepted at the answer seam, stored at full width, folded as the cross-player
+/// maximum, and dealt as damage.
+#[test]
+fn a_number_past_the_old_ceiling_is_choosable_and_deals_that_much_damage() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for player in [P0, P1, P2] {
+        scenario.with_library_top(
+            player,
+            &[
+                "Lib 1", "Lib 2", "Lib 3", "Lib 4", "Lib 5", "Lib 6", "Lib 7", "Lib 8",
+            ],
+        );
+        scenario.with_cards_in_hand(player, &["Hand A", "Hand B"]);
+        // High enough that a 40-point hit is survivable, so the assertion reads a
+        // life total rather than an elimination.
+        scenario.with_life(player, 60);
+    }
+
+    let mut spell_builder = scenario.add_spell_to_hand_from_oracle(
+        P0,
+        "Wheel of Misfortune",
+        false,
+        WHEEL_OF_MISFORTUNE,
+    );
+    spell_builder.with_mana_cost(ManaCost::Cost {
+        generic: 2,
+        shards: vec![ManaCostShard::Red],
+    });
+    let spell = spell_builder.id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Red, spell, false, vec![]),
+            ManaUnit::new(ManaType::Red, spell, false, vec![]),
+            ManaUnit::new(ManaType::Red, spell, false, vec![]),
+        ],
+    );
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting Wheel of Misfortune must start");
+
+    let bids: [(PlayerId, &str); 3] = [(P0, "40"), (P1, "21"), (P2, "0")];
+    let mut answered = 0usize;
+    for _ in 0..256 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ManaPayment { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("mana payment must auto-finalize");
+            }
+            WaitingFor::NamedChoice { player, .. } => {
+                let (_, bid) = bids
+                    .iter()
+                    .find(|(seat, _)| *seat == player)
+                    .unwrap_or_else(|| panic!("unexpected chooser {player:?}"));
+                runner
+                    .act(GameAction::ChooseOption {
+                        choice: (*bid).to_string(),
+                    })
+                    .unwrap_or_else(|e| {
+                        panic!("{bid} must be a legal answer for {player:?}: {e:?}")
+                    });
+                answered += 1;
+            }
+            WaitingFor::Priority { .. } => {
+                if runner.act(GameAction::PassPriority).is_err() {
+                    break;
+                }
+                if runner.state().stack.is_empty() && answered == bids.len() {
+                    break;
+                }
+            }
+            other => panic!("unexpected prompt during resolution: {other:?}"),
+        }
+    }
+    assert_eq!(answered, 3, "all three bids must have been accepted");
+
+    let state = runner.state();
+    // CR 120.3a: 40 is the highest bid, so P0 — and only P0 — takes exactly that
+    // much. Under the invented ceiling this assertion could not even be reached:
+    // the answer seam rejected the bid.
+    assert_eq!(life(state, P0), 20, "P0 bid 40 and takes exactly that much");
+    assert_eq!(life(state, P1), 60, "P1 did not bid the highest");
+    assert_eq!(life(state, P2), 60, "P2 did not bid the highest");
+
+    // CR 701.9a + CR 121.1: P2 bid the lowest (0) and is spared; the other two
+    // wheel — including the 21 bid the old range also rejected.
+    assert_eq!(hand_size(state, P0), 7, "P0 wheels");
+    assert_eq!(
+        hand_size(state, P1),
+        7,
+        "P1 bid 21 — past the old ceiling — and wheels"
+    );
+    assert_eq!(
+        hand_size(state, P2),
+        2,
+        "P2 bid the lowest and keeps its hand"
     );
 }

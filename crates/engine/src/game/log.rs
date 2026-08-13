@@ -945,7 +945,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
                 }
                 segments.push(player_seg(state, *player));
                 segments.push(text(" "));
-                segments.push(num(i32::from(*value)));
+                segments.push(num(crate::game::arithmetic::u32_to_i32_saturating(*value)));
             }
             segments
         }

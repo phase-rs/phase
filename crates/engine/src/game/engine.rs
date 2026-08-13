@@ -16162,9 +16162,14 @@ mod stage2_injector_tests {
                 // Measure AFTER the last edit to effects/mod.rs, not during: an earlier
                 // pass here recorded `+9` from a measurement taken before that fourth arm
                 // was added, and the row caught the 4-line discrepancy.
-                "game/effects/mod.rs:6653".to_string(),
-                "game/effects/mod.rs:6730".to_string(),
-                "game/effects/mod.rs:9954".to_string(),
+                // Unbounded-number round (same PR): `:6653/:6730/:9954 =>
+                // `:6655/:6732/:9956`, a uniform `+2` — the unbounded-range arm
+                // added to `compute_options`' sibling classifier in this file,
+                // which sits above all three producers. Nothing added raises a
+                // `WaitingFor`; the census set is still exactly 5.
+                "game/effects/mod.rs:6655".to_string(),
+                "game/effects/mod.rs:6732".to_string(),
+                "game/effects/mod.rs:9956".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.

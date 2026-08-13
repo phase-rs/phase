@@ -2080,7 +2080,13 @@ fn fmt_choice_type(ct: &ChoiceType) -> String {
             }
         }
         ChoiceType::CardName => "card name",
-        ChoiceType::NumberRange { min, max, .. } => return format!("number ({min}-{max})"),
+        // CR 107.1a/b: an unbounded range has no ceiling to print.
+        ChoiceType::NumberRange { min, max, .. } => {
+            return match max {
+                Some(max) => format!("number ({min}-{max})"),
+                None => format!("number ({min} or greater)"),
+            }
+        }
         ChoiceType::Labeled { options } => return format!("one of: {}", options.join(", ")),
         ChoiceType::LandType => "land type",
         ChoiceType::CardPredicate { .. } => "card predicate",

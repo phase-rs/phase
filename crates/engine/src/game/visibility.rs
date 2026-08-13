@@ -5587,7 +5587,7 @@ mod tests {
             player: PlayerId(1),
             choice_type: ChoiceType::NumberRange {
                 min: 0,
-                max: 20,
+                max: Some(20),
                 distinctness: NumberDistinctness::Repeatable,
             },
             options: (0..=20u8).map(|n| n.to_string()).collect(),
@@ -5709,7 +5709,7 @@ mod tests {
             options: (1..=5).map(|n| n.to_string()).collect(),
             choice_type: ChoiceType::NumberRange {
                 min: 1,
-                max: 5,
+                max: Some(5),
                 distinctness: NumberDistinctness::DistinctFromSourceHistory,
             },
             source: crate::types::game_state::OpponentGuessSource {

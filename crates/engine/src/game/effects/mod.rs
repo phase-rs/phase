@@ -650,7 +650,9 @@ pub(crate) fn candidate_player_scalar(p: &Player, attr: &QuantityRef) -> Option<
         // the current resolution. `None` for a player who chose nothing, which
         // fails the candidate predicate CLOSED — "each player who didn't choose
         // the lowest number" must not sweep in a player who never chose at all.
-        QuantityRef::PlayerChosenNumber { .. } => p.chosen_number().map(i32::from),
+        QuantityRef::PlayerChosenNumber { .. } => p
+            .chosen_number()
+            .map(crate::game::arithmetic::u32_to_i32_saturating),
         _ => None,
     }
 }
