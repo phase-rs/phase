@@ -1137,11 +1137,19 @@ pub fn choose_blockers_with_profile(
         let damage_through = |set: &[ObjectId]| -> i32 {
             engine::game::combat_damage::combat_damage_to_defender(state, attacker_id, set)
         };
+        // The no-block baseline, read from the same authority so the comparison below
+        // is like for like. NOT `attacker_power`: that is one damage step's worth,
+        // while `damage_through` reports the whole combat phase, so a double striker
+        // makes the two disagree by an entire strike (CR 702.4b) — and disagree in
+        // the direction that rejects a block which does save the game.
+        let unblocked_damage = damage_through(&[]);
         // CR 510.1c: a block that lets nothing through is a full save whatever
-        // becomes of the blockers. Otherwise it has to get the player under lethal.
+        // becomes of the blockers. Otherwise it has to get the player under lethal
+        // AND actually prevent something worth the creatures — the same
+        // `damage_prevented >= 2` floor the single-blocker pass applies.
         let averts_lethal = |set: &[ObjectId]| -> bool {
             let through = damage_through(set);
-            through < effective_life && (through == 0 || attacker_power - through >= 2)
+            through < effective_life && (through == 0 || unblocked_damage - through >= 2)
         };
 
         // CR 509.1b + CR 510.1c + CR 702.7b + CR 702.19b: the survival gang answers a
@@ -4794,6 +4802,52 @@ mod tests {
             on_attacker, 0,
             "CR 702.4b + CR 702.19d: the second strike finds an empty block and \
              tramples 11 more into a player already down to 1. Got {assignments:?}"
+        );
+    }
+
+    /// The survival test must compare like with like. `combat_damage_to_defender`
+    /// reports the WHOLE combat phase, so for a double striker it counts both steps
+    /// (CR 702.4b) while `attacker_power` is one step's worth — and the block that
+    /// saves the game is exactly where the two disagree.
+    ///
+    /// A 5/5 menace double-strike trampler is 10 damage unblocked (5 through the
+    /// first step's excess plus 5 more into the empty block, CR 702.19d), lethal at
+    /// 7 life. Two 2/2s absorb 2+2 in the first step, so 1 tramples then, and 5 in
+    /// the regular step: 6 total, and the player lives at 1.
+    ///
+    /// Comparing against raw `attacker_power` gives `5 - 6 = -1`, fails the
+    /// prevented-damage floor, and declines a block that saves the game — so
+    /// reverting the baseline to `attacker_power` fails this test.
+    #[test]
+    fn double_strike_trample_gang_is_taken_when_it_is_the_difference_between_living_and_dying() {
+        let mut state = setup();
+        state.players[1].life = 7;
+        let attacker = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Attacker",
+            5,
+            5,
+            vec![Keyword::Menace, Keyword::DoubleStrike, Keyword::Trample],
+        );
+        for i in 0..2 {
+            add_creature(
+                &mut state,
+                PlayerId(1),
+                &format!("Blocker {i}"),
+                1,
+                2,
+                vec![],
+            );
+        }
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        let on_attacker = assignments.iter().filter(|&&(_, a)| a == attacker).count();
+        assert_eq!(
+            on_attacker, 2,
+            "10 unblocked at 7 life is lethal; the legal pair cuts it to 6 and the \
+             player lives. Got {assignments:?}"
         );
     }
 
