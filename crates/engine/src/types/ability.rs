@@ -12441,8 +12441,13 @@ pub enum Effect {
     /// is a per-player choice made during resolution (CR 608.2d), so it gets its
     /// own publication channel rather than a card-reveal variant bent to fit.
     ///
-    /// A player's chosen number is private until this effect names them
-    /// (`GameState::revealed_chosen_numbers`, read by `game::visibility`).
+    /// A player's chosen number is private until this effect names them: the
+    /// resolver calls
+    /// [`crate::types::player::Player::reveal_chosen_number`], which swaps that
+    /// player's [`ChosenAttribute::Number`] for
+    /// [`ChosenAttribute::RevealedNumber`]. `game::visibility` redacts the
+    /// former from every other viewer and leaves the latter public, so privacy
+    /// is a property of the attribute kind rather than of any separate flag.
     /// Naming a player who chose no number is a legal no-op (CR 609.3), which is
     /// what makes `players: All` correct for a card whose choosers were only a
     /// subset of the table.

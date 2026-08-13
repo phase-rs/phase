@@ -27666,12 +27666,23 @@ fn strip_each_player_subject_chosen_number_matrix() {
         let QuantityExpr::Ref {
             qty:
                 QuantityRef::PlayerChosenNumber {
-                    player: PlayerScope::AllPlayers { aggregate, .. },
+                    player: PlayerScope::AllPlayers { aggregate, exclude },
                 },
         } = *value
         else {
             panic!("threshold must be a cross-player chosen-number extremum for {text}");
         };
+        // CR 101.4: the extremum is over EVERY player who chose, including the
+        // controller — "the highest number" is the table's highest, not the
+        // highest among some narrowed subset. This matters most on the opponent
+        // relation ("each opponent with the highest number"), where `relation`
+        // narrows WHO IS AFFECTED but must not narrow WHAT IS COMPARED: an
+        // `exclude` here would silently measure the extremum over opponents only
+        // and hit an opponent whose number the controller had beaten.
+        assert!(
+            exclude.is_none(),
+            "the extremum population must not be narrowed for {text}, got exclude={exclude:?}"
+        );
         (relation, comparator, aggregate, body)
     }
 
@@ -27711,14 +27722,25 @@ fn chosen_number_restriction_rejects_unbound_and_unrelated_clauses() {
         super::lower::parse_chosen_number_restriction("who chose that number", None).is_err(),
         "an anaphor with no referent in scope must decline, not guess an extremum"
     );
-    assert!(
-        super::lower::parse_chosen_number_restriction(
-            "who chose that number",
-            Some(crate::types::ability::AggregateFunction::Max)
-        )
-        .is_ok(),
-        "the same anaphor binds once its referent is supplied"
-    );
+    // The anaphor must bind to the SUPPLIED referent, not merely succeed. A
+    // parser that ignored the parameter and hardcoded one extremum would pass an
+    // `is_ok()` check while resolving "that number" to the wrong value, so assert
+    // the returned pair — and assert BOTH extrema so the binding is shown to
+    // track the argument rather than coincide with a default.
+    for aggregate in [
+        crate::types::ability::AggregateFunction::Max,
+        crate::types::ability::AggregateFunction::Min,
+    ] {
+        let (rest, bound) =
+            super::lower::parse_chosen_number_restriction("who chose that number", Some(aggregate))
+                .expect("the anaphor binds once its referent is supplied");
+        assert_eq!(rest, "", "the whole clause is consumed");
+        assert_eq!(
+            bound,
+            (Comparator::EQ, aggregate),
+            "\"that number\" must resolve to the extremum the caller supplied"
+        );
+    }
     assert!(
         super::lower::parse_chosen_number_restriction("who didn't discard a card", None).is_err(),
         "an unrelated decline tail is not a chosen-number restriction"
@@ -27897,11 +27919,15 @@ fn secret_number_provenance_invariant_holds_across_the_class() {
         ("Counting Control", "Draw cards equal to the highest number of cards in hand among players."),
     ];
 
+    let mut readers: Vec<&str> = Vec::new();
     for (name, oracle) in CARDS {
         let parsed = parse_oracle_text(oracle, name, &[], &["Creature".to_string()], &[]);
         let rendered = format!("{parsed:?}");
         let reads_chosen_number = rendered.contains("PlayerChosenNumber");
         let has_number_choice = rendered.contains("NumberRange");
+        if reads_chosen_number {
+            readers.push(name);
+        }
 
         // THE INVARIANT: a chosen-number reference may exist only where the same
         // card actually creates a secret number to refer to. This is what makes
@@ -27912,6 +27938,31 @@ fn secret_number_provenance_invariant_holds_across_the_class() {
             "{name} reads a secretly-chosen number with no NumberRange choice to bind it to"
         );
     }
+
+    // REACH GUARD. The invariant above is an implication, so it holds vacuously
+    // for a card that produces no `PlayerChosenNumber` at all — if the grammar
+    // stopped firing entirely, or every card fell back to `Unimplemented`, all
+    // eight cases would still "pass" while proving nothing.
+    //
+    // Menacing Ogre is the NAMED positive: "Each player with the highest number
+    // loses that much life" is the one clause in this set that both creates a
+    // secret number and reads the extremum back, so it must appear here or the
+    // sweep is measuring nothing.
+    //
+    // Itazura is deliberately NOT expected. It creates the choice but its "Choose
+    // an opponent with the highest number" does not currently bind to it — the
+    // restriction lowers without a `PlayerChosenNumber` threshold. That is a real
+    // partial-support gap, not a regression: on `main` the whole card died at
+    // `Unimplemented { secretly }`. Pinning the reader set exactly means closing
+    // that gap will fail this assertion and force the list to be updated
+    // deliberately rather than drifting.
+    assert_eq!(
+        readers,
+        vec!["Menacing Ogre"],
+        "the sweep's positive side changed. If a card gained a chosen-number read, \
+         confirm it is correct and add it here; if Menacing Ogre stopped reading one, \
+         the grammar regressed and the implication above is now vacuous"
+    );
 }
 
 /// CR 608.2d: "the highest number" is only a secretly-chosen number when a
@@ -27959,11 +28010,35 @@ fn noted_number_is_not_a_secretly_chosen_number() {
                 .is_some_and(mentions_chosen_number)
     }
 
-    // Reach guard: the card really did parse into abilities, so the negative
-    // assertion below cannot pass vacuously on an empty parse.
+    // REACH GUARD. A non-empty `abilities` is not enough: `mentions_chosen_number`
+    // also returns false when the ability lowered to `Effect::Unimplemented`, so a
+    // regression that DROPPED the "power less than or equal to …" clause entirely
+    // would satisfy the negative assertion below for the wrong reason. Require the
+    // real activated ability — a `Tap` whose target survived — so the negative is
+    // measured against a parse that actually reached the clause under test.
     assert!(
         !parsed.abilities.is_empty(),
         "Custodi Peacekeeper must still produce its activated ability"
+    );
+    fn has_live_tap(def: &AbilityDefinition) -> bool {
+        matches!(
+            &*def.effect,
+            Effect::SetTapState {
+                state: crate::types::ability::TapStateChange::Tap,
+                ..
+            }
+        ) || def.sub_ability.as_deref().is_some_and(has_live_tap)
+            || def.else_ability.as_deref().is_some_and(has_live_tap)
+    }
+    assert!(
+        parsed.abilities.iter().any(has_live_tap),
+        "the tap ability must still lower — without it the negative below passes \
+         because the clause vanished, not because it parsed correctly: {:#?}",
+        parsed
+            .abilities
+            .iter()
+            .map(|a| &a.effect)
+            .collect::<Vec<_>>()
     );
     for ability in &parsed.abilities {
         assert!(

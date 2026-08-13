@@ -3061,8 +3061,12 @@ fn legacy_effect(x: &Effect) -> bool {
             first: _,
             second: _,
         } => false,
-        // CR 101.4: carries a `PlayerFilter`, not a legacy tag-bearing target.
-        Effect::RevealChosenNumbers { players: _ } => false,
+        // CR 101.4: unlike its `SwapChosenLabels` neighbour this variant DOES
+        // carry a `PlayerFilter`, so it must be traversed rather than answered
+        // `false` outright — `legacy_player_filter` detects `TriggeringPlayer`
+        // and recurses through the nested `ControlsCount` / `PlayerAttribute` /
+        // `AllExcept` forms, any of which a future reveal could name.
+        Effect::RevealChosenNumbers { players } => legacy_player_filter(players),
         Effect::Attach { attachment, target } | Effect::UnattachAll { attachment, target } => {
             legacy_target_filter(attachment) || legacy_target_filter(target)
         }
