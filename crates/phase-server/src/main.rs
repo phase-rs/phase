@@ -7984,7 +7984,11 @@ mod state_transport_derived_tests {
             (session.state_revision, session.state.waiting_for.clone())
         };
 
-        match requester_rx.recv().await.expect("requester state update") {
+        match tokio::time::timeout(std::time::Duration::from_secs(1), requester_rx.recv())
+            .await
+            .expect("Resolve All must send the requester state update")
+            .expect("requester state update channel remains open")
+        {
             ServerMessage::StateUpdate {
                 state_revision,
                 state,
@@ -7996,17 +8000,21 @@ mod state_transport_derived_tests {
             other => panic!("expected requester StateUpdate, got {other:?}"),
         }
         assert!(matches!(
-            requester_rx
-                .recv()
+            tokio::time::timeout(std::time::Duration::from_secs(1), requester_rx.recv())
                 .await
-                .expect("Resolve All acknowledgement"),
+                .expect("Resolve All must acknowledge after its state update")
+                .expect("requester acknowledgement channel remains open"),
             ServerMessage::ResolveAllResult {
                 request_id: 41,
                 items_resolved: 1,
                 total: 1,
             }
         ));
-        match ai_rx.recv().await.expect("AI recipient state update") {
+        match tokio::time::timeout(std::time::Duration::from_secs(1), ai_rx.recv())
+            .await
+            .expect("Resolve All must fan out the final state to the AI seat")
+            .expect("AI recipient channel remains open")
+        {
             ServerMessage::StateUpdate { state_revision, .. } => {
                 assert_eq!(state_revision, expected_revision);
             }
