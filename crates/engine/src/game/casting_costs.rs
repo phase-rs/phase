@@ -12540,9 +12540,7 @@ fn finalize_mana_payment_with_resume(
         .pending_cast
         .take()
         .ok_or_else(|| EngineError::InvalidAction("No pending cast to finalize".to_string()))?;
-    if let Err(err) = ensure_pending_spell_announcement_is_live(state, &pending) {
-        return Err(err);
-    }
+    ensure_pending_spell_announcement_is_live(state, &pending)?;
     let resumed_prepaid_actual_mana_spent = pending.prepaid_actual_mana_spent.take();
     let mut pending_for_restore = pending.clone();
 
@@ -12916,9 +12914,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
         .pending_cast
         .take()
         .ok_or_else(|| EngineError::InvalidAction("No pending cast to finalize".to_string()))?;
-    if let Err(err) = ensure_pending_spell_announcement_is_live(state, &pending) {
-        return Err(err);
-    }
+    ensure_pending_spell_announcement_is_live(state, &pending)?;
     let resumed_prepaid_actual_mana_spent = pending.prepaid_actual_mana_spent.take();
     let mut pending_for_restore = pending.clone();
     let mana_resume = ManaAbilityResume::PhyrexianCastPayment {
