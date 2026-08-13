@@ -5880,7 +5880,9 @@ fn parse_dig_destination_tail(input: &str) -> Option<(Option<Zone>, bool, bool)>
         // have a later sentence that describes the rest pile (for example,
         // "put the rest ... onto the battlefield tapped"), which must not
         // affect the kept-card entry mode.
-        let (_, qualifier_tail) = take_till(|character| character == '.').parse(rest).ok()?;
+        let (_, qualifier_tail) = take_till::<_, _, OracleError<'_>>(|character| character == '.')
+            .parse(rest)
+            .ok()?;
         let (tapped, attacking) = super::parse_battlefield_entry_qualifiers(qualifier_tail);
         return Some((Some(Zone::Battlefield), tapped, attacking));
     }
