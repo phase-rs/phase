@@ -676,19 +676,7 @@ pub(crate) fn zone_move_completion_from_delivery(
     member: ObjectIncarnationRef,
     delivery_events: &[GameEvent],
 ) -> ZoneMoveCompletion {
-    if delivery_events.iter().any(|event| {
-        matches!(
-            event,
-            GameEvent::ZoneChanged { record, .. }
-                if record
-                    .trigger_source_context()
-                    .is_some_and(|context| context.identity.reference == member)
-        )
-    }) {
-        ZoneMoveCompletion::Moved
-    } else {
-        ZoneMoveCompletion::Remained
-    }
+    PendingZoneChangeDelivery::completion_from_delivery_events(member, delivery_events)
 }
 
 pub(crate) enum ZoneDeliveryResult {
@@ -2407,10 +2395,8 @@ pub(crate) fn deliver_replaced_zone_change(
                 let (recorded, source_id) = {
                     let frame = state
                         .resolution_stack
-                        .active_discard_parent_of_active_ability_continuation_mut(frame_id)
-                        .expect(
-                            "discard provenance must name the active continuation's discard parent",
-                        );
+                        .active_discard_or_direct_continuation_parent_mut(frame_id)
+                        .expect("discard provenance must name the active discard operation");
                     let recorded = frame.results.is_empty();
                     let source_id = frame.source_id;
                     if recorded {

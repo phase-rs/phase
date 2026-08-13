@@ -28,13 +28,13 @@
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::EffectKind;
 use engine::types::ability::{
-    Effect, ManaProduction, ManaTargetRole, QuantityExpr, QuantityRef, TargetFilter, TargetRef,
-    ZoneRef,
+    ControllerRef, Effect, ManaContribution, ManaProduction, ManaTargetRole, QuantityExpr,
+    QuantityRef, TargetFilter, TargetRef, TypedFilter, ZoneRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
-use engine::types::mana::{ManaCost, ManaType};
+use engine::types::game_state::{CastPaymentMode, ManaChoice, ManaChoicePrompt, WaitingFor};
+use engine::types::mana::{ManaColor, ManaCost, ManaType};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 
@@ -193,6 +193,132 @@ fn mana_recipient_and_count_source_resolve_from_their_own_slots() {
         0,
         "the controller (P0) must NOT receive a targeted recipient's mana"
     );
+}
+
+/// CR 106.1 + CR 106.4: Color discovery uses the RECIPIENT target while the
+/// production count uses the COUNT SOURCE target. The recipient controls red
+/// and blue permanents, the count source controls green, and its five-card hand
+/// determines the amount. Passing only the count-scoped ability to the prompt
+/// would offer only green (and skip the prompt entirely).
+#[test]
+fn mana_color_prompt_keeps_recipient_context_separate_from_count_context() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_cards_in_hand(
+        P2,
+        &hand_names("Count Card", COUNT_SOURCE_HAND)
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+    );
+    let recipient_red = scenario.add_creature(P1, "Recipient Red", 1, 1).id();
+    let recipient_blue = scenario.add_creature(P1, "Recipient Blue", 1, 1).id();
+    let count_source_green = scenario.add_creature(P2, "Count Source Green", 1, 1).id();
+
+    let spell = scenario
+        .add_spell_to_hand(P0, "Role Split Color Ritual", false)
+        .with_mana_cost(ManaCost::zero())
+        .with_ability(Effect::Mana {
+            produced: ManaProduction::AnyOneColorAmongPermanents {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::TargetZoneCardCount {
+                        zone: ZoneRef::Hand,
+                    },
+                },
+                filter: TargetFilter::Typed(
+                    TypedFilter::permanent().controller(ControllerRef::TargetPlayer),
+                ),
+                contribution: ManaContribution::Base,
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: Some(ManaTargetRole::Both {
+                recipient: TargetFilter::Player,
+                count_source: TargetFilter::Player,
+            }),
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&recipient_red)
+        .unwrap()
+        .color = vec![ManaColor::Red];
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&recipient_blue)
+        .unwrap()
+        .color = vec![ManaColor::Blue];
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&count_source_green)
+        .unwrap()
+        .color = vec![ManaColor::Green];
+
+    let spell_card = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id: spell_card,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting the role-split color ritual must succeed");
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Player(P1), TargetRef::Player(P2)],
+        })
+        .expect("recipient and count-source targets must be accepted");
+
+    for _ in 0..16 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseManaColor { .. }
+        ) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("resolving the ritual must advance to its mana prompt");
+    }
+
+    match &runner.state().waiting_for {
+        WaitingFor::ChooseManaColor {
+            choice: ManaChoicePrompt::SingleColor { options },
+            ..
+        } => {
+            assert_eq!(options, &vec![ManaType::Blue, ManaType::Red]);
+            assert!(!options.contains(&ManaType::Green));
+        }
+        other => panic!("expected recipient-scoped color prompt, got {other:?}"),
+    }
+
+    runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Red),
+            count: 1,
+        })
+        .expect("choosing the recipient's red mana must succeed");
+
+    assert_eq!(total_pool(&runner, P1), COUNT_SOURCE_HAND as i32);
+    assert_eq!(
+        runner
+            .state()
+            .players
+            .iter()
+            .find(|p| p.id == P1)
+            .unwrap()
+            .mana_pool
+            .count_color(ManaType::Red),
+        COUNT_SOURCE_HAND
+    );
+    assert_eq!(total_pool(&runner, P2), 0);
+    assert_eq!(total_pool(&runner, P0), 0);
 }
 
 /// Paired negative / over-application guard: the SAME production, but with the

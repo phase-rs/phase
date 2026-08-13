@@ -218,6 +218,43 @@ fn dynamic_for_each_pump_trailing_keyword_unchanged() {
     );
 }
 
+/// CR 508.1a + CR 613.4c: a distributive attack-history static binds the
+/// count to each affected creature, rather than using the source controller's
+/// aggregate attack total (Moraug, Fury of Akoum).
+#[test]
+fn dynamic_for_each_pump_binds_attack_count_to_each_recipient() {
+    let defs = parse_static_line_multi(
+        "Creatures you control get +1/+0 for each time they have attacked this turn.",
+    );
+    assert_eq!(defs.len(), 1, "Moraug's static must produce one definition");
+    assert_eq!(
+        defs[0].affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You)
+        ))
+    );
+    let expected = QuantityExpr::Ref {
+        qty: QuantityRef::AttackedThisTurn {
+            scope: CountScope::All,
+            filter: Some(TargetFilter::Typed(TypedFilter::creature().properties(
+                vec![FilterProp::Not {
+                    prop: Box::new(FilterProp::Another),
+                }],
+            ))),
+        },
+    };
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddDynamicPower { value: expected }));
+    assert!(
+        !defs[0].modifications.iter().any(|modification| matches!(
+            modification,
+            ContinuousModification::AddDynamicToughness { .. }
+        )),
+        "Moraug grants only +1/+0, never toughness"
+    );
+}
+
 // CR 205.1b + CR 613.4c: when a "for each X" dynamic pump carries a trailing "and
 // is a <Subtype> in addition to its other types", the type-addition tail used to
 // break the count parse and collapse the whole pump to a FIXED +N/+M (Avatar
@@ -934,6 +971,7 @@ fn static_ignore_hexproof_and_ward_suppression_pair() {
         StaticMode::SuppressTriggers {
             events,
             source_filter,
+            ..
         } => {
             assert_eq!(events, &vec![SuppressedTriggerEvent::BecomesTargeted]);
             assert_eq!(
@@ -25696,6 +25734,7 @@ fn suppress_triggers_torpor_orb_etb_only() {
         StaticMode::SuppressTriggers {
             source_filter: TargetFilter::Typed(tf),
             events,
+            ..
         } => {
             assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
             assert_eq!(events, vec![SuppressedTriggerEvent::EntersBattlefield]);
@@ -25757,6 +25796,7 @@ fn suppress_triggers_hushbringer_etb_and_dies() {
         StaticMode::SuppressTriggers {
             source_filter: TargetFilter::Typed(tf),
             events,
+            ..
         } => {
             assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
             assert_eq!(
@@ -25768,6 +25808,30 @@ fn suppress_triggers_hushbringer_etb_and_dies() {
             );
         }
         other => panic!("expected SuppressTriggers, got {other:?}"),
+    }
+}
+
+#[test]
+fn suppress_triggers_scopes_the_trigger_source() {
+    let def = parse_static_line(
+        "Permanents entering don't cause abilities of permanents your opponents control to trigger.",
+    )
+    .expect("Elesh Norn's ETB suppression should parse");
+    match def.mode {
+        StaticMode::SuppressTriggers {
+            source_filter: TargetFilter::Typed(subject),
+            trigger_source_filter: Some(TargetFilter::Typed(trigger_source)),
+            events,
+        } => {
+            assert_eq!(subject.type_filters, vec![TypeFilter::Permanent]);
+            assert_eq!(
+                trigger_source.controller,
+                Some(ControllerRef::Opponent),
+                "the suppression applies only to opposing permanent abilities"
+            );
+            assert_eq!(events, vec![SuppressedTriggerEvent::EntersBattlefield]);
+        }
+        other => panic!("expected source-scoped SuppressTriggers, got {other:?}"),
     }
 }
 

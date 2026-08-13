@@ -234,6 +234,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         trigger_definition_ref: _, // exact trigger occurrence, no dynamic read
         force_block_attacker: _,   // exact force-block referent, no dynamic read
         target_incarnations: _,    // CR 400.7 referent pins, no dynamic read
+        selected_target_incarnations: _, // CR 400.7 selected-target pins, no dynamic read
         controller: _,             // player id
         original_controller: _,    // player id
         scoped_player: _,          // player id (iteration binding)
@@ -2205,6 +2206,22 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             }
             acc
         }
+        QuantityRef::SpellsCastBeforeTriggeringSpell { scope, filter } => {
+            let mut acc = Axes {
+                event: true,
+                sibling: false,
+                projected: true,
+            };
+            acc = acc.or(scan_count_scope(scope));
+            if let Some(x) = filter {
+                acc = acc.or(scan_target_filter(
+                    x,
+                    FilterReadContext::SnapshotOrEvent,
+                    mode,
+                ));
+            }
+            acc
+        }
         QuantityRef::EnteredThisTurn { filter } => {
             let mut acc = Axes {
                 event: false,
@@ -3776,6 +3793,7 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
         | FilterProp::Named { .. }
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource
         | FilterProp::IsCommander
         // CR 205.3m + CR 903.3: reads commander designation + the candidate's own
         // creature types — a board/object read, no player resource.

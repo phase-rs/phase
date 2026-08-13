@@ -11422,20 +11422,18 @@ pub fn handle_cast_spell_with_payment_mode(
     // `enters_with_counter` rider). Maralen, Fae Ascendant; Intrepid
     // Paleontologist; The Matrix of Time.
     //
-    // ponytail: scoped to `ExilePermission` — the one variant class whose
-    // single-candidate cast currently mis-elects to Normal. The GENERAL rule is
-    // "don't skip single-candidate election when the elected option carries
-    // context a Normal cast would drop" (would also cover a hypothetical single
-    // Flashback/Escape/etc.). Not generalized here because the fall-through below
+    // The elected alternate-cost context must not be dropped when it is the sole
+    // candidate. This is intentionally scoped to variants that have no later
+    // cost-choice handler: ExilePermission and Freerunning. The fall-through below
     // routes single-candidate Warp/Evoke/Dash hand casts through their own
-    // cost-choice `WaitingFor` handlers; electing them via `continue_cast_with_
-    // variant` would preempt those prompts. Widen to the general predicate only
-    // after auditing those keyword handlers tolerate pre-election.
-    if let Some(option) = variant_choices
-        .options
-        .first()
-        .filter(|option| matches!(option.variant, CastingVariant::ExilePermission { .. }))
-    {
+    // cost-choice `WaitingFor` handlers; electing those here would preempt those
+    // prompts. Widen only after auditing those handlers for pre-election.
+    if let Some(option) = variant_choices.options.first().filter(|option| {
+        matches!(
+            option.variant,
+            CastingVariant::ExilePermission { .. } | CastingVariant::Freerunning
+        )
+    }) {
         return continue_cast_with_variant(
             state,
             player,
@@ -14646,6 +14644,21 @@ pub(super) fn spell_tap_payment_mode_for(
     }
 }
 
+/// CR 702.66a: Delve is an independent generic-payment permission. It composes
+/// with a spell's primary tap-payment mode (for example, Hogaak's Convoke), so
+/// callers must query it separately rather than treating `ConvokeMode` as a
+/// mutually exclusive keyword selection.
+pub(crate) fn spell_has_delve_payment_for(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    fused: bool,
+) -> bool {
+    effective_spell_keywords_for(state, player, source_id, fused)
+        .iter()
+        .any(|keyword| matches!(keyword, Keyword::Delve))
+}
+
 /// CR 601.2c + CR 601.2f: Target selection may precede locking the final
 /// mana obligation. Return true only when none of the production cost axes can
 /// still change the amount or the sources available before payment.
@@ -14799,13 +14812,25 @@ fn can_pay_with_spell_tap_payments(
     else {
         return false;
     };
-    can_pay_with_tap_payment_mode(state, player, mode, cost, ctx, permissions)
+    let fused = state.pending_cast.as_ref().is_some_and(|pending| {
+        pending.object_id == source_id && pending.casting_variant == CastingVariant::Fuse
+    });
+    can_pay_with_tap_payment_mode(
+        state,
+        player,
+        mode,
+        spell_has_delve_payment_for(state, player, source_id, fused),
+        cost,
+        ctx,
+        permissions,
+    )
 }
 
 fn can_pay_with_tap_payment_mode(
     state: &GameState,
     player: PlayerId,
     mode: ConvokeMode,
+    has_delve: bool,
     cost: &crate::types::mana::ManaCost,
     ctx: Option<&PaymentContext<'_>>,
     permissions: crate::types::mana::CostPermissionContext,
@@ -14814,12 +14839,26 @@ fn can_pay_with_tap_payment_mode(
         return false;
     };
 
+    let mut payment_pool = player_data.mana_pool.clone();
+    if has_delve && mode != ConvokeMode::Delve {
+        // CR 702.66a: Delve's generic-only contributions compose with the
+        // primary Convoke/Improvise/Waterbend payment channel.
+        for (&object_id, obj) in &state.objects {
+            if obj.is_delve_eligible(player) {
+                payment_pool.add(crate::types::mana::ManaUnit::convoke_payment(
+                    crate::types::mana::ManaType::Colorless,
+                    object_id,
+                ));
+            }
+        }
+    }
+
     // CR 601.2h: This is an affordability preview only. The real payment still
     // flows through ManaPayment and the shared mana-payment algorithm.
     match mode {
         ConvokeMode::Improvise => {
             // CR 702.126a: Improvise lets players tap untapped artifacts to pay generic mana.
-            let mut pool = player_data.mana_pool.clone();
+            let mut pool = payment_pool;
             for (&object_id, obj) in &state.objects {
                 if obj.is_improvise_eligible(player) {
                     pool.add(crate::types::mana::ManaUnit::convoke_payment(
@@ -14831,7 +14870,7 @@ fn can_pay_with_tap_payment_mode(
             mana_payment::can_pay_for_spell(&pool, cost, ctx, permissions)
         }
         ConvokeMode::Waterbend => {
-            let mut pool = player_data.mana_pool.clone();
+            let mut pool = payment_pool;
             for (&object_id, obj) in &state.objects {
                 if obj.is_waterbend_eligible(player) {
                     pool.add(crate::types::mana::ManaUnit::new(
@@ -14863,13 +14902,13 @@ fn can_pay_with_tap_payment_mode(
                     Some(choices)
                 })
                 .collect::<Vec<_>>();
-            can_pay_with_convoke_options(&player_data.mana_pool, cost, ctx, permissions, &options)
+            can_pay_with_convoke_options(&payment_pool, cost, ctx, permissions, &options)
         }
         ConvokeMode::Delve => {
             // CR 702.66a: each card in the caster's graveyard can be exiled to pay
             // one generic mana. Model each as a generic-only colorless unit, exactly
             // like Improvise, so a spell castable only with delve is offered.
-            let mut pool = player_data.mana_pool.clone();
+            let mut pool = payment_pool;
             for (&object_id, obj) in &state.objects {
                 if obj.is_delve_eligible(player) {
                     pool.add(crate::types::mana::ManaUnit::convoke_payment(
@@ -15211,7 +15250,18 @@ fn feasibly_payable_with_tap_payment_mode_in_context(
         player_can_spend_as_any_color_for_payment(simulated, player, Some(source_id), ctx);
     let permissions =
         super::static_abilities::build_cost_permission_context(simulated, player, any_color);
-    can_pay_with_tap_payment_mode(simulated, player, tap_payment_mode, cost, ctx, permissions)
+    let fused = simulated.pending_cast.as_ref().is_some_and(|pending| {
+        pending.object_id == source_id && pending.casting_variant == CastingVariant::Fuse
+    });
+    can_pay_with_tap_payment_mode(
+        simulated,
+        player,
+        tap_payment_mode,
+        spell_has_delve_payment_for(simulated, player, source_id, fused),
+        cost,
+        ctx,
+        permissions,
+    )
 }
 
 /// Castability-gate feasibility predicate. Returns true if `player` could pay
@@ -16958,6 +17008,51 @@ pub(super) fn activation_payment_context(
     }
 }
 
+/// CR 106.6: Evaluate a mana unit's spell-effect condition against the spell
+/// it paid for, with the mana owner's controller as the source-relative "you".
+fn mana_grant_matches_spell(
+    state: &GameState,
+    spell_id: ObjectId,
+    caster: PlayerId,
+    unit: &crate::types::mana::ManaUnit,
+    filter: &TargetFilter,
+) -> bool {
+    let filter_ctx =
+        crate::game::filter::FilterContext::from_source_with_controller(unit.source_id, caster);
+    crate::game::filter::matches_target_filter(state, spell_id, filter, &filter_ctx)
+}
+
+/// CR 106.6a + CR 601.2g-i + CR 903.8: Resolve an entry-counter grant while
+/// a commander spell is still being paid for. The cast record is committed
+/// after payment, so include its current command-zone cast exactly once.
+fn resolve_mana_entry_counter_count(
+    state: &GameState,
+    count: &QuantityExpr,
+    caster: PlayerId,
+    source_id: ObjectId,
+    spell_id: ObjectId,
+) -> u32 {
+    let resolved =
+        u32::try_from(resolve_quantity(state, count, caster, source_id)).unwrap_or_default();
+    let cast_origin = spell_cast_origin(state, spell_id).or_else(|| {
+        state
+            .objects
+            .get(&spell_id)
+            .map(|object| object.cast_from_zone.unwrap_or(object.zone))
+    });
+    if matches!(
+        count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::CommanderCastFromCommandZoneCount
+        }
+    ) && cast_origin == Some(Zone::Command)
+    {
+        resolved.saturating_add(1)
+    } else {
+        resolved
+    }
+}
+
 /// CR 106.6: When mana with spell grants is spent to cast a spell, apply those
 /// grants to the spell object (e.g., "that spell can't be countered").
 fn apply_mana_spell_grants(
@@ -16965,9 +17060,15 @@ fn apply_mana_spell_grants(
     spell_id: ObjectId,
     spent_units: &[crate::types::mana::ManaUnit],
 ) {
-    let has_cant_be_countered = spent_units
-        .iter()
-        .any(|u| u.grants.contains(&ManaSpellGrant::CantBeCountered));
+    let Some(caster) = state.objects.get(&spell_id).map(|obj| obj.controller) else {
+        return;
+    };
+    let has_cant_be_countered = spent_units.iter().any(|unit| {
+        unit.grants.iter().any(|grant| {
+            matches!(grant, ManaSpellGrant::CantBeCountered { filter }
+                if mana_grant_matches_spell(state, spell_id, caster, unit, filter))
+        })
+    });
 
     if has_cant_be_countered {
         if let Some(obj) = state.objects.get_mut(&spell_id) {
@@ -16983,9 +17084,6 @@ fn apply_mana_spell_grants(
         }
     }
 
-    let Some(caster) = state.objects.get(&spell_id).map(|obj| obj.controller) else {
-        return;
-    };
     let spell_meta = build_spell_meta(state, caster, spell_id);
     let mut keyword_grants: Vec<(crate::types::keywords::Keyword, Duration)> = Vec::new();
     for grant in spent_units.iter().flat_map(|unit| unit.grants.iter()) {
@@ -17021,6 +17119,31 @@ fn apply_mana_spell_grants(
             vec![ContinuousModification::AddKeyword { keyword }],
             None,
         );
+    }
+
+    // CR 106.6a + CR 614.1c: Each spent mana unit can carry a distinct
+    // battlefield-entry replacement effect. Register it before the spell
+    // resolves so the zone pipeline applies its counters as the permanent
+    // enters, alongside counter-placement replacements.
+    for unit in spent_units {
+        for grant in &unit.grants {
+            let ManaSpellGrant::EntersWithCounters {
+                filter,
+                counter_type,
+                count,
+            } = grant
+            else {
+                continue;
+            };
+            if !mana_grant_matches_spell(state, spell_id, caster, unit, filter) {
+                continue;
+            }
+            let count =
+                resolve_mana_entry_counter_count(state, count, caster, unit.source_id, spell_id);
+            state
+                .pending_etb_counters
+                .push((spell_id, counter_type.clone(), count));
+        }
     }
 
     // CR 106.6 + CR 603.3b: Reflexive "when you spend this mana to cast a
@@ -17249,6 +17372,16 @@ pub(crate) fn resolve_non_self_discard_requirement(
     source_id: ObjectId,
     cost: &AbilityCost,
 ) -> Result<Option<(usize, Vec<ObjectId>)>, EngineError> {
+    resolve_non_self_discard_requirement_with_ability(state, player, source_id, cost, None)
+}
+
+pub(crate) fn resolve_non_self_discard_requirement_with_ability(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+    ability: Option<&ResolvedAbility>,
+) -> Result<Option<(usize, Vec<ObjectId>)>, EngineError> {
     // The activation/casting path handles ANY `FromHand` discard selection mode; the
     // mana-ability path (see `mana_abilities::discard_cost_choice`) is the only caller
     // that gates on `Chosen`. Keep this resolver selection-agnostic.
@@ -17261,7 +17394,12 @@ pub(crate) fn resolve_non_self_discard_requirement(
     if count == 0 {
         return Ok(None);
     }
-    let eligible = find_eligible_discard_targets(state, player, source_id, filter);
+    let eligible = ability.map_or_else(
+        || find_eligible_discard_targets(state, player, source_id, filter),
+        |ability| {
+            find_eligible_discard_targets_for_ability(state, player, source_id, filter, ability)
+        },
+    );
     if eligible.len() < count {
         return Err(EngineError::ActionNotAllowed(
             "Not enough cards in hand to discard".into(),
@@ -17555,7 +17693,7 @@ fn find_eligible_hand_cost_targets(
     source: ObjectId,
     filter: Option<&TargetFilter>,
 ) -> Vec<ObjectId> {
-    let effective_filter = super::cost_payability::exile_cost_effective_filter(filter);
+    let effective_filter = super::cost_payability::cost_filter_before_x_announcement(filter);
     let filter_ref = effective_filter.as_ref();
     let ctx = super::filter::FilterContext::from_source(state, source);
     state
@@ -17586,6 +17724,36 @@ pub(crate) fn find_eligible_discard_targets(
     find_eligible_hand_cost_targets(state, player, source, filter)
 }
 
+/// CR 118.3 + CR 602.2b: Select the hand cards that can pay an activated
+/// ability's discard cost by excluding the source and applying its optional
+/// filter against the announced ability context.
+pub(crate) fn find_eligible_discard_targets_for_ability(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    filter: Option<&TargetFilter>,
+    ability: &ResolvedAbility,
+) -> Vec<ObjectId> {
+    let ctx = super::filter::FilterContext::from_ability(ability);
+    state
+        .players
+        .get(player.0 as usize)
+        .map(|player_state| {
+            player_state
+                .hand
+                .iter()
+                .copied()
+                .filter(|&id| {
+                    id != source
+                        && filter.is_none_or(|filter| {
+                            super::filter::matches_target_filter(state, id, filter, &ctx)
+                        })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// CR 701.20a + CR 601.2b: Eligible cards for an `AbilityCost::Reveal` payment
 /// whose `filter` is `Some` (a non-self reveal). The source spell is never a
 /// legal choice for its own additional cost, mirroring discard/exile.
@@ -17610,7 +17778,7 @@ pub(crate) fn find_eligible_exile_for_cost_targets(
     zone: ExileCostSourceZone,
     filter: Option<&TargetFilter>,
 ) -> Vec<ObjectId> {
-    let effective_filter = super::cost_payability::exile_cost_effective_filter(filter);
+    let effective_filter = super::cost_payability::cost_filter_before_x_announcement(filter);
     let filter_ref = effective_filter.as_ref();
     match zone {
         ExileCostSourceZone::Hand => {
@@ -19057,9 +19225,13 @@ pub fn handle_activate_ability(
             // Courier's "Discard your hand" on an empty hand) is paid by doing nothing — the
             // helper returns `Ok(None)` so we FALL THROUGH to the following cost detection
             // rather than surfacing a dead `PayCost { count: 0 }`.
-            if let Some((count, eligible)) =
-                resolve_non_self_discard_requirement(state, player, source_id, cost)?
-            {
+            if let Some((count, eligible)) = resolve_non_self_discard_requirement_with_ability(
+                state,
+                player,
+                source_id,
+                cost,
+                Some(&resolved),
+            )? {
                 let mut pending_discard =
                     PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
                 pending_discard.activation_cost = Some(cost.clone());

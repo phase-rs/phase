@@ -1184,14 +1184,12 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                 )
                 .expect("replacement-resumed ChangeZone delivery retains its exact segment");
             }
-            if let Some(terminal_completion) = paused_current.terminal_completion {
-                logical_zone_change_group
-                    .record_delivery_completion(
-                        paused_current.member.object_id,
-                        terminal_completion,
-                    )
-                    .expect("resumed ChangeZone member records its exact terminal outcome");
-            }
+            logical_zone_change_group
+                .record_delivery_completion(
+                    paused_current.member.object_id,
+                    paused_current.terminal_completion_after_resume(),
+                )
+                .expect("resumed ChangeZone member records its exact terminal outcome");
             if matches!(
                 paused_current.count,
                 crate::types::game_state::PausedZoneChangeDeliveryCount::NeedsCount
@@ -1498,7 +1496,7 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
             let iter_effective: &ResolvedAbility = if member.is_some() || kind.is_some() {
                 iter_ability = (*ability).clone();
                 if let Some(member) = member {
-                    rebind_first_object_target(&mut iter_ability.targets, member);
+                    rebind_member_driven_parent_target(&mut iter_ability, member);
                 }
                 if let Some(kind) = kind {
                     rebind_iterated_counter_kind(&mut iter_ability, kind);
@@ -2465,6 +2463,10 @@ fn apply_parent_chain_context(
     state: &mut GameState,
 ) {
     child.context = parent.context.clone();
+    // CR 701.20e + CR 608.2c: Look-result membership is owned by precisely
+    // one immediate looping child. Ordinary hand-offs must not let it leak to
+    // a later grandchild with a different instruction scope.
+    child.context.parent_target_iteration_members = None;
     // CR 701.9a + CR 608.2c: A discard result is visible only to the direct
     // contingent child. Every ordinary hand-off clears it, preventing a later
     // grandchild (or an unrelated chain branch) from reading stale provenance.
@@ -3085,6 +3087,26 @@ fn inject_last_revealed_targets(
         .iter()
         .map(|&id| TargetRef::Object(id))
         .collect()
+}
+
+/// Stamps the exact forwarded result collection onto an immediate executable
+/// member-driven child. Call only after `apply_parent_chain_context`, which
+/// intentionally clears resolution-local direct-child provenance.
+fn stamp_parent_target_iteration_members(child: &mut ResolvedAbility) {
+    if child.targets.is_empty() || !has_member_driven_repeat(child) {
+        return;
+    }
+
+    child.context.parent_target_iteration_members = Some(
+        child
+            .targets
+            .iter()
+            .filter_map(|target| match target {
+                TargetRef::Object(id) => Some(*id),
+                TargetRef::Player(_) => None,
+            })
+            .collect(),
+    );
 }
 
 /// CR 608.2c: Locate the `Not(OptionalEffectPerformed)` decline clause anywhere
@@ -5695,6 +5717,10 @@ fn optional_head_declined_all_object_targets(ability: &ResolvedAbility) -> bool 
 ///    "when you lose control of this, unattach it" trigger rebinds the per-source
 ///    `attachment` through this hidden slot (Stolen Uniform, Ogre Geargrabber);
 ///    without the arm the `_ => {}` fallback snapshots nothing and it resolves inert.
+///  * `Effect::ChangeZoneAll` intentionally has no generic `target_filter()` slot:
+///    its filter selects a mass operation rather than a declared target. It still
+///    needs inspection here when it carries a delayed `ParentTarget` anaphor, so
+///    the delayed trigger snapshots and pins that object before the mass scan.
 ///
 /// NOTE: the `_ => {}` arm means "no hidden object slot beyond `target_filter()`".
 /// Any FUTURE effect that hides an object slot behind `target_filter()` MUST add
@@ -5713,6 +5739,9 @@ fn effect_parent_ref_slots(effect: &Effect) -> Vec<&TargetFilter> {
         Effect::Attach { attachment, .. } if attachment.is_context_ref() => slots.push(attachment),
         Effect::UnattachAll { attachment, .. } if attachment.is_context_ref() => {
             slots.push(attachment)
+        }
+        Effect::ChangeZoneAll { target, .. } if filter_refs_parent_target(target) => {
+            slots.push(target)
         }
         _ => {}
     }
@@ -5761,7 +5790,7 @@ fn effect_iterates_over_parent_target(effect: &Effect) -> bool {
 
 /// Recurse into compound filters so a wrapped `ParentTargetController` is
 /// detected wherever it appears (`Or { filters: [..., ParentTargetController, ...] }`).
-fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
+pub(crate) fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
     match filter {
         // CR 603.7c + CR 608.2c: a `ParentTargetSlot { index }` delayed effect
         // must snapshot the parent targets at creation, exactly like the broad
@@ -5790,6 +5819,7 @@ fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
             filters.iter().any(filter_refs_parent_target)
         }
         TargetFilter::Not { filter } => filter_refs_parent_target(filter),
+        TargetFilter::TrackedSetFiltered { filter, .. } => filter_refs_parent_target(filter),
         _ => false,
     }
 }
@@ -5865,6 +5895,30 @@ fn rebind_first_object_target(
         *slot = TargetRef::Object(new_id);
     } else {
         targets.push(TargetRef::Object(new_id));
+    }
+}
+
+/// CR 701.20e + CR 608.2c: A carried look-result collection owns every object
+/// target on its immediate looping child, so each iteration must replace the
+/// complete object list with its one current member while retaining independent
+/// player targets. Ordinary member loops retain the established first-slot
+/// binding for their independent target slots.
+fn rebind_member_driven_parent_target(ability: &mut ResolvedAbility, member: ObjectId) {
+    if ability.context.parent_target_iteration_members.is_some() {
+        let insertion_index = ability
+            .targets
+            .iter()
+            .position(|target| matches!(target, TargetRef::Object(_)))
+            .unwrap_or(ability.targets.len());
+        ability
+            .targets
+            .retain(|target| !matches!(target, TargetRef::Object(_)));
+        ability.targets.insert(
+            insertion_index.min(ability.targets.len()),
+            TargetRef::Object(member),
+        );
+    } else {
+        rebind_first_object_target(&mut ability.targets, member);
     }
 }
 
@@ -7207,14 +7261,10 @@ fn amount_channel(effect: &Effect) -> Option<AmountChannel> {
         // CR 118.1: `PayCost`'s `cost` is an arbitrary `AbilityCost`, and only a
         // life payment emits the negative `LifeChanged` events this channel sums;
         // a mana / sacrifice / discard payment owns no amount here at all.
-        // CR 119.4b makes paying 0 life a real, always-legal payment whose result
-        // is zero, so a life payment SHOULD report it — but `pay::resolve` pushes
-        // no events whatsoever, so it emits no `EffectResolved` terminal marker
-        // and the completion half of the zero rule cannot be established for it.
-        // Closing this arm means first giving cost payment a terminal marker,
-        // which is its own change with its own blast radius (the per-player
-        // counts helper, the trigger matchers and the game log all read that
-        // event class).
+        // CR 118.1 + CR 119.4b: `PayCost` has no life-loss event of its own;
+        // the cost authority therefore stamps its completed life-payment result
+        // directly. Keep this event channel indistinguishable so mana-only
+        // costs still preserve the preceding amount.
         Effect::PayCost { .. } => (AmountEvents::LifeLost, ZeroSemantics::Indistinguishable),
         // CR 119.3 + CR 119.9: gaining zero life is not a life-GAIN EVENT, so
         // "whenever you gain life" correctly does not trigger — but CR 119.9
@@ -7557,7 +7607,7 @@ fn install_previous_effect_counts_by_player(
 ) -> bool {
     match counts_by_player {
         Some(counts_by_player) => {
-            let amount = counts_by_player.values().copied().max().unwrap_or(0);
+            let amount = counts_by_player.values().copied().sum();
             state.last_effect_count = Some(amount);
             state.last_effect_amount = Some(amount);
             state.last_effect_counts_by_player = counts_by_player;
@@ -9425,18 +9475,22 @@ fn resolve_chain_body(
                 .collect();
             if let Some(first) = opponent_order.first().copied() {
                 let remaining = opponent_order.split_off(1);
-                state.push_optional_effect_frame(OptionalEffectFrame {
-                    ability: Box::new(ability_with_event_context_targets(state, ability)),
-                    trigger_event: state.current_trigger_event.clone(),
-                    trigger_events: state.current_trigger_events.clone(),
-                    trigger_match_count: state.current_trigger_match_count,
-                });
-                state.waiting_for = WaitingFor::OpponentMayChoice {
-                    player: first,
-                    source_id: ability.source_id,
-                    description,
-                    remaining,
-                };
+                state
+                    .install_direct_choice_frame(
+                        ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+                            ability: Box::new(ability_with_event_context_targets(state, ability)),
+                            trigger_event: state.current_trigger_event.clone(),
+                            trigger_events: state.current_trigger_events.clone(),
+                            trigger_match_count: state.current_trigger_match_count,
+                        }),
+                        WaitingFor::OpponentMayChoice {
+                            player: first,
+                            source_id: ability.source_id,
+                            description,
+                            remaining,
+                        },
+                    )
+                    .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
             }
             return Ok(());
         }
@@ -9501,30 +9555,34 @@ fn resolve_chain_body(
                 return Ok(());
             }
         }
-        state.push_optional_effect_frame(OptionalEffectFrame {
-            ability: Box::new(ability_with_event_context_targets(state, ability)),
-            // CR 608.2: capture the triggering event in lockstep with the stashed
-            // ability while `current_trigger_event` is still live (we are inside
-            // `execute_effect`). Restored when the optional decision resumes so an
-            // optional ("may") trigger's effect resolves `TriggeringPlayer` and
-            // other event-context refs exactly as a non-optional trigger would.
-            trigger_event: state.current_trigger_event.clone(),
-            // CR 603.2c + CR 608.2: capture the PLURAL event batch in lockstep so
-            // a "you may" reproduction (Captain Marvel, Apex Avenger) folds every
-            // `CounterAdded` occurrence when the decision resumes.
-            trigger_events: state.current_trigger_events.clone(),
-            // CR 603.2c + CR 608.2: mirror the batched-trigger subject count so a
-            // "you may" sub-ability of a batched trigger (Ur-Dragon's optional
-            // permanent-from-hand sub-effect) resumes with the same
-            // `EventContextAmount` the pre-pause resolution observed.
-            trigger_match_count: state.current_trigger_match_count,
-        });
-        state.waiting_for = WaitingFor::OptionalEffectChoice {
-            player: prompt_player,
-            source_id: ability.source_id,
-            description,
-            may_trigger_key,
-        };
+        state
+            .install_direct_choice_frame(
+                ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+                    ability: Box::new(ability_with_event_context_targets(state, ability)),
+                    // CR 608.2: capture the triggering event in lockstep with the stashed
+                    // ability while `current_trigger_event` is still live (we are inside
+                    // `execute_effect`). Restored when the optional decision resumes so an
+                    // optional ("may") trigger's effect resolves `TriggeringPlayer` and
+                    // other event-context refs exactly as a non-optional trigger would.
+                    trigger_event: state.current_trigger_event.clone(),
+                    // CR 603.2c + CR 608.2: capture the PLURAL event batch in lockstep so a
+                    // "you may" reproduction (Captain Marvel, Apex Avenger) folds every
+                    // `CounterAdded` occurrence when the decision resumes.
+                    trigger_events: state.current_trigger_events.clone(),
+                    // CR 603.2c + CR 608.2: mirror the batched-trigger subject count so a
+                    // "you may" sub-ability of a batched trigger (Ur-Dragon's optional
+                    // permanent-from-hand sub-effect) resumes with the same
+                    // `EventContextAmount` the pre-pause resolution observed.
+                    trigger_match_count: state.current_trigger_match_count,
+                }),
+                WaitingFor::OptionalEffectChoice {
+                    player: prompt_player,
+                    source_id: ability.source_id,
+                    description,
+                    may_trigger_key,
+                },
+            )
+            .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
         return Ok(());
     }
 
@@ -9541,7 +9599,15 @@ fn resolve_chain_body(
     // CR 118.12 + CR 118.12a: "Effect unless [player] pays {cost}" —
     // intercepted here for both tax triggers and counter-target-spell unless
     // costs. Post-fold, the cost is the unified `AbilityCost` taxonomy.
-    if let Some(ref unless_pay) = ability.unless_pay {
+    // CR 608.2c + CR 118.12a: A member-driven "for each" loop offers its
+    // unless payment once for each bound member, not once against the full
+    // parent target collection. Defer interception until the loop below
+    // re-enters this chain with its singleton iteration ability.
+    if let Some(unless_pay) = ability
+        .unless_pay
+        .as_ref()
+        .filter(|_| !has_member_driven_repeat_after_hydration(state, ability))
+    {
         // CR 603.2 + CR 118.12a: Hydrate event-context targets before payer
         // resolution so trigger unless-costs ("that player ... unless they pay")
         // do not silently fall through when `ability.targets` is still empty
@@ -9913,12 +9979,24 @@ fn resolve_chain_body(
                         // the same `effective` ability, so members and count match
                         // (including `OtherThanTriggerObject` handling).
                         let ctx = filter::FilterContext::from_ability(effective);
-                        crate::game::quantity::object_count_matching_ids(
-                            state,
-                            filter,
-                            &ctx,
-                            effective.source_id,
-                        )
+                        if let Some(candidate_ids) =
+                            effective.context.parent_target_iteration_members.clone()
+                        {
+                            crate::game::quantity::object_count_matching_candidate_ids(
+                                state,
+                                candidate_ids,
+                                filter,
+                                &ctx,
+                                effective.source_id,
+                            )
+                        } else {
+                            crate::game::quantity::object_count_matching_ids(
+                                state,
+                                filter,
+                                &ctx,
+                                effective.source_id,
+                            )
+                        }
                     }
                     _ => Vec::new(),
                 };
@@ -10015,9 +10093,13 @@ fn resolve_chain_body(
             // exiled cards…" — Disorder in the Court) and runs exactly once AFTER
             // the loop — it falls through to the generic sub tail below.
             let repeated_full_chain = ability.repeat_for.is_some()
-                && effective.sub_ability.as_deref().is_some_and(|sub| {
+                && (effective.sub_ability.as_deref().is_some_and(|sub| {
                     member_driven || kind_driven || sub.sub_link == SubAbilityLink::ContinuationStep
-                });
+                })
+                    // CR 118.12a: a per-member/per-kind unless payment must run
+                    // through resolve_ability_chain so its individual bound
+                    // target reaches the payment gate before the effect resolves.
+                    || ((member_driven || kind_driven) && effective.unless_pay.is_some()));
             while iteration < iterations {
                 // Snapshot per-iteration ability with parent-target rebinding when
                 // applicable. CR 109.5: the rebind is SINGLE-slot — every reachable
@@ -10036,7 +10118,7 @@ fn resolve_chain_body(
                     if member.is_some() || is_replacement_added_copy || kind_driven {
                         iter_ability = effective.clone();
                         if let Some(member) = member {
-                            rebind_first_object_target(&mut iter_ability.targets, member);
+                            rebind_member_driven_parent_target(&mut iter_ability, member);
                         }
                         // CR 122.1 + CR 608.2c: rebind this iteration's dynamic
                         // ChooseOneOf branch to the current counter kind.
@@ -10052,7 +10134,7 @@ fn resolve_chain_body(
                         // so each iteration fires its own `OptionalEffectChoice`.
                         // Clear `repeat_for` on the clone so the inner chain does
                         // not re-enter this outer loop.
-                        if kind_driven || (member_driven && iter_ability.optional) {
+                        if kind_driven || member_driven {
                             iter_ability.repeat_for = None;
                         }
                         if let (true, Effect::CopySpell { retarget, .. }) =
@@ -10793,11 +10875,8 @@ fn resolve_chain_body(
                         && !state.last_revealed_ids.is_empty()
                         && effect_writes_last_revealed_ids(&ability.effect)
                     {
-                        else_resolved.targets = state
-                            .last_revealed_ids
-                            .iter()
-                            .map(|&id| TargetRef::Object(id))
-                            .collect();
+                        else_resolved.targets =
+                            inject_last_revealed_targets(state, ability, else_branch.as_ref());
                     } else if should_propagate_parent_targets(ability, &else_resolved) {
                         else_resolved.targets = ability.targets.clone();
                     }
@@ -10807,6 +10886,7 @@ fn resolve_chain_body(
                         effect_context_object.as_ref(),
                         state,
                     );
+                    stamp_parent_target_iteration_members(&mut else_resolved);
                     if try_begin_deferred_else_branch_target_selection(
                         state,
                         &mut else_resolved,
@@ -11284,6 +11364,7 @@ fn resolve_chain_body(
                 effect_context_object.as_ref(),
                 state,
             );
+            stamp_parent_target_iteration_members(&mut sub_with_targets);
             resolve_ability_chain(state, &sub_with_targets, events, depth + 1)?;
         } else if sub.targets.is_empty()
             && !state.last_zone_changed_ids.is_empty()
@@ -12606,6 +12687,26 @@ fn expand_per_counter(base: &AbilityCost, n: u32) -> AbilityCost {
             zone: Some(Zone::Library),
             filter: None,
         },
+        // CR 702.24a: Aboroth-class cumulative upkeep repeats the source
+        // counter placement once for every age counter. Scaling its quantity
+        // keeps it a single deterministic effect-cost payment, so the shared
+        // counter replacement pipeline sees the complete payment at once.
+        AbilityCost::EffectCost { effect } => match effect.as_ref() {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target: TargetFilter::SelfRef,
+            } => AbilityCost::EffectCost {
+                effect: Box::new(Effect::PutCounter {
+                    counter_type: counter_type.clone(),
+                    count: count.scaled_by(n),
+                    target: TargetFilter::SelfRef,
+                }),
+            },
+            _ => AbilityCost::Composite {
+                costs: vec![base.clone(); n as usize],
+            },
+        },
         // YAGNI fallback: no current cumulative-upkeep card uses these
         // base variants. If a future mechanic does, the
         // Composite-of-N-copies expansion is semantically correct for
@@ -12849,6 +12950,117 @@ mod tests {
             Some(live),
             "a disagreeing continuation carrier must not overwrite active delayed identity"
         );
+    }
+
+    #[test]
+    fn carried_member_rebind_retains_independent_player_target() {
+        let mut ability = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "member rebind probe".to_string(),
+                description: None,
+            },
+            vec![
+                TargetRef::Object(ObjectId(1)),
+                TargetRef::Player(PlayerId(2)),
+                TargetRef::Object(ObjectId(3)),
+            ],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        ability.context.parent_target_iteration_members = Some(vec![ObjectId(1), ObjectId(3)]);
+
+        rebind_member_driven_parent_target(&mut ability, ObjectId(4));
+
+        assert_eq!(
+            ability.targets,
+            vec![TargetRef::Object(ObjectId(4)), TargetRef::Player(PlayerId(2))],
+            "a carried collection replaces all of its object members but retains an independent selected player target"
+        );
+    }
+
+    /// CR 608.2c + CR 118.12a: Every member-driven iteration must re-enter the
+    /// unless-payment gate with exactly one bound parent target. In particular,
+    /// a non-optional loop with no sub-ability must re-enter
+    /// `resolve_ability_chain`, because that chain owns the unless-payment gate.
+    #[test]
+    fn member_driven_unless_loop_prompts_for_its_first_bound_member() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Loop source".to_string(),
+            Zone::Battlefield,
+        );
+        let first = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "First creature".to_string(),
+            Zone::Battlefield,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Second creature".to_string(),
+            Zone::Battlefield,
+        );
+        for object_id in [first, second] {
+            state
+                .objects
+                .get_mut(&object_id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let creature_filter = TargetFilter::Typed(TypedFilter::creature());
+        let mut ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::ParentTarget,
+                cant_regenerate: false,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: creature_filter,
+            },
+        });
+        ability.unless_pay = Some(UnlessPayModifier {
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+            },
+            payer: TargetFilter::Controller,
+        });
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("member-driven unless loop should arm its first payment prompt");
+
+        let WaitingFor::UnlessPayment { pending_effect, .. } = &state.waiting_for else {
+            panic!(
+                "expected an unless-payment prompt, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert!(
+            pending_effect.repeat_for.is_none(),
+            "the bound iteration must not re-enter the outer repeat loop"
+        );
+        assert_eq!(
+            pending_effect.targets.len(),
+            1,
+            "the prompt must be bound to one loop member"
+        );
+        assert!(matches!(
+            pending_effect.targets.as_slice(),
+            [TargetRef::Object(id)] if *id == first || *id == second
+        ));
     }
 
     #[test]
@@ -28153,6 +28365,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn count_producer_installs_total_scalar_alongside_per_player_counts() {
+        let mut state = GameState::new_two_player(42);
+        install_previous_effect_counts_by_player(
+            &mut state,
+            Some(HashMap::from([(PlayerId(0), 1), (PlayerId(1), 1)])),
+            false,
+        );
+
+        assert_eq!(state.last_effect_count, Some(2));
+        assert_eq!(state.last_effect_amount, Some(2));
+        assert_eq!(
+            state.last_effect_counts_by_player,
+            HashMap::from([(PlayerId(0), 1), (PlayerId(1), 1)])
+        );
+    }
+
     fn assert_scalar_fallback_after_stale_per_player_counts(player_scope: Option<PlayerFilter>) {
         let mut state = GameState::new_two_player(42);
         let source = ObjectId(10);
@@ -28889,16 +29118,10 @@ mod tests {
         );
     }
 
-    /// NOT CLOSED (#6956): CR 118.1 + CR 119.4b say paying 0 life is a real,
-    /// always-legal payment whose result is zero, so this SHOULD read 0 — but
-    /// `pay::resolve` emits no `EffectResolved` terminal marker, so the
-    /// completion half of the zero rule cannot be established for
-    /// `Effect::PayCost`. Pinned at the PREDECESSOR behaviour
-    /// (the preceding step's 7 survives) so the arm's status is a visible,
-    /// asserted fact rather than an untested assumption. Flipping this
-    /// expectation to 0 is the acceptance test for the follow-up.
+    /// CR 118.1 + CR 119.4b: Paying 0 life is a real, always-legal payment,
+    /// so its completed result overwrites the preceding amount with zero.
     #[test]
-    fn zero_life_pay_cost_is_not_yet_distinguished_from_an_absent_producer() {
+    fn zero_life_pay_cost_overwrites_the_preceding_amount() {
         let (mut state, source) = state_for_previous_amount_probe();
         let drawn = previous_effect_amount_seen_by_next_clause(
             &mut state,
@@ -28913,9 +29136,8 @@ mod tests {
             vec![],
         );
         assert_eq!(
-            drawn, 7,
-            "PayCost has no terminal marker, so its zero cannot yet be told apart \
-             from an absent producer; see `amount_channel`'s PayCost arm"
+            drawn, 0,
+            "a completed zero-life PayCost must not leave the preceding amount in place"
         );
     }
 

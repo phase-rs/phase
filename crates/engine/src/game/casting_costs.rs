@@ -49,6 +49,16 @@ use super::life_costs::PayLifeCostResult;
 
 const TERMINAL_CAST_CANCELLATION_ERROR: &str = "__terminal_cast_cancellation__";
 
+/// The mana payment authority stamps this on the spell object before casting
+/// finalization publishes the spell-cast event.
+fn recorded_mana_spent_to_cast(state: &GameState, object_id: ObjectId) -> u32 {
+    state
+        .objects
+        .get(&object_id)
+        .expect("spell object must exist while its cast is being finalized")
+        .mana_spent_to_cast_amount
+}
+
 fn stamp_controller_controlled_as_cast(
     state: &GameState,
     ability: &mut ResolvedAbility,
@@ -1975,7 +1985,6 @@ fn finish_cost_object_moves(
             phyrexian_choices,
             cascade_cast_transformed,
             resolution_success_waiting_for,
-            pool_before,
             prepaid_actual_mana_spent,
         } => {
             let returned_creature = chosen
@@ -1988,14 +1997,8 @@ fn finish_cost_object_moves(
                     .retain(|attacker| attacker.object_id != returned_creature);
                 combat.blocker_assignments.remove(&returned_creature);
             }
-            let pool_after = state
-                .players
-                .iter()
-                .find(|candidate| candidate.id == player)
-                .map(|candidate| candidate.mana_pool.produced_mana_total())
-                .unwrap_or(0);
             let actual_mana_spent = prepaid_actual_mana_spent
-                .unwrap_or_else(|| pool_before.saturating_sub(pool_after) as u32);
+                .unwrap_or_else(|| recorded_mana_spent_to_cast(state, pending.object_id));
             let deferred_life_resume_pending = pending.clone();
             finalize_cast_with_phyrexian_choices_inner(
                 state,
@@ -4428,7 +4431,13 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
     // helper returns `Ok(None)` so we FALL THROUGH to the next unpaid leg (the sacrifice arm
     // below) rather than surfacing a dead `PayCost { count: 0 }`.
     if let Some((count, eligible)) =
-        super::casting::resolve_non_self_discard_requirement(state, player, source_id, cost)?
+        super::casting::resolve_non_self_discard_requirement_with_ability(
+            state,
+            player,
+            source_id,
+            cost,
+            Some(&pending.ability),
+        )?
     {
         return Ok(Some(WaitingFor::PayCost {
             player,
@@ -4604,7 +4613,7 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
 
     if let Some((count, exile_filter)) = super::casting::find_battlefield_exile_cost(cost) {
         let effective_filter =
-            super::cost_payability::exile_cost_effective_filter(Some(exile_filter));
+            super::cost_payability::cost_filter_before_x_announcement(Some(exile_filter));
         let eligible = super::cost_payability::eligible_exile_cost_objects(
             state,
             player,
@@ -7422,7 +7431,7 @@ fn pay_additional_cost_with_source(
             == Zone::Battlefield =>
         {
             let effective_filter =
-                super::cost_payability::exile_cost_effective_filter(filter.as_ref());
+                super::cost_payability::cost_filter_before_x_announcement(filter.as_ref());
             let eligible = super::cost_payability::eligible_exile_cost_objects(
                 state,
                 player,
@@ -7814,6 +7823,17 @@ fn additional_cost_x_max(
         AbilityCost::PayEnergy { amount } if amount.contains_x() => {
             Some(state.players[player.0 as usize].energy)
         }
+        AbilityCost::Discard {
+            filter: Some(filter),
+            ..
+        } if super::cost_payability::target_filter_has_x_mana_value_constraint(filter) => Some(
+            super::casting::find_eligible_discard_targets(state, player, source_id, Some(filter))
+                .into_iter()
+                .filter_map(|object_id| state.objects.get(&object_id))
+                .map(|object| object.effective_mana_value())
+                .max()
+                .unwrap_or(0),
+        ),
         AbilityCost::Sacrifice(cost)
             if cost.requirement == SacrificeRequirement::Count { count: u32::MAX } =>
         {
@@ -7928,8 +7948,55 @@ fn cost_needs_activation_x_announcement(cost: &AbilityCost) -> bool {
     match cost {
         AbilityCost::RemoveCounter { count, .. } => is_chosen_remove_counter_cost_count(*count),
         AbilityCost::PayEnergy { amount } => amount.contains_x(),
+        AbilityCost::Discard {
+            filter: Some(filter),
+            ..
+        } => super::cost_payability::target_filter_has_x_mana_value_constraint(filter),
         AbilityCost::Composite { costs } => costs.iter().any(cost_needs_activation_x_announcement),
         _ => false,
+    }
+}
+
+/// CR 107.3a + CR 601.2b: Once X is announced, a discard cost whose card
+/// filter references X must have enough matching cards before target selection
+/// can proceed. This preserves the all-or-nothing cast proposal when the
+/// chosen value is within the numeric maximum but absent from the hand.
+pub(crate) fn activation_cost_is_payable_after_x_choice(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+    ability: &ResolvedAbility,
+) -> bool {
+    match cost {
+        AbilityCost::Discard {
+            count,
+            filter,
+            self_scope,
+            ..
+        } if !self_scope.is_source_card() => {
+            let count = super::quantity::resolve_quantity_with_targets(state, count, ability).max(0)
+                as usize;
+            super::casting::find_eligible_discard_targets_for_ability(
+                state,
+                player,
+                source_id,
+                filter.as_ref(),
+                ability,
+            )
+            .len()
+                >= count
+        }
+        AbilityCost::Composite { costs } => costs.iter().all(|cost| {
+            activation_cost_is_payable_after_x_choice(state, player, source_id, cost, ability)
+        }),
+        AbilityCost::OneOf { costs } => costs.iter().any(|cost| {
+            activation_cost_is_payable_after_x_choice(state, player, source_id, cost, ability)
+        }),
+        AbilityCost::PerCounter { base, .. } => {
+            activation_cost_is_payable_after_x_choice(state, player, source_id, base, ability)
+        }
+        _ => true,
     }
 }
 
@@ -8721,6 +8788,12 @@ pub(super) fn pay_and_push_adventure(
         object_id,
         casting_variant == CastingVariant::Fuse,
     );
+    let has_delve = super::casting::spell_has_delve_payment_for(
+        state,
+        player,
+        object_id,
+        casting_variant == CastingVariant::Fuse,
+    );
     // Gate on eligible creatures/artifacts being present.
     let convoke_mode = convoke_mode.filter(|mode| {
         state.objects.values().any(|o| match mode {
@@ -8729,7 +8802,7 @@ pub(super) fn pay_and_push_adventure(
             ConvokeMode::Improvise => o.is_improvise_eligible(player),
             // CR 702.66a: delve needs at least one eligible card in the caster's graveyard.
             ConvokeMode::Delve => o.is_delve_eligible(player),
-        })
+        }) || (has_delve && state.objects.values().any(|o| o.is_delve_eligible(player)))
     });
 
     // Enter the payment step if cost needs player input (X), convoke/waterbend is active,
@@ -9115,13 +9188,6 @@ fn finalize_cast_with_phyrexian_choices_inner(
         return Ok(waiting_for);
     }
 
-    // CR 700.14: Snapshot pool size before payment to compute actual mana spent.
-    let pool_before = state
-        .players
-        .iter()
-        .find(|p| p.id == player)
-        .map(|p| p.mana_pool.produced_mana_total())
-        .unwrap_or(0);
     let cast_transformed = cascade_cast_transformed
         || super::casting::selected_exile_alt_cost_permission_casts_transformed(
             state,
@@ -9163,14 +9229,8 @@ fn finalize_cast_with_phyrexian_choices_inner(
                     )
                 })?;
                 pending.cost = ManaCost::NoCost;
-                let pool_after = state
-                    .players
-                    .iter()
-                    .find(|candidate| candidate.id == player)
-                    .map(|candidate| candidate.mana_pool.produced_mana_total())
-                    .unwrap_or(0);
                 pending.prepaid_actual_mana_spent =
-                    Some(pool_before.saturating_sub(pool_after) as u32);
+                    Some(recorded_mana_spent_to_cast(state, object_id));
                 state.pending_deferred_life_cost_resume =
                     Some(crate::types::game_state::DeferredLifeCostResume::Cast {
                         player,
@@ -9212,7 +9272,6 @@ fn finalize_cast_with_phyrexian_choices_inner(
                 phyrexian_choices: phyrexian_choices.map(|choices| choices.to_vec()),
                 cascade_cast_transformed,
                 resolution_success_waiting_for: resolution_success_waiting_for.map(Box::new),
-                pool_before,
                 prepaid_actual_mana_spent,
             },
             cost_event_start,
@@ -9221,15 +9280,10 @@ fn finalize_cast_with_phyrexian_choices_inner(
         );
     }
 
-    // CR 700.14: Compute actual mana deducted from pool (not declared cost).
-    let pool_after = state
-        .players
-        .iter()
-        .find(|p| p.id == player)
-        .map(|p| p.mana_pool.produced_mana_total())
-        .unwrap_or(0);
+    // CR 700.14: Use payment's recorded amount; auto-tapped mana can be
+    // produced and spent between pool snapshots.
     let actual_mana_spent =
-        prepaid_actual_mana_spent.unwrap_or_else(|| pool_before.saturating_sub(pool_after) as u32);
+        prepaid_actual_mana_spent.unwrap_or_else(|| recorded_mana_spent_to_cast(state, object_id));
 
     // CR 603.4 + CR 903.8: `origin_zone` preserves the pre-announcement zone so
     // that "cast from hand/graveyard/exile" conditions evaluate correctly and
@@ -11455,6 +11509,12 @@ fn auto_tap_mana_sources_inner(
                     produced: vec![option.mana_type],
                     tap_state: ManaTapState::FromTap,
                 });
+                events.push(GameEvent::ManaAbilityProduced {
+                    player_id: player,
+                    source_id: option.object_id,
+                    produced: vec![option.mana_type],
+                    trigger_state: crate::types::events::ManaAbilityTriggerState::Pending,
+                });
             });
         }
     }
@@ -11766,7 +11826,12 @@ pub(super) fn max_x_value_excluding(
     // only generic mana by exiling cards from the caster's graveyard. Unlike
     // tap-payment keywords, this is an additional graveyard-card channel rather
     // than an alternative use of battlefield permanents.
-    let delve_capacity = if matches!(tap_payment_mode, Some(ConvokeMode::Delve)) {
+    let delve_capacity = if object_id.is_some_and(|oid| {
+        let fused = state.pending_cast.as_ref().is_some_and(|pending| {
+            pending.object_id == oid && pending.casting_variant == CastingVariant::Fuse
+        });
+        super::casting::spell_has_delve_payment_for(state, player, oid, fused)
+    }) {
         state
             .objects
             .iter()
@@ -12620,15 +12685,9 @@ fn finalize_mana_payment_with_resume(
                     Some(&mana_resume),
                     events,
                 )? {
-                    let pool_after = state
-                        .players
-                        .iter()
-                        .find(|candidate| candidate.id == player)
-                        .map(|candidate| candidate.mana_pool.total())
-                        .unwrap_or(0);
                     pending.cost = ManaCost::NoCost;
                     pending.prepaid_actual_mana_spent =
-                        Some(pool_before.saturating_sub(pool_after) as u32);
+                        Some(recorded_mana_spent_to_cast(state, pending.object_id));
                     state.pending_deferred_life_cost_resume =
                         Some(crate::types::game_state::DeferredLifeCostResume::Cast {
                             player,
@@ -13011,15 +13070,9 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
                     Some(&mana_resume),
                     events,
                 )? {
-                    let pool_after = state
-                        .players
-                        .iter()
-                        .find(|candidate| candidate.id == player)
-                        .map(|candidate| candidate.mana_pool.total())
-                        .unwrap_or(0);
                     pending.cost = ManaCost::NoCost;
                     pending.prepaid_actual_mana_spent =
-                        Some(pool_before.saturating_sub(pool_after) as u32);
+                        Some(recorded_mana_spent_to_cast(state, pending.object_id));
                     state.pending_deferred_life_cost_resume =
                         Some(crate::types::game_state::DeferredLifeCostResume::Cast {
                             player,

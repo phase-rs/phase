@@ -206,6 +206,84 @@ fn tracked_set_member_zones(state: &GameState, filter: &TargetFilter) -> Option<
     (!zones.is_empty()).then_some(zones)
 }
 
+/// CR 400.7 + CR 603.7c: A delayed tracked-set move retains an object-anaphor
+/// member predicate until its creation-time pin has been recorded. At firing,
+/// bind that predicate to the stored referent before the mass scan: the object
+/// has already become the immediate exile successor of the pin, so the generic
+/// `ParentTarget` matcher correctly rejects it as stale.
+fn bind_delayed_parent_target_filter(
+    filter: &TargetFilter,
+    parent_targets: &[TargetRef],
+) -> TargetFilter {
+    match filter {
+        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => {
+            super::delayed_trigger::concrete_parent_target_filter(filter, parent_targets)
+        }
+        TargetFilter::TrackedSetFiltered {
+            id,
+            filter,
+            caused_by,
+        } => TargetFilter::TrackedSetFiltered {
+            id: *id,
+            filter: Box::new(bind_delayed_parent_target_filter(filter, parent_targets)),
+            caused_by: *caused_by,
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .iter()
+                .map(|filter| bind_delayed_parent_target_filter(filter, parent_targets))
+                .collect(),
+        },
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .iter()
+                .map(|filter| bind_delayed_parent_target_filter(filter, parent_targets))
+                .collect(),
+        },
+        TargetFilter::Not { filter } => TargetFilter::Not {
+            filter: Box::new(bind_delayed_parent_target_filter(filter, parent_targets)),
+        },
+        _ => filter.clone(),
+    }
+}
+
+/// CR 400.7 + CR 603.7c: A delayed Exile → Battlefield return follows the
+/// parent ability's own exile move. Its creation-time target pin is therefore
+/// one incarnation behind the expected exile object; a later zone change creates
+/// a further incarnation which must not be returned.
+fn target_pin_is_current_or_delayed_exile_successor(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    object_id: ObjectId,
+) -> bool {
+    ability
+        .target_incarnations
+        .iter()
+        .find(|pin| pin.object_id == object_id)
+        .is_none_or(|pin| {
+            pin.is_current(state)
+                || state.objects.get(&object_id).is_some_and(|object| {
+                    pin.incarnation.checked_add(1) == Some(object.incarnation)
+                })
+        })
+}
+
+/// CR 400.7 + CR 603.7c: A delayed tracked-set move must validate its
+/// incarnation pins when a nested set member filter names the creation-time
+/// parent object. The anaphor walk is the shared recursive authority.
+fn tracked_set_filter_names_parent_object(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::TrackedSetFiltered { filter, .. } => {
+            super::delayed_trigger::filter_refs_parent_object_anaphor(filter)
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(tracked_set_filter_names_parent_object)
+        }
+        TargetFilter::Not { filter } => tracked_set_filter_names_parent_object(filter),
+        _ => false,
+    }
+}
+
 /// CR 110.2a: Resolve the optional `enters_under` controller override to a
 /// concrete `PlayerId` for any battlefield-entry effect. Shared by `ChangeZone`,
 /// `ChangeZoneAll`, and `Manifest` so every entry path resolves the reference
@@ -1646,6 +1724,22 @@ pub fn resolve_all(
     let effective_filter =
         crate::game::targeting::resolve_tracked_set_sentinel(state, effective_filter);
 
+    // CR 400.7 + CR 603.7c: This predicate must inspect the parser-preserved
+    // anaphor before the firing-time binding below replaces it with the delayed
+    // trigger's concrete referent.
+    let tracked_members_name_parent_object = tracked_set_filter_names_parent_object(&target_filter);
+
+    // A delayed `ChangeZone` that named its parent object is upgraded to a
+    // tracked-set mass move. The pin distinguishes stale later incarnations;
+    // this binding supplies the one immediate successor that the delayed return
+    // is allowed to find in the tracked set.
+    let effective_filter =
+        if tracked_members_name_parent_object && !ability.target_incarnations.is_empty() {
+            bind_delayed_parent_target_filter(&effective_filter, &ability.targets)
+        } else {
+            effective_filter
+        };
+
     // CR 608.2c: Re-derive scan zones after the tracked-set sentinel binds —
     // the initial `origin`/`target` snapshot may have defaulted to the
     // battlefield before `chain_tracked_set_id` was populated (Zimone's
@@ -1661,6 +1755,7 @@ pub fn resolve_all(
     } else {
         origin_zones
     };
+    let delayed_exile_return = origin_zones == [Zone::Exile] && dest_zone == Zone::Battlefield;
 
     let track_exiled_by_source =
         crate::game::exile_links::should_track_exiled_by_source(state, ability.source_id, ability);
@@ -1726,6 +1821,12 @@ pub fn resolve_all(
             .iter()
             .filter(|(&id, obj)| {
                 origin_zones.contains(&obj.zone)
+                    && (!tracked_members_name_parent_object
+                        || if delayed_exile_return {
+                            target_pin_is_current_or_delayed_exile_successor(state, ability, id)
+                        } else {
+                            ability.target_pin_is_current(id, state)
+                        })
                     && crate::game::filter::matches_target_filter(
                         state,
                         id,

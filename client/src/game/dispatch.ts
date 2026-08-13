@@ -1080,6 +1080,7 @@ export async function dispatchResolveAll(
       await saveAuthoritativeGame(gameId, adapter, newState);
     }
   } catch (err) {
+    if (isStaleAction(err)) return;
     debugLog(`Resolve All error: ${err instanceof Error ? err.message : String(err)}`);
     showActionError({ type: "PassPriority" }, err);
   } finally {

@@ -18,7 +18,7 @@ import type {
   FormatConfig,
 } from "./types";
 import type { InteractionSubmission } from "./generated/interaction";
-import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, actionRejectionError, nextSnapshotSeq } from "./types";
+import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, actionRejectionError, nextSnapshotSeq, resolveAllRejectionError } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import {
   HandshakeError,
@@ -1529,7 +1529,7 @@ export class WebSocketAdapter implements EngineAdapter {
       case "ResolveAllRejected": {
         const data = msg.data as { request_id: number; reason: string };
         if (this.pendingResolveAll?.requestId === data.request_id) {
-          this.pendingResolveAll.reject(actionRejectionError(data.reason));
+          this.pendingResolveAll.reject(resolveAllRejectionError(data.reason));
           this.pendingResolveAll = null;
         }
         break;

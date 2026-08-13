@@ -8,7 +8,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CastingVariant, CopyTargetSlot, GameState, StackEntry, StackEntryKind, WaitingFor,
 };
-use crate::types::identifiers::{ObjectId, TrackedSetId};
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TrackedSetId};
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
@@ -207,8 +207,12 @@ pub fn resolve(
                 TargetRef::Player(_) => None,
             })
         {
+            let member_pin = state
+                .objects
+                .get(&member)
+                .map(ObjectIncarnationRef::from_object);
             if let Some(copy_ability) = state.stack.back_mut().and_then(|e| e.ability_mut()) {
-                rewrite_copy_spell_object_targets(copy_ability, member);
+                rewrite_copy_spell_object_targets(copy_ability, member, member_pin);
             }
         }
     }
@@ -883,18 +887,32 @@ fn preserve_ability_copy_source_recursive(ability: &mut ResolvedAbility) {
     ability.clear_noted_mana_payment_recursive();
 }
 
-/// CR 707.10d: Replace every object target on a copied spell with `new_target`.
-fn rewrite_copy_spell_object_targets(ability: &mut ResolvedAbility, new_target: ObjectId) {
-    for target in &mut ability.targets {
-        if matches!(target, TargetRef::Object(_)) {
+/// CR 707.10d: Replace every object target on a copied spell with `new_target`
+/// and capture the target's current incarnation for ordinary resolution pins.
+fn rewrite_copy_spell_object_targets(
+    ability: &mut ResolvedAbility,
+    new_target: ObjectId,
+    new_target_pin: Option<ObjectIncarnationRef>,
+) {
+    let replaced_object_target = ability
+        .targets
+        .iter_mut()
+        .filter(|target| matches!(target, TargetRef::Object(_)))
+        .map(|target| {
             *target = TargetRef::Object(new_target);
+        })
+        .count()
+        > 0;
+    if replaced_object_target {
+        if let Some(pin) = new_target_pin {
+            ability.update_selected_target_incarnation(pin);
         }
     }
     if let Some(sub) = ability.sub_ability.as_mut() {
-        rewrite_copy_spell_object_targets(sub, new_target);
+        rewrite_copy_spell_object_targets(sub, new_target, new_target_pin);
     }
     if let Some(else_ab) = ability.else_ability.as_mut() {
-        rewrite_copy_spell_object_targets(else_ab, new_target);
+        rewrite_copy_spell_object_targets(else_ab, new_target, new_target_pin);
     }
 }
 
@@ -929,7 +947,7 @@ mod tests {
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
     use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
-    use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
+    use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
     use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
 
@@ -3231,6 +3249,170 @@ mod tests {
         assert_eq!(
             copies, 2,
             "Twinning Staff must make exactly one extra copy (2 total), got {copies}"
+        );
+    }
+
+    #[test]
+    fn automatic_copy_retarget_captures_iteration_member_incarnation() {
+        fn resolve_zone_change(
+            state: &mut GameState,
+            object_id: ObjectId,
+            origin: Zone,
+            destination: Zone,
+            events: &mut Vec<GameEvent>,
+        ) {
+            let ability = ResolvedAbility::new(
+                Effect::ChangeZone {
+                    origin: Some(origin),
+                    destination,
+                    target: TargetFilter::Any,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+                vec![TargetRef::Object(object_id)],
+                ObjectId(20),
+                PlayerId(0),
+            );
+            crate::game::effects::resolve_ability_chain(state, &ability, events, 0)
+                .expect("production ChangeZone must resolve");
+        }
+
+        let mut state = GameState::new_two_player(42);
+        let original_target = ObjectId(60);
+        let iteration_member = ObjectId(61);
+        let mut original_target_object = GameObject::new(
+            original_target,
+            CardId(5),
+            PlayerId(1),
+            "Original Target".to_string(),
+            Zone::Battlefield,
+        );
+        original_target_object
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state
+            .objects
+            .insert(original_target, original_target_object);
+        let mut iteration_member_object = GameObject::new(
+            iteration_member,
+            CardId(6),
+            PlayerId(1),
+            "Iteration Member".to_string(),
+            Zone::Battlefield,
+        );
+        iteration_member_object
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state
+            .objects
+            .insert(iteration_member, iteration_member_object);
+
+        let mut original_spell = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Typed(crate::types::ability::TypedFilter {
+                    type_filters: vec![crate::types::ability::TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![],
+                }),
+                cant_regenerate: false,
+            },
+            vec![TargetRef::Object(original_target)],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        original_spell.capture_target_incarnations_recursive(&state);
+        push_spell(
+            &mut state,
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Destroy Spell",
+            original_spell,
+            CastingVariant::Normal,
+        );
+
+        let mut copy = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::RetargetEachCopyToIterationMember,
+                copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
+            },
+            vec![TargetRef::Object(iteration_member)],
+            ObjectId(20),
+            PlayerId(0),
+        );
+        copy.target_incarnations = vec![ObjectIncarnationRef::from_object(
+            state.objects.get(&iteration_member).unwrap(),
+        )];
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            card_id: CardId(1),
+            object_id: ObjectId(10),
+            controller: PlayerId(0),
+        });
+        let mut events = Vec::new();
+        resolve(&mut state, &copy, &mut events).expect("automatic copy must resolve");
+
+        let copied_ability = state
+            .stack
+            .back()
+            .and_then(|entry| entry.ability())
+            .expect("automatic copy must be on the stack");
+        assert_eq!(
+            copied_ability.targets,
+            vec![TargetRef::Object(iteration_member)]
+        );
+        assert!(
+            copied_ability.selected_target_pin_is_current(iteration_member, &state),
+            "automatic retarget must capture the iteration member incarnation"
+        );
+
+        resolve_zone_change(
+            &mut state,
+            iteration_member,
+            Zone::Battlefield,
+            Zone::Graveyard,
+            &mut events,
+        );
+        resolve_zone_change(
+            &mut state,
+            iteration_member,
+            Zone::Graveyard,
+            Zone::Battlefield,
+            &mut events,
+        );
+        assert_eq!(
+            state.objects.get(&iteration_member).unwrap().zone,
+            Zone::Battlefield,
+            "iteration member must return to the battlefield before copy resolution"
+        );
+        let copied_ability = state
+            .stack
+            .back()
+            .and_then(|entry| entry.ability())
+            .cloned()
+            .expect("automatic copy ability must remain on the stack");
+        assert!(
+            !copied_ability.selected_target_pin_is_current(iteration_member, &state),
+            "returned iteration member must no longer match the captured copy target pin"
+        );
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects.get(&iteration_member).unwrap().zone,
+            Zone::Battlefield,
+            "automatic copy must not affect a returned iteration-member incarnation"
         );
     }
 

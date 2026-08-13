@@ -3072,6 +3072,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         trigger_definition_ref,
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
+        selected_target_incarnations: _, // CR 400.7 selected-target pins; batch candidacy is shape-only
         controller: _,
         original_controller,
         scoped_player,
@@ -3284,6 +3285,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         trigger_definition_ref: _,
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
+        selected_target_incarnations: _, // CR 400.7 selected-target pins; batch candidacy is shape-only
         controller: _,
         original_controller: _,
         scoped_player,
@@ -3292,7 +3294,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         else_ability,
         duration,
         condition,
-        context: _,
+        context,
         optional_targeting,
         optional,
         optional_for,
@@ -3347,6 +3349,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         && else_ability.is_none()
         && duration.is_none()
         && condition.is_none()
+        && *context == SpellContext::default()
         && !*optional_targeting
         && !*optional
         && optional_for.is_none()
@@ -3475,6 +3478,7 @@ fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility
         trigger_definition_ref: _,
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
+        selected_target_incarnations: _, // CR 400.7 selected-target pins; batch candidacy is shape-only
         controller: _,
         original_controller: _,
         scoped_player,
@@ -3483,7 +3487,7 @@ fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility
         else_ability,
         duration,
         condition,
-        context: _,
+        context,
         optional_targeting,
         optional,
         optional_for,
@@ -3538,6 +3542,7 @@ fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility
         && else_ability.is_none()
         && duration.is_none()
         && condition.is_none()
+        && *context == SpellContext::default()
         && !*optional_targeting
         && !*optional
         && optional_for.is_none()
@@ -4159,6 +4164,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         modal: a_modal,
         mode_abilities: a_mode_abilities,
         parent_target_missing_reason: a_parent_target_missing_reason,
+        selected_target_incarnations: a_selected_target_incarnations,
     } = a;
     let ResolvedAbility {
         effect: b_effect,
@@ -4214,6 +4220,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         modal: b_modal,
         mode_abilities: b_mode_abilities,
         parent_target_missing_reason: b_parent_target_missing_reason,
+        selected_target_incarnations: b_selected_target_incarnations,
     } = b;
 
     a_effect == b_effect
@@ -4224,6 +4231,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         // keeps this manual comparison in agreement with the type's derived
         // `PartialEq`; disagreeing with the derive would be the actual defect.
         && a_target_incarnations == b_target_incarnations
+        && a_selected_target_incarnations == b_selected_target_incarnations
         && a_controller == b_controller
         && a_scoped_player == b_scoped_player
         && a_kind == b_kind

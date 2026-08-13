@@ -179,6 +179,12 @@ pub(in crate::game) fn advance_phase_once(
         removed = taken;
     }
 
+    // CR 511.3: End Combat teardown happens when the step ends, after its
+    // priority window, not when the step begins.
+    if leaving == Phase::EndCombat {
+        complete_end_combat_teardown(state);
+    }
+
     // If wrapping from Cleanup to Untap, start next turn. Turn-level skip
     // replacements (CR 614.10) are handled inside `start_next_turn` — the
     // per-phase pipeline below runs only for within-turn phase advances.
@@ -247,18 +253,13 @@ pub fn end_turn_to_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) {
     enter_phase(state, Phase::Cleanup, events);
 }
 
-/// CR 724.2d: End the current combat phase by removing everything from combat,
-/// expiring "until end of combat" effects, and skipping straight to the
-/// postcombat main phase. Mirrors the end-of-combat teardown the `EndCombat`
-/// step performs (see the `Phase::EndCombat` arm of `advance_phase`), but skips
-/// the intervening end-of-combat step so its "at end of combat" triggers do not
-/// fire (CR 724.2e). Drives `Effect::EndCombatPhase` (Mandate of Peace).
-pub fn end_combat_phase_to_postcombat(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    // CR 724.2d / CR 511.3: Remove all creatures and planeswalkers from combat.
+/// CR 511.2 + CR 511.3: End Combat effects expire and combat objects leave
+/// combat only after the step's priority window has ended. Explicit effects
+/// that skip directly out of combat use the same teardown authority.
+fn complete_end_combat_teardown(state: &mut GameState) {
     state.combat = None;
-    // CR 724.2d: Effects that last "until end of combat" expire — continuous
-    // effects, replacement definitions, and pending damage replacements alike,
-    // matching the normal end-of-combat prune.
+    state.current_combat_attacker_restriction = None;
+    state.current_combat_attacker_restriction_source = None;
     super::layers::prune_end_of_combat_effects(state);
     super::layers::prune_controller_end_combat_step_effects(state, state.active_player);
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
@@ -268,11 +269,19 @@ pub fn end_combat_phase_to_postcombat(state: &mut GameState, events: &mut Vec<Ga
     state
         .pending_damage_replacements
         .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));
+}
 
-    // CR 511.3 / CR 724.2d: the combat phase is over — clear any active
-    // additional-combat attacker restriction (Last Night Together / Bumi).
-    state.current_combat_attacker_restriction = None;
-    state.current_combat_attacker_restriction_source = None;
+/// CR 724.2d: End the current combat phase by removing everything from combat,
+/// expiring "until end of combat" effects, and skipping straight to the
+/// postcombat main phase. Mirrors the end-of-combat teardown the `EndCombat`
+/// step performs (see the `Phase::EndCombat` arm of `advance_phase`), but skips
+/// the intervening end-of-combat step so its "at end of combat" triggers do not
+/// fire (CR 724.2e). Drives `Effect::EndCombatPhase` (Mandate of Peace).
+pub fn end_combat_phase_to_postcombat(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    // CR 724.2d / CR 511.3: Remove all creatures and planeswalkers from combat.
+    // CR 724.2d: Effects that last "until end of combat" expire through the
+    // same authority as the normal End Combat transition.
+    complete_end_combat_teardown(state);
 
     // CR 724.2d: Skip straight to the postcombat main phase, skipping any
     // intervening steps (including the end-of-combat step — CR 724.2e). Any
@@ -295,22 +304,13 @@ pub(super) fn mark_empty_attackers_end_combat(state: &mut GameState, events: &mu
 }
 
 /// The declaration-continuation form of [`mark_empty_attackers_end_combat`].
-/// It preserves the established ordering that has already processed
-/// declaration triggers and advances past the synthetic marker without
-/// running EndCombat step triggers.
+/// CR 508.8 skips only Declare Blockers and Combat Damage; the normal End
+/// Combat step still begins and must run its triggers and priority window.
 pub(super) fn advance_after_empty_attackers(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
     mark_empty_attackers_end_combat(state, events);
-    state.combat = None;
-    // CR 511.3: The synthetic empty-attacker path still ends this combat, so
-    // its extra-combat attacker restriction cannot survive to postcombat main.
-    state.current_combat_attacker_restriction = None;
-    state.current_combat_attacker_restriction_source = None;
-    super::layers::prune_end_of_combat_effects(state);
-    super::layers::prune_controller_end_combat_step_effects(state, state.active_player);
-    let _ = advance_phase_once(state, events);
     auto_advance(state, events)
 }
 
@@ -3006,40 +3006,31 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
                     player: state.active_player,
                 });
             }
-            let _ = advance_phase_once(state, events);
-            // Continue to EndCombat
+            // CR 117.3a: After the combat-damage turn-based action and its
+            // triggered abilities are handled, the active player receives
+            // priority before the step ends. This also gives phase stops a
+            // Priority window in which to interrupt auto-pass.
+            return AutoAdvanceStep::waiting(WaitingFor::Priority {
+                player: state.active_player,
+            });
         }
         Phase::EndCombat => {
             // CR 511.1: "At end of combat" triggers fire here.
             let event_snapshot = events.clone();
             let (triggers_fired, ordering_prompt) =
                 process_phase_triggers(state, &event_snapshot, events);
-            // CR 511.3: At end of combat, all creatures are removed from combat.
-            state.combat = None;
-            // CR 511.3: the combat phase is over — its attacker restriction
-            // (Last Night Together / Bumi) ends with it.
-            state.current_combat_attacker_restriction = None;
-            state.current_combat_attacker_restriction_source = None;
-            super::layers::prune_end_of_combat_effects(state);
-            super::layers::prune_controller_end_combat_step_effects(state, state.active_player);
-            for obj in state.objects.iter_mut().map(|(_, v)| v) {
-                obj.replacement_definitions
-                    .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));
-            }
-            state
-                .pending_damage_replacements
-                .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));
             if triggers_fired {
                 // CR 603.3b: surface a same-controller ordering prompt before priority.
                 if let Some(prompt) = ordering_prompt {
                     return AutoAdvanceStep::waiting(prompt);
                 }
-                return AutoAdvanceStep::waiting(WaitingFor::Priority {
-                    player: state.active_player,
-                });
             }
-            let _ = advance_phase_once(state, events);
-            // Continue to PostCombatMain
+            // CR 511.1: The active player receives priority as the End Combat step
+            // begins, even when no ability triggered. Keeping the phase active until
+            // all players pass lets phase stops interrupt auto-pass here.
+            return AutoAdvanceStep::waiting(WaitingFor::Priority {
+                player: state.active_player,
+            });
         }
         Phase::End => {
             // CR 513.1 + CR 611.2a/b: Expire `PlayFromExile { duration:
@@ -3169,7 +3160,14 @@ mod tests {
         state.current_combat_attacker_restriction_source = Some(ObjectId(99));
         let mut events = Vec::new();
 
-        let _ = advance_after_empty_attackers(&mut state, &mut events);
+        let waiting = advance_after_empty_attackers(&mut state, &mut events);
+
+        assert_eq!(state.phase, Phase::EndCombat);
+        assert!(matches!(waiting, WaitingFor::Priority { .. }));
+        assert!(state.current_combat_attacker_restriction.is_some());
+
+        apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
+        apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
 
         assert!(state.current_combat_attacker_restriction.is_none());
         assert!(state.current_combat_attacker_restriction_source.is_none());
@@ -7636,6 +7634,10 @@ mod tests {
         )
         .unwrap();
 
+        // CR 511.1: the empty-attacker path still enters EndCombat, whose
+        // priority window must be passed before PostCombatMain.
+        apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
+        apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
         assert_eq!(state.phase, Phase::PostCombatMain);
     }
 

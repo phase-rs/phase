@@ -349,6 +349,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::Named { .. }
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource
         | FilterProp::IsCommander
         // CR 205.3m: reads the controller's COMMANDER, not whole-board population;
         // another object entering or leaving cannot change the commander's types.
@@ -612,7 +613,9 @@ fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> Charact
         }
 
         // ---- CR 613.1c (layer 3): name reads. ----
-        FilterProp::SameName | FilterProp::SameNameAsParentTarget => CharacteristicKinds::NAME_TEXT,
+        FilterProp::SameName
+        | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource => CharacteristicKinds::NAME_TEXT,
         // CR 201.2 + CR 613.1f: `Named` also matches through the live
         // `StaticMode::CountsAsNamed` aliases, which are layer-6 statics.
         FilterProp::Named { .. } => {
@@ -1003,6 +1006,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::Named { .. }
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource
         | FilterProp::IsCommander
         // CR 205.3m: an entering object cannot perturb this — the commander's
         // creature types come from the deck-pool registration, not the board.
@@ -3121,12 +3125,28 @@ fn filter_inner_for_object(
         // `ObjectScope::EventTarget`; inert (matches nothing) outside a trigger.
         TargetFilter::EventTarget => crate::game::quantity::triggering_event_target_object(state)
             .is_some_and(|damaged| damaged == object_id),
-        // ParentTarget/ParentTargetController/ParentTargetOwner/PostReplacementSourceController
+        // CR 400.7 + CR 603.7c: a parent object can be the member predicate of
+        // a tracked-set continuation. In that one scan-based path, match the
+        // creation-time target only while its recorded incarnation is current.
+        TargetFilter::ParentTarget => ability.is_some_and(|ability| {
+            !ability.target_incarnations.is_empty()
+                && ability.targets.iter().any(|target| {
+                    matches!(target, TargetRef::Object(id)
+                        if *id == object_id && ability.target_pin_is_current(*id, state))
+                })
+        }),
+        TargetFilter::ParentTargetSlot { index } => ability.is_some_and(|ability| {
+            !ability.target_incarnations.is_empty()
+                && matches!(
+                    ability.targets.get(*index),
+                    Some(TargetRef::Object(id))
+                        if *id == object_id && ability.target_pin_is_current(*id, state)
+                )
+        }),
+        // ParentTargetController/ParentTargetOwner/PostReplacementSourceController
         // resolve at resolution time, not via object matching. ParentTargetOwner
         // mirrors ParentTargetController for the player-axis side of CR 108.3 vs CR 109.4.
-        TargetFilter::ParentTarget
-        | TargetFilter::ParentTargetSlot { .. }
-        | TargetFilter::ParentTargetController
+        TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::PostReplacementSourceController
         // CR 615.5: an object-typed resolution-time ref (the prevented event's
@@ -4463,6 +4483,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // `FilterProp::Named { name }` is handled above against the snapshot.
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource
         | FilterProp::NameMatchesAnyPermanent { .. }
         // CR 903.3d: Commander designation is meaningful for permanents on the
         // battlefield. The spell-cast record path is not currently plumbed with
@@ -5175,6 +5196,13 @@ fn matches_filter_prop(
         // (e.g., the seed was just exiled by the preceding effect).
         FilterProp::SameNameAsParentTarget => parent_target_name(state, source.ability)
             .is_some_and(|name| obj.name.eq_ignore_ascii_case(&name)),
+        FilterProp::SameNameAsExiledBySource => state.exile_links.iter().any(|link| {
+            link.source_id == source.id
+                && state
+                    .objects
+                    .get(&link.exiled_id)
+                    .is_some_and(|exiled| obj.name.eq_ignore_ascii_case(&exiled.name))
+        }),
         // CR 201.2 + CR 201.2a: Matches if `obj.name` equals the name of any
         // permanent on the battlefield (optionally narrowed by controller).
         // Name comparison is case-insensitive per `FilterProp::Named` /
@@ -6048,6 +6076,13 @@ fn zone_change_record_matches_property(
         // target (parent target). Mirrors the live-object evaluator.
         FilterProp::SameNameAsParentTarget => parent_target_name(state, source.ability)
             .is_some_and(|name| record.name.eq_ignore_ascii_case(&name)),
+        FilterProp::SameNameAsExiledBySource => state.exile_links.iter().any(|link| {
+            link.source_id == source.id
+                && state
+                    .objects
+                    .get(&link.exiled_id)
+                    .is_some_and(|exiled| record.name.eq_ignore_ascii_case(&exiled.name))
+        }),
 
         // -------- Group 3: combat snapshot state --------
         // CR 508.1k / CR 509.1g / CR 509.1h: Combat state as of the zone change.
@@ -13817,6 +13852,7 @@ mod characteristic_read_classification_tests {
             | FilterProp::Named { .. }
             | FilterProp::SameName
             | FilterProp::SameNameAsParentTarget
+            | FilterProp::SameNameAsExiledBySource
             | FilterProp::IsCommander
             | FilterProp::SharesCreatureTypeWithCommander
             | FilterProp::Other { .. } => false,

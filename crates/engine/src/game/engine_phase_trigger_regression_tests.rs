@@ -14,6 +14,7 @@ use crate::types::ability::{
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
 use crate::types::format::FormatConfig;
+use crate::types::game_state::{AutoPassMode, TurnBoundary};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
@@ -156,8 +157,8 @@ fn begin_combat_window_precedes_forced_empty_attacker_declaration() {
     ));
 
     // Submit the only legal declaration through the production action path.
-    // CR 508.8 then skips only DeclareBlockers and CombatDamage, leaving combat
-    // and arriving at PostCombatMain normally.
+    // CR 508.8 skips DeclareBlockers and CombatDamage, but CR 511.1 still
+    // begins EndCombat and grants priority.
     let empty_declaration = apply_as_current(
         &mut state,
         GameAction::DeclareAttackers {
@@ -166,17 +167,154 @@ fn begin_combat_window_precedes_forced_empty_attacker_declaration() {
         },
     )
     .expect("the empty declaration offered by the engine must be submitable");
-    assert_eq!(state.phase, Phase::PostCombatMain);
-    assert!(
-        state.combat.is_none(),
-        "combat ends after the empty declaration"
-    );
+    assert_eq!(state.phase, Phase::EndCombat);
     assert!(matches!(
         empty_declaration.waiting_for,
         WaitingFor::Priority {
             player: PlayerId(0)
         }
     ));
+
+    // The normal priority loop ends EndCombat and enters the postcombat main
+    // phase after both players pass.
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    let postcombat = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    assert_eq!(state.phase, Phase::PostCombatMain);
+    assert!(
+        state.combat.is_none(),
+        "combat ends after the EndCombat step"
+    );
+    assert!(matches!(
+        postcombat.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(0)
+        }
+    ));
+}
+
+/// CR 510.4 + CR 511.1 + CR 117.3a: completed combat-damage and end-of-combat
+/// steps each expose their ordinary active-player priority window. The
+/// turn-boundary auto-pass session is re-armed before each opponent pass so the
+/// phase-stop interruption is exercised through the production `apply` path.
+#[test]
+fn combat_phase_stops_pause_damage_and_end_combat_windows() {
+    let mut state = new_game(42);
+    state.turn_number = 2;
+    state.phase = Phase::DeclareBlockers;
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+
+    let attacker = create_object(
+        &mut state,
+        CardId(201),
+        PlayerId(0),
+        "Combat Creature".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&attacker).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+    }
+    state.combat = Some(crate::game::combat::CombatState {
+        attackers: vec![crate::game::combat::AttackerInfo::attacking_player(
+            attacker,
+            PlayerId(1),
+        )],
+        ..Default::default()
+    });
+    state.current_combat_attacker_restriction = Some(TargetFilter::Any);
+    state.current_combat_attacker_restriction_source = Some(attacker);
+    state.waiting_for = WaitingFor::DeclareBlockers {
+        player: PlayerId(1),
+        valid_blocker_ids: Vec::new(),
+        valid_block_targets: Default::default(),
+        block_requirements: Default::default(),
+        blocker_constraints: Default::default(),
+    };
+    state.phase_stops.insert(
+        PlayerId(0),
+        vec![
+            PhaseStop {
+                phase: Phase::CombatDamage,
+                scope: PhaseStopScope::AllTurns,
+            },
+            PhaseStop {
+                phase: Phase::EndCombat,
+                scope: PhaseStopScope::AllTurns,
+            },
+        ],
+    );
+
+    // Finish the blocker declaration, then pass the declare-blockers priority
+    // window. The next pass enters CombatDamage through the normal reducer.
+    apply(
+        &mut state,
+        PlayerId(1),
+        GameAction::DeclareBlockers {
+            assignments: Vec::new(),
+        },
+    )
+    .unwrap();
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    state.auto_pass.insert(
+        PlayerId(0),
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        },
+    );
+    let damage_stop = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    assert_eq!(state.phase, Phase::CombatDamage);
+    assert!(matches!(
+        damage_stop.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(0)
+        }
+    ));
+    assert!(
+        !state.auto_pass.contains_key(&PlayerId(0)),
+        "CombatDamage stop must interrupt the armed auto-pass session"
+    );
+
+    // Pass through the damage-step priority window, then repeat the same
+    // production flow for EndCombat.
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    state.auto_pass.insert(
+        PlayerId(0),
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        },
+    );
+    let end_combat_stop = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    assert_eq!(state.phase, Phase::EndCombat);
+    assert!(matches!(
+        end_combat_stop.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(0)
+        }
+    ));
+    assert!(
+        state.combat.is_some(),
+        "combat remains during EndCombat priority"
+    );
+    assert!(
+        state.current_combat_attacker_restriction.is_some(),
+        "EndCombat restriction remains live during its priority window"
+    );
+    assert!(
+        !state.auto_pass.contains_key(&PlayerId(0)),
+        "EndCombat stop must interrupt the armed auto-pass session"
+    );
+
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    assert_eq!(state.phase, Phase::PostCombatMain);
+    assert!(state.combat.is_none(), "combat clears after EndCombat ends");
+    assert!(
+        state.current_combat_attacker_restriction.is_none(),
+        "EndCombat restriction clears after the step ends"
+    );
 }
 
 /// CR 500.8 + CR 507.2: An inserted combat phase gets the same
@@ -195,12 +333,25 @@ fn inserted_begin_combat_gets_priority_window() {
         });
 
     let mut events = Vec::new();
-    let waiting_for = crate::game::turns::auto_advance(&mut state, &mut events);
+    let end_combat_waiting = crate::game::turns::auto_advance(&mut state, &mut events);
+
+    assert_eq!(state.phase, Phase::EndCombat);
+    assert!(matches!(
+        end_combat_waiting,
+        WaitingFor::Priority {
+            player: PlayerId(0)
+        }
+    ));
+
+    // End Combat is a real priority-bearing step even when no creature
+    // attacked. Passing it lets the inserted phase become the next entry.
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    let waiting_for = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
 
     assert_eq!(state.phase, Phase::BeginCombat);
     assert!(state.combat.is_some());
     assert!(matches!(
-        waiting_for,
+        waiting_for.waiting_for,
         WaitingFor::Priority {
             player: PlayerId(0)
         }

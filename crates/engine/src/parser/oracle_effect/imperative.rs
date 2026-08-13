@@ -1311,12 +1311,26 @@ fn parse_discard_unless_filter<'a>(
 /// been consumed by `parse_count_expr`. So for "discard two creature cards"
 /// the count parser eats "two " and hands "creature cards" here. For "a card"
 /// (count = 1, no type qualifier) the count parser eats "a " and hands
-/// "card" here, which has no leading type word and returns `None`.
+/// "card" here. A bare `TypeFilter::Card` is intentionally discarded because
+/// every object in a hand is a card.
 ///
 /// Mirrors `AbilityCost::Discard.filter` so the trigger-effect discard on
 /// Dokuchi Silencer ("you may discard a creature card") preserves the same
 /// filter data as cost-form discards like "Discard a creature card:".
 pub(crate) fn parse_discard_card_filter(tail: &str) -> Option<TargetFilter> {
+    let (filter, remainder) = parse_type_phrase(tail);
+    let is_bare_card = matches!(
+        &filter,
+        TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller: None,
+            properties,
+        }) if type_filters == &[TypeFilter::Card] && properties.is_empty()
+    );
+    if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) && !is_bare_card {
+        return Some(filter);
+    }
+
     // Find the " card" / " cards" suffix — the type phrase lies before it.
     // No suffix or empty before-suffix → no type qualifier.
     let type_phrase = tail

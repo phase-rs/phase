@@ -12,6 +12,29 @@ use super::turn_control;
 
 const HIDDEN_CARD_NAME: &str = "Hidden Card";
 
+/// Resolution-only look-result provenance is never part of a viewer snapshot.
+/// The engine retains it for the active loop, while clients need only the
+/// public prompt and the card identities they are otherwise allowed to see.
+fn redact_parent_target_iteration_members(ability: &mut crate::types::ability::ResolvedAbility) {
+    ability.context.parent_target_iteration_members = None;
+    if let Some(sub_ability) = ability.sub_ability.as_mut() {
+        redact_parent_target_iteration_members(sub_ability);
+    }
+    if let Some(else_ability) = ability.else_ability.as_mut() {
+        redact_parent_target_iteration_members(else_ability);
+    }
+}
+
+fn redact_waiting_for_iteration_members(waiting_for: &mut WaitingFor) {
+    match waiting_for {
+        WaitingFor::UnlessPayment { pending_effect, .. }
+        | WaitingFor::UnlessPaymentChooseCost { pending_effect, .. } => {
+            redact_parent_target_iteration_members(pending_effect);
+        }
+        _ => {}
+    }
+}
+
 pub(crate) fn interaction_object_identity_is_visible(state: &GameState, id: ObjectId) -> bool {
     state
         .objects
@@ -88,10 +111,13 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // viewer projection — including the activating player's projection.
     if let Some(pending) = filtered.pending_cast.as_mut() {
         pending.activation_trigger_collection = None;
+        redact_parent_target_iteration_members(&mut pending.ability);
     }
     if let Some(pending) = filtered.waiting_for.pending_cast_mut() {
         pending.activation_trigger_collection = None;
+        redact_parent_target_iteration_members(&mut pending.ability);
     }
+    redact_waiting_for_iteration_members(&mut filtered.waiting_for);
     // Interaction capability authority is trusted persistence state. Viewer
     // projections expose only the actor-scoped opaque opportunity IDs produced
     // by `game::interaction`, never the session/serial/slot minting ledger.
@@ -1786,35 +1812,66 @@ fn is_visible_revealed_card(state: &GameState, viewer: PlayerId, obj_id: ObjectI
         })
 }
 
+/// Removes printed-card identity from a viewer projection while retaining the
+/// public object identity and runtime state needed to render the game.
+fn redact_printed_identity(obj: &mut crate::game::game_object::GameObject) {
+    obj.card_id = CardId(0);
+    obj.base_name = HIDDEN_CARD_NAME.to_string();
+    obj.token_rules_text = None;
+    obj.attraction_lights.clear();
+    obj.token_image_ref = None;
+    obj.source_related_token_ids.clear();
+    obj.spellbook.clear();
+    obj.parse_warnings.clear();
+    obj.back_face = None;
+    obj.specialize_faces = None;
+    obj.cleave_variant = None;
+    obj.modal = None;
+    obj.additional_cost = None;
+    obj.strive_cost = None;
+    obj.casting_restrictions.clear();
+    obj.casting_options.clear();
+    obj.casting_permissions.clear();
+    obj.unimplemented_mechanics.clear();
+
+    obj.base_power = None;
+    obj.base_toughness = None;
+    obj.base_loyalty = None;
+    obj.base_printed_loyalty = None;
+    obj.base_defense = None;
+    obj.base_card_types = Default::default();
+    obj.base_mana_cost = Default::default();
+    obj.base_keywords.clear();
+    Arc::make_mut(&mut obj.base_abilities).clear();
+    Arc::make_mut(&mut obj.base_trigger_definitions).clear();
+    Arc::make_mut(&mut obj.base_replacement_definitions).clear();
+    Arc::make_mut(&mut obj.base_static_definitions).clear();
+    obj.base_color.clear();
+    obj.base_printed_ref = None;
+}
+
 fn hide_card(state: &mut GameState, obj_id: ObjectId) {
     if let Some(obj) = state.objects.get_mut(&obj_id) {
+        // CR 400.2: library and hand are hidden zones — a viewer without
+        // look-permission may not see the card's face or any printed-card
+        // metadata that identifies it.
         obj.face_down = true;
         obj.name = HIDDEN_CARD_NAME.to_string();
+        redact_printed_identity(obj);
         Arc::make_mut(&mut obj.abilities).clear();
         obj.keywords.clear();
-        obj.base_keywords.clear();
         obj.power = None;
         obj.toughness = None;
         obj.loyalty = None;
+        obj.printed_loyalty = None;
+        obj.defense = None;
+        obj.card_types = Default::default();
+        obj.mana_cost = Default::default();
         obj.color.clear();
-        obj.base_color.clear();
         obj.trigger_definitions.clear();
         obj.replacement_definitions.clear();
         obj.static_definitions.clear();
-        obj.casting_permissions.clear();
         obj.printed_ref = None;
-        obj.base_printed_ref = None;
-        obj.back_face = None;
-        obj.token_image_ref = None;
-        obj.source_related_token_ids.clear();
-        // CR 400.2: library and hand are hidden zones — a viewer without
-        // look-permission may not see the card's face. `parse_warnings` is
-        // parser evidence derived from that face's printed text (a
-        // `SwallowedClause` carries the rules text verbatim), and only 891 of
-        // 35,657 card faces carry a non-empty vector, so its presence and
-        // contents both fingerprint the card. Redact it with the rest of the
-        // printed identity.
-        obj.parse_warnings.clear();
         obj.foretold = false;
     }
 }
@@ -1840,10 +1897,8 @@ fn reveal_face_down_identity_to_controller(obj: &mut crate::game::game_object::G
 
 fn redact_face_down_identity_from_observer(obj: &mut crate::game::game_object::GameObject) {
     obj.name = HIDDEN_CARD_NAME.to_string();
-    obj.base_name = HIDDEN_CARD_NAME.to_string();
+    redact_printed_identity(obj);
     obj.printed_ref = None;
-    obj.base_printed_ref = None;
-    obj.back_face = None;
     // CR 708.5 + CR 708.2: a face-down permanent has no name and no abilities,
     // and no player but its controller may look at the card underneath.
     // `parse_warnings` survives the face-down transformation on the
@@ -1898,8 +1953,8 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::EffectKind;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, BeholdCostAction, CostPaidObjectSnapshot, Effect,
-        ReplacementDefinition, ResolvedAbility, TargetFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, BeholdCostAction, CostPaidObjectSnapshot,
+        Effect, QuantityExpr, ReplacementDefinition, ResolvedAbility, TargetFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CardType, CoreType};
@@ -1999,6 +2054,40 @@ mod tests {
             alt_cost_grant_source: None,
             activation_trigger_collection: None,
         })
+    }
+
+    #[test]
+    fn unless_payment_projection_redacts_private_iteration_members() {
+        let mut state = GameState::new_two_player(42);
+        let mut pending = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "private loop probe".to_string(),
+                description: None,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        pending.context.parent_target_iteration_members = Some(vec![ObjectId(1), ObjectId(2)]);
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(0),
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
+            pending_effect: Box::new(pending),
+            trigger_event: None,
+            effect_description: None,
+            remaining: Vec::new(),
+        };
+
+        let filtered = filter_state_for_viewer(&state, PlayerId(1));
+        let WaitingFor::UnlessPayment { pending_effect, .. } = filtered.waiting_for else {
+            panic!("the viewer projection must retain the payment prompt");
+        };
+        assert_eq!(
+            pending_effect.context.parent_target_iteration_members, None,
+            "a viewer snapshot must not expose the private look-result object ids"
+        );
     }
 
     fn dummy_pending_mana_ability(
@@ -2764,6 +2853,90 @@ mod tests {
 
         assert_eq!(hidden.name, "Hidden Card");
         assert!(hidden.back_face.is_none());
+    }
+
+    /// CR 400.2: a non-owner's hidden-zone projection must not carry printed
+    /// identity through baseline characteristics or card metadata. The owner
+    /// arm proves each sentinel is present before the observer projection.
+    #[test]
+    fn hidden_hand_card_redacts_printed_identity_metadata_from_opponent() {
+        let mut state = GameState::new_two_player(42);
+        let card_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Secret Printed Card".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&card_id).unwrap();
+            let card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Secret Type".to_string()],
+            };
+            obj.base_name = "Secret Base Name".to_string();
+            obj.token_rules_text = Some("Secret token rules".to_string());
+            obj.spellbook = vec!["Secret Spellbook Card".to_string()];
+            obj.unimplemented_mechanics = vec!["Secret mechanic".to_string()];
+            obj.power = Some(7);
+            obj.toughness = Some(9);
+            obj.base_power = Some(7);
+            obj.base_toughness = Some(9);
+            obj.card_types = card_types.clone();
+            obj.base_card_types = card_types;
+            obj.mana_cost = ManaCost::generic(7);
+            obj.base_mana_cost = ManaCost::generic(7);
+        }
+
+        let owner_view = filter_state_for_viewer(&state, PlayerId(1));
+        let owned = owner_view.objects.get(&card_id).unwrap();
+        assert_eq!(owned.base_name, "Secret Base Name");
+        assert_eq!(owned.spellbook, vec!["Secret Spellbook Card".to_string()]);
+        assert_eq!(
+            owned.token_rules_text.as_deref(),
+            Some("Secret token rules")
+        );
+        assert_eq!(
+            owned.unimplemented_mechanics,
+            vec!["Secret mechanic".to_string()]
+        );
+        assert_eq!(owned.base_power, Some(7));
+        assert_eq!(owned.base_toughness, Some(9));
+        assert_ne!(owned.base_card_types, CardType::default());
+        assert_eq!(owned.base_mana_cost, ManaCost::generic(7));
+
+        let opponent_view = filter_state_for_viewer(&state, PlayerId(0));
+        let hidden = opponent_view.objects.get(&card_id).unwrap();
+        assert_eq!(hidden.name, HIDDEN_CARD_NAME);
+        assert_eq!(hidden.card_id, CardId(0));
+        assert_eq!(hidden.base_name, HIDDEN_CARD_NAME);
+        assert!(hidden.token_rules_text.is_none());
+        assert!(hidden.spellbook.is_empty());
+        assert!(hidden.unimplemented_mechanics.is_empty());
+        assert_eq!(hidden.power, None);
+        assert_eq!(hidden.toughness, None);
+        assert_eq!(hidden.base_power, None);
+        assert_eq!(hidden.base_toughness, None);
+        assert_eq!(hidden.card_types, CardType::default());
+        assert_eq!(hidden.base_card_types, CardType::default());
+        assert_eq!(hidden.mana_cost, ManaCost::default());
+        assert_eq!(hidden.base_mana_cost, ManaCost::default());
+
+        let serialized = serde_json::to_string(hidden).unwrap();
+        for secret in [
+            "Secret Printed Card",
+            "Secret Base Name",
+            "Secret token rules",
+            "Secret Spellbook Card",
+            "Secret mechanic",
+            "Secret Type",
+        ] {
+            assert!(
+                !serialized.contains(secret),
+                "hidden card's serialized payload must not reveal {secret:?}"
+            );
+        }
     }
 
     /// CR 400.2: a hand is a hidden zone. `parse_warnings` is derived from the

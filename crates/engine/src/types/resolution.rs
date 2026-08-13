@@ -656,6 +656,34 @@ impl ResolutionStack {
         }
     }
 
+    /// Returns the active discard operation, or its exact direct parent when
+    /// an ability continuation has already been parked above it. Terminal
+    /// discard delivery owns either of these two adjacent shapes; it must not
+    /// search through another active resolution frame for a matching ID.
+    pub fn active_discard_or_direct_continuation_parent_mut(
+        &mut self,
+        discard_id: DiscardFrameId,
+    ) -> Option<&mut DiscardFrame> {
+        let active_index = self.frames.len().checked_sub(1)?;
+        let discard_index = match self.frames.get(active_index) {
+            Some(ResolutionFrame::Discard(discard)) if discard.id == discard_id => active_index,
+            Some(ResolutionFrame::AbilityContinuation(_)) => {
+                let discard_index = active_index.checked_sub(1)?;
+                match self.frames.get(discard_index) {
+                    Some(ResolutionFrame::Discard(discard)) if discard.id == discard_id => {
+                        discard_index
+                    }
+                    Some(_) | None => return None,
+                }
+            }
+            Some(_) | None => return None,
+        };
+        match self.frames.get_mut(discard_index) {
+            Some(ResolutionFrame::Discard(discard)) => Some(discard),
+            Some(_) | None => unreachable!("checked discard frame must retain its frame kind"),
+        }
+    }
+
     /// Identifies the exact discard parent of the active continuation without
     /// exposing any non-adjacent frame.
     pub fn active_ability_continuation_discard_parent_id(&self) -> Option<DiscardFrameId> {
@@ -702,6 +730,43 @@ impl ResolutionStack {
                     self.pop_expected(FrameKind::AbilityContinuation)?
                 else {
                     unreachable!("checked ability-continuation frame kind must match")
+                };
+                Ok(Some(frame))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::AbilityContinuation,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Consumes the active continuation, or its exact parent when a
+    /// `BatchDelivery` child currently owns the stack top. The batch remains
+    /// parked so its undelivered zone-change members settle before the enclosing
+    /// resolution advances; this fixed two-frame shape is not a general search.
+    pub fn take_active_ability_continuation_or_batch_delivery_child(
+        &mut self,
+    ) -> Result<Option<AbilityContinuationFrame>, ResolutionStackError> {
+        match self.last() {
+            Some(ResolutionFrame::AbilityContinuation(_)) | None => {
+                self.take_active_ability_continuation()
+            }
+            Some(ResolutionFrame::BatchDelivery(_)) => {
+                let Some(parent_index) = self.frames.len().checked_sub(2) else {
+                    return Ok(None);
+                };
+                if !matches!(
+                    self.frames.get(parent_index),
+                    Some(ResolutionFrame::AbilityContinuation(_))
+                ) {
+                    return Ok(None);
+                }
+                let child_index = self.frames.len() - 1;
+                self.frames.swap(parent_index, child_index);
+                let ResolutionFrame::AbilityContinuation(frame) =
+                    self.pop_expected(FrameKind::AbilityContinuation)?
+                else {
+                    unreachable!("checked batch parent must retain its frame kind")
                 };
                 Ok(Some(frame))
             }
@@ -3958,8 +4023,74 @@ mod tests {
         })
     }
 
+    fn batch_delivery_frame(seed: u64) -> ResolutionFrame {
+        let mut state = GameState::new_two_player(seed);
+        let mut logical_zone_change_group = state.allocate_logical_zone_change_group(&[]);
+        logical_zone_change_group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("empty batch group retains its pre-delivery latch");
+        ResolutionFrame::BatchDelivery(Box::new(PendingBatchDeliveries {
+            logical_zone_change_group,
+            paused_current: None,
+            remaining: Vec::new(),
+            destination: Zone::Graveyard,
+            source_id: None,
+            enter_tapped: EtbTapState::Unspecified,
+            exile_tracking: ZoneDeliveryExileTracking::None,
+            library_placement: None,
+            completion: None,
+            replacement_applied: HashSet::new(),
+            requests: Vec::new(),
+            attempted: Vec::new(),
+            zone_change_record_start: state.zone_changes_this_turn.len(),
+            deferred_events: Vec::new(),
+        }))
+    }
+
+    #[test]
+    fn take_continuation_preserves_an_active_batch_delivery_child() {
+        let mut stack = ResolutionStack::default();
+        stack.push_inner(continuation_frame(1));
+        stack.push_inner(batch_delivery_frame(1));
+
+        assert!(
+            stack
+                .take_active_ability_continuation_or_batch_delivery_child()
+                .expect("the direct batch-child relation is consumable")
+                .is_some(),
+            "the direct continuation parent is removed"
+        );
+        assert!(
+            matches!(stack.last(), Some(ResolutionFrame::BatchDelivery(_))),
+            "the unrelated active batch remains available for its delivery drain"
+        );
+
+        let mut unrelated_child = ResolutionStack::default();
+        unrelated_child.push_inner(continuation_frame(2));
+        unrelated_child.push_inner(change_zone_frame(2));
+        assert!(
+            matches!(
+                unrelated_child.take_active_ability_continuation_or_batch_delivery_child(),
+                Err(ResolutionStackError::UnexpectedTop {
+                    expected: FrameKind::AbilityContinuation,
+                    actual: FrameKind::ChangeZone,
+                })
+            ),
+            "the helper does not search through an arbitrary child frame"
+        );
+    }
+
     #[test]
     fn active_discard_parent_of_active_ability_continuation_is_direct_and_id_bound() {
+        let mut active = ResolutionStack::default();
+        let active_id = active.begin_discard(None);
+        assert!(
+            active
+                .active_discard_or_direct_continuation_parent_mut(active_id)
+                .is_some(),
+            "an active discard owns terminal delivery before a continuation is parked"
+        );
+
         let mut direct = ResolutionStack::default();
         let direct_id = direct.begin_discard(None);
         direct.push_inner(continuation_frame(1));
@@ -4002,6 +4133,12 @@ mod tests {
                 .active_discard_parent_of_active_ability_continuation_mut(buried_id)
                 .is_none(),
             "a discard below an active child must not be recovered by a stack search"
+        );
+        assert!(
+            buried
+                .active_discard_or_direct_continuation_parent_mut(buried_id)
+                .is_none(),
+            "terminal delivery may not recover a discard below another active frame"
         );
     }
 

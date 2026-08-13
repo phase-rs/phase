@@ -969,6 +969,7 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::HasAdventure
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource
         | FilterProp::NameMatchesAnyPermanent { .. }
         | FilterProp::DifferentNameFrom { .. }
         | FilterProp::DistinctFrom { .. }

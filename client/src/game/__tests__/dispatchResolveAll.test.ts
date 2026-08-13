@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { BatchResolveResult, EngineSnapshot, GameState } from "../../adapter/types";
-import { nextSnapshotSeq } from "../../adapter/types";
+import { AdapterError, AdapterErrorCode, nextSnapshotSeq } from "../../adapter/types";
 import { useGameStore } from "../../stores/gameStore";
 import { useAppNotificationStore } from "../../stores/appToastStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
@@ -191,10 +191,39 @@ describe("dispatchResolveAll progress", () => {
     expect(submitAction).not.toHaveBeenCalled();
   });
 
-  it("shows a server-provided Resolve All rejection without rejecting the click handler", async () => {
+  it("silently absorbs a stale Resolve All priority rejection without rejecting the click handler", async () => {
     const resolveAll = vi
       .fn<EngineResolveAll>()
-      .mockRejectedValue(new Error("Resolve All requires your priority"));
+      .mockRejectedValue(
+        new AdapterError(
+          AdapterErrorCode.STALE_ACTION,
+          "Resolve All requires your priority",
+          false,
+        ),
+      );
+    const getState = vi.fn().mockResolvedValue(stateWithStack(2));
+    useGameStore.setState({
+      gameState: stateWithStack(2),
+      adapter: {
+        resolveAll,
+        resolveAllUsesServerAi: true,
+        getState,
+        getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
+        getSnapshot: snapshotVia(getState),
+      } as never,
+    });
+
+    await expect(dispatchResolveAll(0, [])).resolves.toBeUndefined();
+
+    expect(useAppNotificationStore.getState().notification).toBeNull();
+    expect(useGameStore.getState().isResolvingAll).toBe(false);
+    expect(useGameStore.getState().resolutionProgress).toBeNull();
+  });
+
+  it("still surfaces a non-stale Resolve All rejection", async () => {
+    const resolveAll = vi
+      .fn<EngineResolveAll>()
+      .mockRejectedValue(new Error("batch snapshot rejected"));
     const getState = vi.fn().mockResolvedValue(stateWithStack(2));
     useGameStore.setState({
       gameState: stateWithStack(2),
@@ -210,7 +239,7 @@ describe("dispatchResolveAll progress", () => {
     await expect(dispatchResolveAll(0, [])).resolves.toBeUndefined();
 
     expect(useAppNotificationStore.getState().notification).toMatchObject({
-      description: "Resolve All requires your priority",
+      description: "batch snapshot rejected",
     });
   });
 

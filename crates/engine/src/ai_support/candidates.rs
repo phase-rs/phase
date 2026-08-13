@@ -16,7 +16,7 @@ use crate::types::card::LayoutKind;
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterMatch;
 use crate::types::game_state::{
-    CastOfferKind, CastPaymentMode, CompanionDeclaration, ConvokeMode, CostResume,
+    CastOfferKind, CastPaymentMode, CastingVariant, CompanionDeclaration, ConvokeMode, CostResume,
     CounterCostChoice, CounterMoveChoice, CounterRemoveChoice, GameState, MulliganDecisionPhase,
     PayCostKind, PayableResource, PendingMulliganAction, TargetSelectionSlot, WaitingFor,
 };
@@ -73,6 +73,14 @@ pub struct CandidateAction {
 
 const SELECTION_POOL_CAP: usize = 12;
 const SELECTION_CANDIDATE_CAP: usize = 64;
+
+/// Bounds for gang-block proposal enumeration against a CR 509.1b
+/// minimum-blocker restriction. Sized so the widest realistic case stays cheap:
+/// `C(10, 3) = 120` combinations trimmed to 32 per attacker, mirroring the
+/// `SELECTION_*` precedent above — take the first `pool_cap` eligible blockers in
+/// the engine's deterministic order, then cap the emitted set.
+const GANG_BLOCK_POOL_CAP: usize = 10;
+const GANG_BLOCK_CANDIDATE_CAP: usize = 32;
 
 fn collect_mana_combinations(
     count: usize,
@@ -947,8 +955,15 @@ pub fn candidate_actions_broad_with_probe(
             player,
             valid_blocker_ids,
             valid_block_targets,
+            block_requirements,
             ..
-        } => blocker_actions(state, *player, valid_blocker_ids, valid_block_targets),
+        } => blocker_actions(
+            state,
+            *player,
+            valid_blocker_ids,
+            valid_block_targets,
+            block_requirements,
+        ),
         WaitingFor::UntapChoice {
             player, candidates, ..
         } => candidates
@@ -4448,6 +4463,10 @@ fn blocker_actions(
         crate::types::identifiers::ObjectId,
         Vec<crate::types::identifiers::ObjectId>,
     >,
+    block_requirements: &std::collections::HashMap<
+        crate::types::identifiers::ObjectId,
+        crate::game::combat::BlockRequirement,
+    >,
 ) -> Vec<CandidateAction> {
     let mut proposals = vec![Vec::new()];
 
@@ -4456,6 +4475,46 @@ fn blocker_actions(
             for &attacker_id in targets {
                 proposals.push(vec![(blocker_id, attacker_id)]);
             }
+        }
+    }
+
+    // CR 509.1b + CR 702.111b: an attacker carrying menace or a `MinBlockers`
+    // restriction can't be blocked except by `count` or more creatures, so every
+    // one-blocker proposal seeded above is an illegal declaration against it and
+    // `complete_blocker_proposals` collapses each to the same tax-free witness.
+    // Without an explicit gang-block seed the defending player's whole candidate
+    // set degenerates to "don't block" and the AI can never block a menace-class
+    // attacker at all. Seed the bounded set of `count`-sized combinations drawn
+    // from that attacker's own eligible blockers; legality is still decided by
+    // `complete_blocker_proposals` below, which is the single authority.
+    //
+    // `block_requirements` only carries attackers whose floor exceeds 1 (see
+    // `block_requirements_for_player`); the `<= 1` guard keeps that contract
+    // local rather than assumed. Attackers are visited in `ObjectId` order so a
+    // `HashMap` iteration order can't perturb candidate ordering (issue #4878).
+    let mut gang_attackers: Vec<_> = block_requirements
+        .iter()
+        .filter(|(_, requirement)| requirement.count > 1)
+        .map(|(&attacker_id, requirement)| (attacker_id, requirement.count as usize))
+        .collect();
+    gang_attackers.sort_unstable();
+    for (attacker_id, needed) in gang_attackers {
+        let eligible: Vec<crate::types::identifiers::ObjectId> = valid_blocker_ids
+            .iter()
+            .copied()
+            .filter(|blocker_id| {
+                valid_block_targets
+                    .get(blocker_id)
+                    .is_some_and(|targets| targets.contains(&attacker_id))
+            })
+            .collect();
+        for combo in bounded_combinations_for_sizes(
+            &eligible,
+            [needed],
+            GANG_BLOCK_POOL_CAP,
+            GANG_BLOCK_CANDIDATE_CAP,
+        ) {
+            proposals.push(combo.into_iter().map(|b| (b, attacker_id)).collect());
         }
     }
 
@@ -4815,13 +4874,35 @@ fn mana_payment_actions(
     convoke_mode: Option<ConvokeMode>,
 ) -> Vec<CandidateAction> {
     let mut actions = mana_tap_actions(state, player);
+    let has_delve = state.pending_cast.as_ref().is_some_and(|pending| {
+        crate::game::casting::spell_has_delve_payment_for(
+            state,
+            player,
+            pending.object_id,
+            pending.casting_variant == CastingVariant::Fuse,
+        )
+    });
     // Always include PassPriority to finalize payment
     actions.push(candidate(
         GameAction::PassPriority,
         TacticalClass::Pass,
         Some(player),
     ));
-    if let Some(mode) = convoke_mode {
+    if has_delve {
+        for (&obj_id, obj) in &state.objects {
+            if obj.is_delve_eligible(player) {
+                actions.push(candidate(
+                    GameAction::TapForConvoke {
+                        object_id: obj_id,
+                        mana_type: crate::types::mana::ManaType::Colorless,
+                    },
+                    TacticalClass::Mana,
+                    Some(player),
+                ));
+            }
+        }
+    }
+    if let Some(mode) = convoke_mode.filter(|mode| *mode != ConvokeMode::Delve) {
         // CR 702.51a + CR 302.6: Summoning sickness does not restrict tapping for convoke.
         // CR 702.51a: a Convoke tap reduces the cost by {1} (a Colorless marker) or by one
         // mana of the creature's color (a colored marker, which pays ONLY a matching colored
@@ -4834,9 +4915,24 @@ fn mana_payment_actions(
                 crate::types::mana::ManaCost::Cost { shards, .. } => Some(shards.as_slice()),
                 _ => None,
             });
-        if mode == ConvokeMode::Delve {
-            for (&obj_id, obj) in &state.objects {
-                if obj.is_delve_eligible(player) {
+        // Non-Delve convoke/improvise/waterbend taps come from the battlefield
+        // only; the eligibility helpers all require `zone == Battlefield`, so
+        // iterating `state.battlefield` (rather than every object in the game)
+        // is behavior-preserving and avoids scanning hand/library/graveyard
+        // objects on go-wide token boards.
+        for &obj_id in &state.battlefield {
+            let Some(obj) = state.objects.get(&obj_id) else {
+                continue;
+            };
+            // CR 701.26a + CR 508.1f: a "can't become tapped" creature can't be
+            // tapped for convoke/improvise/waterbend (all tap the creature to
+            // pay). Delve (graveyard exile above) never taps, so it's exempt.
+            if crate::game::restrictions::object_cant_tap(state, obj_id) {
+                continue;
+            }
+            match mode {
+                ConvokeMode::Waterbend if obj.is_waterbend_eligible(player) => {
+                    // Waterbend: always colorless
                     actions.push(candidate(
                         GameAction::TapForConvoke {
                             object_id: obj_id,
@@ -4846,79 +4942,52 @@ fn mana_payment_actions(
                         Some(player),
                     ));
                 }
-            }
-        } else {
-            // Non-Delve convoke/improvise/waterbend taps come from the
-            // battlefield only; the eligibility helpers all require
-            // `zone == Battlefield`, so iterating `state.battlefield` (rather
-            // than every object in the game) is behavior-preserving and avoids
-            // scanning hand/library/graveyard objects on go-wide token boards.
-            for &obj_id in &state.battlefield {
-                let Some(obj) = state.objects.get(&obj_id) else {
-                    continue;
-                };
-                // CR 701.26a + CR 508.1f: a "can't become tapped" creature can't be
-                // tapped for convoke/improvise/waterbend (all tap the creature to
-                // pay). Delve (graveyard exile above) never taps, so it's exempt.
-                if crate::game::restrictions::object_cant_tap(state, obj_id) {
-                    continue;
+                ConvokeMode::Improvise if obj.is_improvise_eligible(player) => {
+                    // CR 702.126a: Improvise pays generic mana — always colorless.
+                    actions.push(candidate(
+                        GameAction::TapForConvoke {
+                            object_id: obj_id,
+                            mana_type: crate::types::mana::ManaType::Colorless,
+                        },
+                        TacticalClass::Mana,
+                        Some(player),
+                    ));
                 }
-                match mode {
-                    ConvokeMode::Waterbend if obj.is_waterbend_eligible(player) => {
-                        // Waterbend: always colorless
-                        actions.push(candidate(
-                            GameAction::TapForConvoke {
-                                object_id: obj_id,
-                                mana_type: crate::types::mana::ManaType::Colorless,
-                            },
-                            TacticalClass::Mana,
-                            Some(player),
-                        ));
-                    }
-                    ConvokeMode::Improvise if obj.is_improvise_eligible(player) => {
-                        // CR 702.126a: Improvise pays generic mana — always colorless.
-                        actions.push(candidate(
-                            GameAction::TapForConvoke {
-                                object_id: obj_id,
-                                mana_type: crate::types::mana::ManaType::Colorless,
-                            },
-                            TacticalClass::Mana,
-                            Some(player),
-                        ));
-                    }
-                    ConvokeMode::Convoke if obj.is_convoke_eligible(player) => {
-                        // CR 702.51a: Colorless (for generic) always available
-                        actions.push(candidate(
-                            GameAction::TapForConvoke {
-                                object_id: obj_id,
-                                mana_type: crate::types::mana::ManaType::Colorless,
-                            },
-                            TacticalClass::Mana,
-                            Some(player),
-                        ));
-                        // CR 702.51a: one colored tap per color the creature has — but only
-                        // colors the cost can actually use. A colored convoke marker pays only a
-                        // matching colored pip, so a color absent from the cost is a wasted tap.
-                        // `contributes_to` covers hybrid/Phyrexian/two-brid pips. When the cost is
-                        // unavailable, offer every color rather than risk pruning a useful option.
-                        for color in &obj.color {
-                            if let Some(shards) = convoke_cost_shards {
-                                if !shards.iter().any(|shard| shard.contributes_to(*color)) {
-                                    continue;
-                                }
+                ConvokeMode::Convoke if obj.is_convoke_eligible(player) => {
+                    // CR 702.51a: Colorless (for generic) always available
+                    actions.push(candidate(
+                        GameAction::TapForConvoke {
+                            object_id: obj_id,
+                            mana_type: crate::types::mana::ManaType::Colorless,
+                        },
+                        TacticalClass::Mana,
+                        Some(player),
+                    ));
+                    // CR 702.51a: one colored tap per color the creature has — but only
+                    // colors the cost can actually use. A colored convoke marker pays only a
+                    // matching colored pip, so a color absent from the cost is a wasted tap.
+                    // `contributes_to` covers hybrid/Phyrexian/two-brid pips. When the cost is
+                    // unavailable, offer every color rather than risk pruning a useful option.
+                    for color in &obj.color {
+                        if let Some(shards) = convoke_cost_shards {
+                            if !shards.iter().any(|shard| shard.contributes_to(*color)) {
+                                continue;
                             }
-                            actions.push(candidate(
-                                GameAction::TapForConvoke {
-                                    object_id: obj_id,
-                                    mana_type: mana_sources::mana_color_to_type(color),
-                                },
-                                TacticalClass::Mana,
-                                Some(player),
-                            ));
                         }
+                        actions.push(candidate(
+                            GameAction::TapForConvoke {
+                                object_id: obj_id,
+                                mana_type: mana_sources::mana_color_to_type(color),
+                            },
+                            TacticalClass::Mana,
+                            Some(player),
+                        ));
                     }
-                    _ => {}
                 }
+                ConvokeMode::Convoke
+                | ConvokeMode::Improvise
+                | ConvokeMode::Waterbend
+                | ConvokeMode::Delve => {}
             }
         }
     }
