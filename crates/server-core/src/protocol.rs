@@ -2115,6 +2115,7 @@ mod tests {
             colors: vec!["W".to_string()],
             cmc: 1,
             type_line: "Creature — Test".to_string(),
+            draft_effect: None,
         };
         let second_pull = DraftCardInstance {
             instance_id: "pack-2-card-1".to_string(),
@@ -2125,6 +2126,7 @@ mod tests {
             colors: vec!["U".to_string()],
             cmc: 2,
             type_line: "Instant".to_string(),
+            draft_effect: None,
         };
         let pool = vec![first_pull.clone(), second_pull.clone()];
         let pool_groups = DraftPoolGroups::from_pool(&pool);
@@ -2136,6 +2138,7 @@ mod tests {
             pass_direction: PassDirection::Left,
             current_pack: None,
             pool,
+            draft_effects: Vec::new(),
             pool_groups,
             sealed_packs: Some(vec![vec![first_pull], vec![second_pull]]),
             seats: Vec::new(),

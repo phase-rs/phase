@@ -5790,6 +5790,28 @@ fn draft_matters_sentence_negative_cases() {
 }
 
 #[test]
+fn draft_effect_from_oracle_text_recognizes_additional_pick() {
+    assert_eq!(
+        draft_effect_from_oracle_text(
+            "Draft this card face up.\nAs you draft a card, you may draft an additional card from that booster pack.\nIf you do, put this card into that booster pack."
+        ),
+        Some(crate::types::card::DraftEffect::AdditionalPick)
+    );
+    assert_eq!(
+        draft_effect_from_oracle_text(
+            "Draft this card face up.\nAs you draft a card, you may draft an additional card from that booster pack. If you do, put this card into that booster pack."
+        ),
+        Some(crate::types::card::DraftEffect::AdditionalPick)
+    );
+    assert_eq!(
+        draft_effect_from_oracle_text(
+            "As you draft a card, you may draft an additional card from that booster pack."
+        ),
+        None
+    );
+}
+
+#[test]
 fn tempest_hawk_oracle_text_produces_no_unimplemented_static() {
     // Full Oracle text fixture for Tempest Hawk — the bug surface from
     // GitHub issue #1074. Before the fix, the "A deck can have any number

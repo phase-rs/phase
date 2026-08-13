@@ -12,6 +12,7 @@ export interface DraftCardInstance {
   colors: string[];
   cmc: number;
   type_line: string;
+  draft_effect?: "additional_pick";
 }
 
 export type DraftPoolGroupKind =
@@ -169,6 +170,7 @@ export interface DraftPlayerView {
   pass_direction: "Left" | "Right";
   current_pack: DraftCardInstance[] | null;
   pool: DraftCardInstance[];
+  draft_effects?: DraftCardInstance[];
   /** Engine-owned grouping, ordering, and duplicate counts for the pool. */
   pool_groups: DraftPoolGroups;
   /** Engine-provided sealed packs in opening order. Absent for draft events. */
@@ -289,6 +291,17 @@ export class DraftAdapter {
   async submitPick(cardInstanceId: string): Promise<DraftPlayerView> {
     const wasm = await ensureDraftWasm();
     return wasm.submit_pick(cardInstanceId) as DraftPlayerView;
+  }
+
+  async submitPickWithDraftEffect(
+    effectCardInstanceId: string,
+    cardInstanceIds: string[],
+  ): Promise<DraftPlayerView> {
+    const wasm = await ensureDraftWasm();
+    return wasm.submit_pick_with_draft_effect(
+      effectCardInstanceId,
+      JSON.stringify(cardInstanceIds),
+    ) as DraftPlayerView;
   }
 
   /** Let the bot AI pick the best card from the current pack for the player. */

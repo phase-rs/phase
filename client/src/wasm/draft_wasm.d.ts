@@ -174,6 +174,12 @@ export function submit_pick(card_instance_id: string): any;
 export function submit_pick_for_seat(seat: number, card_instance_id: string): any;
 
 /**
+ * Submit an additional pick using a drafted card's draft-time effect, then
+ * resolve all bot picks.
+ */
+export function submit_pick_with_draft_effect(effect_card_instance_id: string, card_instance_ids_json: string): any;
+
+/**
  * Auto-suggest a playable Limited deck from the human's pool.
  *
  * Returns a SuggestedDeck with ~23 spells + ~17 lands, using AI evaluation
@@ -214,6 +220,7 @@ export interface InitOutput {
     readonly submit_deck_for_seat: (a: number, b: number, c: number) => [number, number, number];
     readonly submit_pick: (a: number, b: number) => [number, number, number];
     readonly submit_pick_for_seat: (a: number, b: number, c: number) => [number, number, number];
+    readonly submit_pick_with_draft_effect: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly suggest_deck: () => [number, number, number];
     readonly suggest_lands: (a: number, b: number) => [number, number, number];
     readonly init_panic_hook: () => void;

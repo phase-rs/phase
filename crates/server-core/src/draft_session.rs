@@ -768,6 +768,15 @@ fn authorize_client_draft_action(seat: usize, action: DraftAction) -> Result<Dra
             seat: seat as u8,
             card_instance_id,
         }),
+        DraftAction::PickWithDraftEffect {
+            effect_card_instance_id,
+            card_instance_ids,
+            ..
+        } => Ok(DraftAction::PickWithDraftEffect {
+            seat: seat as u8,
+            effect_card_instance_id,
+            card_instance_ids,
+        }),
         DraftAction::SubmitDeck { main_deck, .. } => Ok(DraftAction::SubmitDeck {
             seat: seat as u8,
             main_deck,

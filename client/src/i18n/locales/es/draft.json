@@ -77,6 +77,7 @@
   },
   "pack": {
     "confirmPick": "Confirmar elección",
+    "draftEffects": "Efectos de draft:",
     "waitingNext": "Esperando el siguiente sobre...",
     "cardsInPack": "{{count}} cartas en el sobre",
     "picking": "Eligiendo…",

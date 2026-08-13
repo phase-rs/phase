@@ -6,6 +6,8 @@ import { useDraftStore } from "../../stores/draftStore";
 import type { DraftCardInstance, DraftPlayerView } from "../../adapter/draft-adapter";
 import type { CardHoverInfo } from "../card/CardPreview";
 
+const EMPTY_DRAFT_EFFECTS: DraftCardInstance[] = [];
+
 // ── Card tile ───────────────────────────────────────────────────────────
 
 interface PackCardProps {
@@ -13,6 +15,7 @@ interface PackCardProps {
   isSelected: boolean;
   onSelect: (instanceId: string) => void;
   onConfirm: () => void;
+  confirmDisabled?: boolean;
   onHover: (info: CardHoverInfo | null) => void;
 }
 
@@ -21,6 +24,7 @@ function PackCard({
   isSelected,
   onSelect,
   onConfirm,
+  confirmDisabled = false,
   onHover,
 }: PackCardProps) {
   const { t } = useTranslation("draft");
@@ -60,7 +64,8 @@ function PackCard({
         {isSelected ? (
           <button
             onClick={onConfirm}
-            className="w-full rounded-lg bg-amber-500 py-0.5 text-xs font-semibold text-black transition-colors hover:bg-amber-400"
+            disabled={confirmDisabled}
+            className="w-full rounded-lg bg-amber-500 py-0.5 text-xs font-semibold text-black transition-colors hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {t("pack.confirmPick")}
           </button>
@@ -115,6 +120,8 @@ interface PackDisplayProps {
   onCardHover: (info: CardHoverInfo | null) => void;
   /** Show the "Auto-pick" button when the active draft mode supports it. */
   showAutoPick?: boolean;
+  /** Show draft-effect controls for the local Draft page. */
+  enableDraftEffects?: boolean;
   view?: DraftPlayerView | null;
   selectedCard?: string | null;
   onSelectCard?: (instanceId: string | null) => void;
@@ -125,6 +132,7 @@ interface PackDisplayProps {
 export function PackDisplay({
   onCardHover,
   showAutoPick = false,
+  enableDraftEffects = false,
   view: viewOverride,
   selectedCard: selectedCardOverride,
   onSelectCard,
@@ -136,6 +144,7 @@ export function PackDisplay({
   const quickSelectedCard = useDraftStore((s) => s.selectedCard);
   const quickSelectCard = useDraftStore((s) => s.selectCard);
   const quickConfirmPick = useDraftStore((s) => s.confirmPick);
+  const quickPickCardWithDraftEffect = useDraftStore((s) => s.pickCardWithDraftEffect);
   const quickAutoPickCard = useDraftStore((s) => s.autoPickCard);
   const [autoPicking, setAutoPicking] = useState(false);
 
@@ -146,12 +155,29 @@ export function PackDisplay({
   const selectCard = onSelectCard ?? quickSelectCard;
   const confirmPick = onConfirmPick ?? quickConfirmPick;
   const autoPickCard = onAutoPick ?? quickAutoPickCard;
+  const [activeDraftEffect, setActiveDraftEffect] = useState<string | null>(null);
+  const [additionalCard, setAdditionalCard] = useState<string | null>(null);
 
   useEffect(() => {
     if (view?.current_pack?.length === 1 && !selectedCard) {
       selectCard(view.current_pack[0].instance_id);
     }
   }, [view?.current_pack, selectedCard, selectCard]);
+
+  const draftEffects = view?.draft_effects ?? EMPTY_DRAFT_EFFECTS;
+
+  useEffect(() => {
+    if (
+      activeDraftEffect &&
+      !draftEffects.some((card) => card.instance_id === activeDraftEffect)
+    ) {
+      setActiveDraftEffect(null);
+    }
+  }, [activeDraftEffect, draftEffects]);
+
+  useEffect(() => {
+    if (!activeDraftEffect) setAdditionalCard(null);
+  }, [activeDraftEffect]);
 
   if (!view) return null;
 
@@ -174,17 +200,73 @@ export function PackDisplay({
     }
   };
 
+  const handleConfirmPick = async () => {
+    if (activeDraftEffect && selectedCard && additionalCard) {
+      await quickPickCardWithDraftEffect(activeDraftEffect, [selectedCard, additionalCard]);
+      setActiveDraftEffect(null);
+      setAdditionalCard(null);
+      return;
+    }
+    if (activeDraftEffect) return;
+    await confirmPick();
+  };
+
+  const handleSelectCard = (instanceId: string) => {
+    if (!activeDraftEffect) {
+      selectCard(instanceId);
+      return;
+    }
+    if (selectedCard === instanceId) {
+      selectCard(null);
+      setAdditionalCard(null);
+    } else if (additionalCard === instanceId) {
+      setAdditionalCard(null);
+    } else if (!selectedCard) {
+      selectCard(instanceId);
+    } else {
+      setAdditionalCard(instanceId);
+    }
+  };
+
+  const handleToggleDraftEffect = (instanceId: string) => {
+    setAdditionalCard(null);
+    setActiveDraftEffect((current) => (current === instanceId ? null : instanceId));
+  };
+
   const sections = groupByRarity(pack);
 
   return (
     <div className="flex flex-col gap-4">
+      {enableDraftEffects && draftEffects.length > 0 && (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-amber-300/15 bg-amber-300/[0.04] px-3 py-2">
+          <span className="shrink-0 text-xs font-semibold text-amber-100">
+            {t("pack.draftEffects")}
+          </span>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            {draftEffects.map((card) => (
+              <label
+                key={card.instance_id}
+                className="flex cursor-pointer items-center gap-2 text-xs text-white/75"
+              >
+                <input
+                  type="checkbox"
+                  checked={activeDraftEffect === card.instance_id}
+                  onChange={() => handleToggleDraftEffect(card.instance_id)}
+                  className="h-4 w-4 accent-amber-400"
+                />
+                <span>{card.name}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
       <div className="flex items-center justify-between">
         <span className="text-xs text-white/40">{t("pack.cardsInPack", { count: pack.length })}</span>
         {showAutoPick && (
           <button
             type="button"
             onClick={handleAutoPick}
-            disabled={autoPicking}
+            disabled={autoPicking || activeDraftEffect !== null}
             className="rounded-lg border border-white/15 bg-white/[0.04] px-3 py-1 text-xs font-medium text-white/80 transition-colors hover:border-white/25 hover:bg-white/[0.08] disabled:cursor-not-allowed disabled:opacity-50"
           >
             {autoPicking ? t("pack.picking") : t("pack.autoPick")}
@@ -205,9 +287,10 @@ export function PackDisplay({
                 <PackCard
                   key={card.instance_id}
                   card={card}
-                  isSelected={selectedCard === card.instance_id}
-                  onSelect={selectCard}
-                  onConfirm={confirmPick}
+                  isSelected={selectedCard === card.instance_id || additionalCard === card.instance_id}
+                  onSelect={handleSelectCard}
+                  onConfirm={handleConfirmPick}
+                  confirmDisabled={activeDraftEffect !== null && additionalCard === null}
                   onHover={onCardHover}
                 />
               ))}

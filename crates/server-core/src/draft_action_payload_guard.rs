@@ -18,6 +18,27 @@ pub fn guard_draft_action_payload(action: &DraftAction) -> Result<(), String> {
         } => {
             validate_token("Pick.card_instance_id", card_instance_id, MAX_TOKEN_LEN)?;
         }
+        DraftAction::PickWithDraftEffect {
+            effect_card_instance_id,
+            card_instance_ids,
+            ..
+        } => {
+            validate_token(
+                "PickWithDraftEffect.effect_card_instance_id",
+                effect_card_instance_id,
+                MAX_TOKEN_LEN,
+            )?;
+            if card_instance_ids.len() != 2 {
+                return Err("PickWithDraftEffect requires exactly two card IDs".to_string());
+            }
+            for card_instance_id in card_instance_ids {
+                validate_token(
+                    "PickWithDraftEffect.card_instance_id",
+                    card_instance_id,
+                    MAX_TOKEN_LEN,
+                )?;
+            }
+        }
         DraftAction::SubmitDeck { main_deck, .. } => {
             validate_deck_list("SubmitDeck.main_deck", main_deck, MAX_MAIN_DECK_ENTRIES)?;
         }

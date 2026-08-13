@@ -387,21 +387,27 @@ fn apply_human_pick_and_resolve_bots(
     draft_session: &mut DraftSession,
     human_card_id: String,
 ) -> Result<(), JsValue> {
+    apply_human_pick_and_resolve_bots_with_action(
+        draft_session,
+        DraftAction::Pick {
+            seat: 0,
+            card_instance_id: human_card_id,
+        },
+    )
+}
+
+fn apply_human_pick_and_resolve_bots_with_action(
+    draft_session: &mut DraftSession,
+    human_action: DraftAction,
+) -> Result<(), JsValue> {
     if !matches!(draft_session.config.kind, DraftKind::Quick) {
         return Err(JsValue::from_str(
             "apply_human_pick_and_resolve_bots is only valid for Quick Draft",
         ));
     }
 
-    session::apply(
-        draft_session,
-        DraftAction::Pick {
-            seat: 0,
-            card_instance_id: human_card_id,
-        },
-        None,
-    )
-    .map_err(|e| JsValue::from_str(&format!("Human pick failed: {}", e)))?;
+    session::apply(draft_session, human_action, None)
+        .map_err(|e| JsValue::from_str(&format!("Human pick failed: {}", e)))?;
 
     let difficulty = DIFFICULTY.with(|cell| cell.get());
     let mut rng = RNG
@@ -455,6 +461,29 @@ pub fn submit_pick(card_instance_id: &str) -> Result<JsValue, JsValue> {
     let card_id = card_instance_id.to_string();
     with_draft_mut(|draft_session| {
         apply_human_pick_and_resolve_bots(draft_session, card_id)?;
+        Ok(to_js(&filter_for_player(draft_session, 0)))
+    })
+}
+
+/// Submit an additional pick using a drafted card's draft-time effect, then
+/// resolve all bot picks.
+#[wasm_bindgen]
+pub fn submit_pick_with_draft_effect(
+    effect_card_instance_id: &str,
+    card_instance_ids_json: &str,
+) -> Result<JsValue, JsValue> {
+    let effect_card_instance_id = effect_card_instance_id.to_string();
+    let card_instance_ids: Vec<String> = serde_json::from_str(card_instance_ids_json)
+        .map_err(|e| JsValue::from_str(&format!("Failed to parse draft-effect cards: {e}")))?;
+    with_draft_mut(|draft_session| {
+        apply_human_pick_and_resolve_bots_with_action(
+            draft_session,
+            DraftAction::PickWithDraftEffect {
+                seat: 0,
+                effect_card_instance_id,
+                card_instance_ids,
+            },
+        )?;
         Ok(to_js(&filter_for_player(draft_session, 0)))
     })
 }

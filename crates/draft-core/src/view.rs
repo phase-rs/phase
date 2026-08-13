@@ -139,6 +139,8 @@ pub struct DraftPlayerView {
     pub current_pack: Option<Vec<DraftCardInstance>>,
     /// The viewer's drafted pool
     pub pool: Vec<DraftCardInstance>,
+    /// Drafted cards whose effects can be activated during a later pick.
+    pub draft_effects: Vec<DraftCardInstance>,
     /// Engine-defined groups for displaying the viewer's pool without client-side
     /// card classification, ordering, or deduplication.
     pub pool_groups: DraftPoolGroups,
@@ -322,6 +324,11 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
         .map(|p| p.0.clone());
 
     let pool = session.pools.get(idx).cloned().unwrap_or_default();
+    let draft_effects = pool
+        .iter()
+        .filter(|card| card.draft_effect.is_some())
+        .cloned()
+        .collect();
     let sealed_packs = (session.kind == DraftKind::Sealed).then(|| {
         pool.chunks(usize::from(session.config.cards_per_pack))
             .map(ToOwned::to_owned)
@@ -388,6 +395,7 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
         pass_direction: session.pass_direction,
         current_pack,
         pool,
+        draft_effects,
         pool_groups,
         sealed_packs,
         seats,
@@ -714,6 +722,7 @@ mod tests {
             colors: colors.iter().map(ToString::to_string).collect(),
             cmc,
             type_line: type_line.to_string(),
+            draft_effect: None,
         }
     }
 
@@ -940,6 +949,7 @@ mod tests {
                 colors: Vec::new(),
                 cmc: 0,
                 type_line: String::new(),
+                draft_effect: None,
             })
             .collect();
         session.pools[1] = session.pools[0].clone();

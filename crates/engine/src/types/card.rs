@@ -91,6 +91,13 @@ pub struct PrintedCardRef {
     pub face_name: String,
 }
 
+/// A card ability that changes how the booster draft proceeds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DraftEffect {
+    AdditionalPick,
+}
+
 /// Exact image reference for a printed token.
 ///
 /// This is display metadata only. It is deliberately separate from
