@@ -47,12 +47,16 @@ fn reveillark_trigger_stacks_above_unresolved_electrolyze() {
         }
 
         match runner.state().waiting_for.clone() {
-            WaitingFor::Priority { .. } => runner
-                .act(GameAction::PassPriority)
-                .expect("pass priority through the response stack"),
-            WaitingFor::OrderTriggers { .. } => runner
-                .act(GameAction::OrderTriggers { order: vec![0] })
-                .expect("order the single triggered ability"),
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority through the response stack");
+            }
+            WaitingFor::OrderTriggers { .. } => {
+                runner
+                    .act(GameAction::OrderTriggers { order: vec![0] })
+                    .expect("order the single triggered ability");
+            }
             WaitingFor::OptionalEffectChoice { .. } => {
                 accepted_chwinga = true;
                 runner
