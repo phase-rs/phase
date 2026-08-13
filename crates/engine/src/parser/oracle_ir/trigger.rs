@@ -293,6 +293,7 @@ pub(crate) struct TriggerModifiers {
     pub(crate) optional: bool,
     /// CR 608.2d: Event-relative player explicitly named by the root optional
     /// subject, after any intervening-if wrapper has been removed.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) optional_player: Option<TargetFilter>,
     /// CR 118.12: "unless [player] pays {cost}" tax modifier.
     pub(crate) unless_pay: Option<UnlessPayModifier>,

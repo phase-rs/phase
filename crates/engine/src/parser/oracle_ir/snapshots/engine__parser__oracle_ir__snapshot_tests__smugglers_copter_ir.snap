@@ -203,7 +203,6 @@ expression: "&ir"
             },
             "modifiers": {
               "optional": true,
-              "optional_player": null,
               "unless_pay": null,
               "intervening_if": null,
               "trigger_subject": {
