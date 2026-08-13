@@ -28,6 +28,7 @@ fn issue_5271_overencumbered_etb_gives_every_token_to_enchanted_opponent() {
 
     let mut runner = scenario.build();
     runner.cast(aura).target_player(P1).resolve();
+    runner.advance_until_stack_empty();
 
     for token_name in ["Clue", "Food", "Junk"] {
         let token = runner
