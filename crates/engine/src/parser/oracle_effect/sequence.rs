@@ -413,6 +413,7 @@ fn parse_put_rest_on_bottom_line(input: &str) -> OracleResult<'_, DigRestOrder> 
         value(DigRestOrder::Preserve, tag(" in any order")),
     )))
     .parse(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
     let (input, _) = eof(input)?;
     Ok((input, rest_order.unwrap_or(DigRestOrder::Preserve)))
 }
