@@ -2533,7 +2533,7 @@ pub(super) fn parse_subject_application(
             is_optional: false,
         });
     }
-    // CR 303.4b + CR 702.5a + CR 701.17a (issues #5947, #5271): "enchanted
+    // CR 303.4b + CR 303.4m + CR 702.5a (issues #5947, #5271): "enchanted
     // player" / "enchanted opponent" name the Aura's attached player host —
     // `AttachedTo`, not a Typed EnchantedBy filter (which is object-only).
     // The opponent qualifier constrains attachment when the Aura enters; its
