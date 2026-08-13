@@ -9842,14 +9842,14 @@ pub enum WaitingFor {
         player: PlayerId,
         choices: Vec<MeldSelection>,
     },
-    /// CR 508.4a: choose what the meld result enters attacking. The engine
+    /// CR 508.4: choose what the meld result enters attacking. The engine
     /// supplies the complete legal topology; clients only return one member.
     MeldAttackTargetChoice {
         player: PlayerId,
         context: MeldSelection,
         valid_targets: Vec<AttackTarget>,
     },
-    /// CR 508.4a: choose a defending player, planeswalker, or battle for a
+    /// CR 508.4: choose a defending player, planeswalker, or battle for a
     /// creature that entered the battlefield attacking during resolution.
     EntryAttackTargetChoice {
         player: PlayerId,
