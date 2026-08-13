@@ -438,27 +438,17 @@ pub fn resolve(
             // CR 608.2c: Effect resolved as no-op (empty hand) — veto downstream IfYouDo.
             state.cost_payment_failed_flag = true;
         } else if random {
-            let mut remaining = hand_cards;
-            for _ in 0..count {
-                if remaining.is_empty() {
-                    break;
-                }
-                let index = state.rng.random_range(0..remaining.len());
-                let obj_id = remaining.swap_remove(index);
-                if let DiscardOutcome::NeedsReplacementChoice(player) =
-                    discard_caused_by_effect_with_source_and_frame(
-                        state,
-                        obj_id,
-                        discard_player,
-                        Some(ability.source_id),
-                        discard_frame,
-                        events,
-                    )
-                {
-                    state.waiting_for =
-                        crate::game::replacement::replacement_choice_waiting_for(player, state);
-                    return Ok(());
-                }
+            if discard_at_random(
+                state,
+                discard_player,
+                ability.source_id,
+                count,
+                hand_cards,
+                discard_frame,
+                events,
+            ) == RandomDiscardOutcome::NeedsReplacementChoice
+            {
+                return Ok(());
             }
         } else if hand_cards.is_empty() {
             // up_to=true with empty hand — choosing 0 is the only option, skip interaction.
@@ -546,6 +536,75 @@ pub(crate) fn discard_caused_by_effect_with_source(
 }
 
 /// Resolving-effect discard with optional operation-owned provenance.
+/// Result of a game-selected (random) discard batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RandomDiscardOutcome {
+    /// Every requested card was discarded (or replacement-redirected).
+    Completed,
+    /// A replacement effect needs a player choice before the batch can finish.
+    /// `state.waiting_for` has been set; callers MUST return without treating
+    /// the batch as complete.
+    NeedsReplacementChoice,
+}
+
+/// CR 701.9b: "Some effects … require a random discard." Move `count` cards
+/// picked uniformly at random from `eligible` to their owner's graveyard.
+///
+/// SINGLE AUTHORITY for game-selected discard. Both layers call it:
+///
+/// * the EFFECT layer — `Effect::Discard { selection: Random }` (Wheel of
+///   Torture class), and
+/// * the COST layer — an `AbilityCost::Discard { selection: Random }`
+///   unless-payment (Balduvian Horde class).
+///
+/// Keeping one implementation is what stops the two from drifting on the three
+/// things that are easy to get subtly wrong independently: which RNG is used,
+/// how a replacement effect mid-batch is surfaced, and whether a short pool
+/// discards partially.
+///
+/// RNG: `state.rng` — the seeded, replay-deterministic game RNG. Never
+/// `rand::thread_rng()`: a replayed game (and the CR 732.2a loop replay) must
+/// reproduce the identical discards, and a thread RNG would desync them.
+///
+/// Caller contract: `eligible` must already be filtered and length-checked.
+/// This function discards `min(count, eligible.len())` cards — it does NOT
+/// enforce CR 118.3's all-or-nothing rule, because the two layers disagree on
+/// what a short pool means (an effect discards what it can; a cost is simply
+/// unpayable). The cost caller performs that check before calling.
+pub(crate) fn discard_at_random(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    count: usize,
+    eligible: Vec<ObjectId>,
+    discard_frame: Option<crate::types::identifiers::DiscardFrameId>,
+    events: &mut Vec<GameEvent>,
+) -> RandomDiscardOutcome {
+    let mut remaining = eligible;
+    for _ in 0..count {
+        if remaining.is_empty() {
+            break;
+        }
+        let index = state.rng.random_range(0..remaining.len());
+        let obj_id = remaining.swap_remove(index);
+        if let DiscardOutcome::NeedsReplacementChoice(chooser) =
+            discard_caused_by_effect_with_source_and_frame(
+                state,
+                obj_id,
+                player,
+                Some(source_id),
+                discard_frame,
+                events,
+            )
+        {
+            state.waiting_for =
+                crate::game::replacement::replacement_choice_waiting_for(chooser, state);
+            return RandomDiscardOutcome::NeedsReplacementChoice;
+        }
+    }
+    RandomDiscardOutcome::Completed
+}
+
 pub(crate) fn discard_caused_by_effect_with_source_and_frame(
     state: &mut GameState,
     object_id: ObjectId,
@@ -645,6 +704,138 @@ fn route_discard(
         }
     }
     DiscardOutcome::Complete
+}
+
+#[cfg(test)]
+mod random_discard_authority_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    /// Stage `n` cards in P0's hand on a game seeded with `seed`.
+    fn hand_of(seed: u64, n: usize) -> (GameState, Vec<ObjectId>) {
+        let mut state = GameState::new_two_player(seed);
+        let hand = (0..n)
+            .map(|i| {
+                create_object(
+                    &mut state,
+                    CardId(10 + i as u64),
+                    PlayerId(0),
+                    format!("Hand {i}"),
+                    Zone::Hand,
+                )
+            })
+            .collect();
+        (state, hand)
+    }
+
+    fn discarded(state: &GameState, hand: &[ObjectId]) -> Vec<ObjectId> {
+        hand.iter()
+            .copied()
+            .filter(|id| state.objects[id].zone == Zone::Graveyard)
+            .collect()
+    }
+
+    /// CR 701.9b: the authority moves exactly `count` cards from the eligible
+    /// pool to the graveyard.
+    #[test]
+    fn discard_at_random_moves_exactly_count_cards() {
+        let (mut state, hand) = hand_of(42, 5);
+        let mut events = Vec::new();
+        let outcome = discard_at_random(
+            &mut state,
+            PlayerId(0),
+            ObjectId(500),
+            2,
+            hand.clone(),
+            None,
+            &mut events,
+        );
+        assert_eq!(outcome, RandomDiscardOutcome::Completed);
+        assert_eq!(discarded(&state, &hand).len(), 2);
+        assert_eq!(state.players[0].hand.len(), 3, "the rest stay in hand");
+    }
+
+    /// The RNG must be the seeded, replay-deterministic `state.rng` — NOT a
+    /// thread RNG. Two games with the same seed must discard the same cards,
+    /// or a replayed game (and the CR 732.2a accept-time loop replay) desyncs.
+    /// A `thread_rng` implementation passes the count test above but fails this.
+    #[test]
+    fn discard_at_random_is_seed_deterministic() {
+        let pick = |seed: u64| {
+            let (mut state, hand) = hand_of(seed, 6);
+            let mut events = Vec::new();
+            discard_at_random(
+                &mut state,
+                PlayerId(0),
+                ObjectId(500),
+                3,
+                hand.clone(),
+                None,
+                &mut events,
+            );
+            discarded(&state, &hand)
+        };
+        assert_eq!(
+            pick(7),
+            pick(7),
+            "same seed must reproduce the same random discards"
+        );
+    }
+
+    /// Reach-guard for the determinism test: the selection genuinely varies
+    /// with the seed, so `pick(7) == pick(7)` above is not passing merely
+    /// because the function always takes the same positions.
+    #[test]
+    fn discard_at_random_varies_across_seeds() {
+        let pick = |seed: u64| {
+            let (mut state, hand) = hand_of(seed, 8);
+            let mut events = Vec::new();
+            discard_at_random(
+                &mut state,
+                PlayerId(0),
+                ObjectId(500),
+                3,
+                hand.clone(),
+                None,
+                &mut events,
+            );
+            // Compare by hand POSITION, not ObjectId: ids are assigned in the
+            // same order every game, so positions are the comparable signal.
+            discarded(&state, &hand)
+                .iter()
+                .map(|id| hand.iter().position(|h| h == id).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let seeds: Vec<Vec<usize>> = (0u64..12).map(pick).collect();
+        assert!(
+            seeds.windows(2).any(|w| w[0] != w[1]),
+            "picks must depend on the seed, got identical selections: {seeds:?}"
+        );
+    }
+
+    /// Caller contract (documented on the authority): a pool shorter than
+    /// `count` discards what it can and reports `Completed`. Enforcing
+    /// CR 118.3's all-or-nothing rule is the COST caller's job, because the
+    /// effect layer legitimately discards a short hand.
+    #[test]
+    fn discard_at_random_short_pool_discards_what_it_can() {
+        let (mut state, hand) = hand_of(42, 2);
+        let mut events = Vec::new();
+        let outcome = discard_at_random(
+            &mut state,
+            PlayerId(0),
+            ObjectId(500),
+            5,
+            hand.clone(),
+            None,
+            &mut events,
+        );
+        assert_eq!(outcome, RandomDiscardOutcome::Completed);
+        assert_eq!(discarded(&state, &hand).len(), 2);
+    }
 }
 
 #[cfg(test)]

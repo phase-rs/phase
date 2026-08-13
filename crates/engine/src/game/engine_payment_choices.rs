@@ -789,7 +789,7 @@ pub(super) fn handle_unless_payment(
             AbilityCost::Discard {
                 count,
                 filter,
-                selection: _,
+                selection,
                 self_scope: _,
             } => {
                 let resolved = crate::game::quantity::resolve_quantity_with_targets(
@@ -810,6 +810,34 @@ pub(super) fn handle_unless_payment(
                 // the effect happens.
                 if (hand_cards.len() as u32) < count {
                     payment_failed = true;
+                } else if selection.is_random() {
+                    // CR 701.9b: a RANDOM discard offers the payer no choice —
+                    // the game picks. Pay it inline through the shared
+                    // `discard_at_random` authority (same code the effect layer
+                    // uses, same seeded `state.rng`) instead of surfacing
+                    // `WardDiscardChoice`, which would let the payer select and
+                    // silently turn Balduvian Horde's cost into a cheaper one.
+                    //
+                    // Structural precedent: the `Mill` arm below — the other
+                    // unless-cost with no choice to offer pays inline and falls
+                    // through to the paid path.
+                    match crate::game::effects::discard::discard_at_random(
+                        state,
+                        player,
+                        pending_effect.source_id,
+                        count as usize,
+                        hand_cards,
+                        None,
+                        events,
+                    ) {
+                        crate::game::effects::discard::RandomDiscardOutcome::Completed => {}
+                        // CR 616.1: a replacement effect parked a choice; its
+                        // cursor owns the continuation. Do not clobber it and
+                        // do not treat the pause as a declined payment.
+                        crate::game::effects::discard::RandomDiscardOutcome::NeedsReplacementChoice => {
+                            return Ok(action_result(events, state.waiting_for.clone()));
+                        }
+                    }
                 } else {
                     state.waiting_for = WaitingFor::WardDiscardChoice {
                         player,
@@ -2134,9 +2162,9 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCondition, AbilityDefinition, AbilityKind, ControllerRef, ManaContribution,
-        ManaProduction, QuantityExpr, ResolvedAbility, SacrificeCost, SubAbilityLink,
-        TriggerDefinition, TypedFilter,
+        AbilityCondition, AbilityDefinition, AbilityKind, CardSelectionMode, ControllerRef,
+        ManaContribution, ManaProduction, QuantityExpr, ResolvedAbility, SacrificeCost,
+        SubAbilityLink, TriggerDefinition, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin};
@@ -2409,6 +2437,130 @@ mod tests {
         );
 
         assert!(result.is_err());
+    }
+
+    /// Stage `hand_size` discardable cards for P0 and park an unless-payment
+    /// whose cost is a `count`-card discard in `selection` mode. The pending
+    /// effect is a marker `gain_life(5)`: it fires only if the unless-cost goes
+    /// UNPAID, so "life still 20" proves the cost was paid.
+    fn unless_discard_state(
+        hand_size: usize,
+        count: i32,
+        selection: CardSelectionMode,
+    ) -> (GameState, Vec<ObjectId>) {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 20;
+        let hand: Vec<ObjectId> = (0..hand_size)
+            .map(|i| {
+                create_object(
+                    &mut state,
+                    CardId(10 + i as u64),
+                    PlayerId(0),
+                    format!("Hand {i}"),
+                    crate::types::zones::Zone::Hand,
+                )
+            })
+            .collect();
+        let pending = ResolvedAbility::new(gain_life(5), vec![], ObjectId(100), PlayerId(0));
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(0),
+            cost: AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: count },
+                filter: None,
+                selection,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+            },
+            pending_effect: Box::new(pending),
+            trigger_event: None,
+            effect_description: None,
+            remaining: Vec::new(),
+        };
+        (state, hand)
+    }
+
+    fn graveyard_count(state: &GameState, hand: &[ObjectId]) -> usize {
+        hand.iter()
+            .filter(|id| state.objects[id].zone == crate::types::zones::Zone::Graveyard)
+            .count()
+    }
+
+    /// CR 701.9b + CR 118.12a: a RANDOM unless-discard has no choice to offer,
+    /// so it must be paid inline by the game — never surfaced as an interactive
+    /// selection. Before the fix this arm ignored `selection` and raised
+    /// `WardDiscardChoice`, letting the payer pick which card to pitch and
+    /// silently making a Balduvian Horde-class cost cheaper than printed.
+    #[test]
+    fn unless_discard_random_pays_inline_without_prompting() {
+        let (mut state, hand) = unless_discard_state(3, 1, CardSelectionMode::Random);
+        let mut events = Vec::new();
+        let waiting_for = state.waiting_for.clone();
+        handle_unless_payment(&mut state, waiting_for, true, &mut events)
+            .expect("random unless-discard should resolve");
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::WardDiscardChoice { .. }),
+            "a random discard must not surface an interactive selection, got {:?}",
+            state.waiting_for
+        );
+        assert_eq!(
+            graveyard_count(&state, &hand),
+            1,
+            "exactly one card must have been discarded by the game"
+        );
+        assert_eq!(
+            state.players[0].life, 20,
+            "the cost was paid, so the unless-effect (gain 5) must not happen"
+        );
+    }
+
+    /// NO-REGRESSION twin of the test above: a player-CHOSEN unless-discard
+    /// still routes to the interactive prompt and moves nothing until the
+    /// player selects. Without this, the arm above could pass by making every
+    /// discard game-selected.
+    #[test]
+    fn unless_discard_chosen_still_prompts() {
+        let (mut state, hand) = unless_discard_state(3, 1, CardSelectionMode::Chosen);
+        let mut events = Vec::new();
+        let waiting_for = state.waiting_for.clone();
+        handle_unless_payment(&mut state, waiting_for, true, &mut events)
+            .expect("chosen unless-discard should resolve");
+
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::WardDiscardChoice { remaining: 1, .. }
+            ),
+            "a player-chosen discard must still prompt, got {:?}",
+            state.waiting_for
+        );
+        assert_eq!(
+            graveyard_count(&state, &hand),
+            0,
+            "nothing may move before the player has chosen"
+        );
+    }
+
+    /// CR 118.3: "A player can't pay a cost without having the necessary
+    /// resources to pay it fully." A random discard demanding more cards than
+    /// the payer holds is unpayable, so the unless-effect happens and the hand
+    /// is left untouched — no partial random discard.
+    #[test]
+    fn unless_discard_random_short_hand_is_unpayable() {
+        let (mut state, hand) = unless_discard_state(1, 2, CardSelectionMode::Random);
+        let mut events = Vec::new();
+        let waiting_for = state.waiting_for.clone();
+        handle_unless_payment(&mut state, waiting_for, true, &mut events)
+            .expect("unpayable unless-discard should resolve");
+
+        assert_eq!(
+            graveyard_count(&state, &hand),
+            0,
+            "an unpayable cost must not take a partial random discard"
+        );
+        assert_eq!(
+            state.players[0].life, 25,
+            "the cost was unpayable, so the unless-effect (gain 5) happens"
+        );
     }
 
     /// CR 118.12 + CR 119.4 + CR 107.3c (M1 fold): An unless-pay-life cost
