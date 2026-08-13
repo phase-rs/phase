@@ -11835,6 +11835,7 @@ mod tests {
             selectable_cards: pool,
             kept_destination: None,
             rest_destination: None,
+            rest_order: engine::types::ability::DigRestOrder::Preserve,
             source_id: None,
             enter_tapped: false,
         };
@@ -11959,6 +11960,7 @@ mod tests {
                 selectable_cards: vec![pool[0]],
                 kept_destination: None,
                 rest_destination: None,
+                rest_order: engine::types::ability::DigRestOrder::Preserve,
                 source_id: None,
                 enter_tapped: false,
             }

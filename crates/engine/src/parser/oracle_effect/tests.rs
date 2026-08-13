@@ -10,8 +10,8 @@ use crate::parser::parse_oracle_text;
 use crate::types::ability::CardPlayMode::{Cast, Play};
 use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermission};
 use crate::types::ability::{
-    AttachmentKind, CardSelectionMode, CastManaObjectScope, CastManaSpentMetric, ExcessRecipient,
-    ForEachCategoryAction, ModalChoice, PerpetualModification, SeatDirection,
+    AttachmentKind, CardSelectionMode, CastManaObjectScope, CastManaSpentMetric, DigRestOrder,
+    ExcessRecipient, ForEachCategoryAction, ModalChoice, PerpetualModification, SeatDirection,
 };
 use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
@@ -3632,6 +3632,7 @@ fn dig_conditional_instead_alternative_preserves_both_branches() {
         up_to,
         filter,
         rest_destination,
+        rest_order,
         destination,
         ..
     } = &*def.effect
@@ -3646,6 +3647,7 @@ fn dig_conditional_instead_alternative_preserves_both_branches() {
     assert!(!*up_to, "alt branch is exact-2 (not up-to)");
     assert_eq!(*destination, Some(Zone::Hand));
     assert_eq!(*rest_destination, Some(Zone::Library));
+    assert_eq!(*rest_order, DigRestOrder::Random);
     let TargetFilter::Or { filters } = filter else {
         panic!("alt filter should be Or, got {:?}", filter);
     };
@@ -3681,6 +3683,7 @@ fn dig_conditional_instead_alternative_preserves_both_branches() {
         up_to: base_up_to,
         filter: base_filter,
         rest_destination: base_rest,
+        rest_order: base_rest_order,
         ..
     } = &*base.effect
     else {
@@ -3690,6 +3693,11 @@ fn dig_conditional_instead_alternative_preserves_both_branches() {
     assert_eq!(*base_keep, Some(1));
     assert!(*base_up_to, "base branch is up-to 1");
     assert_eq!(*base_rest, Some(Zone::Library), "PutRest must recurse");
+    assert_eq!(
+        *base_rest_order,
+        DigRestOrder::Random,
+        "PutRest order must recurse"
+    );
     let TargetFilter::Or {
         filters: base_filters,
     } = base_filter
@@ -22649,6 +22657,7 @@ fn exiled_cause_publishers_all_stamp_exiled_at_runtime() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
+            rest_order: crate::types::ability::DigRestOrder::Preserve,
             reveal: false,
             enter_tapped: false,
             source: crate::types::ability::DigSource::default(),

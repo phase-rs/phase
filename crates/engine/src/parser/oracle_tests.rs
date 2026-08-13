@@ -7021,6 +7021,30 @@ fn thassas_oracle_win_condition_gated_by_devotion_vs_library() {
         .execute
         .as_ref()
         .expect("trigger should have execute body");
+    match &*exec.effect {
+        crate::types::ability::Effect::Dig {
+            keep_count,
+            up_to,
+            destination,
+            rest_destination,
+            rest_order,
+            ..
+        } => {
+            assert_eq!(*keep_count, Some(1));
+            assert!(*up_to);
+            assert_eq!(*destination, Some(crate::types::zones::Zone::Library));
+            assert_eq!(*rest_destination, Some(crate::types::zones::Zone::Library));
+            assert_eq!(*rest_order, crate::types::ability::DigRestOrder::Random);
+        }
+        other => panic!("Thassa's selection must fuse into Dig, got {other:?}"),
+    }
+    assert!(
+        !matches!(
+            exec.sub_ability.as_deref().map(|ability| &*ability.effect),
+            Some(crate::types::ability::Effect::PutAtLibraryPosition { .. })
+        ),
+        "Thassa's top-card instruction must not remain a separate ParentTarget move"
+    );
     // Walk to the innermost SequentialSibling chain — the WinTheGame node.
     let mut node = exec;
     while let Some(sub) = node.sub_ability.as_ref() {
@@ -10160,6 +10184,15 @@ fn parses_activate_only_timing_and_only_if_condition() {
             &["Creature"],
             &[],
         );
+    // CR 113.6m: the effect moves the source out of the graveyard, so the
+    // ability functions only from the graveyard. This is the assertion that was
+    // missing — the restrictions below were checked from day one, the zone was
+    // not, which is how the `Graveyard → Hand` gap survived.
+    assert_eq!(
+        r.abilities[0].activation_zone,
+        Some(Zone::Graveyard),
+        "CR 113.6m: a graveyard self-return functions only from the graveyard"
+    );
     let restrictions = &r.abilities[0].activation_restrictions;
     assert!(restrictions.contains(&ActivationRestriction::DuringYourTurn));
     assert!(restrictions.iter().any(|restriction| matches!(
@@ -13742,9 +13775,9 @@ fn put_self_from_graveyard_onto_battlefield_activates_from_graveyard() {
 
 #[test]
 fn battlefield_self_changezone_leaves_activation_zone_unset() {
-    // Negative control: a normal battlefield-activated ability whose effect
-    // does NOT move the source out of a non-battlefield zone must keep
-    // activation_zone == None (→ defaults to Battlefield at runtime).
+    // Negative control, VARIANT level: a normal battlefield-activated ability
+    // whose effect does NOT move the source out of a non-battlefield zone must
+    // keep activation_zone == None (→ defaults to Battlefield at runtime).
     let r = parse(
         "{1}{U}: Return Test Bounce Creature to its owner's hand.",
         "Test Bounce Creature",
@@ -13755,10 +13788,546 @@ fn battlefield_self_changezone_leaves_activation_zone_unset() {
     assert_eq!(r.abilities.len(), 1);
     let ability = &r.abilities[0];
     assert_eq!(ability.kind, AbilityKind::Activated);
+    // Reach-guard — without it this control is VACUOUS. A self-bounce lowers to
+    // `Effect::Bounce`, not `Effect::ChangeZone`, so it never reaches the
+    // `ChangeZone` arm of `activation_zone_from_self_effect` and would pass
+    // identically with or without the CR 113.6m derivation. Pinning the variant
+    // makes that explicit: if a future parser change routes self-bounce through
+    // `ChangeZone`, this fails loudly instead of going quietly vacuous. The
+    // FIELD-level control (a real `ChangeZone` that IS entered and then
+    // rejected on its fields) is
+    // `enchanted_creature_exile_leaves_activation_zone_unset` below.
+    assert!(
+        matches!(
+            *ability.effect,
+            Effect::Bounce {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "reach-guard: a self-bounce must lower to Effect::Bounce, so this \
+         control never enters the ChangeZone arm; got {:?}",
+        ability.effect
+    );
     assert_eq!(
         ability.activation_zone, None,
         "a self-bounce (battlefield → hand) must not derive an activation zone"
     );
+}
+
+/// V1 — CR 113.6m: `Graveyard → Hand` is the reported bug. Bestial Bloodline's
+/// `{4}{G}: Return this card from your graveyard to your hand.` must derive
+/// `activation_zone: Graveyard`; before the destination gate was removed from
+/// `activation_zone_from_self_effect` it stayed `None`, so the Aura offered the
+/// ability on the battlefield and withheld it in the graveyard — both wrong.
+#[test]
+fn return_self_from_graveyard_to_hand_activates_from_graveyard() {
+    let r = parse(
+        "Enchant creature\nEnchanted creature gets +2/+2.\n{4}{G}: Return this \
+         card from your graveyard to your hand.",
+        "Bestial Bloodline",
+        &[],
+        &["Enchantment"],
+        &["Aura"],
+    );
+    assert_eq!(r.abilities.len(), 1);
+    let ability = &r.abilities[0];
+    assert_eq!(ability.kind, AbilityKind::Activated);
+    // Reach-guard: the ability parsed and carries the shape the derivation reads.
+    assert!(
+        matches!(
+            *ability.effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Hand,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "reach-guard: expected a Graveyard → Hand self-ChangeZone, got {:?}",
+        ability.effect
+    );
+    assert_eq!(
+        ability.activation_zone,
+        Some(Zone::Graveyard),
+        "CR 113.6m: the effect moves the card out of the graveyard, so the \
+         ability functions only from the graveyard"
+    );
+}
+
+/// V2 — the derivation is DESTINATION-AGNOSTIC. CR 113.6m quantifies over the
+/// zone the object is moved *out of*; the destination appears nowhere in the
+/// rule. This is the building-block property, not a `→ Hand` special case.
+#[test]
+fn self_changezone_activation_zone_is_destination_agnostic() {
+    let rows: [(&str, Zone); 4] = [
+        (
+            "{1}: Return this card from your graveyard to your hand.",
+            Zone::Hand,
+        ),
+        (
+            "{1}: Put this card from your graveyard onto the battlefield.",
+            Zone::Battlefield,
+        ),
+        ("{1}: Exile this card from your graveyard.", Zone::Exile),
+        (
+            "{1}: Shuffle this card into your library from your graveyard.",
+            Zone::Library,
+        ),
+    ];
+    for (text, destination) in rows {
+        let r = parse(
+            text,
+            "Test Destination Axis",
+            &[],
+            &["Creature"],
+            &["Zombie"],
+        );
+        assert_eq!(r.abilities.len(), 1, "one activated ability for {text:?}");
+        let ability = &r.abilities[0];
+        assert_eq!(ability.kind, AbilityKind::Activated);
+        // Reach-guard FIRST: a parser shortfall must fail loudly here rather
+        // than make the activation-zone assertion below vacuous.
+        assert!(
+            matches!(
+                *ability.effect,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Graveyard),
+                    destination: parsed,
+                    target: TargetFilter::SelfRef,
+                    ..
+                } if parsed == destination
+            ),
+            "reach-guard: {text:?} must lower to a Graveyard → {destination:?} \
+             self-ChangeZone, got {:?}",
+            ability.effect
+        );
+        assert_eq!(
+            ability.activation_zone,
+            Some(Zone::Graveyard),
+            "CR 113.6m: the origin decides the activation zone; destination \
+             {destination:?} must not change the answer"
+        );
+    }
+}
+
+/// V3 — the derivation is PER ABILITY, not per card. On a card carrying both an
+/// affected and an unaffected activated ability, only the affected one may flip.
+/// Lochmere Serpent additionally proves (a) the `sub_ability` recursion is
+/// walked and is KIND-AGNOSTIC (its self-move sits on a `Spell`-kind
+/// sub-ability) and (b) a non-self `ChangeZone` at the top level neither
+/// short-circuits the walk nor mis-derives. Abzan Devotee proves the derivation
+/// does not leak sideways onto a mana sibling on the same card.
+#[test]
+fn activation_zone_is_derived_per_ability_not_per_card() {
+    /// Proof that the ability at this index is the one the row means — an index
+    /// shift or a parser shape change fails loudly instead of silently moving
+    /// the expectation onto a different ability.
+    type AbilityGuard = fn(&AbilityDefinition) -> bool;
+
+    // The keyword column mirrors MTGJSON's `keywords` array, which production
+    // passes alongside the printed text; a printed keyword-only line ("Flash")
+    // needs that hint to be recognised as a keyword line rather than falling
+    // through to an ability slot.
+    #[allow(clippy::type_complexity)]
+    let rows: [(
+        &str,
+        &str,
+        &[Keyword],
+        &[&str],
+        &[&str],
+        &[(Option<Zone>, AbilityGuard)],
+    ); 3] = [
+        (
+            "Tymaret, the Murder King",
+            "{1}{R}, Sacrifice another creature: Tymaret deals 2 damage to \
+             target player or planeswalker.\n{1}{B}, Sacrifice a creature: \
+             Return this card from your graveyard to your hand.",
+            &[],
+            &["Creature"],
+            &["Zombie", "Warrior"],
+            &[
+                (None, |a| matches!(*a.effect, Effect::DealDamage { .. })),
+                (Some(Zone::Graveyard), |a| {
+                    matches!(
+                        *a.effect,
+                        Effect::ChangeZone {
+                            origin: Some(Zone::Graveyard),
+                            destination: Zone::Hand,
+                            target: TargetFilter::SelfRef,
+                            ..
+                        }
+                    )
+                }),
+            ],
+        ),
+        (
+            "Lochmere Serpent",
+            "Flash\n{U}, Sacrifice an Island: This creature can't be blocked \
+             this turn.\n{B}, Sacrifice a Swamp: You gain 1 life and draw a \
+             card.\n{U}{B}: Exile five target cards from an opponent's \
+             graveyard. Return this card from your graveyard to your hand. \
+             Activate only as a sorcery.",
+            &[Keyword::Flash],
+            &["Creature"],
+            &["Serpent"],
+            &[
+                (None, |a| matches!(*a.effect, Effect::GenericEffect { .. })),
+                (None, |a| matches!(*a.effect, Effect::GainLife { .. })),
+                (Some(Zone::Graveyard), |a| {
+                    // Top-level move is a NON-self exile of opponent cards; the
+                    // self-move lives on a `Spell`-kind sub-ability, which only
+                    // the kind-agnostic recursion can reach.
+                    matches!(
+                        *a.effect,
+                        Effect::ChangeZone {
+                            origin: None,
+                            destination: Zone::Exile,
+                            target: TargetFilter::Typed { .. },
+                            ..
+                        }
+                    ) && a.sub_ability.as_deref().is_some_and(|sub| {
+                        sub.kind == AbilityKind::Spell
+                            && matches!(
+                                *sub.effect,
+                                Effect::ChangeZone {
+                                    origin: Some(Zone::Graveyard),
+                                    destination: Zone::Hand,
+                                    target: TargetFilter::SelfRef,
+                                    ..
+                                }
+                            )
+                    })
+                }),
+            ],
+        ),
+        (
+            "Abzan Devotee",
+            "{1}: Add {W}, {B}, or {G}. Activate only once each turn.\n{2}{B}: \
+             Return this card from your graveyard to your hand.",
+            &[],
+            &["Creature"],
+            &["Dog", "Cleric"],
+            &[
+                // A mana ability: the derivation must not leak sideways onto it.
+                (None, |a| matches!(*a.effect, Effect::Mana { .. })),
+                (Some(Zone::Graveyard), |a| {
+                    matches!(
+                        *a.effect,
+                        Effect::ChangeZone {
+                            origin: Some(Zone::Graveyard),
+                            destination: Zone::Hand,
+                            target: TargetFilter::SelfRef,
+                            ..
+                        }
+                    )
+                }),
+            ],
+        ),
+    ];
+
+    for (name, text, keywords, types, subtypes, expected) in rows {
+        let r = parse(text, name, keywords, types, subtypes);
+        assert_eq!(
+            r.abilities.len(),
+            expected.len(),
+            "{name}: activated-ability count"
+        );
+        for (index, (expected_zone, guard)) in expected.iter().enumerate() {
+            let ability = &r.abilities[index];
+            assert!(
+                guard(ability),
+                "{name}: ability {index} is not the shape this row expects; \
+                 got {:?}",
+                ability.effect
+            );
+            assert_eq!(
+                ability.activation_zone, *expected_zone,
+                "{name}: ability {index} activation_zone (CR 113.6m applies per \
+                 ability, not per card)"
+            );
+        }
+    }
+}
+
+/// V4 — NEGATIVE, FIELD level. Cooped Up's `{2}{W}: Exile enchanted creature.`
+/// produces a real `ChangeZone` that DOES reach the derivation and is rejected
+/// on both `origin: Some(_)` and `target: SelfRef`. Distinct from the
+/// variant-level control above, which never enters the `ChangeZone` arm at all.
+#[test]
+fn enchanted_creature_exile_leaves_activation_zone_unset() {
+    let r = parse(
+        "Enchant creature\nEnchanted creature can't attack or block.\n{2}{W}: \
+         Exile enchanted creature.",
+        "Cooped Up",
+        &[],
+        &["Enchantment"],
+        &["Aura"],
+    );
+    assert_eq!(r.abilities.len(), 1);
+    let ability = &r.abilities[0];
+    assert_eq!(ability.kind, AbilityKind::Activated);
+    // Paired positive reach-guard: the effect IS a ChangeZone, so the `if let`
+    // arm is entered; it is rejected on the fields, not on the variant.
+    assert!(
+        matches!(
+            *ability.effect,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::Typed { .. },
+                ..
+            }
+        ),
+        "reach-guard: the derivation must be entered with a real ChangeZone \
+         and rejected on its fields; got {:?}",
+        ability.effect
+    );
+    assert_eq!(
+        ability.activation_zone, None,
+        "moving another object out of a zone says nothing about where THIS \
+         ability functions (CR 113.6m is about the object the ability is on)"
+    );
+}
+
+/// V5 — NEGATIVE, variant level, on a real printed card. Cage of Hands'
+/// `{1}{W}: Return this Aura to its owner's hand.` is a self-bounce from the
+/// battlefield: CR 113.6's default already covers it, and CR 113.6m adds
+/// nothing because the move is not *out of* a non-battlefield zone.
+#[test]
+fn cage_of_hands_self_bounce_leaves_activation_zone_unset() {
+    let r = parse(
+        "Enchant creature\nEnchanted creature can't attack or block.\n{1}{W}: \
+         Return this Aura to its owner's hand.",
+        "Cage of Hands",
+        &[],
+        &["Enchantment"],
+        &["Aura"],
+    );
+    assert_eq!(r.abilities.len(), 1);
+    let ability = &r.abilities[0];
+    assert_eq!(ability.kind, AbilityKind::Activated);
+    assert!(
+        matches!(
+            *ability.effect,
+            Effect::Bounce {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "reach-guard: Cage of Hands' self-bounce lowers to Effect::Bounce; if \
+         it ever lowers to ChangeZone this control must be re-derived, got {:?}",
+        ability.effect
+    );
+    assert_eq!(ability.activation_zone, None);
+}
+
+/// V6 — MULTI-AUTHORITY. Kogla and Yidaro is the only parsed ability in the
+/// corpus where the cost-side and effect-side derivations disagree: the cost
+/// ("Discard this card") says `Hand`, the effect ("Shuffle this card into your
+/// library from your graveyard") says `Graveyard`. `Hand` is correct: CR 113.6j
+/// and CR 118.3 together make a graveyard activation unpayable, and CR 113.6m's
+/// `unless` clause exempts the effect side because the discard is what put the
+/// card in the graveyard. This pins the `.or_else()` ORDER, which became
+/// load-bearing only once the destination gate was removed (before that,
+/// `→ Library` silenced the effect side by accident).
+#[test]
+fn discard_self_cost_beats_graveyard_effect_origin() {
+    let r = parse(
+        "When Kogla and Yidaro enters, choose one —\n• It gains trample and \
+         haste until end of turn.\n• It fights target creature you don't \
+         control.\n{2}{R}{G}, Discard this card: Destroy up to one target \
+         artifact or enchantment. Shuffle this card into your library from your \
+         graveyard, then draw a card.",
+        "Kogla and Yidaro",
+        &[],
+        &["Creature"],
+        &["Ape", "Dinosaur", "Turtle"],
+    );
+    assert_eq!(r.abilities.len(), 1);
+    let ability = &r.abilities[0];
+    assert_eq!(ability.kind, AbilityKind::Activated);
+
+    // Both authorities must genuinely fire — `Hand` is a RESOLVED CONFLICT, not
+    // a single-source result. `oracle_tests.rs` is a child module of `oracle`,
+    // so the two private derivations can be called directly.
+    let cost = ability.cost.as_ref().expect("the ability has a cost");
+    assert_eq!(
+        activation_zone_from_self_cost(cost),
+        Some(Zone::Hand),
+        "CR 113.6j + CR 118.3: 'Discard this card' is payable only from hand"
+    );
+    assert_eq!(
+        activation_zone_from_self_effect(ability),
+        Some(Zone::Graveyard),
+        "CR 113.6m read alone would say Graveyard — this is the losing authority"
+    );
+    assert_eq!(
+        ability.activation_zone,
+        Some(Zone::Hand),
+        "cost-side derivation keeps priority; swapping the .or_else() links \
+         regresses this card to Graveyard"
+    );
+}
+
+/// CR 113.6j + CR 113.6m: a self-sacrifice cost puts the source into its
+/// graveyard, so it keeps battlefield activation authority over a later
+/// graveyard self-return effect.
+#[test]
+fn sacrifice_self_cost_beats_graveyard_effect_origin() {
+    let r = parse(
+        "{B}, Sacrifice this creature: Return this card from your graveyard to your hand.",
+        "Test Sacrificial Return",
+        &[],
+        &["Creature"],
+        &[],
+    );
+    assert_eq!(r.abilities.len(), 1);
+    let ability = &r.abilities[0];
+    let cost = ability.cost.as_ref().expect("the ability has a cost");
+    assert!(
+        matches!(
+            cost,
+            AbilityCost::Composite { costs }
+                if costs.iter().any(|cost| matches!(
+                    cost,
+                    AbilityCost::Sacrifice(sacrifice)
+                        if sacrifice.target == TargetFilter::SelfRef
+                ))
+        ),
+        "reach-guard: expected a self-sacrifice cost, got {cost:?}"
+    );
+    assert_eq!(
+        activation_zone_from_self_cost(cost),
+        Some(Zone::Battlefield),
+        "a self-sacrifice is payable only while the source is on the battlefield"
+    );
+    assert_eq!(
+        activation_zone_from_self_effect(ability),
+        Some(Zone::Graveyard),
+        "the later self-return alone would derive Graveyard"
+    );
+    assert_eq!(
+        ability.activation_zone,
+        Some(Zone::Battlefield),
+        "cost-side source-zone authority must beat the later effect-side origin"
+    );
+}
+
+/// A self-sacrifice cost is battlefield-only, but Battlefield is already the
+/// runtime default. Do not serialize it unless it must override an effect-side
+/// non-battlefield origin.
+#[test]
+fn self_sacrifice_without_effect_origin_keeps_default_activation_zone() {
+    let r = parse(
+        "{R}, Sacrifice this artifact: Draw a card.",
+        "Test Sacrificial Draw",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+    assert_eq!(r.abilities.len(), 1);
+    let ability = &r.abilities[0];
+    let cost = ability.cost.as_ref().expect("the ability has a cost");
+    assert_eq!(
+        activation_zone_from_self_cost(cost),
+        Some(Zone::Battlefield),
+        "reach-guard: the cost must derive battlefield authority"
+    );
+    assert_eq!(
+        activation_zone_from_self_effect(ability),
+        None,
+        "reach-guard: drawing does not derive an effect-side source zone"
+    );
+    assert_eq!(
+        ability.activation_zone, None,
+        "the default battlefield representation must not create a parse delta"
+    );
+}
+
+/// The canonical own-resolution visitor must cover every direct ability branch
+/// that can carry a self-zone move.
+#[test]
+fn self_changezone_derivation_visits_sub_else_and_mode_branches() {
+    let root = parse(
+        "{1}: Draw a card.",
+        "Test Branch Root",
+        &[],
+        &["Artifact"],
+        &[],
+    )
+    .abilities
+    .remove(0);
+    let self_return = parse(
+        "{1}: Return this card from your graveyard to your hand.",
+        "Test Branch Return",
+        &[],
+        &["Artifact"],
+        &[],
+    )
+    .abilities
+    .remove(0);
+
+    let mut sub = root.clone();
+    sub.sub_ability = Some(Box::new(self_return.clone()));
+    let mut otherwise = root.clone();
+    otherwise.else_ability = Some(Box::new(self_return.clone()));
+    let mut modal = root;
+    modal.mode_abilities.push(self_return);
+
+    for (branch, ability) in [("sub", sub), ("else", otherwise), ("mode", modal)] {
+        assert_eq!(
+            activation_zone_from_self_effect(&ability),
+            Some(Zone::Graveyard),
+            "the {branch} branch's self-return must contribute its origin"
+        );
+    }
+}
+
+/// V7 — cost-shape NEAR-MISSES must not short-circuit to the wrong zone.
+/// Phantasmagorian's cost discards *other* cards (`self_scope` is not
+/// `SourceCard`), and Salvage Titan's cost exiles *other* artifact cards from
+/// the graveyard rather than itself. In both the cost side must decline and the
+/// effect side must win with `Graveyard`.
+#[test]
+fn non_self_discard_and_non_self_exile_costs_defer_to_effect_origin() {
+    let rows: [(&str, &str, &[&str], &[&str]); 2] = [
+        (
+            "Phantasmagorian",
+            "When you cast this spell, any player may discard three cards. If a \
+             player does, counter Phantasmagorian.\nDiscard three cards: Return \
+             this card from your graveyard to your hand.",
+            &["Creature"],
+            &["Horror"],
+        ),
+        (
+            "Salvage Titan",
+            "You may sacrifice three artifacts rather than pay this spell's \
+             mana cost.\nExile three artifact cards from your graveyard: Return \
+             this card from your graveyard to your hand.",
+            &["Artifact", "Creature"],
+            &["Golem"],
+        ),
+    ];
+    for (name, text, types, subtypes) in rows {
+        let r = parse(text, name, &[], types, subtypes);
+        assert_eq!(r.abilities.len(), 1, "{name}: one activated ability");
+        let ability = &r.abilities[0];
+        let cost = ability.cost.as_ref().expect("the ability has a cost");
+        // Reach-guard: the cost side is REACHED and DECLINES, so the effect
+        // side's win below is real rather than an artifact of an absent cost.
+        assert_eq!(
+            activation_zone_from_self_cost(cost),
+            None,
+            "{name}: the cost does not move the source out of any zone, so the \
+             cost-side derivation must decline; cost = {cost:?}"
+        );
+        assert_eq!(
+            ability.activation_zone,
+            Some(Zone::Graveyard),
+            "{name}: CR 113.6m — the effect's origin decides"
+        );
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -18699,6 +19268,7 @@ fn muxus_put_all_from_among_sets_rest_to_library() {
             up_to,
             filter,
             rest_destination,
+            rest_order,
             ..
         } => {
             assert_eq!(*count, QuantityExpr::Fixed { value: 6 }, "dig six");
@@ -18724,6 +19294,11 @@ fn muxus_put_all_from_among_sets_rest_to_library() {
                     Some(Zone::Library),
                     "the in-clause 'and the rest on the bottom' rider must route the rest to the library, not the graveyard",
                 );
+            assert_eq!(
+                *rest_order,
+                crate::types::ability::DigRestOrder::Random,
+                "only the exact random-order rider must request a shuffled rest pile"
+            );
         }
         other => panic!(
             "Expected Dig effect, got {:?}",
@@ -18750,6 +19325,7 @@ fn commune_with_nature_dig_from_among() {
             up_to,
             filter,
             rest_destination,
+            rest_order,
             ..
         } => {
             assert_eq!(*count, QuantityExpr::Fixed { value: 5 });
@@ -18762,6 +19338,11 @@ fn commune_with_nature_dig_from_among() {
                 "filter should require creatures",
             );
             assert_eq!(*rest_destination, Some(Zone::Library));
+            assert_eq!(
+                *rest_order,
+                crate::types::ability::DigRestOrder::Preserve,
+                "'in any order' must not be misrepresented as a random instruction"
+            );
         }
         other => {
             panic!(

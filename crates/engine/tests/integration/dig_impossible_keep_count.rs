@@ -47,6 +47,7 @@ fn filtered_dig_runner() -> (engine::game::scenario::GameRunner, Vec<ObjectId>) 
         selectable_cards: vec![looked_at[0]],
         kept_destination: Some(Zone::Hand),
         rest_destination: Some(Zone::Graveyard),
+        rest_order: engine::types::ability::DigRestOrder::Preserve,
         source_id: None,
         enter_tapped: false,
     };

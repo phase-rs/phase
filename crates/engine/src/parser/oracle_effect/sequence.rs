@@ -24,12 +24,12 @@ use crate::parser::oracle_quantity::{
 };
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, ChoiceType, Chooser,
-    ContinuousModification, ControllerRef, CopyRetargetPermission, CounterSourceRider, DigSource,
-    Duration, Effect, EffectScope, ExcessRecipient, FaceDownBody, FaceDownProfile, FilterProp,
-    ForEachCategoryAction, LibraryPosition, ManaSpendRestriction, MultiTargetSpec, ObjectScope,
-    PermissionGrantee, PlayerFilter, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
-    SpellStackToGraveyardReplacement, StaticDefinition, TargetChoiceTiming, TargetFilter,
-    TypeFilter, TypedFilter,
+    ContinuousModification, ControllerRef, CopyRetargetPermission, CounterSourceRider,
+    DigRestOrder, DigSource, Duration, Effect, EffectScope, ExcessRecipient, FaceDownBody,
+    FaceDownProfile, FilterProp, ForEachCategoryAction, LibraryPosition, ManaSpendRestriction,
+    MultiTargetSpec, ObjectScope, PermissionGrantee, PlayerFilter, PtValue, QuantityExpr,
+    QuantityRef, RevealUntilDisposition, SpellStackToGraveyardReplacement, StaticDefinition,
+    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -404,20 +404,18 @@ fn parse_reveal_until_rest_zone(lower: &str) -> Option<Zone> {
 /// Whole-line dig continuation "put the rest on the bottom of your library
 /// [in a random order | in any order]" following a `ChooseFromZone`.
 ///
-/// CR 401.4: multi-card library placement defaults to owner-arranged order,
-/// so "in any order" restates the default. The random-order variant is
-/// currently collapsed into the same continuation (randomization is not yet
-/// modeled at this seam) — the suffix axis is one `opt(alt(...))`, extended
-/// there when it is.
-fn parse_put_rest_on_bottom_line(input: &str) -> OracleResult<'_, ()> {
-    value(
-        (),
-        all_consuming((
-            tag("put the rest on the bottom of your library"),
-            opt(alt((tag(" in a random order"), tag(" in any order")))),
-        )),
-    )
-    .parse(input)
+/// CR 400.5 + CR 608.2c: "in a random order" is an instruction distinct from
+/// the player-chosen ordering in "in any order".
+fn parse_put_rest_on_bottom_line(input: &str) -> OracleResult<'_, DigRestOrder> {
+    let (input, _) = tag("put the rest on the bottom of your library").parse(input)?;
+    let (input, rest_order) = opt(alt((
+        value(DigRestOrder::Random, tag(" in a random order")),
+        value(DigRestOrder::Preserve, tag(" in any order")),
+    )))
+    .parse(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    let (input, _) = eof(input)?;
+    Ok((input, rest_order.unwrap_or(DigRestOrder::Preserve)))
 }
 
 /// Whole-line dig continuation matcher — delegates to [`parse_put_rest_on_bottom_line`]
@@ -817,21 +815,33 @@ fn parse_put_all_back_in_any_order(lower: &str) -> bool {
         .is_ok()
 }
 
-fn parse_put_one_dig_card_on_top(lower: &str) -> bool {
-    (
+fn parse_put_one_dig_card_on_top(lower: &str) -> Option<DigRestOrder> {
+    let (rest, _) = (
         alt((
             tag::<_, _, OracleError<'_>>("you may put "),
             tag("may put "),
             tag("put "),
         )),
+        opt(tag("up to ")),
         alt((tag("one of those cards"), tag("one of them"))),
-        tag(" back "),
+        opt(tag(" back")),
+        tag(" "),
         alt((tag("on top of your library"), tag("on top"))),
-        opt(tag(".")),
-        eof,
     )
         .parse(lower.trim())
-        .is_ok()
+        .ok()?;
+    let (rest, order) = opt(value(
+        DigRestOrder::Random,
+        tag::<_, _, OracleError<'_>>(
+            " and the rest on the bottom of your library in a random order",
+        ),
+    ))
+    .parse(rest)
+    .ok()?;
+    terminated(opt(tag::<_, _, OracleError<'_>>(".")), eof)
+        .parse(rest)
+        .ok()?;
+    Some(order.unwrap_or(DigRestOrder::Preserve))
 }
 
 fn parse_exile_rest_after_dig(lower: &str) -> bool {
@@ -4110,6 +4120,7 @@ pub(super) fn apply_clause_continuation(
         ContinuationAst::PutRest {
             destination,
             reorder_all,
+            rest_order,
         } => {
             // CR 608.2c + CR 701.20b (Portent of Calamity): After a per-category
             // exile from among revealed cards, "put the rest into <zone>" moves
@@ -4187,7 +4198,7 @@ pub(super) fn apply_clause_continuation(
                             enter_with_counters: vec![],
                             face_down_profile: None,
                             library_position,
-                            random_order: false,
+                            random_order: matches!(rest_order, DigRestOrder::Random),
                         },
                     ));
                     return;
@@ -4196,6 +4207,7 @@ pub(super) fn apply_clause_continuation(
                     &mut defs[bound_index],
                     destination,
                     reorder_all,
+                    rest_order,
                 );
             }
         }
@@ -4204,6 +4216,7 @@ pub(super) fn apply_clause_continuation(
             filter: card_filter,
             destination: kept_dest,
             rest_destination: rest_dest,
+            rest_order: continuation_rest_order,
             enters_under,
             face_down_profile,
             enter_tapped,
@@ -4298,6 +4311,7 @@ pub(super) fn apply_clause_continuation(
                                 filter: TargetFilter::Any,
                                 destination: None,
                                 rest_destination: Some(Zone::Library),
+                                rest_order: DigRestOrder::Preserve,
                                 reveal: false,
                                 enter_tapped: false,
                                 source: DigSource::PriorLook,
@@ -4319,6 +4333,7 @@ pub(super) fn apply_clause_continuation(
                                 filter: card_filter,
                                 destination: kept_dest,
                                 rest_destination: Some(rest_dest.unwrap_or(Zone::Library)),
+                                rest_order: continuation_rest_order,
                                 reveal: false,
                                 enter_tapped,
                                 source: DigSource::PriorLook,
@@ -4361,6 +4376,7 @@ pub(super) fn apply_clause_continuation(
                 filter,
                 destination,
                 rest_destination,
+                rest_order,
                 reveal,
                 enter_tapped: dig_enter_tapped,
                 ..
@@ -4411,6 +4427,7 @@ pub(super) fn apply_clause_continuation(
                 if let Some(rd) = rest_dest {
                     *rest_destination = Some(rd);
                 }
+                *rest_order = continuation_rest_order;
                 *dig_enter_tapped = enter_tapped;
             } else if let Effect::Mill {
                 destination: mill_destination,
@@ -5182,11 +5199,13 @@ fn patch_rest_destination_recursively(
     def: &mut AbilityDefinition,
     destination: Zone,
     reorder_all: bool,
+    rest_order: DigRestOrder,
 ) {
     match &mut *def.effect {
         Effect::Dig {
             destination: kept_destination,
             rest_destination,
+            rest_order: dig_rest_order,
             ..
         } => {
             if reorder_all {
@@ -5195,6 +5214,7 @@ fn patch_rest_destination_recursively(
             } else if rest_destination.is_none() {
                 *rest_destination = Some(destination);
             }
+            *dig_rest_order = rest_order;
         }
         Effect::RevealUntil {
             rest_destination, ..
@@ -5204,7 +5224,7 @@ fn patch_rest_destination_recursively(
         _ => {}
     }
     if let Some(else_def) = def.else_ability.as_deref_mut() {
-        patch_rest_destination_recursively(else_def, destination, reorder_all);
+        patch_rest_destination_recursively(else_def, destination, reorder_all, rest_order);
     }
 }
 
@@ -5585,6 +5605,7 @@ pub(super) fn parse_dig_from_among(
             filter,
             destination,
             rest_destination: None,
+            rest_order: DigRestOrder::Preserve,
             enters_under,
             face_down_profile,
             enter_tapped,
@@ -5678,13 +5699,17 @@ pub(super) fn parse_dig_from_among(
         // shared rest-anaphor matcher so the rest pile is routed correctly instead of
         // falling through to the `None`→Graveyard default. A genuinely separate
         // "Put the rest ..." sentence still patches via its own PutRest continuation.
-        let rest_destination = parse_of_them_rest_destination(lower);
+        let (rest_destination, rest_order) = parse_of_them_rest_destination(lower)
+            .map_or((None, DigRestOrder::Preserve), |(destination, order)| {
+                (Some(destination), order)
+            });
 
         return Some(ContinuationAst::DigFromAmong {
             quantity,
             filter,
             destination,
             rest_destination,
+            rest_order,
             enters_under,
             face_down_profile,
             enter_tapped,
@@ -5737,13 +5762,17 @@ pub(super) fn parse_dig_from_among(
                 PutCount::up(1)
             };
 
-            let rest_destination = parse_of_them_rest_destination(lower);
+            let (rest_destination, rest_order) = parse_of_them_rest_destination(lower)
+                .map_or((None, DigRestOrder::Preserve), |(destination, order)| {
+                    (Some(destination), order)
+                });
 
             return Some(ContinuationAst::DigFromAmong {
                 quantity,
                 filter: TargetFilter::Any,
                 destination,
                 rest_destination,
+                rest_order,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped,
@@ -6116,18 +6145,33 @@ pub(super) fn parse_its_face_down_profile(lower: &str) -> Option<FaceDownProfile
 /// rest" generalizes to any remainder count. Both anaphors point to the same
 /// rest_destination semantics, so they share the same downstream zone
 /// classification.
-fn parse_of_them_rest_destination(lower: &str) -> Option<Zone> {
+fn parse_of_them_rest_destination(lower: &str) -> Option<(Zone, DigRestOrder)> {
     let (_, (_, after_rest)) = nom_primitives::split_once_on(lower, " and the rest")
         .or_else(|_| nom_primitives::split_once_on(lower, " and the other"))
         .ok()?;
-    if contains_possessive(after_rest, "into", "graveyard") {
-        Some(Zone::Graveyard)
+    let destination = if contains_possessive(after_rest, "into", "graveyard") {
+        Zone::Graveyard
     } else if contains_possessive(after_rest, "into", "hand") {
-        Some(Zone::Hand)
+        Zone::Hand
     } else {
         // Default: bottom of library ("on the bottom", "in any order", etc.)
-        Some(Zone::Library)
-    }
+        Zone::Library
+    };
+    let random = opt(preceded(
+        take_until::<_, _, OracleError<'_>>(" in a random order"),
+        tag(" in a random order"),
+    ))
+    .parse(after_rest)
+    .ok()
+    .is_some_and(|(_, matched)| matched.is_some());
+    Some((
+        destination,
+        if random {
+            DigRestOrder::Random
+        } else {
+            DigRestOrder::Preserve
+        },
+    ))
 }
 
 /// CR 608.2c: The controller follows a card's instructions in written order;
@@ -6781,6 +6825,7 @@ pub(super) fn parse_followup_continuation_ast(
                 ])),
                 destination: Some(Zone::Battlefield),
                 rest_destination: None,
+                rest_order: DigRestOrder::Preserve,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -6791,12 +6836,18 @@ pub(super) fn parse_followup_continuation_ast(
         // "You may put one of those cards back on top of your library" after
         // Dig — keep up to one looked-at card on top, leaving the remainder
         // for a following rest-placement clause.
-        Effect::Dig { .. } if parse_put_one_dig_card_on_top(&lower) => {
+        Effect::Dig { .. } if parse_put_one_dig_card_on_top(&lower).is_some() => {
             Some(ContinuationAst::DigFromAmong {
                 quantity: PutCount::up(1),
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Library),
-                rest_destination: None,
+                rest_destination: matches!(
+                    parse_put_one_dig_card_on_top(&lower),
+                    Some(DigRestOrder::Random)
+                )
+                .then_some(Zone::Library),
+                rest_order: parse_put_one_dig_card_on_top(&lower)
+                    .expect("continuation guard just matched"),
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -6811,6 +6862,7 @@ pub(super) fn parse_followup_continuation_ast(
             Some(ContinuationAst::PutRest {
                 destination: Zone::Library,
                 reorder_all: true,
+                rest_order: DigRestOrder::Preserve,
             })
         }
         Effect::SearchLibrary { .. } | Effect::Shuffle { .. } | Effect::Dig { .. }
@@ -6837,6 +6889,7 @@ pub(super) fn parse_followup_continuation_ast(
             Some(ContinuationAst::PutRest {
                 destination: Zone::Exile,
                 reorder_all: false,
+                rest_order: DigRestOrder::Preserve,
             })
         }
         // CR 406.3 + CR 701.20e: "[then] exile it/them [face down]" after a
@@ -6895,9 +6948,13 @@ pub(super) fn parse_followup_continuation_ast(
                 // Default: bottom of library (covers "on the bottom", "back in any order", etc.)
                 Zone::Library
             };
+            let rest_order = parse_put_rest_on_bottom_line(&lower)
+                .map(|(_, order)| order)
+                .unwrap_or(DigRestOrder::Preserve);
             Some(ContinuationAst::PutRest {
                 destination,
                 reorder_all: false,
+                rest_order,
             })
         }
         // CR 608.2c + CR 701.20b (Portent of Calamity / Sanar class): "Put the
@@ -6924,6 +6981,7 @@ pub(super) fn parse_followup_continuation_ast(
             Some(ContinuationAst::PutRest {
                 destination,
                 reorder_all: false,
+                rest_order: DigRestOrder::Preserve,
             })
         }
         // CR 701.20a + CR 608.2c: A reveal-until rest-pile clause may be
@@ -6936,6 +6994,7 @@ pub(super) fn parse_followup_continuation_ast(
             Some(ContinuationAst::PutRest {
                 destination: parse_reveal_until_rest_zone(&lower).unwrap_or(Zone::Library),
                 reorder_all: false,
+                rest_order: DigRestOrder::Preserve,
             })
         }
         // CR 701.20a + CR 608.2c: "Put any number of those [filter] cards onto the
@@ -7100,6 +7159,7 @@ pub(super) fn parse_followup_continuation_ast(
             Some(ContinuationAst::PutRest {
                 destination,
                 reorder_all: false,
+                rest_order: DigRestOrder::Preserve,
             })
         }
         // "create a ... token and suspect it" → chain suspect on last created token
@@ -9785,6 +9845,7 @@ mod tests {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
+            rest_order: crate::types::ability::DigRestOrder::Preserve,
             reveal: false,
             enter_tapped: false,
             source: DigSource::Library,
@@ -9842,6 +9903,7 @@ mod tests {
             Some(ContinuationAst::PutRest {
                 destination: Zone::Library,
                 reorder_all: false,
+                rest_order: DigRestOrder::Preserve,
             })
         );
     }
@@ -9859,6 +9921,7 @@ mod tests {
             Some(ContinuationAst::PutRest {
                 destination: Zone::Library,
                 reorder_all: false,
+                rest_order: DigRestOrder::Preserve,
             })
         );
     }
@@ -9876,6 +9939,7 @@ mod tests {
             Some(ContinuationAst::PutRest {
                 destination: Zone::Graveyard,
                 reorder_all: false,
+                rest_order: DigRestOrder::Preserve,
             })
         );
     }
@@ -9893,6 +9957,7 @@ mod tests {
             Some(ContinuationAst::PutRest {
                 destination: Zone::Library,
                 reorder_all: false,
+                rest_order: DigRestOrder::Random,
             })
         );
     }
@@ -9910,6 +9975,7 @@ mod tests {
             Some(ContinuationAst::PutRest {
                 destination: Zone::Library,
                 reorder_all: true,
+                rest_order: DigRestOrder::Preserve,
             })
         );
     }
@@ -9927,6 +9993,7 @@ mod tests {
             Some(ContinuationAst::PutRest {
                 destination: Zone::Hand,
                 reorder_all: false,
+                rest_order: DigRestOrder::Preserve,
             })
         );
     }
@@ -9944,6 +10011,7 @@ mod tests {
             Some(ContinuationAst::PutRest {
                 destination: Zone::Library,
                 reorder_all: false,
+                rest_order: DigRestOrder::Preserve,
             })
         );
     }
@@ -9966,6 +10034,7 @@ mod tests {
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
+                rest_order: DigRestOrder::Preserve,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -9990,6 +10059,7 @@ mod tests {
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
+                rest_order: DigRestOrder::Preserve,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -10019,6 +10089,7 @@ mod tests {
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
+                rest_order: DigRestOrder::Preserve,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -10042,6 +10113,7 @@ mod tests {
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Graveyard),
+                rest_order: DigRestOrder::Preserve,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -10065,6 +10137,7 @@ mod tests {
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
+                rest_order: DigRestOrder::Preserve,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -10090,6 +10163,7 @@ mod tests {
                     filter: TargetFilter::Any,
                     destination: Some(Zone::Hand),
                     rest_destination: None,
+                    rest_order: DigRestOrder::Preserve,
                     enters_under: None,
                     face_down_profile: None,
                     enter_tapped: false,
@@ -10347,6 +10421,7 @@ mod tests {
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
+                rest_order: DigRestOrder::Preserve,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -10619,6 +10694,7 @@ mod tests {
                 filter: TargetFilter::Typed(TypedFilter::creature()),
                 destination: Some(Zone::Hand),
                 rest_destination: None,
+                rest_order: DigRestOrder::Preserve,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -10667,6 +10743,7 @@ mod tests {
                 filter: TargetFilter::Typed(TypedFilter::creature()),
                 destination: Some(Zone::Hand),
                 rest_destination: None,
+                rest_order: DigRestOrder::Preserve,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -10733,6 +10810,7 @@ mod tests {
                 filter: or_filter.clone(),
                 destination: Some(Zone::Hand),
                 rest_destination: None,
+                rest_order: DigRestOrder::Preserve,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -11695,6 +11773,7 @@ mod tests {
                 ])),
                 destination: Some(Zone::Battlefield),
                 rest_destination: None,
+                rest_order: DigRestOrder::Preserve,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -12995,6 +13074,7 @@ mod tests {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
+            rest_order: DigRestOrder::Preserve,
             reveal: false,
             enter_tapped: false,
             source: DigSource::Library,

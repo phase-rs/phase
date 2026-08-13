@@ -10677,6 +10677,24 @@ pub enum PerpetualModification {
     },
 }
 
+/// CR 400.5 + CR 608.2c: The required placement order for a Dig's unkept
+/// cards when its rest destination is a library. `Preserve` retains the
+/// pre-existing encounter order; `Random` consumes engine RNG immediately
+/// before placing the rest pile on the library bottom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DigRestOrder {
+    #[default]
+    Preserve,
+    Random,
+}
+
+impl DigRestOrder {
+    pub fn is_preserve(&self) -> bool {
+        matches!(self, DigRestOrder::Preserve)
+    }
+}
+
 /// CR 701.20e + CR 608.2c: Discriminates where `Effect::Dig` reads its
 /// card set from. `Library` (the default) reads from the top of the library;
 /// `PriorLook` reads from `GameState::private_look_ids`, which was populated
@@ -11368,6 +11386,10 @@ pub enum Effect {
         /// Where unchosen cards go (None = Graveyard, Some(Library) = bottom).
         #[serde(default)]
         rest_destination: Option<Zone>,
+        /// CR 400.5 + CR 608.2c: Ordering instruction for an unchosen
+        /// library rest pile. `Random` is only set by exact Oracle text.
+        #[serde(default, skip_serializing_if = "DigRestOrder::is_preserve")]
+        rest_order: DigRestOrder,
         /// CR 701.20a vs CR 701.20e: True = cards are revealed (public), false = looked at (private).
         #[serde(default)]
         reveal: bool,
