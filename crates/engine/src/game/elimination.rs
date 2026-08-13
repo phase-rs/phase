@@ -1341,7 +1341,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         Effect, EffectKind, PostReplacementContinuation, ReplacementDefinition, ReplacementMode,
-        ResolvedAbility, TargetFilter, TargetRef,
+        ResolvedAbility, TargetRef,
     };
     use crate::types::actions::GameAction;
     use crate::types::counter::CounterType;
@@ -2443,7 +2443,7 @@ mod tests {
             .replacement_definitions
             .push(
                 ReplacementDefinition::new(ReplacementEvent::Discard)
-                    .valid_card(TargetFilter::SelfRef)
+                    .valid_card(crate::types::ability::TargetFilter::SelfRef)
                     .mode(ReplacementMode::Optional { decline: None }),
             );
         let mut setup_events = Vec::new();
