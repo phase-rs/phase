@@ -374,6 +374,19 @@ export class DraftAdapter {
     return wasm.submit_pick_for_seat(seat, cardInstanceId) as DraftPlayerView;
   }
 
+  async submitPickWithDraftEffectForSeat(
+    seat: number,
+    effectCardInstanceId: string,
+    cardInstanceIds: string[],
+  ): Promise<DraftPlayerView> {
+    const wasm = await ensureDraftWasm();
+    return wasm.submit_pick_with_draft_effect_for_seat(
+      seat,
+      effectCardInstanceId,
+      JSON.stringify(cardInstanceIds),
+    ) as DraftPlayerView;
+  }
+
   async submitDeckForSeat(seat: number, mainDeck: string[]): Promise<DraftPlayerView> {
     const wasm = await ensureDraftWasm();
     return wasm.submit_deck_for_seat(seat, JSON.stringify(mainDeck)) as DraftPlayerView;

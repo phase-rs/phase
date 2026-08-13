@@ -639,6 +639,7 @@ function DraftingPhaseContent() {
   const selectedCard = useMultiplayerDraftStore((s) => s.selectedCard);
   const selectCard = useMultiplayerDraftStore((s) => s.selectCard);
   const confirmPick = useMultiplayerDraftStore((s) => s.confirmPick);
+  const submitPickWithDraftEffect = useMultiplayerDraftStore((s) => s.submitPickWithDraftEffect);
   const autoPickCard = useMultiplayerDraftStore((s) => s.autoPickCard);
   const paused = useMultiplayerDraftStore((s) => s.paused);
   const pauseReason = useMultiplayerDraftStore((s) => s.pauseReason);
@@ -672,6 +673,8 @@ function DraftingPhaseContent() {
             selectedCard={selectedCard}
             onSelectCard={selectCard}
             onConfirmPick={confirmPick}
+            onPickWithDraftEffect={submitPickWithDraftEffect}
+            enableDraftEffects
             showAutoPick
             onAutoPick={autoPickCard}
             onCardHover={setHoveredCard}

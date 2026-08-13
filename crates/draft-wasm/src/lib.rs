@@ -625,6 +625,37 @@ pub fn submit_pick_for_seat(seat: u8, card_instance_id: &str) -> Result<JsValue,
     })
 }
 
+/// Submit a draft-effect pick for any seat (host proxies guest picks).
+///
+/// Returns the filtered DraftPlayerView for the specified seat after the pick.
+#[wasm_bindgen]
+pub fn submit_pick_with_draft_effect_for_seat(
+    seat: u8,
+    effect_card_instance_id: &str,
+    card_instance_ids_json: &str,
+) -> Result<JsValue, JsValue> {
+    let effect_card_instance_id = effect_card_instance_id.to_string();
+    let card_instance_ids: Vec<String> = serde_json::from_str(card_instance_ids_json)
+        .map_err(|e| JsValue::from_str(&format!("Failed to parse draft-effect cards: {e}")))?;
+
+    with_draft_mut(|draft_session| {
+        session::apply(
+            draft_session,
+            DraftAction::PickWithDraftEffect {
+                seat,
+                effect_card_instance_id,
+                card_instance_ids,
+            },
+            None,
+        )
+        .map_err(|e| {
+            JsValue::from_str(&format!("Draft-effect pick failed for seat {seat}: {e}"))
+        })?;
+
+        Ok(to_js(&filter_for_player(draft_session, seat)))
+    })
+}
+
 /// Mark a human seat as connected or disconnected. The host adapter calls
 /// this on guest disconnect/reconnect so `DraftPlayerView.seats[*].connected`
 /// reflects the runtime state. Rejects bot seats with `SeatIsBot`.

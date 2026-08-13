@@ -126,6 +126,7 @@ interface PackDisplayProps {
   selectedCard?: string | null;
   onSelectCard?: (instanceId: string | null) => void;
   onConfirmPick?: () => Promise<void> | void;
+  onPickWithDraftEffect?: (effectCardInstanceId: string, cardInstanceIds: string[]) => Promise<void> | void;
   onAutoPick?: () => Promise<void> | void;
 }
 
@@ -137,6 +138,7 @@ export function PackDisplay({
   selectedCard: selectedCardOverride,
   onSelectCard,
   onConfirmPick,
+  onPickWithDraftEffect,
   onAutoPick,
 }: PackDisplayProps) {
   const { t } = useTranslation("draft");
@@ -154,6 +156,7 @@ export function PackDisplay({
     : quickSelectedCard;
   const selectCard = onSelectCard ?? quickSelectCard;
   const confirmPick = onConfirmPick ?? quickConfirmPick;
+  const pickCardWithDraftEffect = onPickWithDraftEffect ?? quickPickCardWithDraftEffect;
   const autoPickCard = onAutoPick ?? quickAutoPickCard;
   const [activeDraftEffect, setActiveDraftEffect] = useState<string | null>(null);
   const [additionalCard, setAdditionalCard] = useState<string | null>(null);
@@ -202,7 +205,7 @@ export function PackDisplay({
 
   const handleConfirmPick = async () => {
     if (activeDraftEffect && selectedCard && additionalCard) {
-      await quickPickCardWithDraftEffect(activeDraftEffect, [selectedCard, additionalCard]);
+      await pickCardWithDraftEffect(activeDraftEffect, [selectedCard, additionalCard]);
       setActiveDraftEffect(null);
       setAdditionalCard(null);
       return;

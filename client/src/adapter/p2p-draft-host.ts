@@ -471,6 +471,21 @@ export class P2PDraftHost {
         await this.handlePick(seat, msg.cardInstanceId);
         break;
       }
+      case "draft_pick_with_draft_effect": {
+        if (!this.draftStarted || this.paused) {
+          this.guestSessions.get(seat)?.send({
+            type: "draft_error",
+            reason: this.paused ? "Draft is paused" : "Draft not started",
+          });
+          return;
+        }
+        await this.handlePickWithDraftEffect(
+          seat,
+          msg.effectCardInstanceId,
+          msg.cardInstanceIds,
+        );
+        break;
+      }
       case "draft_submit_deck": {
         if (!this.draftStarted) {
           this.guestSessions.get(seat)?.send({
@@ -594,6 +609,14 @@ export class P2PDraftHost {
     return this.handlePick(0, cardInstanceId);
   }
 
+  /** Host submits an effect pick for seat 0. */
+  async submitHostPickWithDraftEffect(
+    effectCardInstanceId: string,
+    cardInstanceIds: string[],
+  ): Promise<DraftPlayerView> {
+    return this.handlePickWithDraftEffect(0, effectCardInstanceId, cardInstanceIds);
+  }
+
   /**
    * Host submits their own deck (seat 0).
    */
@@ -614,13 +637,36 @@ export class P2PDraftHost {
     });
   }
 
+  private async handlePickWithDraftEffect(
+    seat: number,
+    effectCardInstanceId: string,
+    cardInstanceIds: string[],
+  ): Promise<DraftPlayerView> {
+    return this.applyPick(
+      seat,
+      effectCardInstanceId,
+      {
+        acknowledge: true,
+        emit: true,
+        persist: true,
+        resolveBots: true,
+      },
+      () => this.adapter.submitPickWithDraftEffectForSeat(
+        seat,
+        effectCardInstanceId,
+        cardInstanceIds,
+      ),
+    );
+  }
+
   private async applyPick(
     seat: number,
     cardInstanceId: string,
     options: PickOptions,
+    submitPick = () => this.adapter.submitPickForSeat(seat, cardInstanceId),
   ): Promise<DraftPlayerView> {
     try {
-      const view = await this.adapter.submitPickForSeat(seat, cardInstanceId);
+      const view = await submitPick();
       this.picksThisRound.add(seat);
 
       // Send pick acknowledgement to the picking player

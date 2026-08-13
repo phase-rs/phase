@@ -10,8 +10,8 @@ import type { DraftP2PMessage } from "../draftProtocol";
 
 describe("draftProtocol", () => {
   describe("DRAFT_PROTOCOL_VERSION", () => {
-    it("is version 9", () => {
-      expect(DRAFT_PROTOCOL_VERSION).toBe(9);
+    it("is version 10", () => {
+      expect(DRAFT_PROTOCOL_VERSION).toBe(10);
     });
   });
 
@@ -24,6 +24,19 @@ describe("draftProtocol", () => {
     it("accepts valid draft_pick message", () => {
       const msg = validateDraftMessage({ type: "draft_pick", cardInstanceId: "card-001" });
       expect(msg.type).toBe("draft_pick");
+    });
+
+    it("accepts a draft-effect pick message", () => {
+      const msg = validateDraftMessage({
+        type: "draft_pick_with_draft_effect",
+        effectCardInstanceId: "cogwork-1",
+        cardInstanceIds: ["card-001", "card-002"],
+      });
+      expect(msg).toMatchObject({
+        type: "draft_pick_with_draft_effect",
+        effectCardInstanceId: "cogwork-1",
+        cardInstanceIds: ["card-001", "card-002"],
+      });
     });
 
     it("accepts valid draft_welcome message", () => {
@@ -53,6 +66,30 @@ describe("draftProtocol", () => {
       }
     });
 
+    it.each([null, {}])("rejects present non-array draft_effects values", (draftEffects) => {
+      expect(() => validateDraftMessage({
+        type: "draft_state_update",
+        view: { draft_effects: draftEffects, seats: [] },
+      })).toThrow("draft_effects must be an array");
+    });
+
+    it.each([null, {}])("rejects present non-array seats values", (seats) => {
+      expect(() => validateDraftMessage({
+        type: "draft_state_update",
+        view: { draft_effects: [], seats },
+      })).toThrow("seats must be an array");
+    });
+
+    it.each([null, {}])("rejects present non-array face-up draft cards", (faceUpCards) => {
+      expect(() => validateDraftMessage({
+        type: "draft_state_update",
+        view: {
+          draft_effects: [],
+          seats: [{ face_up_draft_cards: faceUpCards }],
+        },
+      })).toThrow("face_up_draft_cards must be an array");
+    });
+
     it("rejects missing type field", () => {
       expect(() => validateDraftMessage({})).toThrow("missing type field");
     });
@@ -73,6 +110,7 @@ describe("draftProtocol", () => {
       "draft_join",
       "draft_reconnect",
       "draft_pick",
+      "draft_pick_with_draft_effect",
       "draft_submit_deck",
       "draft_welcome",
       "draft_reconnect_ack",

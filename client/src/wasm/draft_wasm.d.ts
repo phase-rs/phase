@@ -180,6 +180,13 @@ export function submit_pick_for_seat(seat: number, card_instance_id: string): an
 export function submit_pick_with_draft_effect(effect_card_instance_id: string, card_instance_ids_json: string): any;
 
 /**
+ * Submit a draft-effect pick for any seat (host proxies guest picks).
+ *
+ * Returns the filtered DraftPlayerView for the specified seat after the pick.
+ */
+export function submit_pick_with_draft_effect_for_seat(seat: number, effect_card_instance_id: string, card_instance_ids_json: string): any;
+
+/**
  * Auto-suggest a playable Limited deck from the human's pool.
  *
  * Returns a SuggestedDeck with ~23 spells + ~17 lands, using AI evaluation
@@ -221,6 +228,7 @@ export interface InitOutput {
     readonly submit_pick: (a: number, b: number) => [number, number, number];
     readonly submit_pick_for_seat: (a: number, b: number, c: number) => [number, number, number];
     readonly submit_pick_with_draft_effect: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly submit_pick_with_draft_effect_for_seat: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly suggest_deck: () => [number, number, number];
     readonly suggest_lands: (a: number, b: number) => [number, number, number];
     readonly init_panic_hook: () => void;
