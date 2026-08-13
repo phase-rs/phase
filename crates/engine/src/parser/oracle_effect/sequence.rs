@@ -6844,6 +6844,7 @@ pub(super) fn parse_followup_continuation_ast(
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                enters_attacking: false,
                 // "put one of those cards onto the battlefield" — a put, not a reveal.
                 reveal_verb: false,
             })
@@ -6866,6 +6867,7 @@ pub(super) fn parse_followup_continuation_ast(
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                enters_attacking: false,
                 // "put one ... back on top" — a put, not a reveal.
                 reveal_verb: false,
             })

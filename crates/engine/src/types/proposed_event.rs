@@ -391,6 +391,11 @@ pub enum ProposedEvent {
         /// `Unspecified` preserves any non-replacement tapped seed from the originating effect.
         #[serde(default)]
         enter_tapped: EtbTapState,
+        /// CR 508.4: Whether this permanent enters the battlefield attacking.
+        /// Carried through the replacement pipeline because an ETB-counter or
+        /// replacement-ordering pause resumes from the approved ZoneChange.
+        #[serde(default)]
+        enters_attacking: bool,
         /// Counters to place on this permanent as it enters the battlefield.
         /// Each entry is (counter_type, count). Set by ETB-counter replacements.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -759,6 +764,7 @@ impl ProposedEvent {
             cause,
             attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
