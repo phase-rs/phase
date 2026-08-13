@@ -17,7 +17,7 @@ fn kentaro_offers_and_pays_the_matching_samurai_mana_value() {
     scenario.at_phase(Phase::PreCombatMain);
     scenario.add_creature_from_oracle(P0, "Kentaro, the Smiling Cat", 2, 2, KENTARO_ORACLE);
     let samurai = scenario
-        .add_creature_to_hand(P0, "Test Samurai", 3, 3, "")
+        .add_creature_to_hand(P0, "Test Samurai", 3, 3)
         .with_subtypes(vec!["Samurai"])
         .with_mana_cost(ManaCost::generic(3))
         .id();
