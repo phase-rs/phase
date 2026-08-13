@@ -550,7 +550,7 @@ describe("groupByName", () => {
     expect(groups).toHaveLength(2);
   });
 
-  it("groups face-down permanents by public characteristics instead of hidden names", () => {
+  it("keeps face-down permanents separate in battlefield order", () => {
     const objects = [
       makeGameObject({
         id: 54,
@@ -572,12 +572,9 @@ describe("groupByName", () => {
 
     const groups = groupByName(objects, undefined, undefined, undefined);
 
-    expect(groups).toHaveLength(1);
-    expect(groups[0]).toMatchObject({
-      name: "Face-down card",
-      ids: [54, 55],
-      count: 2,
-    });
+    expect(groups).toHaveLength(2);
+    expect(groups.map((group) => group.ids)).toEqual([[54], [55]]);
+    expect(groups.map((group) => group.name)).toEqual(["Face-down card", "Face-down card"]);
   });
 
   // DESIGN STEP 4 (∞-pile): groupByName marks a group isUnboundedPile iff EVERY

@@ -267,4 +267,12 @@ describe("GameCardPreview", () => {
 
     expect(container.firstChild).toBeNull();
   });
+
+  it("previews a face-down permanent when the engine projects its identity", () => {
+    inspect(battlefieldObject({ face_down: true, display_visible_to_viewer: true }));
+
+    render(<GameCardPreview />);
+
+    expect(screen.getAllByAltText("Pithing Needle").length).toBeGreaterThan(0);
+  });
 });
