@@ -70,12 +70,15 @@ fn braid_of_fire_cumulative_upkeep_adds_red_for_each_age_counter() {
     assert!(pool.iter().all(|unit| unit.color == ManaType::Red));
 }
 
-/// CR 118.3 + CR 106.4: A deterministic, untargeted fixed-mana effect cost
-/// resolves through the normal unless-payment flow into the payer's mana pool.
+/// CR 118.3 + CR 118.12a + CR 106.4: A deterministic, untargeted fixed-mana
+/// effect cost resolves through the normal unless-payment flow into the payer's
+/// mana pool.
 #[test]
 fn fixed_mana_effect_cost_pays_into_the_unless_payers_mana_pool() {
     let mut scenario = GameScenario::new();
-    let source = scenario.add_creature(P0, "Fixed Mana Cost Source", 1, 1).id();
+    let source = scenario
+        .add_creature(P0, "Fixed Mana Cost Source", 1, 1)
+        .id();
     let mut runner = scenario.build();
     let pending_effect = ResolvedAbility::new(
         Effect::GainLife {
