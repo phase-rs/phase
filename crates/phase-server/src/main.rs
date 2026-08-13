@@ -7909,7 +7909,7 @@ mod state_transport_derived_tests {
         session.state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
         };
-        session.state.stack.push(StackEntry {
+        session.state.stack.push_back(StackEntry {
             id: stack_object,
             source_id: stack_object,
             controller: PlayerId(0),
