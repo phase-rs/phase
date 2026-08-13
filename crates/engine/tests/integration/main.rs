@@ -893,6 +893,7 @@ mod purged_source_intervening_if_lki;
 mod purged_source_matches_filter_lki;
 mod quirion_ranger_activation;
 mod rage_reflection_double_strike_grant;
+mod random_discard_cost_replacement_resume;
 mod refurbished_familiar;
 mod relic_of_progenitus_6446;
 mod render_silent_cant_cast;
