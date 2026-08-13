@@ -5,6 +5,7 @@ use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
 use crate::types::ability::CastTimingPermission;
+use crate::types::mana::{ManaCost, ManaCostShard};
 
 /// CR 602.1: Parse the leading keyword of a "<Keyword> abilities of …" class-wide
 /// activation cost-modification static, returning the canonical keyword string that
@@ -370,6 +371,18 @@ pub(crate) fn parse_alt_cost_frequency_prefix(input: &str) -> OracleResult<'_, C
 ///
 /// Strict-fails to `None` (never misparses) when the payment cannot be parsed
 /// as an `AbilityCost` (Dream Halls discard, Bolas's Citadel life-as-MV).
+///
+/// CR 107.3c + CR 118.9: a trailing "where X is that spell's mana value"
+/// defines the alternative-cost X rather than leaving it for the caster to
+/// choose. The binding is only valid for the standalone `{X}` mana-cost shape.
+fn parse_x_bound_to_spell_mana_value(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = opt(tag(",")).parse(input)?;
+    let (input, _) =
+        preceded(opt(tag(" ")), tag("where x is that spell's mana value")).parse(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    Ok((input, ()))
+}
+
 pub(crate) fn parse_spells_alternative_cost(text: &str) -> Option<StaticDefinition> {
     type VE<'a> = OracleError<'a>;
 
@@ -440,10 +453,33 @@ pub(crate) fn parse_spells_alternative_cost(text: &str) -> Option<StaticDefiniti
     let type_prefix_original = subject.original[..type_prefix_lower.len()].trim();
     let after_spells = after_spells_lower.trim();
 
+    let parsed_cost = parse_oracle_cost(cost_slice);
+    if !supported_alternative_cast_cost(&parsed_cost) {
+        return None;
+    }
+
+    // CR 107.3c + CR 118.9: Kentaro-class alternatives bind their lone `{X}`
+    // to the spell's mana value. This is distinct from an announced X, which
+    // is left as `ManaCostShard::X` by normal cost parsing.
+    let spell_mana_value_x = parse_x_bound_to_spell_mana_value(after_spells)
+        .is_ok_and(|(rest, _)| rest.trim().is_empty());
+    let cost = if spell_mana_value_x {
+        match parsed_cost {
+            AbilityCost::Mana {
+                cost: ManaCost::Cost { shards, generic: 0 },
+            } if shards == vec![ManaCostShard::X] => AbilityCost::Mana {
+                cost: ManaCost::SelfManaValue,
+            },
+            _ => return None,
+        }
+    } else {
+        parsed_cost
+    };
+
     // Optional "with mana value N or greater" qualifier (Jodah MV-5+ class). If
     // an MV qualifier is present but does not parse cleanly into FilterProp::Cmc,
     // strict-fail (None) rather than over-broadening to any spell.
-    let mv_filter = if after_spells.is_empty() {
+    let mv_filter = if after_spells.is_empty() || spell_mana_value_x {
         None
     } else {
         let (prop, consumed) = parse_mana_value_suffix(after_spells, &mut ParseContext::default())?;
@@ -470,11 +506,6 @@ pub(crate) fn parse_spells_alternative_cost(text: &str) -> Option<StaticDefiniti
     };
     let affected =
         apply_spell_keyword_subject_constraints(base_filter, None, mv_filter, Vec::new());
-
-    let cost = parse_oracle_cost(cost_slice);
-    if !supported_alternative_cast_cost(&cost) {
-        return None;
-    }
 
     Some(
         StaticDefinition::new(StaticMode::CastWithAlternativeCost {
