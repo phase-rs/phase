@@ -521,6 +521,7 @@ fn resolve_mass_put_all(
 /// mass Dig. The typed batch completion is the single authority for publication
 /// and the parent result, so a replacement pause cannot expose a pre-redirect
 /// selected set to a chained instruction.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn move_mass_put_all_selected(
     state: &mut GameState,
     player: crate::types::player::PlayerId,
