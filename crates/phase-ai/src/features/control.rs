@@ -529,6 +529,7 @@ mod tests {
                 rest_order: engine::types::ability::DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             },
         ));
@@ -558,6 +559,7 @@ mod tests {
                 rest_order: engine::types::ability::DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             },
         ));

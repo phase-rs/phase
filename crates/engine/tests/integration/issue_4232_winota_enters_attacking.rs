@@ -23,7 +23,7 @@ fn advance_to_dig_choice(runner: &mut GameRunner) {
                 .act(GameAction::PassPriority)
                 .expect("pass priority toward Winota's DigChoice"),
             other => panic!("unexpected state before Winota's DigChoice: {other:?}"),
-        }
+        };
     }
     panic!("Winota's attack trigger never reached DigChoice");
 }

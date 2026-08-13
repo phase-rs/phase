@@ -11838,6 +11838,7 @@ mod tests {
             rest_order: engine::types::ability::DigRestOrder::Preserve,
             source_id: None,
             enter_tapped: false,
+            enters_attacking: false,
         };
 
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);
@@ -11963,6 +11964,7 @@ mod tests {
                 rest_order: engine::types::ability::DigRestOrder::Preserve,
                 source_id: None,
                 enter_tapped: false,
+                enters_attacking: false,
             }
         });
         push("SurveilChoice", &|state| WaitingFor::SurveilChoice {
