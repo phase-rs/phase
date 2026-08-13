@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-08-12T00:00:00Z",
+  "updated": "2026-08-13T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -537,74 +537,34 @@
         },
         {
           "count": 4,
-          "name": "Badgermole Cub"
-        },
-        {
-          "count": 1,
-          "name": "Forest"
-        },
-        {
-          "count": 2,
-          "name": "Forest"
-        },
-        {
-          "count": 1,
-          "name": "Forest"
-        },
-        {
-          "count": 4,
           "name": "Esper Origins"
-        },
-        {
-          "count": 1,
-          "name": "Forest"
-        },
-        {
-          "count": 1,
-          "name": "Forest"
-        },
-        {
-          "count": 4,
-          "name": "Icetill Explorer"
-        },
-        {
-          "count": 4,
-          "name": "Fabled Passage"
-        },
-        {
-          "count": 3,
-          "name": "Meltstrider's Resolve"
         },
         {
           "count": 4,
           "name": "Escape Tunnel"
         },
         {
-          "count": 1,
-          "name": "Royal Treatment"
+          "count": 4,
+          "name": "Fabled Passage"
         },
         {
           "count": 4,
-          "name": "Earthbender Ascension"
+          "name": "Icetill Explorer"
+        },
+        {
+          "count": 2,
+          "name": "Mole Man, Moloid Master"
         },
         {
           "count": 4,
           "name": "Sazh's Chocobo"
         },
         {
-          "count": 1,
-          "name": "Demolition Field"
-        },
-        {
-          "count": 7,
+          "count": 14,
           "name": "Forest"
         },
         {
           "count": 4,
-          "name": "Llanowar Elves"
-        },
-        {
-          "count": 3,
           "name": "Mightform Harmonizer"
         },
         {
@@ -612,34 +572,34 @@
           "name": "Sapling Nursery"
         },
         {
-          "count": 1,
-          "name": "Surrak, Elusive Hunter"
+          "count": 4,
+          "name": "Earthbender Ascension"
+        },
+        {
+          "count": 2,
+          "name": "Bristly Bill, Spine Sower"
+        },
+        {
+          "count": 4,
+          "name": "Llanowar Elves"
+        },
+        {
+          "count": 4,
+          "name": "Meltstrider's Resolve"
         }
       ],
       "sideboard": [
         {
           "count": 2,
-          "name": "Eumidian Terrabotanist"
-        },
-        {
-          "count": 2,
-          "name": "Glorious Decay"
-        },
-        {
-          "count": 1,
-          "name": "Meltstrider's Resolve"
-        },
-        {
-          "count": 1,
           "name": "Surrak, Elusive Hunter"
         },
         {
-          "count": 1,
-          "name": "Royal Treatment"
+          "count": 4,
+          "name": "Soul-Guide Lantern"
         },
         {
-          "count": 3,
-          "name": "Soul-Guide Lantern"
+          "count": 4,
+          "name": "Mossborn Hydra"
         },
         {
           "count": 1,
@@ -647,7 +607,7 @@
         },
         {
           "count": 4,
-          "name": "Mossborn Hydra"
+          "name": "Heritage Reclamation"
         }
       ]
     },
@@ -1226,11 +1186,10 @@
       ]
     },
     {
-      "name": "Sultai Reanimator",
+      "name": "Lifegain",
       "author": "MTGGoldfish",
       "colors": [
-        "G",
-        "U",
+        "W",
         "B"
       ],
       "tags": [
@@ -1238,122 +1197,142 @@
       ],
       "main": [
         {
-          "count": 1,
-          "name": "Forest"
-        },
-        {
-          "count": 4,
-          "name": "Overlord of the Balemurk"
-        },
-        {
-          "count": 4,
-          "name": "Breeding Pool"
-        },
-        {
-          "count": 4,
-          "name": "Cavern of Souls"
-        },
-        {
           "count": 2,
-          "name": "Watery Grave"
-        },
-        {
-          "count": 4,
-          "name": "Bringer of the Last Gift"
-        },
-        {
-          "count": 2,
-          "name": "Ouroboroid"
-        },
-        {
-          "count": 4,
-          "name": "Oblivious Bookworm"
+          "name": "Bleachbone Verge"
         },
         {
           "count": 1,
-          "name": "Kiora, the Rising Tide"
-        },
-        {
-          "count": 1,
-          "name": "Dredger's Insight"
+          "name": "Aunt May"
         },
         {
           "count": 3,
-          "name": "Wastewood Verge"
-        },
-        {
-          "count": 2,
-          "name": "Ardyn, the Usurper"
-        },
-        {
-          "count": 2,
-          "name": "Commune with Beavers"
-        },
-        {
-          "count": 3,
-          "name": "Town Greeter"
+          "name": "Concealed Courtyard"
         },
         {
           "count": 4,
+          "name": "Case of the Uneaten Feast"
+        },
+        {
+          "count": 1,
+          "name": "Clarion Conqueror"
+        },
+        {
+          "count": 2,
+          "name": "Emptiness"
+        },
+        {
+          "count": 3,
+          "name": "Deep-Cavern Bat"
+        },
+        {
+          "count": 4,
+          "name": "Godless Shrine"
+        },
+        {
+          "count": 3,
+          "name": "Erode"
+        },
+        {
+          "count": 4,
+          "name": "Hinterland Sanctifier"
+        },
+        {
+          "count": 3,
+          "name": "Haliya, Guided by Light"
+        },
+        {
+          "count": 3,
+          "name": "Shattered Sanctum"
+        },
+        {
+          "count": 4,
+          "name": "Lunar Convocation"
+        },
+        {
+          "count": 3,
+          "name": "Moseo, Vein's New Dean"
+        },
+        {
+          "count": 1,
+          "name": "Plains"
+        },
+        {
+          "count": 1,
+          "name": "Plains"
+        },
+        {
+          "count": 2,
+          "name": "Starscape Cleric"
+        },
+        {
+          "count": 3,
           "name": "Starting Town"
         },
         {
-          "count": 4,
-          "name": "Formidable Speaker"
+          "count": 1,
+          "name": "Strategic Betrayal"
         },
         {
-          "count": 4,
-          "name": "Superior Spider-Man"
+          "count": 2,
+          "name": "Multiversal Passage"
         },
         {
-          "count": 3,
-          "name": "Jadzi, Steward of Fate"
-        },
-        {
-          "count": 4,
-          "name": "Rapid Rescue"
+          "count": 2,
+          "name": "Voice of Victory"
         },
         {
           "count": 1,
-          "name": "Forest"
+          "name": "Zoraline, Cosmos Caller"
         },
         {
-          "count": 3,
-          "name": "Overgrown Tomb"
+          "count": 1,
+          "name": "Plains"
+        },
+        {
+          "count": 2,
+          "name": "Swamp"
+        },
+        {
+          "count": 4,
+          "name": "Amalia Benavides Aguirre"
         }
       ],
       "sideboard": [
         {
-          "count": 1,
-          "name": "Swamp"
-        },
-        {
-          "count": 3,
-          "name": "Strategic Betrayal"
-        },
-        {
-          "count": 3,
-          "name": "Dragon Sniper"
-        },
-        {
-          "count": 1,
-          "name": "Dauntless Scrapbot"
-        },
-        {
-          "count": 1,
-          "name": "Leatherhead, Swamp Stalker"
-        },
-        {
-          "count": 3,
-          "name": "Vicious Rivalry"
-        },
-        {
-          "count": 1,
-          "name": "Professor Dellian Fel"
+          "count": 2,
+          "name": "Ancient Vendetta"
         },
         {
           "count": 2,
-          "name": "Wistfulness"
+          "name": "Clarion Conqueror"
+        },
+        {
+          "count": 1,
+          "name": "Decorum Dissertation"
+        },
+        {
+          "count": 3,
+          "name": "Leyline of the Void"
+        },
+        {
+          "count": 1,
+          "name": "Pyrrhic Strike"
+        },
+        {
+          "count": 1,
+          "name": "Requiting Hex"
+        },
+        {
+          "count": 2,
+          "name": "Seam Rip"
+        },
+        {
+          "count": 2,
+          "name": "Starscape Cleric"
+        },
+        {
+          "count": 1,
+          "name": "Strategic Betrayal"
         }
       ]
     }
