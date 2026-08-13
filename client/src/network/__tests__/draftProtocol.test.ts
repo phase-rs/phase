@@ -38,6 +38,21 @@ describe("draftProtocol", () => {
       expect(msg.type).toBe("draft_welcome");
     });
 
+    it("normalizes missing face-up draft arrays in received player views", () => {
+      const msg = validateDraftMessage({
+        type: "draft_state_update",
+        view: {
+          seats: [{ seat_index: 1, display_name: "Alex" }],
+        },
+      });
+
+      expect(msg.type).toBe("draft_state_update");
+      if (msg.type === "draft_state_update") {
+        expect(msg.view.draft_effects).toEqual([]);
+        expect(msg.view.seats[0].face_up_draft_cards).toEqual([]);
+      }
+    });
+
     it("rejects missing type field", () => {
       expect(() => validateDraftMessage({})).toThrow("missing type field");
     });
@@ -145,6 +160,7 @@ describe("draftProtocol", () => {
             type_line: "Instant",
           },
         ],
+        draft_effects: [],
         pool_groups: {
           color_groups: [
             { kind: "white", total: 1, cards: [{ card: {

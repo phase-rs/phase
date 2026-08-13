@@ -386,6 +386,31 @@ const VALID_DRAFT_TYPES = new Set([
   "draft_bo3_match_complete",
 ]);
 
+function normalizeSeatPublicView(raw: unknown): SeatPublicView {
+  if (typeof raw !== "object" || raw === null) {
+    throw new Error("Invalid draft message: malformed public seat");
+  }
+  const seat = raw as SeatPublicView;
+  return {
+    ...seat,
+    face_up_draft_cards: Array.isArray(seat.face_up_draft_cards)
+      ? seat.face_up_draft_cards
+      : [],
+  };
+}
+
+function normalizeDraftPlayerView(raw: unknown): DraftPlayerView {
+  if (typeof raw !== "object" || raw === null) {
+    return { draft_effects: [], seats: [] } as unknown as DraftPlayerView;
+  }
+  const view = raw as Partial<DraftPlayerView>;
+  return {
+    ...view,
+    draft_effects: Array.isArray(view.draft_effects) ? view.draft_effects : [],
+    seats: Array.isArray(view.seats) ? view.seats.map(normalizeSeatPublicView) : [],
+  } as DraftPlayerView;
+}
+
 /** Validate a parsed object as a DraftP2PMessage. Throws on malformed data. */
 export function validateDraftMessage(raw: unknown): DraftP2PMessage {
   if (typeof raw !== "object" || raw === null || !("type" in raw)) {
@@ -394,6 +419,21 @@ export function validateDraftMessage(raw: unknown): DraftP2PMessage {
   const msg = raw as { type: string };
   if (!VALID_DRAFT_TYPES.has(msg.type)) {
     throw new Error(`Invalid draft message type: ${msg.type}`);
+  }
+  const viewMessage = raw as { type: string; view?: unknown; seats?: unknown };
+  if (["draft_welcome", "draft_reconnect_ack", "draft_state_update", "draft_pick_ack"].includes(msg.type)) {
+    return {
+      ...viewMessage,
+      view: normalizeDraftPlayerView(viewMessage.view),
+    } as DraftP2PMessage;
+  }
+  if (msg.type === "draft_lobby_update") {
+    return {
+      ...viewMessage,
+      seats: Array.isArray(viewMessage.seats)
+        ? viewMessage.seats.map(normalizeSeatPublicView)
+        : [],
+    } as DraftP2PMessage;
   }
   return raw as DraftP2PMessage;
 }
