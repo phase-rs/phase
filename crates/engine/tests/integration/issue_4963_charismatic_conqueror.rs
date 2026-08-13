@@ -16,13 +16,7 @@ fn scenario_with_optional_tapper(oracle: &str) -> (GameRunner, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario
-        .add_creature_from_oracle(
-            P0,
-            "Charismatic Conqueror",
-            2,
-            2,
-            oracle,
-        )
+        .add_creature_from_oracle(P0, "Charismatic Conqueror", 2, 2, oracle)
         .id();
     let entrant = scenario
         .add_creature_to_hand_from_oracle(P1, "Untapped Entrant", 1, 1, "")

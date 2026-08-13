@@ -7127,11 +7127,9 @@ pub(crate) fn optional_prompt_player(state: &GameState, ability: &ResolvedAbilit
     // who receives this choice. The reference resolves from the trigger event,
     // preserving the event-time controller rather than inferring from effect shape.
     if let Some(optional_player) = &ability.optional_player {
-        if let Some(player) = crate::game::targeting::resolve_effect_player_ref(
-            state,
-            ability,
-            optional_player,
-        ) {
+        if let Some(player) =
+            crate::game::targeting::resolve_effect_player_ref(state, ability, optional_player)
+        {
             return player;
         }
     }

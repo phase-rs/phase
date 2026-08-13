@@ -2524,7 +2524,10 @@ fn conditional_they_may_tap_stamps_triggering_player_as_optional_actor() {
     );
     let execute = def.execute.as_deref().expect("execute ability");
     assert!(execute.optional);
-    assert_eq!(execute.optional_player, Some(TargetFilter::TriggeringPlayer));
+    assert_eq!(
+        execute.optional_player,
+        Some(TargetFilter::TriggeringPlayer)
+    );
 }
 
 /// CR 603.2 + CR 603.6 + CR 608.2k: Only a trigger's direct, untargeted
