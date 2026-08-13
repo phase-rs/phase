@@ -19,21 +19,29 @@ use super::players;
 /// several replacement-aware cost continuations. Once its controller leaves,
 /// none may resume into finalization after the announcement stack entry has
 /// been removed.
+fn is_abandoned_spell(
+    state: &GameState,
+    departing_player: PlayerId,
+    spell_ids: &[crate::types::identifiers::ObjectId],
+    pending: &PendingCast,
+) -> bool {
+    pending.activation_ability_index.is_none()
+        && (spell_ids.contains(&pending.object_id)
+            || state
+                .objects
+                .get(&pending.object_id)
+                .is_some_and(|object| object.controller == departing_player))
+}
+
 fn abandon_pending_spell_casts(
     state: &mut GameState,
     departing_player: PlayerId,
     spell_ids: &[crate::types::identifiers::ObjectId],
 ) {
-    let is_abandoned_spell = |pending: &PendingCast| {
-        pending.activation_ability_index.is_none()
-            && (spell_ids.contains(&pending.object_id)
-                || pending.ability.controller == departing_player)
-    };
-
     if state
         .pending_cast
         .as_ref()
-        .is_some_and(|pending| is_abandoned_spell(pending))
+        .is_some_and(|pending| is_abandoned_spell(state, departing_player, spell_ids, pending))
     {
         state.pending_cast = None;
     }
@@ -41,7 +49,7 @@ fn abandon_pending_spell_casts(
     if state
         .waiting_for
         .pending_cast_ref()
-        .is_some_and(is_abandoned_spell)
+        .is_some_and(|pending| is_abandoned_spell(state, departing_player, spell_ids, pending))
     {
         state.waiting_for = WaitingFor::Priority {
             player: state.active_player,
@@ -53,7 +61,7 @@ fn abandon_pending_spell_casts(
         Some(DeferredLifeCostResume::Cast {
             pending: Some(pending),
             ..
-        }) if is_abandoned_spell(pending)
+        }) if is_abandoned_spell(state, departing_player, spell_ids, pending)
     ) {
         state.pending_deferred_life_cost_resume = None;
     }
@@ -65,12 +73,12 @@ fn abandon_pending_spell_casts(
                 ..
             }
             | PendingCostMoveResume::SacrificeForCost { pending, .. } => {
-                is_abandoned_spell(pending)
+                is_abandoned_spell(state, departing_player, spell_ids, pending)
             }
             PendingCostMoveResume::CollectEvidencePayment { resume, .. } => matches!(
                 resume.as_ref(),
                 CollectEvidenceResume::Casting { pending_cast, .. }
-                    if is_abandoned_spell(pending_cast)
+                    if is_abandoned_spell(state, departing_player, spell_ids, pending_cast)
             ),
             _ => false,
         };
@@ -82,7 +90,9 @@ fn abandon_pending_spell_casts(
     if state
         .pending_discard_for_cost
         .as_ref()
-        .is_some_and(|resume| is_abandoned_spell(&resume.pending))
+        .is_some_and(|resume| {
+            is_abandoned_spell(state, departing_player, spell_ids, &resume.pending)
+        })
     {
         state.pending_discard_for_cost = None;
     }
@@ -1329,7 +1339,8 @@ mod tests {
     };
     use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
     use crate::types::mana::ManaCost;
-    use crate::types::proposed_event::{CounterPlacement, ProposedEvent, ReplacementEvent};
+    use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
+    use crate::types::replacements::ReplacementEvent;
 
     fn setup_two_player() -> GameState {
         let mut state = GameState::new_two_player(42);
@@ -2508,7 +2519,7 @@ mod tests {
             !resolved
                 .events
                 .iter()
-                .any(|event| matches!(event, GameEvent::SpellCast { source_id, .. } if *source_id == leaving_spell)),
+                .any(|event| matches!(event, GameEvent::SpellCast { object_id, .. } if *object_id == leaving_spell)),
             "answering the living player's replacement choice must not cast the departed player's spell"
         );
     }

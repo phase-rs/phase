@@ -16452,7 +16452,9 @@ mod stage2_injector_tests {
                 //   FIRST and both fired GREEN on the run that caught this — total still 37,
                 //   partition still 5/7/25. The change constructs no `WaitingFor` of any kind;
                 //   it threads an attachment-legality authority through an existing call.
-                "game/engine.rs:12003".to_string(),
+                // #4155 adds seven lines above this producer for abandoned-cast
+                // finalization, moving only this coordinate to `:12010`.
+                "game/engine.rs:12010".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \
