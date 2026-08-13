@@ -7886,7 +7886,7 @@ mod state_transport_derived_tests {
     }
 
     #[tokio::test]
-    async fn resolve_all_handler_sends_the_post_ai_snapshot_before_its_acknowledgement() {
+    async fn resolve_all_handler_sends_the_final_snapshot_before_its_acknowledgement() {
         let mut manager = SessionManager::new();
         let (game_code, player_token) = manager.create_game(PlayerDeckPayload::default());
         let ai_player = PlayerId(1);
@@ -7978,8 +7978,8 @@ mod state_transport_derived_tests {
                 .get(&game_code)
                 .expect("Resolve All retains its session");
             assert!(
-                session.state_revision >= revision_before + 2,
-                "one batch resolution and the AI priority action must both advance the revision"
+                session.state_revision >= revision_before + 1,
+                "the resolved batch must advance the authoritative revision"
             );
             (session.state_revision, session.state.waiting_for.clone())
         };
