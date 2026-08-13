@@ -2,11 +2,14 @@
 //! effect cost, not an unsupported trigger.
 
 use engine::game::scenario::{GameScenario, P0};
-use engine::types::ability::{AbilityCost, Effect, ManaProduction};
+use engine::types::ability::{
+    AbilityCost, Effect, ManaContribution, ManaProduction, QuantityExpr, ResolvedAbility,
+    TargetFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::WaitingFor;
-use engine::types::mana::ManaType;
+use engine::types::mana::{ManaColor, ManaType};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -65,4 +68,51 @@ fn braid_of_fire_cumulative_upkeep_adds_red_for_each_age_counter() {
     let pool = &runner.state().players[P0.0 as usize].mana_pool.mana;
     assert_eq!(pool.len(), 2);
     assert!(pool.iter().all(|unit| unit.color == ManaType::Red));
+}
+
+/// CR 118.3 + CR 106.4: A deterministic, untargeted fixed-mana effect cost
+/// resolves through the normal unless-payment flow into the payer's mana pool.
+#[test]
+fn fixed_mana_effect_cost_pays_into_the_unless_payers_mana_pool() {
+    let mut scenario = GameScenario::new();
+    let source = scenario.add_creature(P0, "Fixed Mana Cost Source", 1, 1).id();
+    let mut runner = scenario.build();
+    let pending_effect = ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    runner.state_mut().waiting_for = WaitingFor::UnlessPayment {
+        player: P0,
+        cost: AbilityCost::EffectCost {
+            effect: Box::new(Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![ManaColor::Blue, ManaColor::Red],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            }),
+        },
+        pending_effect: Box::new(pending_effect),
+        trigger_event: None,
+        effect_description: None,
+        remaining: vec![],
+    };
+
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("fixed mana effect cost is payable");
+
+    let pool = &runner.state().players[P0.0 as usize].mana_pool.mana;
+    assert_eq!(
+        pool.iter().map(|unit| unit.color).collect::<Vec<_>>(),
+        vec![ManaType::Blue, ManaType::Red]
+    );
 }
