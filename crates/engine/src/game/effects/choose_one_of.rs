@@ -487,7 +487,16 @@ mod tests {
             Vec::new(),
             source,
             PlayerId(0),
-        );
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 10 },
+                player: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        ));
         let mut events = Vec::new();
 
         super::resolve(&mut state, &ability, &mut events).expect("first opponent is prompted");
@@ -517,7 +526,10 @@ mod tests {
             },
         )
         .expect("resolving the pause must drain its branch continuation");
-        assert_eq!(state.players[0].life, 21);
+        assert_eq!(
+            state.players[0].life, 21,
+            "the outer tail must not run until the paused first branch and every chooser finish"
+        );
         assert!(matches!(
             state.waiting_for,
             WaitingFor::ChooseOneOfBranch {
@@ -536,7 +548,10 @@ mod tests {
             },
         )
         .expect("second branch pause resolves");
-        assert_eq!(state.players[0].life, 22);
+        assert_eq!(
+            state.players[0].life, 32,
+            "two branch gains plus exactly one outer tail after the final paused branch"
+        );
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         assert!(state.resolution_stack.is_empty());
     }
