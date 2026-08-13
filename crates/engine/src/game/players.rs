@@ -294,6 +294,14 @@ pub fn apnap_order_from(
     // compile error here rather than a silent fall-back to APNAP.
     let start_player = match starting_with {
         Some(ControllerRef::You) => controller,
+        // CR 101.4 + CR 109.4: a resolution-time snapshot names the anchor
+        // outright, so it anchors AT that id. Folding it into the default arm
+        // below would silently order from the active player whenever the
+        // snapshotted player is not the active one — the exact case the variant
+        // exists to represent. Unlike its dynamic siblings there is nothing to
+        // resolve and no context to be missing, so there is no reason to fail
+        // closed here.
+        Some(ControllerRef::SpecificPlayer { id }) => id,
         None
         | Some(
             ControllerRef::Opponent
@@ -309,10 +317,7 @@ pub fn apnap_order_from(
             // CR 303.4b: Enchanted-player scope is not enumerable. Fail closed.
             | ControllerRef::EnchantedPlayer
             // CR 102.1: the active player is exactly this default anchor.
-            | ControllerRef::ActivePlayer
-            // CR 109.4 + CR 611.2: a snapshotted id is not a role this anchor
-            // enumerates; fall back to the default anchor.
-            | ControllerRef::SpecificPlayer { .. },
+            | ControllerRef::ActivePlayer,
         ) => state.active_player,
     };
 
@@ -481,6 +486,39 @@ pub fn team_poison_total(state: &GameState, player: PlayerId) -> u32 {
 
 #[cfg(test)]
 mod tests {
+
+    /// CR 101.4 + CR 109.4: a snapshotted anchor orders from ITS OWN player, not
+    /// from the active player.
+    ///
+    /// The fixture deliberately makes the snapshotted player NON-ACTIVE — that is
+    /// the only configuration in which the bug is visible, since folding
+    /// `SpecificPlayer` into the default arm returns the active player and a
+    /// same-player fixture would pass either way.
+    #[test]
+    fn specific_player_anchor_orders_from_the_snapshotted_player() {
+        let mut state = make_state(3, FormatConfig::free_for_all());
+        state.active_player = PlayerId(0);
+
+        let anchored = apnap_order_from(
+            &state,
+            Some(ControllerRef::SpecificPlayer { id: PlayerId(2) }),
+            PlayerId(0),
+        );
+        assert_eq!(
+            anchored.first(),
+            Some(&PlayerId(2)),
+            "the snapshotted (non-active) player anchors the order"
+        );
+
+        // Paired guard: the default anchor really is the active player, so the
+        // assertion above is not passing for an unrelated reason.
+        let default_anchored = apnap_order_from(&state, None, PlayerId(0));
+        assert_eq!(
+            default_anchored.first(),
+            Some(&PlayerId(0)),
+            "with no anchor the order still starts at the active player"
+        );
+    }
     use super::*;
     use crate::types::format::FormatConfig;
 

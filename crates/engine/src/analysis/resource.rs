@@ -3999,6 +3999,28 @@ fn static_mode_references_growing_class(mode: &crate::types::statics::StaticMode
         // analogue of `modification_grants_growing_cost_keyword`).
         StaticMode::CastWithKeyword { keyword } => kw_reads(keyword),
 
+        // CR 508.1d + CR 604.1: the required defender splits by whether it is a
+        // resolution-time SNAPSHOT or a LIVE class.
+        //
+        // `Fixed`/`Permanent` are frozen ids (a `PlayerId`, an
+        // `ObjectIncarnationRef`) — nothing is re-derived from the board, so they
+        // are genuinely read-free.
+        //
+        // `Matching` is not. `combat::must_attack_defender_directives_for_creature`
+        // re-evaluates its `PlayerFilter` against live player state at EVERY
+        // declare-attackers step (Galactus's "opponent with the most life among
+        // your opponents"), so the class it names can change as the board does and
+        // a cached analysis result can go stale. Fail closed on ANY filter rather
+        // than enumerating `PlayerFilter`'s variants — the same doctrine the
+        // `activator_filter` site above states at length, and for the same reason:
+        // enumerating here would silently assert something about every future
+        // variant.
+        StaticMode::MustAttackDefender { defender } => match defender {
+            crate::types::statics::RequiredDefender::Fixed { .. }
+            | crate::types::statics::RequiredDefender::Permanent { .. } => false,
+            crate::types::statics::RequiredDefender::Matching { .. } => true,
+        },
+
         // Non-cost (or fixed-cost) variants — read-free, listed exhaustively (NO `_`).
         // `ReduceActionCost`/`DefilerCostReduction` carry only a fixed generic
         // reduction; `CantPayCost` is a payment PROHIBITION, not a payable cost; the
@@ -4030,7 +4052,6 @@ fn static_mode_references_growing_class(mode: &crate::types::statics::StaticMode
         | StaticMode::CantLoseLife
         | StaticMode::PlayerProtection(..)
         | StaticMode::MustAttack
-        | StaticMode::MustAttackDefender { .. }
         | StaticMode::MustBlock
         | StaticMode::MustBlockAttacker { .. }
         | StaticMode::CantDraw { .. }
@@ -5286,6 +5307,51 @@ fn ability_has_per_game_activation_gate(state: &GameState, key: &(ObjectId, usiz
 
 #[cfg(test)]
 mod tests {
+
+    /// CR 508.1d + CR 604.1: only a LIVE required-defender class is a growing-class
+    /// read. `Fixed`/`Permanent` are frozen ids and stay read-free; `Matching`
+    /// carries a `PlayerFilter` that
+    /// `combat::must_attack_defender_directives_for_creature` re-evaluates against
+    /// live player state at every declare-attackers step (Galactus), so a cached
+    /// analysis result can go stale and the scan must fail closed.
+    ///
+    /// The two halves are paired deliberately: the `false` arms are what make the
+    /// `true` arm meaningful, since a blanket `=> true` would also pass it.
+    #[test]
+    fn must_attack_defender_reads_growing_class_only_for_a_live_class() {
+        use crate::types::ability::PlayerFilter;
+        use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+        use crate::types::player::PlayerId;
+        use crate::types::statics::{RequiredDefender, StaticMode};
+
+        // Frozen snapshots — nothing is re-derived from the board.
+        assert!(
+            !static_mode_references_growing_class(&StaticMode::MustAttackDefender {
+                defender: RequiredDefender::Fixed {
+                    player: PlayerId(1)
+                },
+            }),
+            "a snapshotted player id reads nothing"
+        );
+        assert!(
+            !static_mode_references_growing_class(&StaticMode::MustAttackDefender {
+                defender: RequiredDefender::Permanent {
+                    permanent: ObjectIncarnationRef::of(ObjectId(7), 1),
+                },
+            }),
+            "a snapshotted permanent pin reads nothing"
+        );
+
+        // A live class — re-evaluated against player state, so fail closed.
+        assert!(
+            static_mode_references_growing_class(&StaticMode::MustAttackDefender {
+                defender: RequiredDefender::Matching {
+                    filter: PlayerFilter::Opponent,
+                },
+            }),
+            "a live defender CLASS is re-evaluated against the board and must fail closed"
+        );
+    }
     use super::*;
     use crate::game::game_object::GameObject;
     use crate::types::ability::TriggerDefinitionRef;

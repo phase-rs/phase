@@ -9,17 +9,57 @@ use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectIncarnationRef;
 use crate::types::statics::{RequiredDefender, StaticMode};
 
-/// CR 506.3 + CR 611.2: Classify the `required_defender` filter and snapshot it
-/// into the durable [`RequiredDefender`] combat enforcement reads.
+/// CR 506.3: which KIND of defender a `required_defender` filter names.
 ///
-/// A filter naming an OBJECT lowers to `Permanent` (pinned by incarnation — CR
-/// 400.7, so a defender that leaves and re-enters does not inherit a requirement
-/// aimed at the old object); every other filter is a player reference and lowers
-/// to `Fixed` via the shared context-ref resolver. `SelfRef` is the only object
-/// arm a printed card reaches today (Gideon Jura's "attack Gideon Jura if
-/// able"), but the classification is by REFERENT KIND rather than by that one
-/// filter, so a future "attacks target planeswalker if able" needs no new
-/// branch.
+/// CR 506.3's category is "a player, a planeswalker, or a battle", so this is the
+/// discriminator the whole seam turns on.
+enum DefenderReferent {
+    /// A permanent — lowers to `RequiredDefender::Permanent`.
+    Object,
+    /// A player — lowers to `RequiredDefender::Fixed`.
+    Player,
+}
+
+/// CR 506.3: Classify a `required_defender` filter by its RESOLVED referent.
+///
+/// Two filters are unconditionally objects by construction (`SelfRef` is the
+/// ability's own source; `SpecificObject` names one). The inherited-target forms
+/// are NOT: `ParentTarget` / `ParentTargetSlot` name whatever the parent clause
+/// targeted, which may be a player — so they must be resolved before they are
+/// classified. Deciding by filter VARIANT instead routed a player-valued parent
+/// target down the object path, where `resolved_object_ids_for_filter` finds
+/// nothing and the whole requirement is silently dropped.
+///
+/// Everything else is a player reference, which is the conservative default:
+/// every card using this effect before Gideon Jura named a player.
+fn defender_referent(ability: &ResolvedAbility, filter: &TargetFilter) -> DefenderReferent {
+    let inherited = match filter {
+        TargetFilter::SelfRef | TargetFilter::SpecificObject { .. } => {
+            return DefenderReferent::Object
+        }
+        // CR 608.2c: the parent's chosen target — first slot, or the named one.
+        TargetFilter::ParentTarget => ability.targets.first(),
+        TargetFilter::ParentTargetSlot { index } => ability.targets.get(*index),
+        _ => return DefenderReferent::Player,
+    };
+    match inherited {
+        Some(TargetRef::Object(_)) => DefenderReferent::Object,
+        // A player-valued parent target, or no target to inherit at all — read as
+        // a player, which `resolve_player_for_context_ref` handles.
+        Some(TargetRef::Player(_)) | None => DefenderReferent::Player,
+    }
+}
+
+/// CR 506.3 + CR 611.2: Snapshot the `required_defender` filter into the durable
+/// [`RequiredDefender`] combat enforcement reads.
+///
+/// An OBJECT referent lowers to `Permanent`, pinned by incarnation (CR 400.7, so
+/// a defender that leaves and re-enters does not inherit a requirement aimed at
+/// the old object); a PLAYER referent lowers to `Fixed` via the shared
+/// context-ref resolver. `SelfRef` is the only object form a printed card reaches
+/// today (Gideon Jura's "attack Gideon Jura if able"), but the classification is
+/// genuinely by referent kind — see [`defender_referent`] — so a future "attacks
+/// target planeswalker if able" needs no new branch.
 ///
 /// Returns `None` when an object referent names no live object, so the caller
 /// grafts nothing rather than a requirement aimed at a vanished defender.
@@ -28,32 +68,20 @@ fn snapshot_required_defender(
     ability: &ResolvedAbility,
     filter: &TargetFilter,
 ) -> Option<RequiredDefender> {
-    if !filter_denotes_object(filter) {
-        return Some(RequiredDefender::Fixed {
+    match defender_referent(ability, filter) {
+        DefenderReferent::Player => Some(RequiredDefender::Fixed {
             player: resolve_player_for_context_ref(state, ability, filter),
-        });
+        }),
+        DefenderReferent::Object => {
+            let defender_id = resolved_object_ids_for_filter(state, ability, filter)
+                .into_iter()
+                .next()?;
+            let obj = state.objects.get(&defender_id)?;
+            Some(RequiredDefender::Permanent {
+                permanent: ObjectIncarnationRef::from_object(obj),
+            })
+        }
     }
-    let defender_id = resolved_object_ids_for_filter(state, ability, filter)
-        .into_iter()
-        .next()?;
-    let obj = state.objects.get(&defender_id)?;
-    Some(RequiredDefender::Permanent {
-        permanent: ObjectIncarnationRef::from_object(obj),
-    })
-}
-
-/// CR 506.3: whether `filter` denotes an OBJECT defender rather than a player.
-/// An explicit allow-list, never a catch-all: a filter whose referent kind is
-/// unclear keeps the pre-existing player reading, which is the conservative
-/// direction — every card using this effect before Gideon Jura named a player.
-fn filter_denotes_object(filter: &TargetFilter) -> bool {
-    matches!(
-        filter,
-        TargetFilter::SelfRef
-            | TargetFilter::SpecificObject { .. }
-            | TargetFilter::ParentTarget
-            | TargetFilter::ParentTargetSlot { .. }
-    )
 }
 
 /// CR 611.2c + CR 115.1: how a force-attack subject must be installed.
@@ -247,6 +275,86 @@ pub fn resolve(
 
 #[cfg(test)]
 mod tests {
+
+    /// CR 506.3 + CR 608.2c: an inherited-target defender is classified by its
+    /// RESOLVED referent, not by the filter variant.
+    ///
+    /// `ParentTarget` names whatever the parent clause targeted. When that is a
+    /// PLAYER it must reach `RequiredDefender::Fixed`; classifying by variant sent
+    /// it down the object path, where `resolved_object_ids_for_filter` finds
+    /// nothing and the requirement is silently dropped entirely.
+    ///
+    /// The object half is the paired guard: it proves the object path still works
+    /// and that the player half is not passing merely because everything became a
+    /// player.
+    #[test]
+    fn parent_target_defender_is_classified_by_its_resolved_referent() {
+        fn snapshot_for(target: TargetRef) -> Option<RequiredDefender> {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Coercer".to_string(),
+                Zone::Battlefield,
+            );
+            let ability = ResolvedAbility::new(
+                Effect::ForceAttack {
+                    target: TargetFilter::Any,
+                    required_defender: TargetFilter::ParentTarget,
+                    duration: Duration::UntilEndOfCombat,
+                    scope: EffectScope::Single,
+                },
+                vec![target],
+                source,
+                PlayerId(0),
+            );
+            snapshot_required_defender(&state, &ability, &TargetFilter::ParentTarget)
+        }
+
+        // A PLAYER-valued parent target lowers to `Fixed`.
+        assert_eq!(
+            snapshot_for(TargetRef::Player(PlayerId(1))),
+            Some(RequiredDefender::Fixed {
+                player: PlayerId(1)
+            }),
+            "a player-valued parent target is a PLAYER defender"
+        );
+
+        // An OBJECT-valued parent target lowers to `Permanent`, pinned by
+        // incarnation (CR 400.7).
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Coercer".to_string(),
+            Zone::Battlefield,
+        );
+        let walker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Some Planeswalker".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::ForceAttack {
+                target: TargetFilter::Any,
+                required_defender: TargetFilter::ParentTarget,
+                duration: Duration::UntilEndOfCombat,
+                scope: EffectScope::Single,
+            },
+            vec![TargetRef::Object(walker)],
+            source,
+            PlayerId(0),
+        );
+        let snapshot = snapshot_required_defender(&state, &ability, &TargetFilter::ParentTarget);
+        let Some(RequiredDefender::Permanent { permanent }) = snapshot else {
+            panic!("an object-valued parent target is a PERMANENT defender, got {snapshot:?}");
+        };
+        assert_eq!(permanent.object_id, walker);
+    }
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{ControllerRef, Duration, TargetRef, TypedFilter};
