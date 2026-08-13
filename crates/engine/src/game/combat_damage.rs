@@ -1127,15 +1127,18 @@ pub fn combat_damage_to_defender(
     if power == 0 {
         return 0;
     }
-    // CR 510.1b: unblocked — the whole power reaches the player.
-    if blockers.is_empty() {
-        return power;
-    }
-
     let has_trample = attacker.has_keyword(&Keyword::Trample);
     let has_deathtouch = attacker.has_keyword(&Keyword::Deathtouch);
     let has_double_strike = attacker.has_keyword(&Keyword::DoubleStrike);
     let attacker_strikes_first = has_double_strike || attacker.has_keyword(&Keyword::FirstStrike);
+
+    // CR 510.1b + CR 702.4b: unblocked — the whole power reaches the player, once
+    // per damage step it assigns in. A double striker assigns in both, which is what
+    // `resolve_combat_damage` does (`double_strike_deals_damage_twice`: an unblocked
+    // 3/3 double striker deals 6). Plain first strike assigns in one step only.
+    if blockers.is_empty() {
+        return if has_double_strike { power * 2 } else { power };
+    }
 
     // Remaining lethal per blocker, in the order the attacker would exhaust them.
     let mut remaining: Vec<i32> = blockers
@@ -1209,15 +1212,23 @@ fn assign_step_to_defender(remaining: &mut Vec<i32>, power: i32, has_trample: bo
     // Otherwise every point is spent on blockers. Kill the cheapest first — the
     // attacking player chooses, and fewer survivors means less absorption in any
     // later step.
+    //
+    // CR 702.19b: damage assigned to a blocker that survives stays MARKED on it, so
+    // its lethal minimum in a later damage step is reduced by that much. Dropping
+    // the leftover budget instead understated the defender's exposure: a 5-power
+    // double-strike trampler against one 0/6 was read as 0 through, when the first
+    // step marks 5 and the regular step then needs only 1 more before trampling 4.
+    // `remaining` is sorted ascending, so the front is always the cheapest kill.
     let mut budget = power;
-    remaining.retain(|&lethal| {
+    while let Some(&lethal) = remaining.first() {
         if budget >= lethal {
             budget -= lethal;
-            false
+            remaining.remove(0);
         } else {
-            true
+            remaining[0] -= budget;
+            break;
         }
-    });
+    }
     0
 }
 
@@ -4571,6 +4582,42 @@ mod tests {
         // CR 702.7b: a lone first-strike step — 4 lethal, 7 through. It does NOT
         // strike again (that would need double strike).
         assert_eq!(combat_damage_to_defender(&state, a, &[b]), 7);
+    }
+
+    /// CR 702.4b: an unblocked double striker assigns in both damage steps. Pinned
+    /// against `resolve_combat_damage`'s own answer — `double_strike_deals_damage_twice`
+    /// has an unblocked 3/3 double striker deal 6 — because this helper claims to be
+    /// the authority for the same question and must not disagree with the resolver.
+    #[test]
+    fn unblocked_double_striker_assigns_in_both_steps() {
+        let mut state = setup();
+        let a = create_creature(&mut state, PlayerId(0), "A", 3, 3);
+        kw(&mut state, a, vec![Keyword::DoubleStrike]);
+        assert_eq!(combat_damage_to_defender(&state, a, &[]), 6);
+    }
+
+    /// Plain first strike is one step, not two — the distinction double strike turns
+    /// on. Guards against "strikes first" being conflated with "strikes twice".
+    #[test]
+    fn unblocked_first_striker_assigns_once() {
+        let mut state = setup();
+        let a = create_creature(&mut state, PlayerId(0), "A", 3, 3);
+        kw(&mut state, a, vec![Keyword::FirstStrike]);
+        assert_eq!(combat_damage_to_defender(&state, a, &[]), 3);
+    }
+
+    /// CR 702.19b: damage assigned to a surviving blocker stays marked on it, so the
+    /// regular step sees a reduced lethal minimum. A 5-power double-strike trampler
+    /// into one 0/6 marks 5 in the first step (0 through, since lethal was not
+    /// assigned to every blocker), then needs only 1 more in the regular step and
+    /// tramples the other 4.
+    #[test]
+    fn damage_marked_in_the_first_step_lowers_lethal_for_the_second() {
+        let mut state = setup();
+        let a = create_creature(&mut state, PlayerId(0), "A", 5, 5);
+        kw(&mut state, a, vec![Keyword::DoubleStrike, Keyword::Trample]);
+        let b = create_creature(&mut state, PlayerId(1), "B", 0, 6);
+        assert_eq!(combat_damage_to_defender(&state, a, &[b]), 4);
     }
 
     #[test]
