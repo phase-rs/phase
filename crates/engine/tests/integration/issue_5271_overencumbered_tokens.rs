@@ -19,7 +19,7 @@ fn issue_5271_overencumbered_etb_gives_every_token_to_enchanted_opponent() {
             .as_enchantment()
             .with_subtypes(vec!["Aura", "Curse"])
             .with_mana_cost(ManaCost::zero())
-            .from_oracle_text(OVERENCUMBERED_ORACLE);
+            .from_oracle_text_with_keywords(&["Enchant opponent"], OVERENCUMBERED_ORACLE);
         builder.id()
     };
 
