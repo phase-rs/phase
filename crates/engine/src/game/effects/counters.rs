@@ -830,7 +830,7 @@ fn apply_pending_counter_post_action(
                         // CR 508.4: an entrant joins combat only after its
                         // replacement-modified entry has fully settled.
                         if crate::game::combat::choose_entry_attack_target_or_enter(
-                            state, object_id, controller, events,
+                            state, object_id, controller,
                         )
                         .is_some()
                         {

@@ -486,6 +486,18 @@ pub fn enter_attacking(
     push_attacker_and_journal(state, object_id, defending_player, attack_target);
 }
 
+/// CR 508.4: Seat a creature that entered the battlefield attacking against an
+/// explicitly chosen legal defender. Unlike Ninjutsu and Sneak, this does not
+/// tap the creature: entering attacking alone is not a declaration.
+pub fn enter_attacking_at_target(
+    state: &mut GameState,
+    object_id: ObjectId,
+    defending_player: PlayerId,
+    attack_target: AttackTarget,
+) {
+    push_attacker_and_journal(state, object_id, defending_player, attack_target);
+}
+
 /// CR 508.4 + CR 733: seat `object_id` as an attacking creature against an
 /// already-decided defender and journal the settled pair.
 ///
@@ -655,7 +667,6 @@ pub fn choose_entry_attack_target_or_enter(
     state: &mut GameState,
     object_id: ObjectId,
     controller: PlayerId,
-    events: &mut Vec<GameEvent>,
 ) -> Option<PlayerId> {
     let valid_targets = valid_entry_attack_targets(
         state,
@@ -667,7 +678,7 @@ pub fn choose_entry_attack_target_or_enter(
         [target] => {
             if let Some(defending_player) = entry_attack_target_defender(state, controller, *target)
             {
-                place_attacking_alongside(state, object_id, defending_player, *target, events);
+                enter_attacking_at_target(state, object_id, defending_player, *target);
             }
             None
         }

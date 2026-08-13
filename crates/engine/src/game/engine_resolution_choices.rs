@@ -1583,12 +1583,11 @@ pub(super) fn handle_resolution_choice(
             if let Some(defending_player) =
                 crate::game::combat::entry_attack_target_defender(state, player, target)
             {
-                crate::game::combat::place_attacking_alongside(
+                crate::game::combat::enter_attacking_at_target(
                     state,
                     object_id,
                     defending_player,
                     target,
-                    events,
                 );
             }
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
