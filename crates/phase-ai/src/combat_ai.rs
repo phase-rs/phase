@@ -1157,7 +1157,24 @@ pub fn choose_blockers_with_profile(
                 .get(bid)
                 .is_some_and(has_damage_reflection_to_controller)
         });
+        // CR 702.19b: the trample term the single-blocker pass carries as
+        // `damage_prevented = blocker_toughness`, without which the "guard-for-guard"
+        // parity claimed above is false for tramplers. A trampling attacker assigns
+        // only lethal damage (the blockers' toughness) to the gang and tramples the
+        // excess to the player, so the gang has to absorb enough to actually avert
+        // the kill — a floor-sized gang that leaves a still-lethal residual spends
+        // every creature in it and the player dies anyway. `block_is_futile` catches
+        // this for a lone attacker only: its absorption bound is optimistic and
+        // board-wide, while this gang sees just the blockers earlier passes left.
+        //
+        // Non-tramplers need no such term: once blocked they assign nothing to the
+        // player whatever happens to the blockers (CR 510.1c), which is what makes
+        // the doomed block above a full save.
+        let trample_gang_averts_lethal = !attacker_has_trample
+            || (gang_toughness >= 2
+                && attacker_power.saturating_sub(gang_toughness) < effective_life);
         let gang_stabilize = floor_stabilize_route
+            && trample_gang_averts_lethal
             && !gang_reflects_damage
             && !commander_chump_unsafe(state, player, attacker_id, gang_toughness);
 
@@ -4654,6 +4671,43 @@ mod tests {
             on_attacker, 0,
             "a deathtouch trampler tramples past a chump gang (1 lethal per blocker, \
              CR 702.2c), so the block saves nothing. Got {assignments:?}"
+        );
+    }
+
+    /// CR 702.19b: the same boundary without deathtouch, which reaches the
+    /// `gang_stabilize` gate rather than exiting at the deathtouch skip. Needs two
+    /// attackers to be reachable: `block_is_futile` bounds absorption optimistically
+    /// over the whole board, so a lone trampler whose gang cannot absorb is caught
+    /// there — but a gang built from what earlier passes left over is not.
+    ///
+    /// The 6/6 is consumed blocking the 5/5, leaving the menace trampler a
+    /// floor-sized gang of two 1/1s. That gang absorbs 2 of 11, so the player takes
+    /// 9 at 6 life and dies either way: the block is a pure loss of both creatures.
+    #[test]
+    fn floored_trampler_is_not_chump_ganged_when_the_gang_cannot_absorb_lethal() {
+        let mut state = setup();
+        state.players[1].life = 6;
+        let plain = add_creature(&mut state, PlayerId(0), "Plain", 5, 5, vec![]);
+        let trampler = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Trampler",
+            11,
+            11,
+            vec![Keyword::Menace, Keyword::Trample],
+        );
+        add_creature(&mut state, PlayerId(1), "Big", 6, 6, vec![]);
+        add_creature(&mut state, PlayerId(1), "Small 0", 1, 1, vec![]);
+        add_creature(&mut state, PlayerId(1), "Small 1", 1, 1, vec![]);
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[plain, trampler]);
+
+        let on_trampler = assignments.iter().filter(|&&(_, a)| a == trampler).count();
+        assert_eq!(
+            on_trampler, 0,
+            "CR 702.19b: a floor-sized gang absorbing 2 of 11 leaves a lethal residual \
+             at 6 life, so the trampler must not be chump-ganged — the creatures are \
+             spent and the player dies anyway. Got {assignments:?}"
         );
     }
 }
