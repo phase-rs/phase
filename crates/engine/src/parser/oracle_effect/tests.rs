@@ -10,8 +10,8 @@ use crate::parser::parse_oracle_text;
 use crate::types::ability::CardPlayMode::{Cast, Play};
 use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermission};
 use crate::types::ability::{
-    AttachmentKind, CastManaObjectScope, CastManaSpentMetric, ExcessRecipient,
-    ForEachCategoryAction, PerpetualModification, SeatDirection,
+    AttachmentKind, CardSelectionMode, CastManaObjectScope, CastManaSpentMetric, ExcessRecipient,
+    ForEachCategoryAction, ModalChoice, PerpetualModification, SeatDirection,
 };
 use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
@@ -42,6 +42,60 @@ fn each_target_filter_mut_does_not_visit_shuffle() {
         ),
         "the shared walker must not visit Effect::Shuffle"
     );
+}
+
+#[test]
+fn player_scope_rewrite_reaches_modal_mode_abilities() {
+    let mode = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Discard {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::Target,
+                },
+            },
+            target: TargetFilter::Typed(TypedFilter::card().controller(ControllerRef::You)),
+            selection: CardSelectionMode::Chosen,
+            unless_filter: None,
+            filter: None,
+        },
+    )
+    .player_scope(PlayerFilter::All);
+    let mut def = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    )
+    .player_scope(PlayerFilter::All)
+    .with_modal(
+        ModalChoice {
+            min_choices: 1,
+            max_choices: 1,
+            mode_count: 1,
+            ..Default::default()
+        },
+        vec![mode],
+    );
+
+    apply_player_scope_rewrites(&mut def);
+
+    assert!(matches!(
+        def.mode_abilities[0].effect.as_ref(),
+        Effect::Discard {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::ScopedPlayer,
+                },
+            },
+            target: TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::ScopedPlayer),
+                ..
+            }),
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -9725,6 +9779,23 @@ fn return_leading_their_hand_all_exiled_with_source() {
     ));
 }
 
+#[test]
+fn return_each_card_they_exiled_this_way_uses_exiled_tracked_set() {
+    let e = parse_effect("returns to their hand each card they exiled this way");
+    assert!(matches!(
+        e,
+        Effect::ChangeZoneAll {
+            origin: Some(Zone::Exile),
+            destination: Zone::Hand,
+            target: TargetFilter::TrackedSetFiltered {
+                caused_by: Some(ThisWayCause::Exiled),
+                ..
+            },
+            ..
+        }
+    ));
+}
+
 /// CR 406.6 + CR 607.1/607.2a (#5577): Watcher for Tomorrow's Hideaway
 /// leaves-the-battlefield trigger — "put the exiled card into its owner's hand"
 /// — references the card THIS source exiled in a SEPARATE, earlier resolution
@@ -17863,6 +17934,48 @@ fn temporal_prefix_in_effect_chain() {
             effect.effect
         );
     }
+}
+
+#[test]
+fn temporal_prefix_preserves_full_delayed_effect_chain() {
+    let def = parse_effect_chain(
+        "At the beginning of the next end step, each player discards their hand, then returns to their hand each card they exiled this way.",
+        AbilityKind::Spell,
+    );
+    let Effect::CreateDelayedTrigger {
+        effect,
+        uses_tracked_set: true,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected a tracked delayed trigger, got {:?}", def.effect);
+    };
+    assert!(matches!(
+        effect.effect.as_ref(),
+        Effect::Discard {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::ScopedPlayer
+                }
+            },
+            ..
+        }
+    ));
+    assert!(matches!(
+        effect
+            .sub_ability
+            .as_deref()
+            .map(|ability| ability.effect.as_ref()),
+        Some(Effect::ChangeZoneAll {
+            origin: Some(Zone::Exile),
+            destination: Zone::Hand,
+            target: TargetFilter::TrackedSetFiltered {
+                caused_by: Some(ThisWayCause::Exiled),
+                ..
+            },
+            ..
+        })
+    ));
 }
 
 #[test]

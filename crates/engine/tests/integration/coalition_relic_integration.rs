@@ -31,16 +31,20 @@
 //! the dynamic-count any-color mana production.
 
 use engine::game::effects;
+use engine::game::scenario::{GameScenario, P0};
 use engine::game::zones::create_object;
 use engine::types::ability::{
     AbilityCondition, AbilityKind, DamageChannel, Effect, ManaContribution, ManaProduction,
     QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
 };
+use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::game_state::GameState;
+use engine::types::game_state::{ManaChoice, ManaChoicePrompt, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::ManaColor;
+use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
@@ -222,17 +226,110 @@ fn coalition_relic_with_zero_charge_counters_produces_no_mana() {
     effects::resolve_ability_chain(&mut state, &ability, &mut events, 0)
         .expect("chain must resolve cleanly even with zero counters");
 
-    // last_effect_amount remains None — the events-scan only stamps when amount > 0.
+    // The events-scan only stamps when amount > 0; CR 106.5 then makes the
+    // undefined zero-production result produce no mana.
     assert!(
         state.last_effect_amount.is_none() || state.last_effect_amount == Some(0),
         "no counters removed → no last_effect_amount stamp; got {:?}",
         state.last_effect_amount
     );
 
-    // No mana in the pool, no choice in flight.
+    // CR 106.5: an ability that would produce mana of an undefined type
+    // produces no mana and therefore needs no color choice.
     assert_eq!(
         state.players[controller.0 as usize].mana_pool.total(),
         0,
         "zero counters → zero mana"
+    );
+    assert!(
+        matches!(
+            state.waiting_for,
+            engine::types::game_state::WaitingFor::Priority { .. }
+        ),
+        "zero counters must not prompt for a mana color; got {:?}",
+        state.waiting_for
+    );
+}
+
+/// CR 603.2 + CR 106.5: Drive the printed Coalition Relic ability through the
+/// action pipeline. Three counters must reach the color prompt, while the
+/// zero-counter resolver regression above must settle without one.
+#[test]
+fn coalition_relic_full_action_path_reaches_positive_mana_prompt() {
+    const ORACLE: &str = "At the beginning of your precombat main phase, you may remove all charge counters from ~. If you do, add one mana of any color for each charge counter removed this way.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::Upkeep);
+    scenario.with_library_top(P0, &["P0 Card"; 40]);
+    scenario.with_library_top(engine::types::player::PlayerId(1), &["P1 Card"; 40]);
+    let relic = scenario
+        .add_creature(P0, "Coalition Relic", 0, 0)
+        .as_artifact()
+        .from_oracle_text(ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&relic)
+        .unwrap()
+        .counters
+        .insert(CounterType::Generic("charge".to_string()), 3);
+
+    runner.advance_to_phase(Phase::PreCombatMain);
+    for _ in 0..4 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("the Coalition Relic trigger must resolve through priority");
+    }
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ),
+        "the printed Coalition Relic trigger must reach its optional prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("accepting Coalition Relic must resolve its optional effect");
+
+    match &runner.state().waiting_for {
+        WaitingFor::ChooseManaColor {
+            choice: ManaChoicePrompt::SingleColor { options },
+            ..
+        } => assert_eq!(options.len(), 5),
+        other => panic!("three removed counters must reach a mana prompt, got {other:?}"),
+    }
+    runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaColor::Red.into()),
+            count: 1,
+        })
+        .expect("choosing a mana color must complete Coalition Relic");
+
+    assert_eq!(
+        runner.state().players[P0.0 as usize].mana_pool.total(),
+        3,
+        "three removed counters must produce three mana"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .objects
+            .get(&relic)
+            .unwrap()
+            .counters
+            .get(&CounterType::Generic("charge".to_string()))
+            .copied()
+            .unwrap_or(0),
+        0,
+        "the accepted trigger must remove all three charge counters"
     );
 }

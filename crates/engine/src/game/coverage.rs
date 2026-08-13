@@ -760,6 +760,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             }
             FilterProp::SameName => parts.push("same name".into()),
             FilterProp::SameNameAsParentTarget => parts.push("same name as parent target".into()),
+            FilterProp::SameNameAsExiledBySource => parts.push("same name as exiled card".into()),
             FilterProp::NameMatchesAnyPermanent { controller } => match controller {
                 Some(c) => parts.push(format!("name matches {} permanent", fmt_controller(c))),
                 None => parts.push("name matches any permanent".into()),
@@ -1617,6 +1618,17 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 fmt_count_scope(scope)
             ),
             None => format!("spells cast this turn ({})", fmt_count_scope(scope)),
+        },
+        QuantityRef::SpellsCastBeforeTriggeringSpell { scope, filter } => match filter {
+            Some(filter) => format!(
+                "{} spells cast before the triggering spell ({})",
+                fmt_target(filter),
+                fmt_count_scope(scope)
+            ),
+            None => format!(
+                "spells cast before the triggering spell ({})",
+                fmt_count_scope(scope)
+            ),
         },
         QuantityRef::EnteredThisTurn { filter } => {
             format!("{} entered this turn", fmt_target(filter))
@@ -8046,6 +8058,9 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::LifeLostThisTurn { .. } => ("LifeLostThisTurn", Handled),
         QuantityRef::EventContextAmount => ("EventContextAmount", Handled),
         QuantityRef::SpellsCastThisTurn { .. } => ("SpellsCastThisTurn", Handled),
+        QuantityRef::SpellsCastBeforeTriggeringSpell { .. } => {
+            ("SpellsCastBeforeTriggeringSpell", Handled)
+        }
         QuantityRef::EnteredThisTurn { .. } => ("EnteredThisTurn", Handled),
         QuantityRef::SacrificedThisTurn { .. } => ("SacrificedThisTurn", Handled),
         QuantityRef::CrimesCommittedThisTurn => ("CrimesCommittedThisTurn", Handled),

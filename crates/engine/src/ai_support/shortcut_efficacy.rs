@@ -1207,7 +1207,7 @@ fn trigger_event_unreachable_by_confined_action(
         // Directly produced by casting or activating:
         //   `SpellCast`            CR 601.2i     — announcing the spell IS the event
         //   `AbilityActivated`     CR 602.2b     — likewise for an activation
-        //   `Taps` / `TapsForMana` / `ManaAdded` — `AbilityCost::Tap` and the mana
+        //   `Taps` / `TapsForMana` / `ManaAdded` / `ManaAbilityProduced` — `AbilityCost::Tap` and the mana
         //                                          the actor spends
         //   `PlayerPerformedAction`              — `game::search_library` emits it
         //   `SearchedLibrary`                    — `Effect::SearchLibrary` itself
@@ -3207,6 +3207,7 @@ mod tests {
             TriggerMode::Taps,
             TriggerMode::TapsForMana,
             TriggerMode::ManaAdded,
+            TriggerMode::ManaAbilityProduced,
             TriggerMode::Shuffled,
             TriggerMode::SearchedLibrary,
             TriggerMode::PlayerPerformedAction,

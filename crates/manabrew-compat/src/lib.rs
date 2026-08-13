@@ -5255,7 +5255,7 @@ mod tests {
         assert_eq!(json["input"]["presentation"]["title"], "Choose target");
     }
 
-    /// Build a `TargetSelection` board-target prompt whose single slot carries
+    /// Build an earlier `TargetSelection` board-target prompt whose active slot carries
     /// `effect_kind`, driving the real engine projection
     /// (`derive_viewer_interaction` -> `target_intent`) and the real adapter
     /// mapping. Returns the serialized prompt.
@@ -5280,13 +5280,22 @@ mod tests {
         state.waiting_for = WaitingFor::TargetSelection {
             player: PlayerId(0),
             pending_cast: dummy_pending_cast(),
-            target_slots: vec![TargetSelectionSlot {
-                legal_targets: legal.clone(),
-                optional: false,
-                chooser: None,
-                effect_kind,
-                effect_detail,
-            }],
+            target_slots: vec![
+                TargetSelectionSlot {
+                    legal_targets: legal.clone(),
+                    optional: false,
+                    chooser: None,
+                    effect_kind,
+                    effect_detail,
+                },
+                TargetSelectionSlot {
+                    legal_targets: legal.clone(),
+                    optional: true,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
+                },
+            ],
             mode_labels: Vec::new(),
             selection: TargetSelectionProgress {
                 current_slot: 0,

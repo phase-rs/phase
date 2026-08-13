@@ -1,94 +1,9 @@
-//! Valakut Exploration — end-step "if there are cards exiled with this
-//! enchantment, put them into their owner's graveyard, then this enchantment
-//! deals that much damage to each opponent" trigger.
-//!
-//! Oracle (relevant ability, verbatim):
-//!   At the beginning of your end step, if there are cards exiled with this
-//!   enchantment, put them into their owner's graveyard, then this enchantment
-//!   deals that much damage to each opponent.
-//!
-//! These tests drive the REAL parser (`add_enchantment_from_oracle`) and the
-//! REAL trigger→resolution pipeline (scenario runner) — never a raw resolve.
-//! The chain under test: CR 603.4 intervening-if over the linked-exile pool
-//! (`TriggerCondition::QuantityComparison { CardsExiledBySource GE 1 }`), the
-//! CR 406.6 + CR 607.2a pool sweep
-//! (`ChangeZoneAll { origin: Exile, destination: Graveyard, target:
-//! ExiledBySource }`, consuming links), and the CR 608.2c chained
-//! "that much" damage (`DamageEachPlayer { EventContextAmount, Opponent }`
-//! reading `state.last_effect_count` stamped by the completed mass move).
-//!
-//! Revert map (the parser gate this change adds hoists the existential
-//! intervening-if; reverting the condition arm leaves `condition: None` and
-//! the old lone `ChangeZone { ParentTarget }` body):
-//!   * `end_step_trigger_sweeps_pool_and_damages_each_opponent` —
-//!     REVERT-FAILING. Reverted, the sweep moves nothing (a Phase trigger has
-//!     no parent target), so the graveyard assertions flip. The 0-delta life
-//!     assertions are non-discriminating for THIS revert — a condition revert
-//!     also produces 0 deltas, so `== 0` still passes; they discriminate gate
-//!     removal (see the gate revert map in the STRICT-FAILURE GATE note
-//!     below).
-//!   * `landfall_exile_links_and_end_step_sweep_pipeline` — REVERT-FAILING
-//!     pipeline-reachability guard: without the fixed parse the card carries
-//!     no `LINKED_EXILE_CONSUMER_TAGS` member, so `ExileTop` records no link,
-//!     the end-step gate reads an empty pool, and the card never leaves Exile.
-//!   * `end_step_trigger_does_not_fire_on_empty_pool` — CR 603.4 empty-pool
-//!     gate. Reverted, `condition: None` lets the trigger fire; fixed, it
-//!     never goes on the stack. Paired positive reach-guard: the two tests
-//!     above drive the identical path with a non-empty pool and sweep it.
-//!   * `sweep_and_damage_respect_per_source_link_authority` — multi-authority
-//!     hostile fixture: a second source's `ExileLink` must be neither swept
-//!     nor counted (`linked_exile_cards_for_source` filters on
-//!     `link.source_id == source_id`).
-//!
-//! STRICT-FAILURE GATE (issue #7046 — see `oracle_effect::assembly::
-//! MASS_MOVE_TOTAL_DAMAGE_GAP`): "that much" should read the TOTAL number of
-//! cards moved by the sweep (the official Valakut ruling; CR 608.2c
-//! later-text-reads-earlier-action), the same for every opponent. But the
-//! runtime parent->sub hand-off
-//! (`effects/mod.rs::install_previous_effect_counts_by_player`) rewrites the
-//! completed `ChangeZoneAll`'s count channels: `last_effect_count` becomes
-//! max(per-OWNER counts), and a per-player table is installed which
-//! `DamageEachPlayer`'s per-recipient scoped resolution
-//! (`resolve_quantity_scoped_with_targets`) consults FIRST — so each opponent
-//! would read the count of their OWN swept cards, not the total. Emitting the
-//! parsed `DamageEachPlayer{Ref(EventContextAmount), Opponent}` shape would
-//! therefore be silently wrong at runtime. Rather than ship that, the parser
-//! gate (F1) rewrites the damage clause to a named, fragment-carrying
-//! `Effect::Unimplemented { name: MASS_MOVE_TOTAL_DAMAGE_GAP, .. }` — the
-//! sweep/condition/link machinery below all still runs for real, but the
-//! damage clause is an honest no-op: it deals NO damage. Delete the gate —
-//! and flip these deltas to the rules-correct totals (T1: -2 to EACH
-//! opponent; T2/T4: -1) — only once #7046 lands an engine-side
-//! completed-sweep scalar-total channel.
-//!
-//! NOT asserted here (empirically verified during this fix round, distinct
-//! from and outside this PR's scope): `state.unimplemented_oracle_ids` —
-//! `Effect::Unimplemented`'s telemetry side of the no-op — is populated only
-//! by `resolve_effect`'s dedicated arm (`effects/mod.rs:~4508`), but the
-//! REAL chain-resolution path (`resolve_ability_chain` ->
-//! `resolve_chain_body`) short-circuits BEFORE calling `resolve_effect` for
-//! any `Effect::Unimplemented` node ("Skip no-op unimplemented/runtime-handled
-//! effects", `effects/mod.rs:~9755`), so the telemetry set never actually
-//! populates via ordinary stack resolution — only via a direct `resolve_effect`
-//! call (unit tests, and one narrow reveal-all special case). This is a
-//! pre-existing gap in the telemetry mechanism itself, unrelated to the F1
-//! gate, and fixing `resolve_chain_body` is outside this parser-only PR's
-//! frozen scope; the deltas below are this test's sole (and sufficient)
-//! tripwire.
-//!
-//! Revert map for the gate itself (distinct from the condition/sweep revert
-//! map above):
-//!   * `end_step_trigger_sweeps_pool_and_damages_each_opponent` (T1) is the
-//!     revert-failing tripwire. Gate removed WITHOUT #7046 landing: the raw
-//!     `DamageEachPlayer` shape ships again, so each opponent reads their OWN
-//!     swept-card count (P1's delta flips to -1) — the 0-delta assertion
-//!     fails. Gate removed WITH #7046 landed but the deltas here left at 0:
-//!     the engine now deals the rules-correct -2/-2, which also fails the
-//!     0-delta assertions — forcing the conscious flip to -2/-2 described
-//!     above.
+//! Valakut Exploration's end-step trigger sweeps every linked exiled card to
+//! its owner's graveyard, then deals each opponent the sweep's total. The
+//! tests drive the real Oracle parser and trigger-resolution pipeline.
 
 use engine::game::scenario::{GameScenario, P0, P1};
-use engine::types::ability::Effect;
+use engine::types::ability::{DamageChannel, Effect, PlayerFilter, QuantityExpr, QuantityRef};
 use engine::types::game_state::{ExileLink, ExileLinkKind};
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
@@ -125,7 +40,7 @@ fn life_of(runner: &engine::game::scenario::GameRunner, player: PlayerId) -> i32
         .life
 }
 
-fn assert_queued_gated_damage_continuation(
+fn assert_queued_total_damage_continuation(
     runner: &engine::game::scenario::GameRunner,
     source: ObjectId,
 ) {
@@ -143,19 +58,23 @@ fn assert_queued_gated_damage_continuation(
     assert!(
         matches!(
             &damage.effect,
-            Effect::Unimplemented { name, .. } if name == "mass_move_total_damage"
+            Effect::DamageEachPlayer {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount {
+                        channel: DamageChannel::Total,
+                    },
+                },
+                player_filter: PlayerFilter::Opponent,
+            }
         ),
-        "the queued damage continuation must carry the mass-move-total-damage marker, got {:?}",
+        "the queued damage continuation must read the completed sweep total, got {:?}",
         damage.effect
     );
 }
 
 /// T1 — the end-step trigger sweeps the WHOLE pool into the owners'
 /// graveyards (CR 404.1: each card to its own owner's graveyard; CR 603.4:
-/// the gate held), but the chained damage clause is the strict-failure
-/// marker (issue #7046): it deals NO damage to anyone (see module doc for why
-/// `state.unimplemented_oracle_ids` is NOT asserted here). N=2 with two
-/// different owners.
+/// the gate held), then deals the two-card total to every opponent.
 #[test]
 fn end_step_trigger_sweeps_pool_and_damages_each_opponent() {
     let mut scenario = GameScenario::new_n_player(3, 42);
@@ -178,7 +97,7 @@ fn end_step_trigger_sweeps_pool_and_damages_each_opponent() {
     let p2_life = life_of(&runner, P2);
 
     runner.advance_to_end_step();
-    assert_queued_gated_damage_continuation(&runner, valakut);
+    assert_queued_total_damage_continuation(&runner, valakut);
     runner.advance_until_stack_empty();
 
     // CR 404.1: each swept card lands in its OWN owner's graveyard.
@@ -201,29 +120,21 @@ fn end_step_trigger_sweeps_pool_and_damages_each_opponent() {
         "P1's card must be in P1's graveyard"
     );
 
-    // STRICT-FAILURE GATE (issue #7046, see module doc): the damage clause is
-    // an honest no-op — NO damage to any player. Revert-discriminating: with
-    // the gate removed (and #7046 not yet landed), P1 would take -1 (its own
-    // swept-card count read from the per-player table).
     assert_eq!(
         life_of(&runner, P1) - p1_life,
-        0,
-        "the gated damage clause must deal no damage (honest no-op, issue #7046)"
+        -2,
+        "each opponent must receive the two-card sweep total"
     );
     assert_eq!(
         life_of(&runner, P2) - p2_life,
-        0,
-        "the gated damage clause must deal no damage (honest no-op, issue #7046)"
+        -2,
+        "each opponent must receive the same two-card sweep total"
     );
     assert_eq!(
         life_of(&runner, P0) - p0_life,
         0,
         "the controller takes no damage"
     );
-    // `state.unimplemented_oracle_ids` is deliberately NOT asserted here — see
-    // the module doc's "NOT asserted here" paragraph: the real chain-
-    // resolution path never populates it for an `Unimplemented` node, a
-    // pre-existing gap outside this PR's scope.
 }
 
 /// T2 — full-pipeline reachability guard: the landfall exile actually LINKS
@@ -292,7 +203,7 @@ fn landfall_exile_links_and_end_step_sweep_pipeline() {
     );
 
     runner.advance_to_end_step();
-    assert_queued_gated_damage_continuation(&runner, valakut);
+    assert_queued_total_damage_continuation(&runner, valakut);
     runner.advance_until_stack_empty();
 
     assert_eq!(
@@ -300,17 +211,10 @@ fn landfall_exile_links_and_end_step_sweep_pipeline() {
         Zone::Graveyard,
         "the end-step sweep must move the linked card to its owner's graveyard"
     );
-    // STRICT-FAILURE GATE (issue #7046, see module doc): the honest expected
-    // delta is 0 (the gated damage clause is a no-op). NON-DISCRIMINATING for
-    // the gate itself — T1 owns that tripwire (its zero-delta assertions);
-    // this assertion is numerically identical whether the gate exists or not
-    // (a Phase trigger has no parent target, so a REVERTED condition/sweep
-    // parse also produces a 0 delta here — the pipeline-reachability guards
-    // above are what discriminate that revert).
     assert_eq!(
         life_of(&runner, P1) - p1_life,
-        0,
-        "the gated damage clause must deal no damage (honest no-op, issue #7046)"
+        -1,
+        "the single-card sweep must deal one damage"
     );
 }
 
@@ -367,7 +271,7 @@ fn sweep_and_damage_respect_per_source_link_authority() {
     let p1_life = life_of(&runner, P1);
 
     runner.advance_to_end_step();
-    assert_queued_gated_damage_continuation(&runner, valakut);
+    assert_queued_total_damage_continuation(&runner, valakut);
     runner.advance_until_stack_empty();
 
     assert_eq!(
@@ -380,14 +284,9 @@ fn sweep_and_damage_respect_per_source_link_authority() {
         Zone::Exile,
         "a card linked to a DIFFERENT source must not be swept (CR 607.2a per-source links)"
     );
-    // STRICT-FAILURE GATE (issue #7046, see module doc): the honest expected
-    // delta is 0 (the gated damage clause is a no-op). NON-DISCRIMINATING for
-    // the gate itself — T1 owns that tripwire. The per-source AUTHORITY claim
-    // (a foreign-linked card must not be swept or counted) is carried
-    // entirely by the zone assertions above.
     assert_eq!(
         life_of(&runner, P1) - p1_life,
-        0,
-        "the gated damage clause must deal no damage (honest no-op, issue #7046)"
+        -1,
+        "only the Valakut-linked card contributes to the sweep total"
     );
 }

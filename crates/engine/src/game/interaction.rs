@@ -1839,6 +1839,14 @@ fn mana_payment_direct_actions(
     player: PlayerId,
     convoke_mode: Option<ConvokeMode>,
 ) -> Result<Vec<GameAction>, InteractionReasonCode> {
+    let has_delve = state.pending_cast.as_ref().is_some_and(|pending| {
+        super::casting::spell_has_delve_payment_for(
+            state,
+            player,
+            pending.object_id,
+            pending.casting_variant == CastingVariant::Fuse,
+        )
+    });
     let activation_upper_bound = state
         .battlefield
         .iter()
@@ -1867,11 +1875,7 @@ fn mana_payment_direct_actions(
         .unwrap_or_default();
     let convoke_upper_bound = match convoke_mode {
         None => 0,
-        Some(ConvokeMode::Delve) => state
-            .objects
-            .values()
-            .filter(|object| object.is_delve_eligible(player))
-            .count(),
+        Some(ConvokeMode::Delve) => 0,
         Some(mode) => state
             .battlefield
             .iter()
@@ -1889,11 +1893,21 @@ fn mana_payment_direct_actions(
             .try_fold(0usize, |count, choices| count.checked_add(choices))
             .ok_or(InteractionReasonCode::PayloadTooLarge)?,
     };
+    let delve_upper_bound = if has_delve {
+        state
+            .objects
+            .values()
+            .filter(|object| object.is_delve_eligible(player))
+            .count()
+    } else {
+        0
+    };
     let total_upper_bound = actions
         .len()
         .checked_add(tapped_for_mana.len())
         .and_then(|count| count.checked_add(pool.mana_pool.mana.len()))
         .and_then(|count| count.checked_add(convoke_upper_bound))
+        .and_then(|count| count.checked_add(delve_upper_bound))
         .and_then(|count| count.checked_add(2))
         .ok_or(InteractionReasonCode::PayloadTooLarge)?;
     if total_upper_bound > MAX_INTERACTION_LIST_LEN {
@@ -1926,18 +1940,18 @@ fn mana_payment_direct_actions(
                 }
             }),
     );
+    if has_delve {
+        actions.extend(state.objects.values().filter_map(|object| {
+            object
+                .is_delve_eligible(player)
+                .then_some(GameAction::TapForConvoke {
+                    object_id: object.id,
+                    mana_type: ManaType::Colorless,
+                })
+        }));
+    }
     match convoke_mode {
-        None => {}
-        Some(ConvokeMode::Delve) => {
-            actions.extend(state.objects.values().filter_map(|object| {
-                object
-                    .is_delve_eligible(player)
-                    .then_some(GameAction::TapForConvoke {
-                        object_id: object.id,
-                        mana_type: ManaType::Colorless,
-                    })
-            }));
-        }
+        None | Some(ConvokeMode::Delve) => {}
         Some(mode) => {
             let cost_shards = state
                 .pending_cast

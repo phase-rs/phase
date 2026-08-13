@@ -1317,33 +1317,10 @@ impl AssemblyEnv {
     }
 }
 
-/// Coverage-honesty marker (issue #7046): a `DamageEachPlayer` reading "that
-/// much/that many" (`Ref(EventContextAmount)`) chained IMMEDIATELY after a mass
-/// zone move cannot be faithfully executed today. CR 608.2c requires the
-/// completed move's TOTAL for every recipient, but the runtime hand-off
-/// (`install_previous_effect_counts_by_player`) publishes a per-OWNER table that
-/// `DamageEachPlayer`'s per-recipient resolution consults first — each opponent
-/// reads their OWN swept-card count (0 in the Valakut Exploration native
-/// pattern). Emitting the parsed shape would be silently wrong at runtime,
-/// which is strictly worse than an honest residual gap (the Winnowing-class
-/// precedent in `imperative.rs`). Scoped to the immediately-chained pairing
-/// because only the next resolution step can see the table (any intermediate
-/// effect clears it), and only `DamageEachPlayer` resolves per-recipient —
-/// scalar consumers (Draw / DealDamage-to-object / Mill / LoseLife /
-/// SearchLibrary / Token) read max-over-owners, which equals the true total for
-/// every corpus pool (single-owner by CR 400.3). DELETE this gate when #7046
-/// provides the completed-sweep scalar-total channel; the T1 zero-delta
-/// assertions and the P2 marker assertion are the tripwires that force that
-/// deletion to be a conscious, tested change.
-pub(crate) const MASS_MOVE_TOTAL_DAMAGE_GAP: &str = "mass_move_total_damage";
-
 /// CR 608.2c: does `effect`'s amount expression read `EventContextAmount`
-/// ("that much"/"that many")? Leaf helper for the `MASS_MOVE_TOTAL_DAMAGE_GAP`
-/// gate above. Mirrors the game-side
-/// `quantity_expr_references_event_context_amount` (`game/effects/mod.rs`),
-/// which this parser module cannot call directly — the parser layer never
-/// reaches into game internals; both consult the single traversal authority
-/// `QuantityExpr::any_ref`.
+/// ("that much"/"that many")? Used when chain grammar proves that the
+/// antecedent is the immediately preceding resolved instruction, so assembly
+/// can bind it to `PreviousEffectAmount` rather than a triggering event.
 fn damage_amount_reads_event_context(effect: &Effect) -> bool {
     let mut reads = false;
     effect.for_each_quantity_expr(&mut |quantity| {
@@ -2092,24 +2069,21 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // boundary→link authority (`oracle_ir::ast::sub_link_after_boundary`),
         // which the referent walk in `oracle_effect::mod` also consults.
         def.sub_link = sub_link_after_boundary(prev_boundary);
-        // Coverage-honesty gate (issue #7046, see `MASS_MOVE_TOTAL_DAMAGE_GAP`
-        // doc comment above `assemble_effect_chain`): a `DamageEachPlayer`
-        // reading "that much/that many" chained IMMEDIATELY after a mass zone
-        // move cannot be faithfully executed today. `prev.sub_ability.is_none()`
-        // matches the runtime scope exactly — only the immediately-next
-        // resolution step can see the per-owner count table
-        // (`install_previous_effect_counts_by_player` clears it for any other
-        // consumer), and only `DamageEachPlayer` resolves per-recipient.
+        // CR 608.2c: A mass zone move immediately followed by "deals that much
+        // damage to each ..." reads ONE scalar result from the completed move,
+        // not a different per-recipient event-context amount. Bind only this
+        // explicit continuation relationship; event-fed and per-player-scoped
+        // `EventContextAmount` consumers retain their ordinary meaning.
         if let Some(prev) = defs.last() {
-            if prev.sub_ability.is_none()
+            if def.sub_link == SubAbilityLink::ContinuationStep
+                && prev.sub_ability.is_none()
                 && matches!(&*prev.effect, Effect::ChangeZoneAll { .. })
                 && matches!(&*def.effect, Effect::DamageEachPlayer { .. })
                 && damage_amount_reads_event_context(&def.effect)
             {
-                *def.effect = Effect::unimplemented(
-                    MASS_MOVE_TOTAL_DAMAGE_GAP,
-                    clause_ir.source.fragment().unwrap_or_default(),
-                );
+                if let Effect::DamageEachPlayer { amount, .. } = def.effect.as_mut() {
+                    amount.rebind_event_context_amount_to_previous_effect();
+                }
             }
         }
         // CR 615.5: A "(When|Whenever|If) damage [from a <type> source] is

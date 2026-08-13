@@ -340,7 +340,9 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         TriggerMode::LosesGame => push(TriggerEventKey::PlayerLost),
 
         // --- Mana ---
-        TriggerMode::ManaAdded => push(TriggerEventKey::ManaProduced),
+        TriggerMode::ManaAdded | TriggerMode::ManaAbilityProduced => {
+            push(TriggerEventKey::ManaProduced)
+        }
         TriggerMode::ManaExpend => push(TriggerEventKey::ManaSpent),
 
         // --- Land ---
@@ -584,6 +586,7 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::LifeChanged { .. } => push(TriggerEventKey::LifeChanged),
         GameEvent::ControllerChanged { .. } => push(TriggerEventKey::ChangesController),
         GameEvent::ManaAdded { .. } => push(TriggerEventKey::ManaProduced),
+        GameEvent::ManaAbilityProduced { .. } => push(TriggerEventKey::ManaProduced),
         GameEvent::TappedForMana { .. } => {
             push(TriggerEventKey::ManaProduced);
             push(TriggerEventKey::TapsForMana);

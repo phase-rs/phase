@@ -45,7 +45,7 @@ use super::replacements::ReplacementEvent;
 #[cfg(debug_assertions)]
 use super::resolution::debug_assert_runtime_resolution_invariants;
 use super::resolution::{
-    AbilityContinuationFrame, ChangeZoneFrame, MultiDrawFrame, OptionalEffectFrame,
+    AbilityContinuationFrame, ChangeZoneFrame, FrameGate, MultiDrawFrame, OptionalEffectFrame,
     PendingCoinFlip, PendingMutateMerge, PendingProliferateActions, RepeatedOptionalPaymentFrame,
     ResolutionFrame, ResolutionStack, ResolutionStackError, ResolutionStateWire,
 };
@@ -2423,6 +2423,8 @@ impl LatchedBatchedTrigger {
 pub struct LatchedSuppressTrigger {
     pub source_context: TriggerSourceContext,
     pub source_filter: TargetFilter,
+    #[serde(default)]
+    pub trigger_source_filter: Option<TargetFilter>,
     pub events: Vec<crate::types::statics::SuppressedTriggerEvent>,
 }
 
@@ -3442,6 +3444,46 @@ impl PendingZoneChangeDelivery {
         }
         self.terminal_completion = Some(completion);
         Ok(())
+    }
+
+    /// CR 400.7: A zone change creates a new object, so the retained delivery
+    /// event slice — not current object state — identifies whether this exact
+    /// pre-delivery incarnation moved.
+    ///
+    /// Returns the terminal completion recorded by the delivery pipeline, or
+    /// derives it from this paused delivery's exact event slice once its
+    /// resolution has returned to the owning resume driver.
+    ///
+    /// A returned prompt is terminal for this delivery. If an older pause path
+    /// omitted the sidecar classification, its own retained events remain the
+    /// authoritative witness; do not inspect live object state or global event
+    /// history, either of which could observe a later incarnation.
+    pub fn terminal_completion_after_resume(&self) -> ZoneMoveCompletion {
+        self.terminal_completion.unwrap_or_else(|| {
+            Self::completion_from_delivery_events(self.member, &self.delivery_events)
+        })
+    }
+
+    /// Classifies one explicit delivery slice against its pre-delivery
+    /// incarnation. Callers use this when a completed move does not have a
+    /// separately captured terminal sidecar.
+    pub fn completion_from_delivery_events(
+        member: ObjectIncarnationRef,
+        delivery_events: &[GameEvent],
+    ) -> ZoneMoveCompletion {
+        if delivery_events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::ZoneChanged { record, .. }
+                    if record
+                        .trigger_source_context()
+                        .is_some_and(|context| context.identity.reference == member)
+            )
+        }) {
+            ZoneMoveCompletion::Moved
+        } else {
+            ZoneMoveCompletion::Remained
+        }
     }
 
     pub fn mark_counted(&mut self) {
@@ -5947,7 +5989,6 @@ pub enum PendingCostMoveCompletion {
         phyrexian_choices: Option<Vec<ShardChoice>>,
         cascade_cast_transformed: bool,
         resolution_success_waiting_for: Option<Box<WaitingFor>>,
-        pool_before: usize,
         prepaid_actual_mana_spent: Option<u32>,
     },
 }
@@ -6199,18 +6240,13 @@ pub enum PendingCostMoveResume {
         resolved: Box<ResolvedAbility>,
         ability_index: usize,
     },
-    /// CR 702.21a + CR 122.1 + CR 616.1: Ward's player-counter unless-cost
-    /// (`AbilityCost::GetPlayerCounters`) paused on a replacement choice for
-    /// the `AddCounter` event it attempted (e.g. an optional "you may
-    /// prevent a player from getting counters" replacement, or a CR 616.1
-    /// ordering choice among several applicable replacements). Retains the
-    /// full `WaitingFor::UnlessPayment` payload so the choice's resolution —
-    /// Applied (paid) via the `ReplacementDelivered` boundary, or Prevented
-    /// (failed) via the `ReplacementPrevented` boundary — can drive the same
-    /// paid/failed tail `handle_unless_payment` uses for every other cost
-    /// shape, instead of resetting to bare priority with the Ward-guarded
-    /// ability's fate undetermined.
-    GetPlayerCountersUnlessPayment {
+    /// CR 118.12 + CR 122.1 + CR 616.1: A counter-addition unless-cost paused
+    /// on a replacement choice. Covers Ward's player-counter payment and the
+    /// source-counter `EffectCost` used by cumulative upkeep. Retains the full
+    /// `WaitingFor::UnlessPayment` payload so Applied completes payment and a
+    /// prevented placement fails it instead of orphaning the pending ability.
+    #[serde(alias = "GetPlayerCountersUnlessPayment")]
+    CounterAdditionUnlessPayment {
         #[serde(deserialize_with = "crate::types::ability::deserialize_ability_cost_compat")]
         cost: AbilityCost,
         pending_effect: Box<ResolvedAbility>,
@@ -16556,6 +16592,29 @@ pub struct PendingMultiDraw {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct DrawSequenceFrameId(pub u64);
 
+/// The unbookkept suffix of one individual draw whose Library → Hand delivery
+/// parked on a replacement choice.
+///
+/// The selected card stays here until its zone change settles. Recording it as
+/// drawn before then would emit `CardDrawn` and advance the draw ledger while
+/// the card is still in the library; retaining the remaining selected cards
+/// also preserves the ordinary one-at-a-time draw order after the choice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingDrawDelivery {
+    pub player: PlayerId,
+    pub current: ObjectId,
+    /// False while the current card still needs its initial pipeline pass;
+    /// true once a parked replacement choice has delivered that pass.
+    pub current_settled: bool,
+    pub remaining: Vec<ObjectId>,
+    #[serde(
+        default,
+        serialize_with = "crate::types::deterministic_serde::hash_set"
+    )]
+    pub applied: HashSet<AppliedReplacementKey>,
+    pub attempted_empty_library: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum DrawSequenceOrigin {
     #[default]
@@ -16598,6 +16657,10 @@ pub struct DrawSequenceFrame {
     /// effect replaces a draw within a sequence of card draws, the replacement
     /// effect is completed before resuming the sequence."
     pub remaining: u32,
+    /// A card delivery that has selected its card but has not yet settled its
+    /// `Moved` replacement choice. The frame owns its ledger and suffix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_delivery: Option<PendingDrawDelivery>,
     /// CR 608.2c: running total of cards ACTUALLY delivered across every
     /// completed unit of this instruction. This is the value a later "that many"
     /// clause on the same card reads ("Draw two cards, then discard that many") —
@@ -16718,6 +16781,7 @@ impl DrawSequenceStack {
             applied,
             origin,
             remaining: count,
+            pending_delivery: None,
             accumulated: 0,
         });
         debug_assert!(
@@ -16769,6 +16833,7 @@ impl DrawSequenceStack {
                     && a.remaining == b.remaining
                     && a.accumulated == b.accumulated
                     && a.origin == b.origin
+                    && a.pending_delivery == b.pending_delivery
             })
     }
 
@@ -17200,6 +17265,17 @@ impl GameState {
     /// than an invitation to search below it.
     pub fn clear_active_ability_continuation(&mut self) -> Result<bool, ResolutionStackError> {
         Ok(self.take_active_ability_continuation()?.is_some())
+    }
+
+    /// Clears the reveal choice's continuation while allowing an exact active
+    /// batch-delivery child to retain its own pending zone-change work.
+    pub fn clear_active_ability_continuation_or_batch_delivery_child(
+        &mut self,
+    ) -> Result<bool, ResolutionStackError> {
+        Ok(self
+            .resolution_stack
+            .take_active_ability_continuation_or_batch_delivery_child()?
+            .is_some())
     }
 
     /// Returns the complete ChangeZone owner only when it owns the stack top.
@@ -18728,6 +18804,38 @@ impl GameState {
         Ok(command)
     }
 
+    /// Atomically installs a direct-choice owner and the prompt it is allowed to
+    /// consume. A direct-choice frame may never be visible with an unrelated
+    /// `WaitingFor`, nor may it be buried below another direct-choice owner.
+    pub fn install_direct_choice_frame(
+        &mut self,
+        frame: ResolutionFrame,
+        waiting_for: WaitingFor,
+    ) -> Result<(), ResolutionStackError> {
+        if !matches!(frame.gate(), FrameGate::DirectChoice(_)) {
+            return Err(ResolutionStackError::InvalidPayload {
+                frame: frame.kind(),
+                message: "direct-choice installation requires a direct-choice frame".to_string(),
+            });
+        }
+
+        let transition = ResolvedFrameTransition::Push {
+            frame: frame.clone(),
+        };
+        let mut candidate = (*self.resolution_stack).clone();
+        candidate.push_inner(frame);
+        candidate.validate(&waiting_for)?;
+
+        let previous_waiting_for = std::mem::replace(&mut self.waiting_for, waiting_for);
+        if let Err(error) = self.resolve_and_apply_frame_transition(transition) {
+            self.waiting_for = previous_waiting_for;
+            return Err(match error {
+                ResolvedFrameTransitionReplayInvariantError::Stack(error) => error,
+            });
+        }
+        Ok(())
+    }
+
     /// Applies and journals one already-resolved player resource edit.
     ///
     /// Replacements and dynamic quantities must be settled before this boundary;
@@ -19126,11 +19234,32 @@ impl GameState {
     }
 
     pub(crate) fn current_or_begin_rules_execution_node(&mut self) -> RulesExecutionNodeRef {
-        self.active_rules_execution_node.unwrap_or_else(|| {
+        self.live_active_rules_execution_node().unwrap_or_else(|| {
             self.resolved_rules_journal
                 .begin_proposal()
                 .expect("resolved-rules journal proposal ordinal overflow")
         })
+    }
+
+    /// Returns the ambient execution node only while its provenance record is
+    /// still retained. The journal has an intentionally shorter retention
+    /// window than the transient scope, so a boundary may discard a completed
+    /// parent before a later nested mana activation observes that scope.
+    fn live_active_rules_execution_node(&mut self) -> Option<RulesExecutionNodeRef> {
+        let node = self.active_rules_execution_node?;
+        if self.rules_execution_node_is_live(node) {
+            Some(node)
+        } else {
+            self.active_rules_execution_node = None;
+            None
+        }
+    }
+
+    fn rules_execution_node_is_live(&self, node: RulesExecutionNodeRef) -> bool {
+        self.resolved_rules_journal
+            .nodes()
+            .iter()
+            .any(|candidate| candidate.identity == node)
     }
 
     /// CR 800.4: Begin the distinct execution node for one player leaving the
@@ -19155,8 +19284,9 @@ impl GameState {
             .get(&source_id)
             .map(ObjectIncarnationRef::from_object)
             .expect("mana ability activation source must exist");
+        let parent = self.live_active_rules_execution_node();
         self.resolved_rules_journal
-            .begin_activated_mana(source, self.active_rules_execution_node)
+            .begin_activated_mana(source, parent)
             .expect("resolved-rules journal settlement ordinal overflow")
     }
 
@@ -19169,12 +19299,11 @@ impl GameState {
         trigger: Option<TriggerDefinitionRef>,
         caused_by: Option<RulesExecutionNodeRef>,
     ) -> RulesExecutionNodeRef {
+        let parent = caused_by
+            .filter(|node| self.rules_execution_node_is_live(*node))
+            .or_else(|| self.live_active_rules_execution_node());
         self.resolved_rules_journal
-            .begin_triggered_mana(
-                source,
-                trigger,
-                caused_by.or(self.active_rules_execution_node),
-            )
+            .begin_triggered_mana(source, trigger, parent)
             .expect("resolved-rules journal settlement ordinal overflow")
     }
 
@@ -22528,7 +22657,7 @@ mod tests {
     };
     use crate::types::deterministic_serde::test_support::ReverseBuildHasher;
     use crate::types::identifiers::{
-        DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
+        CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
     };
     use crate::types::resolved_commands::ResolvedDelayedTriggerCommand;
 
@@ -22552,6 +22681,101 @@ mod tests {
                 printed_index,
             },
         }
+    }
+
+    #[test]
+    fn mana_journal_ignores_a_stale_nested_parent_after_journal_reset() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mana Source".to_string(),
+            Zone::Battlefield,
+        );
+        let source = state
+            .objects
+            .get(&source_id)
+            .map(ObjectIncarnationRef::from_object)
+            .expect("test source exists");
+
+        let mut parent = None;
+        for _ in 0..7 {
+            state.active_rules_execution_node = parent;
+            let node = state.begin_activated_mana_journal_node(source_id);
+            assert_eq!(
+                state
+                    .resolved_rules_journal
+                    .nodes()
+                    .iter()
+                    .find(|candidate| candidate.identity == node)
+                    .expect("activation node is retained")
+                    .caused_by,
+                parent,
+                "a live nested activation keeps its exact parent"
+            );
+            parent = Some(node);
+        }
+        let stale_parent = parent.expect("deep chain creates a terminal parent");
+
+        state.resolved_rules_journal = Default::default();
+        state.active_rules_execution_node = Some(stale_parent);
+        let fresh_activation = state.begin_activated_mana_journal_node(source_id);
+        assert_eq!(
+            state
+                .resolved_rules_journal
+                .nodes()
+                .iter()
+                .find(|candidate| candidate.identity == fresh_activation)
+                .expect("fresh activation node is retained")
+                .caused_by,
+            None,
+            "a journal reset must not retain a parent ordinal it no longer owns"
+        );
+
+        state.active_rules_execution_node = Some(stale_parent);
+        let fresh_trigger =
+            state.begin_triggered_mana_journal_node(source, None, Some(stale_parent));
+        assert_eq!(
+            state
+                .resolved_rules_journal
+                .nodes()
+                .iter()
+                .find(|candidate| candidate.identity == fresh_trigger)
+                .expect("fresh trigger node is retained")
+                .caused_by,
+            None,
+            "triggered mana also rejects an absent explicit or ambient parent"
+        );
+    }
+
+    #[test]
+    fn paused_zone_change_delivery_derives_a_terminal_outcome_after_resume() {
+        let member = ObjectIncarnationRef::of(ObjectId(71), 4);
+        let mut delivery = PendingZoneChangeDelivery::new(
+            member,
+            ProposedEvent::zone_change(
+                member.object_id,
+                Zone::Battlefield,
+                Zone::Graveyard,
+                Some(ObjectId(72)),
+            ),
+        );
+
+        assert_eq!(
+            delivery.terminal_completion_after_resume(),
+            ZoneMoveCompletion::Remained,
+            "an answered pause with no original-incarnation event completed without moving"
+        );
+
+        delivery
+            .record_terminal_completion(ZoneMoveCompletion::Prevented)
+            .expect("the explicit replacement outcome is recorded once");
+        assert_eq!(
+            delivery.terminal_completion_after_resume(),
+            ZoneMoveCompletion::Prevented,
+            "an explicit replacement outcome remains authoritative over slice inference"
+        );
     }
 
     #[test]

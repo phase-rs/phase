@@ -1072,7 +1072,9 @@ fn trigger_axis(trig: &TriggerDefinition) -> Option<AxisKey> {
         // CR 701.26a: "becomes tapped" requires untapped state to consume.
         TriggerMode::Taps | TriggerMode::TapAll => Some(AxisKey::Tap),
         // CR 106.1: mana-added / tap-for-mana triggers consume the mana axis.
-        TriggerMode::TapsForMana | TriggerMode::ManaAdded => Some(AxisKey::Mana),
+        TriggerMode::TapsForMana | TriggerMode::ManaAdded | TriggerMode::ManaAbilityProduced => {
+            Some(AxisKey::Mana)
+        }
         // CR 603.6a / 700.4 / 603.6c: zone-change triggers consume the ETB / dies /
         // LTB event axis, disambiguated by the definition's destination/origin.
         TriggerMode::ChangesZone | TriggerMode::ChangesZoneAll => {

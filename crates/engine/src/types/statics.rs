@@ -1665,6 +1665,11 @@ pub enum StaticMode {
     /// only if the variant population grows beyond two.
     SuppressTriggers {
         source_filter: TargetFilter,
+        /// Optional filter over the permanent whose triggered ability would
+        /// fire. `None` retains Torpor Orb's event-wide suppression; `Some`
+        /// models Elesh Norn's controller-scoped restriction.
+        #[serde(default)]
+        trigger_source_filter: Option<TargetFilter>,
         events: Vec<SuppressedTriggerEvent>,
     },
 
@@ -4780,12 +4785,14 @@ mod tests {
         // CR 603.2g: SuppressTriggers display enumerates the event set.
         let mode = StaticMode::SuppressTriggers {
             source_filter: TargetFilter::SelfRef,
+            trigger_source_filter: None,
             events: vec![SuppressedTriggerEvent::EntersBattlefield],
         };
         assert_eq!(mode.to_string(), "SuppressTriggers(EntersBattlefield)");
 
         let mode = StaticMode::SuppressTriggers {
             source_filter: TargetFilter::SelfRef,
+            trigger_source_filter: None,
             events: vec![
                 SuppressedTriggerEvent::EntersBattlefield,
                 SuppressedTriggerEvent::Dies,

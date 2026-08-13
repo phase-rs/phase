@@ -1456,6 +1456,19 @@ pub(crate) fn chosen_card_type_of(attrs: &[ChosenAttribute]) -> Option<CoreType>
 }
 
 impl GameObject {
+    /// CR 109.4 + CR 108.4a: Objects on the stack or battlefield have a
+    /// controller; when an effect asks for the controller of a card that has
+    /// none, use its owner instead. CR 109.4c: emblems are the explicitly
+    /// modeled command-zone exception that retains their controller.
+    pub(crate) fn controller_or_owner(&self) -> PlayerId {
+        match self.zone {
+            Zone::Battlefield | Zone::Stack => self.controller,
+            Zone::Command if self.is_emblem => self.controller,
+            Zone::Command => self.owner,
+            Zone::Library | Zone::Hand | Zone::Graveyard | Zone::Exile => self.owner,
+        }
+    }
+
     const fn initial_trigger_base_set_instance() -> TriggerBaseSetInstanceRef {
         TriggerBaseSetInstanceRef::INITIAL
     }

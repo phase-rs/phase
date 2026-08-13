@@ -3569,6 +3569,21 @@ export function actionRejectionError(reason: string): AdapterError {
 }
 
 /**
+ * Classify a requester-correlated Resolve All rejection.
+ *
+ * A batch request can reach the server after priority has advanced. The server
+ * must reject that request, but this particular response is a stale UI race,
+ * not an actionable error for the requester. Keep the classification scoped to
+ * the Resolve All protocol frame: the same text on an ordinary action
+ * rejection must remain visible.
+ */
+export function resolveAllRejectionError(reason: string): AdapterError {
+  return reason === "Resolve All requires your priority"
+    ? new AdapterError(AdapterErrorCode.STALE_ACTION, reason, false)
+    : actionRejectionError(reason);
+}
+
+/**
  * Detect the engine's rejection of a `ReorderHand` whose order no longer names
  * the current hand. `apply_action` formats
  * `EngineError::InvalidAction("ReorderHand: expected {n} ids, got {m}")` as

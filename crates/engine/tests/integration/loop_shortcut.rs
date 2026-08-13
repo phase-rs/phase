@@ -9609,7 +9609,7 @@ fn bloodloop_state(players: u8) -> GameState {
 /// commit CHANGED; pinning it is what stops a later change from moving it silently.
 #[test]
 fn bloodloop_mandatory_draw_cascade_offers_at_2p_3p_and_4p() {
-    for (players, expected_beat, expected_turn) in [(2u8, 33usize, 4u32), (3, 67, 5), (4, 113, 6)] {
+    for (players, expected_beat, expected_turn) in [(2u8, 37usize, 4u32), (3, 76, 5), (4, 129, 6)] {
         let mut state = bloodloop_state(players);
         let beat = drive_to_bounded_offer(&mut state, 400).unwrap_or_else(|| {
             panic!(

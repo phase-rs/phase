@@ -8847,7 +8847,7 @@ mod tests {
     }
 
     #[test]
-    fn unmodeled_target_selection_uses_an_issued_forward_action_without_scoring() {
+    fn unmodeled_target_selection_uses_a_reducer_validated_forward_action() {
         let mut state = spell_target_selection_state(
             vec![
                 TargetRef::Player(PlayerId(0)),
@@ -8875,9 +8875,9 @@ mod tests {
         let contract = AiDecisionContract::issue(&state, PlayerId(0));
 
         assert_eq!(
-            counters.state_clone_for_legality, 0,
-            "an unsupported spell's engine-issued target slot must not replay cast/payment \
-             simulation before the AI can answer"
+            counters.state_clone_for_legality, 3,
+            "every target choice and CancelCast must pass through the reducer before the \
+             AI receives the engine-issued decision domain"
         );
         assert!(
             action.is_some(),

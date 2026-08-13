@@ -102,10 +102,7 @@ const GRANTED_BLOODTHIRST_INDEX: usize = usize::MAX - 8;
 /// controller; if an effect asks for a card's controller, use its owner
 /// instead. Command-zone emblems keep their controller under CR 109.4c.
 pub(crate) fn replacement_source_player(obj: &GameObject) -> PlayerId {
-    match obj.zone {
-        Zone::Battlefield | Zone::Stack | Zone::Command => obj.controller,
-        Zone::Library | Zone::Hand | Zone::Graveyard | Zone::Exile => obj.owner,
-    }
+    obj.controller_or_owner()
 }
 
 fn compleated_replacement_id(object_id: ObjectId) -> ReplacementId {

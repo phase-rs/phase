@@ -2127,6 +2127,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::CardsDrawnThisTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
         | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SpellsCastLastTurn
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
@@ -2412,6 +2413,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::Named { .. }
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource
         | FilterProp::IsCommander
         // CR 205.3m: a unit variant with no nested TargetFilter/QuantityExpr/
         // ControllerRef interior — nothing to descend, so no legacy referent.
@@ -2602,6 +2604,9 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         // CR 607.2d / CR 607.2m (by analogy): this reads durable per-player anchor
         // state keyed by controller, not per-source member-bound storage.
         FilterProp::ControllerChoseLabel { .. } => false,
+        // CR 607.2a: this consults the resolving source's linked-exile set, so
+        // normalized siblings with different sources are not one shared function.
+        FilterProp::SameNameAsExiledBySource => true,
         // CR 608.2i: reads live per-turn history keyed by the object's controller,
         // not per-source member-bound storage. Mirrors ControllerChoseLabel.
         FilterProp::ControllerMatches { .. } => false,
@@ -3735,6 +3740,7 @@ fn walk_ability(
         trigger_definition_ref: _, // exact trigger occurrence, no read/write effect
         force_block_attacker: _, // exact force-block referent, no read/write effect
         target_incarnations: _, // CR 400.7 pins on the referents, no read/write effect
+        selected_target_incarnations: _, // CR 400.7 selected-target pins, no read/write effect
         controller: _,
         original_controller: _,
         scoped_player: _,
@@ -6009,6 +6015,7 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         QuantityRef::CardsDrawnThisTurn { player: _ }
         | QuantityRef::CardsDiscardedThisTurn { .. } => reads_player_of(StateKind::JournalCards),
         QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SpellsCastLastTurn
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
@@ -6909,6 +6916,10 @@ mod tests {
             TargetFilter::TriggeringSourceController,
             TargetFilter::OriginalController,
             typed_ctrl(ControllerRef::SourceChosenPlayer),
+            TargetFilter::Typed(TypedFilter {
+                properties: vec![FilterProp::SameNameAsExiledBySource],
+                ..TypedFilter::creature()
+            }),
         ] {
             assert!(
                 member_bound_target_filter(&f),

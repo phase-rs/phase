@@ -267,6 +267,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
                 mark_public_state_object_dirty(state, *source_id);
                 mark_mana_display_dirty(state);
             }
+            GameEvent::ManaAbilityProduced { .. } => {}
             GameEvent::ManaExpended { player_id, .. } => {
                 mark_public_state_player_dirty(state, *player_id);
                 mark_mana_display_dirty(state);

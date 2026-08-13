@@ -113,6 +113,7 @@ mod tests {
             trigger_definition_ref: None,
             force_block_attacker: None,
             target_incarnations: Vec::new(),
+            selected_target_incarnations: Vec::new(),
             targets: vec![],
             kind: AbilityKind::Spell,
             sub_ability: None,

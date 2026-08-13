@@ -3707,7 +3707,7 @@ pub(super) fn handle_resolution_choice(
                         .expect("a settled reveal choice must resume its continuation");
                 } else {
                     let _ = state
-                        .clear_active_ability_continuation()
+                        .clear_active_ability_continuation_or_batch_delivery_child()
                         .expect("declined reveal cannot clear a buried continuation");
                 }
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
@@ -3758,7 +3758,7 @@ pub(super) fn handle_resolution_choice(
             // on the revealed card (e.g., Thoughtseize's exile).
             if optional && decline_runs_continuation {
                 let _ = state
-                    .clear_active_ability_continuation()
+                    .clear_active_ability_continuation_or_batch_delivery_child()
                     .expect("accepted reveal cannot clear a buried continuation");
             } else if let Some(frame) = state.active_ability_continuation_frame_mut() {
                 frame.pending.chain.targets = vec![TargetRef::Object(chosen_id)];

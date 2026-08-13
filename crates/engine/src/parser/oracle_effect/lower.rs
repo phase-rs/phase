@@ -4189,15 +4189,18 @@ pub(super) fn strip_for_each_repeat_suffix(text: &str) -> (Option<QuantityExpr>,
         ))
         .parse(tail.as_str())
         {
-            // Unchanged gate: the repeat-suffix lift is restricted to CommanderCast
-            // and Zada distinct-copy today. A player-set `PlayerCount` is deliberately
-            // NOT admitted here — that class routes through the fieldless-Investigate
-            // seam via `for_each_repeatable_repeat_for`.
-            if matches!(&qty, QuantityRef::CommanderCastFromCommandZoneCount)
-                || zada_repeat_for_implies_distinct_copy_targets(&QuantityExpr::Ref {
-                    qty: qty.clone(),
-                })
-            {
+            // The repeat-suffix lift is restricted to quantities whose consumer
+            // is `CopySpell`: commander casts, trigger-bound spell history, and
+            // Zada's distinct-copy object count. A player-set `PlayerCount` is
+            // deliberately NOT admitted here — that class routes through the
+            // fieldless-Investigate seam via `for_each_repeatable_repeat_for`.
+            if matches!(
+                &qty,
+                QuantityRef::CommanderCastFromCommandZoneCount
+                    | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
+            ) || zada_repeat_for_implies_distinct_copy_targets(&QuantityExpr::Ref {
+                qty: qty.clone(),
+            }) {
                 return (
                     Some(QuantityExpr::Ref { qty }),
                     text[..base_len].trim_end().to_string(),
@@ -12928,7 +12931,23 @@ mod dq_d_player_set_lift_tests {
         );
         assert_eq!(base, "copy it");
 
-        // (b) a player-set for-each is REJECTED by this gate (routes through the
+        // (b) Thousand-Year Storm's trigger-bound history is lifted by the
+        // CopySpell seam and keeps the triggering-spell boundary typed.
+        let (qty, base) = strip_for_each_repeat_suffix(
+            "copy it for each other instant and sorcery spell you've cast before it this turn",
+        );
+        assert!(
+            matches!(
+                qty,
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
+                })
+            ),
+            "trigger-bound spell history must be lifted for CopySpell: {qty:?}"
+        );
+        assert_eq!(base, "copy it");
+
+        // (c) a player-set for-each is REJECTED by this gate (routes through the
         // fieldless-Investigate seam instead) → `(None, <full text>)`.
         let input = "investigate for each opponent who lost life this turn";
         let (qty, base) = strip_for_each_repeat_suffix(input);
@@ -12938,7 +12957,7 @@ mod dq_d_player_set_lift_tests {
         );
         assert_eq!(base, input);
 
-        // (c) the Zada distinct-copy ObjectCount lift is preserved: strip lifts
+        // (d) the Zada distinct-copy ObjectCount lift is preserved: strip lifts
         // "other creature you control that the spell could target" to an
         // `ObjectCount{CouldBeTargetedByTriggeringSpell}` and returns the base "copy
         // that spell". Byte-identical to the pre-refactor `_ref + eof` path, and proves
@@ -12957,7 +12976,7 @@ mod dq_d_player_set_lift_tests {
         );
         assert_eq!(base, "copy that spell");
 
-        // (d) no "for each" suffix at all → unchanged passthrough.
+        // (e) no "for each" suffix at all → unchanged passthrough.
         let (qty, base) = strip_for_each_repeat_suffix("draw a card");
         assert!(qty.is_none());
         assert_eq!(base, "draw a card");

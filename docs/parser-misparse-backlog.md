@@ -970,7 +970,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Exert Influence
 - Exile into Darkness
 - Extraordinary Journey
-- Faerie Miscreant
 - Faller's Faithful
 - Faramir, Field Commander
 - Farideh, Devil's Chosen

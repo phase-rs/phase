@@ -11,11 +11,11 @@ use crate::types::actions::{
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState, PlayerActionKind};
 use crate::types::game_state::{
     ActionResult, AssistState, AutoMayChoice, AutoPassMode, AutoPassRequest, CastOfferKind,
-    ConvokeMode, CostResume, GameState, LandPlayRecord, LoopDetectionMode, ManaAbilityResume,
-    MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveResume, RetargetScope, StackEntry,
-    StackEntryKind, WaitingFor,
+    CastingVariant, ConvokeMode, CostResume, GameState, LandPlayRecord, LoopDetectionMode,
+    ManaAbilityResume, MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveResume, RetargetScope,
+    StackEntry, StackEntryKind, WaitingFor,
 };
-use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId};
+use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIncarnationRef};
 use crate::types::match_config::MatchType;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -5757,15 +5757,15 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::ManaAbilityPayment { .. }
                     | PendingCostMoveResume::ActivationMillPayment { .. }
                     | PendingCostMoveResume::LoyaltyActivation { .. }
-                    | PendingCostMoveResume::GetPlayerCountersUnlessPayment { .. }
+                    | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
             )
         ),
         // CR 606.4 + CR 616.1: a fully-prevented loyalty counter add (e.g. an
         // opponent's Solemnity would prevent the counters) must still complete the
         // parked activation instead of wedging, so `LoyaltyActivation` is eligible
-        // at the Prevented boundary as well. `GetPlayerCountersUnlessPayment` is
-        // eligible here too: a prevented Ward player-counter payment is a FAILED
-        // cost (CR 702.21a) that must counter the guarded ability, not wedge.
+        // at the Prevented boundary as well. Counter-addition unless payments
+        // are eligible here too: a prevented counter placement fails the cost
+        // (CR 118.3) and must resolve the pending unless branch, not wedge.
         CostMoveDrainBoundary::ReplacementPrevented { .. } => matches!(
             state.pending_cost_move_resume,
             Some(
@@ -5780,7 +5780,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::ManaAbilityPayment { .. }
                     | PendingCostMoveResume::ActivationMillPayment { .. }
                     | PendingCostMoveResume::LoyaltyActivation { .. }
-                    | PendingCostMoveResume::GetPlayerCountersUnlessPayment { .. }
+                    | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
             )
         ),
         CostMoveDrainBoundary::PriorityBoundary => matches!(
@@ -5854,9 +5854,9 @@ pub(crate) fn drain_pending_cost_move_resume(
         super::planeswalker::resume_loyalty_activation(state, events)?
     } else if matches!(
         state.pending_cost_move_resume,
-        Some(PendingCostMoveResume::GetPlayerCountersUnlessPayment { .. })
+        Some(PendingCostMoveResume::CounterAdditionUnlessPayment { .. })
     ) {
-        engine_payment_choices::resume_get_player_counters_unless_payment(
+        engine_payment_choices::resume_counter_addition_unless_payment(
             state,
             events,
             matches!(boundary, CostMoveDrainBoundary::ReplacementDelivered { .. }),
@@ -6169,9 +6169,17 @@ pub(super) fn resume_delve_mana_payment(state: &mut GameState) -> WaitingFor {
             fuel_id,
         ),
     );
+    let convoke_mode = state.pending_cast.as_ref().and_then(|pending| {
+        super::casting::spell_tap_payment_mode_for(
+            state,
+            player,
+            pending.object_id,
+            pending.casting_variant == CastingVariant::Fuse,
+        )
+    });
     WaitingFor::ManaPayment {
         player,
-        convoke_mode: Some(ConvokeMode::Delve),
+        convoke_mode: convoke_mode.or(Some(ConvokeMode::Delve)),
     }
 }
 
@@ -6742,9 +6750,32 @@ fn finalize_copy_retarget(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let changed_pins = state
+        .stack
+        .iter()
+        .find(|entry| entry.id == copy_id)
+        .and_then(|entry| entry.ability())
+        .map(|ability| {
+            ability
+                .targets
+                .iter()
+                .zip(targets.iter())
+                .filter(|(old, new)| ability.retarget_target_requires_pin_refresh(old, new, state))
+                .filter_map(|(_, target)| match target {
+                    TargetRef::Object(id) => {
+                        state.objects.get(id).map(ObjectIncarnationRef::from_object)
+                    }
+                    TargetRef::Player(_) => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     if let Some(entry) = state.stack.iter_mut().find(|e| e.id == copy_id) {
         if let Some(ability) = entry.ability_mut() {
             ability.targets = targets;
+            for pin in changed_pins {
+                ability.update_selected_target_incarnation(pin);
+            }
         }
     }
     events.push(GameEvent::EffectResolved {
@@ -8935,14 +8966,32 @@ fn apply_action(
             let player = *player;
             let convoke_mode = *convoke_mode;
             if let Some(pending) = state.pending_cast.as_ref() {
+                // CR 602.2b + CR 601.2b/h: An activation's announced X must
+                // make its full cost payable before the announcement commits,
+                // whether or not the ability has deferred targets.
+                let mut trial = pending.as_ref().clone();
+                trial.ability.set_chosen_x_recursive(value);
+                trial.cost.concretize_x(value);
+                if trial.activation_ability_index.is_some()
+                    && trial.activation_cost.as_ref().is_some_and(|cost| {
+                        !casting_costs::activation_cost_is_payable_after_x_choice(
+                            state,
+                            player,
+                            trial.object_id,
+                            cost,
+                            &trial.ability,
+                        )
+                    })
+                {
+                    return Err(EngineError::InvalidAction(format!(
+                        "X={value} cannot pay the activation cost"
+                    )));
+                }
                 if pending.deferred_target_selection {
                     // CR 601.2c: A chosen X that determines target count must
                     // have a legal target assignment before it is locked into
                     // the pending cast.
                     // CR 601.2f: The same X value then determines the total cost.
-                    let mut trial = pending.as_ref().clone();
-                    trial.ability.set_chosen_x_recursive(value);
-                    trial.cost.concretize_x(value);
                     let mut target_slots = build_target_slots(state, &trial.ability)?;
                     // CR 601.2c + CR 601.2d: clamp a divided spell's slots to the
                     // (now-known) pool so the legal-assignment probe matches what
@@ -9436,6 +9485,54 @@ fn apply_action(
                 convoke_mode,
             }
         }
+        // CR 702.66a: Delve composes with a primary tap-payment keyword (for
+        // example, Hogaak's Convoke). Handle the graveyard contribution first so
+        // its object is never rejected by the battlefield-tap arm below.
+        (
+            WaitingFor::ManaPayment { player, .. },
+            GameAction::TapForConvoke {
+                object_id,
+                mana_type,
+            },
+        ) if state.objects.get(&object_id).is_some_and(|object| object.is_delve_eligible(*player))
+            && state.pending_cast.as_ref().is_some_and(|pending| {
+                super::casting::spell_has_delve_payment_for(
+                    state,
+                    *player,
+                    pending.object_id,
+                    pending.casting_variant == CastingVariant::Fuse,
+                )
+            }) => {
+            let player = *player;
+            if mana_type != crate::types::mana::ManaType::Colorless {
+                return Err(EngineError::ActionNotAllowed(
+                    "Delve can only pay generic mana".to_string(),
+                ));
+            }
+            let spell_id = state
+                .pending_cast
+                .as_ref()
+                .map(|pending| pending.object_id)
+                .ok_or_else(|| {
+                    EngineError::InvalidAction("No pending cast for delve".to_string())
+                })?;
+            state.pending_cost_move_resume = Some(PendingCostMoveResume::DelveManaPayment {
+                player,
+                fuel_id: object_id,
+            });
+            match zone_pipeline::move_object(
+                state,
+                ZoneMoveRequest::cost(object_id, Zone::Exile, spell_id)
+                    .track_exiled_by_source(),
+                &mut events,
+            ) {
+                ZoneMoveResult::Done => resume_delve_mana_payment(state),
+                ZoneMoveResult::NeedsChoice(_) => state.waiting_for.clone(),
+                ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                    unreachable!("a delve cost move to exile cannot require an Aura attachment")
+                }
+            }
+        }
         // CR 702.51a / Waterbend: Tap a creature or artifact to pay mana.
         // CR 702.51a + CR 302.6: Convoke taps creatures to pay mana; summoning sickness
         // (CR 302.6) is not checked because convoke does not use the tap activated-ability mechanism.
@@ -9553,64 +9650,6 @@ fn apply_action(
             WaitingFor::ManaPayment {
                 player: *player,
                 convoke_mode: Some(mode),
-            }
-        }
-        // CR 702.66a: Delve — exile a card from the caster's graveyard to pay one
-        // generic mana. Unlike convoke/improvise (which tap a permanent), the
-        // source is a graveyard card that is exiled. The contribution is a
-        // generic-only colorless marker (like Improvise) that can't leak into the
-        // pool.
-        (
-            WaitingFor::ManaPayment {
-                player,
-                convoke_mode: Some(ConvokeMode::Delve),
-            },
-            GameAction::TapForConvoke {
-                object_id,
-                mana_type,
-            },
-        ) => {
-            let player = *player;
-            if mana_type != crate::types::mana::ManaType::Colorless {
-                return Err(EngineError::ActionNotAllowed(
-                    "Delve can only pay generic mana".to_string(),
-                ));
-            }
-            let eligible = state
-                .objects
-                .get(&object_id)
-                .is_some_and(|o| o.is_delve_eligible(player));
-            if !eligible {
-                return Err(EngineError::ActionNotAllowed(
-                    "Can only delve a card from your own graveyard".to_string(),
-                ));
-            }
-            let spell_id = state
-                .pending_cast
-                .as_ref()
-                .map(|pending| pending.object_id)
-                .ok_or_else(|| {
-                    EngineError::InvalidAction("No pending cast for delve".to_string())
-                })?;
-            state.pending_cost_move_resume = Some(PendingCostMoveResume::DelveManaPayment {
-                player,
-                fuel_id: object_id,
-            });
-            // CR 702.66a + CR 614.1 + CR 616.1: The cost move must consult Moved
-            // replacements. `track_exiled_by_source` carries
-            // `ExileLinkSpec { duration: None, tracking: TrackBySource }`, so the
-            // delivery tail links only fuel that actually reaches exile.
-            match zone_pipeline::move_object(
-                state,
-                ZoneMoveRequest::cost(object_id, Zone::Exile, spell_id)
-                    .track_exiled_by_source(),
-                &mut events,
-            ) {
-                ZoneMoveResult::Done => resume_delve_mana_payment(state),
-                ZoneMoveResult::NeedsChoice(_) => state.waiting_for.clone(),
-                ZoneMoveResult::NeedsAuraAttachmentChoice => {
-                    unreachable!("a delve cost move to exile cannot require an Aura attachment")
-                }
             }
         }
         (WaitingFor::MulliganDecision { .. }, GameAction::MulliganDecision { choice }) => {
@@ -11729,8 +11768,31 @@ fn apply_retarget(
     }
 
     if stack_entry_index < state.stack.len() {
+        let target_pins: Vec<_> = state
+            .stack
+            .get(stack_entry_index)
+            .and_then(|entry| entry.ability())
+            .map(|ability| {
+                current_targets
+                    .iter()
+                    .zip(new_targets.iter())
+                    .filter(|(old, new)| {
+                        ability.retarget_target_requires_pin_refresh(old, new, state)
+                    })
+                    .filter_map(|(_, target)| match target {
+                        TargetRef::Object(id) => {
+                            state.objects.get(id).map(ObjectIncarnationRef::from_object)
+                        }
+                        TargetRef::Player(_) => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         if let Some(ability) = state.stack[stack_entry_index].ability_mut() {
             ability.targets = new_targets;
+            for pin in target_pins {
+                ability.update_selected_target_incarnation(pin);
+            }
         }
     } else {
         return Err(EngineError::InvalidAction(
@@ -15916,7 +15978,16 @@ mod stage2_injector_tests {
                 }
                 if test_file || spans.iter().any(|(a, b)| (*a..=*b).contains(&n)) {
                     in_test += 1;
-                } else if line.contains("waiting_for = ") || line.contains("Ok(Some(") {
+                } else if line.contains("waiting_for = ")
+                    || line.contains("Ok(Some(")
+                    // `install_direct_choice_frame` owns the actual
+                    // `state.waiting_for` write. Its typed prompt argument is
+                    // still a production mint, not a reader; the call sits
+                    // within this bounded argument expression.
+                    || lines[n.saturating_sub(32)..n]
+                        .iter()
+                        .any(|prior| prior.contains(".install_direct_choice_frame("))
+                {
                     producers.push(format!("{rel}:{}", n + 1));
                 } else {
                     readers.push(format!("{rel}:{}", n + 1));
@@ -16035,38 +16106,48 @@ mod stage2_injector_tests {
                 // shifts combine with #6958's paid-cast outcome exclusion and
                 // #6976's conditional-branch exclusions. None creates an
                 // `OptionalEffect` prompt. Re-pinned against the merged source.
-                // Wheel of Misfortune round: `:6252/:6329/:9522 => :6257/:6334/:9543`,
-                // `+5/+5/+21`, and the asymmetry IS the measurement. `git diff -U0`
-                // on effects/mod.rs has exactly two non-test hunks:
-                //   `@@ -646,0 +647,5 @@` — the `QuantityRef::PlayerChosenNumber` arm
-                //     added to `candidate_player_scalar`. Above ALL THREE producers,
-                //     and the whole `+5`.
-                //   `@@ -8321,0 +8327,16 @@` — the depth-0 per-player secret-number
-                //     ledger reset in `resolve_ability_chain`. Above the THIRD producer
-                //     only (and below the first two), which is the further `+16`.
-                // Both hunks are a pure scalar READ and a `chosen_attributes` CLEAR
-                // respectively: neither raises a `WaitingFor`, so neither mints a
-                // prompt. All three producers remain byte-identical
-                // `WaitingFor::OptionalEffectChoice` assignments inside the functions
-                // this row names. The remaining hunks are an import line and `mod tests`.
-                // Reveal-transition follow-up (same PR): `:6257/:6334/:9543 =>
-                // `:6261/:6338/:9550`, `+4/+4/+7`. `git diff -U0` on effects/mod.rs now
-                // has exactly three non-test hunks, and the asymmetry is again the
-                // measurement:
-                //   `@@ -186,0 +187 @@` — `pub mod reveal_chosen_numbers;`. One line,
-                //     above all three producers.
-                //   `@@ -4346,0 +4348,3 @@` — the `Effect::RevealChosenNumbers` dispatch
-                //     arm in `resolve_effect`. Three lines, also above all three (it sits
-                //     in the dispatch table, which precedes every producer).
-                //   `@@ -8339,3 +8343,6 @@` — widening the depth-0 chosen-number clear to
-                //     retain BOTH `Number` and `RevealedNumber`. Net +3, above the THIRD
-                //     producer only, which is its extra `+3`.
-                // The dispatch arm delegates to `reveal_chosen_numbers::resolve`, which
-                // converts `ChosenAttribute::Number` to `RevealedNumber` and emits an
-                // event — it raises no `WaitingFor`, so the census set is unchanged at 5.
-                "game/effects/mod.rs:6261".to_string(),
-                "game/effects/mod.rs:6338".to_string(),
-                "game/effects/mod.rs:9550".to_string(),
+                // Wheel of Misfortune (#7266), MEASURED ON THE MERGE TREE. This row's
+                // own header warns that a fork branch's pins are correct for the branch
+                // and wrong for `refs/pull/<n>/merge`; both sides of this conflict were
+                // that kind of local-correct. `origin/main` carried `:6306/:6383/:9578`
+                // and the branch carried `:6261/:6338/:9550`; NEITHER is right here, so
+                // the merged file was re-measured rather than either side taken:
+                // `:6306/:6383/:9578 => :6315/:6392/:9606`, i.e. `+9/+9/+28`.
+                //
+                // The asymmetry IS the measurement. This branch's non-test additions to
+                // effects/mod.rs, in file order:
+                //   `pub mod reveal_chosen_numbers;` — 1 line, above all three.
+                //   the `Effect::RevealChosenNumbers` dispatch arm — 3 lines, above all
+                //     three (the dispatch table precedes every producer).
+                //   the `QuantityRef::PlayerChosenNumber` arm in
+                //     `candidate_player_scalar` — 5 lines, above all three.
+                // 1 + 3 + 5 = the uniform `+9` the first two producers take. The third
+                // takes a further `+19` from the depth-0 per-player secret-number ledger
+                // reset in `resolve_ability_chain` (16 lines, plus 3 widening the clear
+                // to retain both `Number` and `RevealedNumber`), which sits above it and
+                // below the first two: 9 + 19 = 28. Predicted and observed agree.
+                //
+                // Nothing added here raises a `WaitingFor`: the two clears and the scalar
+                // read are pure state reads/writes, and the dispatch arm delegates to
+                // `reveal_chosen_numbers::resolve`, which converts
+                // `ChosenAttribute::Number` to `RevealedNumber` and emits an event. The
+                // census set is therefore still exactly 5.
+                //
+                // NOTE for the next drift: upstream refactored the third producer from a
+                // `state.waiting_for = …` assignment form into a bare struct-literal value
+                // inside a returned tuple. It is still one producer and still matches this
+                // row's assembled needle, but a grep for the old assignment form now finds
+                // only two — measure with the needle, not with the assignment.
+                //
+                // And do NOT spell the needle literally in this comment. It is assembled
+                // at the top of this row precisely so the row cannot count itself, but the
+                // walker reads every line of this file: writing the struct-literal form
+                // out in prose here adds a phantom `in_test` hit per mention. Two such
+                // mentions in an earlier draft of this very note pushed the partition to
+                // 27 and reded the row — the instrument working exactly as intended.
+                "game/effects/mod.rs:6315".to_string(),
+                "game/effects/mod.rs:6392".to_string(),
+                "game/effects/mod.rs:9606".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
@@ -16384,7 +16465,7 @@ mod stage2_injector_tests {
                 //
                 // SET PRESERVATION: unchanged. Upstream adds no line matching the needle to this file and
                 // neither does this branch — total still 37, partition still 5/7/25.
-                "game/engine.rs:11942".to_string(),
+                "game/engine.rs:12004".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \
@@ -18694,7 +18775,7 @@ mod bounded_offer_conjunct_tests {
             (format!("has_kind_driven{}repeat(", '_'), 2),
             (
                 format!("has_member_driven_repeat_after{}hydration(", '_'),
-                2,
+                3,
             ),
             (format!("is_repeated_optional{}payment(", '_'), 2),
             (format!("optional_prompt{}player(", '_'), 1),
@@ -18770,7 +18851,8 @@ mod bounded_offer_conjunct_tests {
             "the CR 603.5 conjunct set gained or lost a production consumer. The surviving \
              non-authority sites are `repeat_for_outermost_with_scope_or_unless` (does a \
              counted repeat wrap scoped/unless-pay instructions), `resolve_chain_body`'s \
-             repeat-driver guard and its CR 603.12a driver dispatch, and \
+             repeat-driver guard, its per-member unless-payment gate, and its CR 603.12a \
+             driver dispatch, and \
              `resolve_chain_body`'s `CastFromZone` decline probe — every one of them selects a \
              DRIVER rather than opening an up-front window, so a NEW site is a decision to \
              adjudicate here and not a number to move.\nsites={sites:#?}"

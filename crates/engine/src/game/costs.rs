@@ -43,14 +43,14 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    AbilityCost, EffectKind, TargetFilter, TypedFilter, REMOVE_COUNTER_COST_ALL,
+    AbilityCost, Effect, EffectKind, TargetFilter, TypedFilter, REMOVE_COUNTER_COST_ALL,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CostResume, GameState, ManaAbilityResume, PayCostKind, PendingCostMoveCompletion,
     PendingCostMoveResume, WaitingFor,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
@@ -651,14 +651,25 @@ pub(crate) fn pay_ability_cost_for_resolution(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<PaymentOutcome, EngineError> {
-    pay_ability_cost_for_resolution_with_cost_move_root(
+    let outcome = pay_ability_cost_for_resolution_with_cost_move_root(
         state,
         payer,
         cost,
         ability,
         ResolutionCostMoveRoot::EffectPayCost,
         events,
-    )
+    )?;
+    // CR 118.1 + CR 119.4b: `effects::pay` records a concrete life component
+    // on its continuation-owned ability before this authority can pause. Stamp
+    // it only after the entire cost finishes, including a mana-root resume.
+    // `None` is deliberately distinct from `Some(0)`: mana-only costs retain
+    // their preceding amount, while a completed zero-life cost reports zero.
+    if outcome == PaymentOutcome::Paid {
+        if let Some(amount) = ability.context.pay_cost_paid_life_amount {
+            state.last_effect_amount = Some(amount as i32);
+        }
+    }
+    Ok(outcome)
 }
 
 /// Pays a replacement's MayCost. Its dedicated root owns the outer
@@ -1319,6 +1330,28 @@ fn pay_ability_cost_inner(
                     target: TargetFilter::SelfRef,
                 } => {
                     let count = resolve_cost_quantity(state, count, player, source_id, scope);
+                    // CR 118.3: A prevented counter placement pays none of this
+                    // cost. The shared add primitive reports both a delivered
+                    // and prevented event as complete because effect resolution
+                    // needs that distinction only for continuation; payment must
+                    // reject the prevented case before executing it.
+                    let prevented = state.objects.get(&source_id).is_some_and(|object| {
+                        matches!(
+                            super::effects::counters::preview_counter_addition(
+                                state,
+                                player,
+                                ObjectIncarnationRef::from_object(object),
+                                counter_type.clone(),
+                                count.unsigned_abs(),
+                            ),
+                            Some(super::effects::counters::CounterAdditionPreview::Prevented)
+                        )
+                    });
+                    if prevented {
+                        return Ok(payment_failed(
+                            "Counter-placement cost prevented by a replacement effect",
+                        ));
+                    }
                     if !super::effects::counters::add_counter_with_replacement(
                         state,
                         player,
@@ -1795,7 +1828,7 @@ pub(crate) fn can_pay(
 /// cost as `Paid` (`Waterbend`, `ExileMaterials`, non-self `Sacrifice`, targeted
 /// `RemoveCounter`) or perform an effect that was never meant to fire at
 /// resolution (singleton `Tap`, self-ref `Sacrifice`/`Exile`, `Loyalty`,
-/// `RemoveCounter { target: None }`, `Exert`, `Unattach`, `EffectCost`,
+/// `RemoveCounter { target: None }`, `Exert`, `Unattach`, arbitrary `EffectCost`,
 /// source-card `Discard`). Both outcomes violate CR 118.3 / CR 601.2h, so the
 /// guard refuses them with `Failed`.
 pub(crate) fn supported_at_resolution(cost: &AbilityCost) -> bool {
@@ -1824,6 +1857,20 @@ pub(crate) fn supported_at_resolution(cost: &AbilityCost) -> bool {
         // "exile two creature cards from graveyards"). The interactive choice is
         // surfaced via WaitingFor::PayCost before this resume runs.
         AbilityCost::Exile { filter, .. } if !matches!(filter, Some(TargetFilter::SelfRef)) => true,
+        // CR 702.24a + CR 122.1: An effect-cost counter placement on the
+        // source is the deterministic cumulative-upkeep payment shape. The
+        // actual addition still flows through `add_counter_with_replacement`.
+        AbilityCost::EffectCost { effect }
+            if matches!(
+                effect.as_ref(),
+                Effect::PutCounter {
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            ) =>
+        {
+            true
+        }
         AbilityCost::Discard { .. }
         | AbilityCost::Tap
         | AbilityCost::Untap
@@ -1986,6 +2033,20 @@ fn can_pay_resolution(
         // limit on giving yourself more counters (poison's ten-or-more loss
         // condition is a separate SBA, not a payment-time affordability gate).
         AbilityCost::GetPlayerCounters { .. } => true,
+        // CR 702.24a + CR 122.1: The concrete source-counter effect cost is
+        // always offerable; replacement handling determines whether its
+        // actual placement completes, exactly as for other counter costs.
+        AbilityCost::EffectCost { effect }
+            if matches!(
+                effect.as_ref(),
+                Effect::PutCounter {
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            ) =>
+        {
+            true
+        }
         // Variants below have no resolution-time payment arm
         // (`supported_at_resolution` is the shared membership authority).
         // Refusing here is the conservative affordability answer (treat as

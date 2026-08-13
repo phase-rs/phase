@@ -214,6 +214,7 @@ fn etb_suppression_does_not_block_ureni_attack_trigger() {
     // Torpor-Orb-style static on P1's side: suppress ETB triggers from any creature.
     let suppressor_def = StaticDefinition::new(StaticMode::SuppressTriggers {
         source_filter: TargetFilter::Typed(TypedFilter::creature()),
+        trigger_source_filter: None,
         events: vec![SuppressedTriggerEvent::EntersBattlefield],
     });
     let mut suppressor_builder = scenario.add_creature(P1, "Torpor Orb Stand-In", 1, 1);

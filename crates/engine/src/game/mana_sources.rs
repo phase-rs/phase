@@ -969,6 +969,12 @@ pub(crate) fn activate_mana_source_option_with_output(
             produced,
             tap_state: ManaTapState::FromTap,
         });
+        events.push(GameEvent::ManaAbilityProduced {
+            player_id: player,
+            source_id: option.object_id,
+            produced: vec![option.mana_type],
+            trigger_state: crate::types::events::ManaAbilityTriggerState::Pending,
+        });
         mana_abilities::resume_waiting_for(player, resume)
     };
 
@@ -1409,7 +1415,7 @@ pub(crate) fn trigger_chain_benefits_controller(trigger: &TriggerDefinition) -> 
 }
 
 /// CR 605.1b (+ CR 603.3): True when `trigger` is a *non-mana* tap-triggered
-/// ability — mode `TapsForMana` or `ManaAdded` whose `execute` chain contains
+/// ability — mode `TapsForMana`, `ManaAbilityProduced`, or `ManaAdded` whose `execute` chain contains
 /// any effect other than mana production.
 ///
 /// Such a trigger FAILS CR 605.1b's mana-ability criteria (it does not "add mana
@@ -1423,7 +1429,7 @@ pub(crate) fn trigger_chain_benefits_controller(trigger: &TriggerDefinition) -> 
 pub(crate) fn is_non_mana_tap_trigger(trigger: &TriggerDefinition) -> bool {
     matches!(
         trigger.mode,
-        TriggerMode::TapsForMana | TriggerMode::ManaAdded
+        TriggerMode::TapsForMana | TriggerMode::ManaAbilityProduced | TriggerMode::ManaAdded
     ) && trigger.execute.as_deref().is_some_and(|execute| {
         !matches!(*execute.effect, Effect::Mana { .. }) || chain_has_non_mana_effect(execute)
     })

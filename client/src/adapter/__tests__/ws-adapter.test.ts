@@ -235,6 +235,34 @@ describe("WebSocketAdapter", () => {
     await expect(resultPromise).rejects.toMatchObject({ message: "batch snapshot rejected" });
   });
 
+  it("scopes the stale priority race to correlated Resolve All rejections", async () => {
+    const stale = adapter.resolveAll(0, [{ playerId: 1, difficulty: "Medium" }], 5);
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({
+        type: "ResolveAllRejected",
+        data: { request_id: 1, reason: "Resolve All requires your priority" },
+      }),
+    );
+    await expect(stale).rejects.toMatchObject({
+      code: "STALE_ACTION",
+      recoverable: false,
+    });
+
+    const rejected = adapter.resolveAll(0, [{ playerId: 1, difficulty: "Medium" }], 5);
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({
+        type: "ResolveAllRejected",
+        data: { request_id: 2, reason: "batch snapshot rejected" },
+      }),
+    );
+    await expect(rejected).rejects.toMatchObject({
+      code: "ACTION_REJECTED",
+      recoverable: true,
+    });
+  });
+
   describe("server rewind capability (F2)", () => {
     it("declares the capability through the standalone type guard", () => {
       expect(supportsServerRewind(adapter)).toBe(true);
@@ -997,13 +1025,13 @@ describe("WebSocketAdapter", () => {
       });
     });
 
-    it("still surfaces a non-stale server rejection as a recoverable ACTION_REJECTED", async () => {
+    it("keeps the Resolve All priority text actionable on an ordinary action rejection", async () => {
       const pending = adapter.submitAction({ type: "PassPriority" }, 0);
       ws.dispatchSynthetic(
         "message",
         JSON.stringify({
           type: "ActionRejected",
-          data: { reason: "Engine error: Something genuinely wrong" },
+          data: { reason: "Resolve All requires your priority" },
         }),
       );
       await expect(pending).rejects.toMatchObject({

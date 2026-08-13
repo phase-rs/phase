@@ -16606,7 +16606,16 @@ fn try_parse_verb_and_target<'a>(
         if rem.is_empty() {
             rem = dest_remainder;
         }
-        let origin = infer_origin_zone(rest_lower);
+        let origin = infer_origin_zone(rest_lower).or_else(|| {
+            matches!(
+                target,
+                TargetFilter::TrackedSetFiltered {
+                    caused_by: Some(ThisWayCause::Exiled),
+                    ..
+                }
+            )
+            .then_some(crate::types::zones::Zone::Exile)
+        });
         let target = add_inferred_origin_constraints_to_target(target, origin, rest_lower);
         // CR 115.1: A bounce resolves at-resolution iff the Oracle text omitted
         // the word "target" AND the filter has a controller scope to enumerate
@@ -26868,6 +26877,33 @@ fn mark_uses_tracked_set(def: &mut AbilityDefinition) {
     }
 }
 
+fn ability_definition_uses_tracked_set(def: &AbilityDefinition) -> bool {
+    let mut effect = def.effect.as_ref().clone();
+    let mut uses_tracked_set = false;
+    each_target_filter_mut(&mut effect, &mut |filter| {
+        uses_tracked_set |= matches!(
+            filter,
+            TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+        );
+    });
+    if let Effect::CreateDelayedTrigger { effect, .. } = def.effect.as_ref() {
+        uses_tracked_set |= ability_definition_uses_tracked_set(effect);
+    }
+    uses_tracked_set
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_definition_uses_tracked_set)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_definition_uses_tracked_set)
+        || def
+            .mode_abilities
+            .iter()
+            .any(ability_definition_uses_tracked_set)
+}
+
 fn tracked_set_filter() -> TargetFilter {
     TargetFilter::TrackedSet {
         id: TrackedSetId(0),
@@ -27299,6 +27335,12 @@ pub(crate) fn each_quantity_expr_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
         Effect::Discover {
             mana_value_limit, ..
         } => f(mana_value_limit),
+        // CR 603.7c: A delayed payload retains the player scope of the ability
+        // that creates it, so its nested quantity references need the same
+        // rewrite as direct effect fields.
+        Effect::CreateDelayedTrigger { effect, .. } => {
+            each_quantity_expr_mut(&mut effect.effect, f);
+        }
         _ => {}
     }
 }
@@ -27391,6 +27433,12 @@ pub(crate) fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
             target: Some(target),
             ..
         } => f(target),
+        // CR 603.7c: A delayed payload retains the player scope of the ability
+        // that creates it, so its nested target references need the same
+        // rewrite as direct effect fields.
+        Effect::CreateDelayedTrigger { effect, .. } => {
+            each_target_filter_mut(&mut effect.effect, f);
+        }
         _ => {}
     }
 }
@@ -27685,11 +27733,20 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
     if let Some(condition) = def.condition.as_mut() {
         rewrite_condition(condition);
     }
+    if let Effect::CreateDelayedTrigger {
+        effect: delayed, ..
+    } = &mut *def.effect
+    {
+        rewrite_player_scope_refs(delayed);
+    }
     if let Some(sub) = def.sub_ability.as_mut() {
         rewrite_player_scope_refs(sub);
     }
     if let Some(else_branch) = def.else_ability.as_mut() {
         rewrite_player_scope_refs(else_branch);
+    }
+    for mode_ability in &mut def.mode_abilities {
+        rewrite_player_scope_refs(mode_ability);
     }
 }
 
@@ -27708,11 +27765,20 @@ fn apply_player_scope_rewrites(def: &mut AbilityDefinition) {
         rewrite_player_scope_refs(def);
         return;
     }
+    if let Effect::CreateDelayedTrigger {
+        effect: delayed, ..
+    } = &mut *def.effect
+    {
+        apply_player_scope_rewrites(delayed);
+    }
     if let Some(sub) = def.sub_ability.as_mut() {
         apply_player_scope_rewrites(sub);
     }
     if let Some(else_branch) = def.else_ability.as_mut() {
         apply_player_scope_rewrites(else_branch);
+    }
+    for mode_ability in &mut def.mode_abilities {
+        apply_player_scope_rewrites(mode_ability);
     }
 }
 
@@ -32362,16 +32428,10 @@ pub(crate) fn parse_effect_chain_ir(
         });
         if let Some(prefix_condition) = prefix_delayed {
             let (inner_text, inner_multi_target) = strip_any_number_quantifier(text_after_prefix);
-            let inner_clause = parse_effect_clause(&inner_text, ctx);
-            let mut inner_def = AbilityDefinition::new(kind, inner_clause.effect);
-            if let Some(spec) = inner_multi_target.or(inner_clause.multi_target) {
+            let inner_ir = parse_effect_chain_ir(&inner_text, kind, ctx);
+            let mut inner_def = lower_effect_chain_ir(&inner_ir);
+            if let Some(spec) = inner_multi_target {
                 inner_def = inner_def.multi_target(spec);
-            }
-            if let Some(duration) = inner_clause.duration {
-                inner_def = inner_def.duration(duration);
-            }
-            if let Some(sub) = inner_clause.sub_ability {
-                inner_def.sub_ability = Some(sub);
             }
             // CR 118.12a (issue #4369): a payment-unless on the delayed
             // instruction itself ("...next end step, sacrifice it unless you pay
@@ -32385,10 +32445,11 @@ pub(crate) fn parse_effect_chain_ir(
                 inner_def.unless_pay = Some(up);
             }
             apply_where_x_ability_expression(&mut inner_def, where_x_expression.as_deref());
+            let uses_tracked_set = ability_definition_uses_tracked_set(&inner_def);
             let delayed_effect = Effect::CreateDelayedTrigger {
                 condition: prefix_condition.clone(),
                 effect: Box::new(inner_def),
-                uses_tracked_set: false,
+                uses_tracked_set,
             };
             let cascade_snap = super::swallow_check::CascadeSnapshot {
                 is_optional,
@@ -35393,6 +35454,16 @@ fn add_inferred_origin_constraints_to_target(
     let Some(zone) = origin else {
         return target;
     };
+    if matches!(
+        target,
+        TargetFilter::TrackedSetFiltered {
+            caused_by: Some(ThisWayCause::Exiled),
+            ..
+        }
+    ) && zone == Zone::Exile
+    {
+        return target;
+    }
     // CR 400.7: A self-reference ("return this card from your graveyard") already
     // identifies one specific object, so an origin `InZone`/`Owned` constraint is
     // meaningless — and `add_filter_props` would corrupt it by wrapping the bare

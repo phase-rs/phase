@@ -31,6 +31,7 @@ tune-ai = "run --release --features tune --bin ai-tune --"
 ai-gate = "run --profile server-release --bin ai-gate --"
 ai-perf-gate = "run --profile server-release --bin ai-perf-gate --"
 engine-inventory = "run --quiet -p engine-inventory-gen"
+probe-pin = "run --quiet -p probe-pin --"
 
 [env]
 # 16 MB stack for test threads — prevents stack overflow when Debug formatting

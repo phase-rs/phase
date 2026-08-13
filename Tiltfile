@@ -257,3 +257,48 @@ local_resource('coverage',
     auto_init = False,
     labels = ['data'],
 )
+
+# The only local enforcement venue for `probe-pin check` (CI enrollment needs a workflow edit,
+# which is a hard stop). Measured cost: 6.25s cold, 0.11s incremental, 0.046s for 10 isolated
+# probe runs -- so an automatic trigger with narrow deps, not a manual knob. This price holds
+# ONLY while the manifest pins probe-pin's own test binary; an engine-census manifest is ~25s
+# of runs plus an engine build and must be re-priced before it is added here.
+local_resource('probe-pin-check',
+    # Separate CARGO_TARGET_DIR (same reason as 'clippy'): probe-pin's dep tree is disjoint
+    # from the engine's, so a shared dir would mutually invalidate fingerprints.
+    cmd = ['bash', '-c',
+           'CARGO_TARGET_DIR=target/probe-pin cargo probe-pin check crates/probe-pin/tests/fixtures/dogfood.toml'],
+    deps = ['crates/probe-pin/', 'docs/probe-pin.md'],
+    # TMP_IGNORE is a FILENAME glob ('**/*.tmp.*') and does not match a tmp/ DIRECTORY, so the
+    # Tier-2 tests' scratch writes under tests/fixtures/tmp/ would retrigger this resource.
+    ignore = TMP_IGNORE + ['**/tmp/**'],
+    auto_init = 'lint' in enabled,
+    allow_parallel = True,
+    labels = ['lint'],
+)
+
+# The Tier-2 suite is #[ignore]d because GitHub's runners deny unprivileged user namespaces
+# (unshare -> /proc/self/uid_map EPERM), so GH CI never executes a real mount. THIS resource is
+# what keeps that honest: the local venue does have the capability, so Tier 2 runs here on every
+# change. Without it, "ignored in CI" quietly becomes "never run anywhere".
+#
+# `-- --ignored` runs ONLY the ignored tests, which is exactly this suite. A non-zero exit turns
+# the resource red like any other gate — a real Tier-2 gate, not a fire-and-forget reporter.
+#
+# Its OWN CARGO_TARGET_DIR, not 'probe-pin-check''s. Both resources watch 'crates/probe-pin/', so
+# one edit triggers both, and both set allow_parallel — so Tilt may run them at once. Sharing a
+# target dir across them is not the disjoint-dep-tree case the comment above describes: each
+# isolation test shells a nested `cargo test --test pure_logic --no-run` into that dir while
+# `probe-pin check` resolves the same test binary out of it. The contention is cross-PROCESS, so
+# the in-process SERIAL mutex in isolation_e2e.rs does not span it, and the flake recorded there
+# has exactly this mechanism (artifact freshness). This is the only venue that executes Tier 2, so
+# a flake here is a gate reporting the wrong colour.
+local_resource('probe-pin-e2e',
+    cmd = ['bash', '-c',
+           'CARGO_TARGET_DIR=target/probe-pin-e2e cargo test -p probe-pin --test isolation_e2e -- --ignored'],
+    deps = ['crates/probe-pin/'],
+    ignore = TMP_IGNORE + ['**/tmp/**'],
+    auto_init = 'lint' in enabled,
+    allow_parallel = True,
+    labels = ['lint'],
+)

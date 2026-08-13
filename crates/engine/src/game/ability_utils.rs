@@ -1777,10 +1777,12 @@ pub fn assign_targets_in_chain(
 ) -> Result<(), EngineError> {
     if is_per_opponent_target_fanout(ability) {
         ability.targets = targets.to_vec();
+        ability.capture_target_incarnations_recursive(state);
         return Ok(());
     }
     if !chain_has_target_sink(ability) {
         ability.targets = targets.to_vec();
+        ability.capture_target_incarnations_recursive(state);
         return Ok(());
     }
     let mut next_target = 0usize;
@@ -1790,6 +1792,7 @@ pub fn assign_targets_in_chain(
             "Unused selected targets".to_string(),
         ));
     }
+    ability.capture_target_incarnations_recursive(state);
     Ok(())
 }
 
@@ -1800,10 +1803,12 @@ pub fn assign_selected_slots_in_chain(
 ) -> Result<(), EngineError> {
     if is_per_opponent_target_fanout(ability) {
         ability.targets = selected_slots.iter().flatten().cloned().collect();
+        ability.capture_target_incarnations_recursive(state);
         return Ok(());
     }
     if !chain_has_target_sink(ability) {
         ability.targets = selected_slots.iter().flatten().cloned().collect();
+        ability.capture_target_incarnations_recursive(state);
         return Ok(());
     }
     let mut next_slot = 0usize;
@@ -1813,6 +1818,7 @@ pub fn assign_selected_slots_in_chain(
             "Unused selected target slots".to_string(),
         ));
     }
+    ability.capture_target_incarnations_recursive(state);
     Ok(())
 }
 
@@ -1860,6 +1866,28 @@ pub fn distribution_targets(ability: &ResolvedAbility) -> Vec<TargetRef> {
 }
 
 /// CR 608.2b: Re-validate targets on resolution — remove any that are no longer legal.
+fn target_is_current(ability: &ResolvedAbility, target: &TargetRef, state: &GameState) -> bool {
+    match target {
+        TargetRef::Object(id) => {
+            ability.target_pin_is_current(*id, state)
+                && ability.selected_target_pin_is_current(*id, state)
+        }
+        TargetRef::Player(_) => true,
+    }
+}
+
+fn validate_pinned_targets(
+    state: &GameState,
+    targets: &[TargetRef],
+    filter: &TargetFilter,
+    ability: &ResolvedAbility,
+) -> Vec<TargetRef> {
+    targeting::validate_targets_for_ability(state, targets, filter, ability)
+        .into_iter()
+        .filter(|target| target_is_current(ability, target, state))
+        .collect()
+}
+
 pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -> ResolvedAbility {
     let mut validated = ability.clone();
     validated.targets = if is_per_opponent_target_fanout(&validated) {
@@ -1876,7 +1904,7 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
             .filter(|filter| !filter.is_context_ref())
             .zip(validated.targets.iter())
             .filter_map(|(filter, target_ref)| {
-                let legal = targeting::validate_targets_for_ability(
+                let legal = validate_pinned_targets(
                     state,
                     std::slice::from_ref(target_ref),
                     filter,
@@ -1905,14 +1933,10 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
             let Some(target_ref) = target_iter.next() else {
                 continue;
             };
-            if let Some(legal) = targeting::validate_targets_for_ability(
-                state,
-                std::slice::from_ref(target_ref),
-                filter,
-                &validated,
-            )
-            .into_iter()
-            .next()
+            if let Some(legal) =
+                validate_pinned_targets(state, std::slice::from_ref(target_ref), filter, &validated)
+                    .into_iter()
+                    .next()
             {
                 kept.push(legal);
             }
@@ -1967,13 +1991,8 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
             let Some(target_ref) = target_iter.next() else {
                 break;
             };
-            if !targeting::validate_targets_for_ability(
-                state,
-                std::slice::from_ref(target_ref),
-                filter,
-                &validated,
-            )
-            .is_empty()
+            if !validate_pinned_targets(state, std::slice::from_ref(target_ref), filter, &validated)
+                .is_empty()
             {
                 any_legal = true;
             }
@@ -1998,7 +2017,7 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
                 let Some(target_ref) = target_iter.next() else {
                     continue;
                 };
-                if let Some(legal) = targeting::validate_targets_for_ability(
+                if let Some(legal) = validate_pinned_targets(
                     state,
                     std::slice::from_ref(target_ref),
                     filter,
@@ -2043,15 +2062,10 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
             let explicit: Vec<TargetRef> = candidate_targets
                 .iter()
                 .filter(|t| {
-                    targeting::validate_targets_for_ability(
-                        state,
-                        std::slice::from_ref(t),
-                        target,
-                        &validated,
-                    )
-                    .into_iter()
-                    .next()
-                    .is_some()
+                    validate_pinned_targets(state, std::slice::from_ref(t), target, &validated)
+                        .into_iter()
+                        .next()
+                        .is_some()
                 })
                 .cloned()
                 .collect();
@@ -2062,7 +2076,9 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
                     let TargetRef::Object(id) = t else {
                         return false;
                     };
-                    !explicit.contains(t) && fight_creature_on_battlefield(state, *id)
+                    !explicit.contains(t)
+                        && fight_creature_on_battlefield(state, *id)
+                        && target_is_current(&validated, t, state)
                 }) {
                     kept.push(ally.clone());
                 }
@@ -2077,7 +2093,29 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
         // would fizzle-filter the spell to battlefield presence and drop it
         // (the spell lives on the STACK). Re-validate against the source leaf
         // (`InZone Stack`-aware) instead, preserving the spell target.
-        targeting::validate_targets_for_ability(state, &validated.targets, &src_leaf, &validated)
+        validate_pinned_targets(state, &validated.targets, &src_leaf, &validated)
+    } else if matches!(
+        &validated.effect,
+        Effect::ChangeZoneAll { target, .. } if crate::game::effects::filter_refs_parent_target(target)
+    ) {
+        // CR 115.1 + CR 608.2b: `ChangeZoneAll` is a resolution-time mass
+        // instruction when its filter carries a delayed `ParentTarget` snapshot
+        // inside a tracked set. Treating that internal filter as a target would
+        // fizzle a valid Exile -> Battlefield return before the mass resolver
+        // can inspect the tracked member. Ordinary ChangeZoneAll player filters
+        // remain declared targets and follow the generic validation below.
+        validated.targets.clone()
+    } else if matches!(
+        mass_all_target_filter(&validated.effect),
+        Some(TargetFilter::Player)
+    ) {
+        // CR 115.1 + CR 608.2b: A bare `Player` mass-operation filter (such as
+        // "exile target player's graveyard") is represented by a companion
+        // declared-player slot. The mass filter is normally a resolution-time
+        // population scan, so it has no `target_filter()` entry; validate this
+        // exceptional declared target against the same legal-player set used
+        // to build the slot.
+        validate_pinned_targets(state, &validated.targets, &TargetFilter::Player, &validated)
     } else {
         match triggers::extract_target_filter_from_effect(&validated.effect) {
             Some(filter) if matches!(validated.effect, Effect::PairWith { .. }) => {
@@ -2085,7 +2123,10 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
                 validated
                     .targets
                     .iter()
-                    .filter(|target| legal_choices.contains(target))
+                    .filter(|target| {
+                        legal_choices.contains(target)
+                            && target_is_current(&validated, target, state)
+                    })
                     .cloned()
                     .collect()
             }
@@ -2102,7 +2143,12 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
                     Some((_, rest)) => rest,
                     None => &[],
                 };
-                kept.extend(targeting::validate_targets_for_ability(
+                if let Some(companion) = kept.first() {
+                    if !target_is_current(&validated, companion, state) {
+                        kept.clear();
+                    }
+                }
+                kept.extend(validate_pinned_targets(
                     state,
                     primary_targets,
                     filter,
@@ -2110,12 +2156,7 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
                 ));
                 kept
             }
-            Some(filter) => targeting::validate_targets_for_ability(
-                state,
-                &validated.targets,
-                filter,
-                &validated,
-            ),
+            Some(filter) => validate_pinned_targets(state, &validated.targets, filter, &validated),
             // CR 608.2b: A context-ref filter (`ParentTarget`,
             // `TriggeringSource`, etc.) carries a resolution-time *snapshot*,
             // not a player-chosen target. `extract_target_filter_from_effect`
@@ -2160,17 +2201,17 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
                     state,
                     validated.source_id,
                 ) {
-                    Some(filter) => targeting::validate_targets_for_ability(
-                        state,
-                        &validated.targets,
-                        &filter,
-                        &validated,
-                    ),
+                    Some(filter) => {
+                        validate_pinned_targets(state, &validated.targets, &filter, &validated)
+                    }
                     None => validated
                         .targets
                         .iter()
                         .filter(|target| match target {
-                            TargetRef::Object(object_id) => state.battlefield.contains(object_id),
+                            TargetRef::Object(object_id) => {
+                                state.battlefield.contains(object_id)
+                                    && target_is_current(&validated, target, state)
+                            }
                             TargetRef::Player(_) => true,
                         })
                         .cloned()
@@ -2181,7 +2222,10 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
                 .targets
                 .iter()
                 .filter(|target| match target {
-                    TargetRef::Object(object_id) => state.battlefield.contains(object_id),
+                    TargetRef::Object(object_id) => {
+                        state.battlefield.contains(object_id)
+                            && target_is_current(&validated, target, state)
+                    }
                     TargetRef::Player(_) => true,
                 })
                 .cloned()
@@ -4340,6 +4384,7 @@ fn quantity_ref_target_slot_spec(qty: &QuantityRef) -> Option<TargetFilter> {
         | QuantityRef::DistinctColorsAmongPermanents { filter }
         | QuantityRef::DistinctCounterKindsAmong { filter } => filter_target_slot_filter(filter),
         QuantityRef::SpellsCastThisTurn { filter, .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
         | QuantityRef::SpellsCastThisGame { filter, .. } => {
             filter.as_ref().and_then(filter_target_slot_filter)
         }
@@ -4469,7 +4514,8 @@ fn collect_target_slot_specs(
         }
         filters.push(target);
         for filter in filters {
-            if matches!(filter, TargetFilter::SelfRef | TargetFilter::ParentTarget) {
+            // Keep per-slot metadata aligned with the surfaced cast-time slots.
+            if filter.is_context_ref() {
                 continue;
             }
             let id = TargetInstanceId(*next_instance);
@@ -6761,7 +6807,10 @@ fn assign_selected_slots_recursive(
         }
         filters.push(target);
         for filter in filters {
-            if matches!(filter, TargetFilter::SelfRef | TargetFilter::ParentTarget) {
+            // Mirror `collect_target_slots` and `assign_targets_recursive`:
+            // context-reference fighters resolve from the ability chain, so they
+            // consume no interactive target-selection slot.
+            if filter.is_context_ref() {
                 continue;
             }
             let Some(selected_slot) = selected_slots.get(*next_slot) else {
@@ -8631,6 +8680,55 @@ mod tests {
             ),
             "a delayed-return ParentTarget ability must not fizzle when its \
              snapshotted object is off the battlefield"
+        );
+    }
+
+    /// CR 115.1 + CR 603.7c: delayed plural returns become `ChangeZoneAll`
+    /// with a tracked-set filter, but their snapshotted referent is still not a
+    /// chosen target. It must survive validation while it is in exile.
+    #[test]
+    fn validate_targets_in_chain_preserves_delayed_tracked_set_snapshot_off_battlefield() {
+        let format = FormatConfig::duel_commander();
+        let mut state = GameState::new(format, 2, 2);
+        let victim = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Exile,
+        );
+        let set_id = TrackedSetId(1);
+        state.tracked_object_sets.insert(set_id, vec![victim]);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Exile),
+                destination: Zone::Battlefield,
+                target: TargetFilter::TrackedSetFiltered {
+                    id: set_id,
+                    filter: Box::new(TargetFilter::ParentTarget),
+                    caused_by: None,
+                },
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                random_order: false,
+            },
+            vec![TargetRef::Object(victim)],
+            ObjectId(99),
+            PlayerId(0),
+        );
+
+        let validated = validate_targets_in_chain(&state, &ability);
+        assert_eq!(validated.targets, ability.targets);
+        assert!(
+            !crate::game::targeting::check_fizzle(
+                &flatten_targets_in_chain(&ability),
+                &flatten_targets_in_chain(&validated),
+            ),
+            "a delayed tracked-set return must not fizzle before its mass resolver runs"
         );
     }
 
@@ -13264,6 +13362,44 @@ mod tests {
         assert!(slots[0]
             .legal_targets
             .contains(&TargetRef::Player(PlayerId(1))));
+    }
+
+    /// CR 115.1 + CR 608.2b: a ChangeZoneAll player filter is a declared
+    /// player target, unlike an internal delayed ParentTarget filter. It must
+    /// be revalidated and cannot keep an eliminated player alive as a target.
+    #[test]
+    fn validate_targets_in_chain_drops_eliminated_change_zone_all_player_target() {
+        let mut state = GameState::new_two_player(42);
+        state.players[1].is_eliminated = true;
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Exile,
+                target: TargetFilter::Player,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                random_order: false,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(900),
+            PlayerId(0),
+        );
+
+        let validated = validate_targets_in_chain(&state, &ability);
+        assert!(
+            validated.targets.is_empty(),
+            "an eliminated player must not survive ChangeZoneAll target revalidation"
+        );
+        assert!(
+            crate::game::targeting::check_fizzle(
+                &flatten_targets_in_chain(&ability),
+                &flatten_targets_in_chain(&validated),
+            ),
+            "a ChangeZoneAll ability whose sole player target is gone must fizzle"
+        );
     }
 
     /// CR 109.4 + CR 115.1 + CR 506.2: Karazikar regression guard.

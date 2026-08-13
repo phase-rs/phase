@@ -3,8 +3,8 @@ use std::sync::LazyLock;
 
 use crate::types::ability::{
     AbilityTag, CoinFlipResult, ControllerRef, DamageKindFilter, DestinationConstraint,
-    DieResultFilter, EffectKind, OriginConstraint, TargetFilter, TargetRef, TriggerDefinition,
-    TypedFilter,
+    DieResultFilter, EffectKind, ManaAbilityProducedFilter, OriginConstraint, TargetFilter,
+    TargetRef, TriggerDefinition, TypedFilter,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{GameState, TriggerSourceContext};
@@ -74,6 +74,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::LandPlayed => match_land_played,
         TriggerMode::PlayCard => match_play_card,
         TriggerMode::ManaAdded => match_mana_added,
+        TriggerMode::ManaAbilityProduced => match_mana_ability_produced,
         TriggerMode::SearchedLibrary
         | TriggerMode::Scry
         | TriggerMode::Surveil
@@ -291,6 +292,10 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(TriggerMode::PlayCard, match_play_card);
     r.insert(TriggerMode::SpellCopy, match_spell_cast);
     r.insert(TriggerMode::ManaAdded, match_mana_added);
+    r.insert(
+        TriggerMode::ManaAbilityProduced,
+        match_mana_ability_produced,
+    );
     r.insert(TriggerMode::SearchedLibrary, match_player_action);
     r.insert(TriggerMode::Scry, match_player_action);
     r.insert(TriggerMode::Surveil, match_player_action);
@@ -978,6 +983,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::LifeChanged { .. }
         | GameEvent::ManaAdded { .. }
         | GameEvent::TappedForMana { .. }
+        | GameEvent::ManaAbilityProduced { .. }
         | GameEvent::ManaPoolEmptied { .. }
         | GameEvent::ManaRecolored { .. }
         | GameEvent::PlayerLost { .. }
@@ -2903,6 +2909,41 @@ pub(super) fn match_mana_added(
     _state: &GameState,
 ) -> bool {
     matches!(event, GameEvent::ManaAdded { .. })
+}
+
+/// CR 605.1b: Matches one aggregate production event from an activated mana
+/// ability. This deliberately does not consume `ManaAdded`, whose per-unit
+/// accounting would fire a multi-mana ability's trigger more than once.
+pub(super) fn match_mana_ability_produced(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_context: &TriggerSourceContext,
+    state: &GameState,
+) -> bool {
+    let GameEvent::ManaAbilityProduced {
+        player_id,
+        source_id,
+        produced,
+        ..
+    } = event
+    else {
+        return false;
+    };
+    if !taps_for_mana_card_matches(trigger, state, *source_id, source_context)
+        || !valid_player_matches(trigger, state, *player_id, source_context)
+    {
+        return false;
+    }
+    match trigger.mana_ability_produced.as_ref() {
+        Some(ManaAbilityProducedFilter::SourceChosenColor) => state
+            .objects
+            .get(&source_event_subject_id(source_context))
+            .and_then(|source| source.chosen_color())
+            .is_some_and(|color| {
+                produced.contains(&crate::game::mana_sources::mana_color_to_type(&color))
+            }),
+        None => true,
+    }
 }
 
 // ---------------------------------------------------------------------------

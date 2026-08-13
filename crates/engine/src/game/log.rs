@@ -135,6 +135,7 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::ZoneChanged { .. }
         | GameEvent::ManaAdded { .. }
         | GameEvent::TappedForMana { .. }
+        | GameEvent::ManaAbilityProduced { .. }
         | GameEvent::ManaPoolEmptied { .. }
         | GameEvent::ManaRecolored { .. }
         | GameEvent::PermanentTapped { .. }
@@ -284,6 +285,7 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::ZoneChanged { .. }
         | GameEvent::ManaAdded { .. }
         | GameEvent::TappedForMana { .. }
+        | GameEvent::ManaAbilityProduced { .. }
         | GameEvent::ManaPoolEmptied { .. }
         | GameEvent::ManaRecolored { .. }
         | GameEvent::PermanentTapped { .. }
@@ -541,6 +543,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
 
         GameEvent::ManaAdded { .. }
         | GameEvent::TappedForMana { .. }
+        | GameEvent::ManaAbilityProduced { .. }
         | GameEvent::ManaPoolEmptied { .. }
         | GameEvent::ManaRecolored { .. } => LogCategory::Mana,
 
@@ -1743,7 +1746,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         // `TapsForMana` matchers. The per-unit `ManaAdded` events already
         // produce the user-facing "adds X mana" log lines, so this event is
         // internal plumbing and emits no segments of its own.
-        GameEvent::TappedForMana { .. } => vec![],
+        GameEvent::TappedForMana { .. } | GameEvent::ManaAbilityProduced { .. } => vec![],
     }
 }
 

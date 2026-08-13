@@ -815,7 +815,19 @@ fn parse_control_named_pair(input: &str) -> OracleResult<'_, StaticCondition> {
             filter: Some(inject_controller_you(filter)),
         })
         .collect();
-    Ok((rest_after_pair, connector.combine(conditions)))
+    let condition = match connector {
+        Some(connector) => connector.combine(conditions),
+        None => match conditions.as_slice() {
+            [condition] => condition.clone(),
+            _ => {
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    input,
+                    nom::error::ErrorKind::Fail,
+                )));
+            }
+        },
+    };
+    Ok((rest_after_pair, condition))
 }
 
 fn parse_control_named_type_filter<'a>(
@@ -836,7 +848,7 @@ fn parse_control_named_type_filter<'a>(
 fn parse_control_named_pair_members<'a>(
     input: &'a str,
     filter_base: &TargetFilter,
-) -> OracleResult<'a, (Vec<TargetFilter>, ControlNamedConnector)> {
+) -> OracleResult<'a, (Vec<TargetFilter>, Option<ControlNamedConnector>)> {
     if let Some((mut rest, first_name, connector)) =
         find_repeated_typed_control_named_connector(input)
     {
@@ -862,7 +874,7 @@ fn parse_control_named_pair_members<'a>(
                         nom::error::ErrorKind::Fail,
                     )));
                 }
-                None => return Ok((next_rest, (filters, connector))),
+                None => return Ok((next_rest, (filters, Some(connector)))),
             }
         }
     }
@@ -937,7 +949,7 @@ fn parse_control_named_typed_member(
 fn parse_shared_type_control_named_pair<'a>(
     input: &'a str,
     filter_base: &TargetFilter,
-) -> OracleResult<'a, (Vec<TargetFilter>, ControlNamedConnector)> {
+) -> OracleResult<'a, (Vec<TargetFilter>, Option<ControlNamedConnector>)> {
     let (rest_after_list, names_text) = parse_control_named_final_name(input)?;
     let (names, connector) = parse_shared_control_named_list(input, names_text)?;
     let filters = names
@@ -950,14 +962,18 @@ fn parse_shared_type_control_named_pair<'a>(
 fn parse_shared_control_named_list<'a>(
     error_input: &'a str,
     names_text: &'a str,
-) -> Result<(Vec<&'a str>, ControlNamedConnector), nom::Err<OracleError<'a>>> {
+) -> Result<(Vec<&'a str>, Option<ControlNamedConnector>), nom::Err<OracleError<'a>>> {
     let Some((connector_index, connector_len, connector, serial_comma)) =
         find_shared_control_named_final_connector(names_text)
     else {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            error_input,
-            nom::error::ErrorKind::Fail,
-        )));
+        let name = names_text.trim();
+        if name.is_empty() {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                error_input,
+                nom::error::ErrorKind::Fail,
+            )));
+        }
+        return Ok((vec![name], None));
     };
     let before_final = names_text[..connector_index].trim();
     let final_name = names_text[connector_index + connector_len..].trim();
@@ -979,7 +995,7 @@ fn parse_shared_control_named_list<'a>(
             nom::error::ErrorKind::Fail,
         )));
     }
-    Ok((names, connector))
+    Ok((names, Some(connector)))
 }
 
 fn find_shared_control_named_final_connector(
@@ -3863,7 +3879,8 @@ fn parse_control_count_ge_distinct_quality(input: &str) -> OracleResult<'_, Stat
     ))
 }
 
-/// CR 201.2 + CR 109.3: Parse "you control N or more [type] with the same name"
+/// CR 201.2 + CR 109.3: Parse "you control N or more [type] with the same name
+/// as one another"
 /// → `QuantityComparison(ObjectCountBySharedQuality[Name, Max] >= N)`.
 ///
 /// The same-quality mirror of `parse_control_count_ge_distinct_quality`. Both read
@@ -3891,7 +3908,10 @@ fn parse_control_count_ge_shared_quality(input: &str) -> OracleResult<'_, Static
     let trimmed = remainder.trim_start();
     let (after_suffix, quality) = preceded(
         tag("with the same "),
-        alt((value(SharedQuality::Name, tag("name")),)),
+        terminated(
+            alt((value(SharedQuality::Name, tag("name")),)),
+            opt(tag(" as one another")),
+        ),
     )
     .parse(trimmed)?;
     let filter = inject_controller_you(filter);
@@ -11240,6 +11260,38 @@ mod tests {
                 zone: Zone::Battlefield
             }
         )));
+    }
+
+    #[test]
+    fn you_control_single_named_creature_keeps_another_and_effect_boundary() {
+        // Faerie Miscreant class: a singleton named object is a single
+        // presence condition, not a malformed one-member conjunction. The
+        // trailing effect must remain available to the trigger parser.
+        let (rest, condition) = parse_inner_condition(
+            "you control another creature named faerie miscreant, draw a card",
+        )
+        .unwrap();
+        assert_eq!(rest, ", draw a card");
+        let filter = typed_presence(&condition);
+        assert!(filter.type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(filter.controller, Some(ControllerRef::You));
+        assert!(filter.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::Named { name } if name == "faerie miscreant"
+        )));
+        assert!(filter
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::Another)));
+        assert!(filter.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::InZone { zone } if *zone == Zone::Battlefield
+        )));
+    }
+
+    #[test]
+    fn you_control_named_rejects_empty_singleton_name() {
+        assert!(parse_control_named_pair("you control a creature named , draw a card").is_err());
     }
 
     #[test]
