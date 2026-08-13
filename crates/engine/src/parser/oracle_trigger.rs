@@ -3392,7 +3392,10 @@ fn parse_unless_discard_cost_phrase(branch_text: &str) -> Option<AbilityCost> {
         if rest.is_empty() {
             return Some(discard(None, CardSelectionMode::Chosen));
         }
-        if tag::<_, _, OracleError<'_>>("at random")
+        // Full consumption is required. A bare `.is_ok()` also accepts
+        // "at randomly" and "at random foo", which would lower an unrecognized
+        // clause as a random discard instead of leaving it honestly unsupported.
+        if all_consuming(tag::<_, _, OracleError<'_>>("at random"))
             .parse(rest)
             .is_ok()
         {

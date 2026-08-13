@@ -6257,6 +6257,56 @@ pub enum PendingCostMoveResume {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         remaining: Vec<PlayerId>,
     },
+    /// CR 701.9b + CR 118.12 + CR 616.1: a RANDOM unless-discard that paused on
+    /// a replacement choice (Library of Leng, Madness) partway through its batch.
+    ///
+    /// Two things would otherwise be lost, because both live only in the paying
+    /// stack frame that returns when the choice is raised:
+    ///
+    ///   * the unless-payment itself — nothing else records
+    ///     `pending_effect` / `trigger_event` / `effect_description` /
+    ///     `remaining`, so the guarded ability is left neither paid nor unpaid
+    ///     and the game resets to bare priority with its fate undetermined;
+    ///   * the batch cursor — the picks still owed after the paused card.
+    ///
+    /// The player-CHOSEN sibling needs no analogue: it parks in
+    /// `WaitingFor::WardDiscardChoice`, whose own re-prompt loop owns the
+    /// remainder. A random discard raises no prompt, so nothing else can own it.
+    ///
+    /// Boxed deliberately. `GameState` is moved by value through the
+    /// phase-server action + AI path and is guarded by a hard size budget
+    /// (`game_state_size.rs`); this payload is large and populated only during
+    /// a replacement pause, which is exactly the shape that guard says to box
+    /// rather than widen the budget for.
+    RandomDiscardUnlessPayment(Box<RandomDiscardUnlessPaymentResume>),
+}
+
+/// CR 701.9b + CR 118.12 + CR 616.1: payload of
+/// [`PendingCostMoveResume::RandomDiscardUnlessPayment`]. Split into its own
+/// boxed struct purely to keep `PendingCostMoveResume` — and therefore
+/// `GameState` — inside its stack budget.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RandomDiscardUnlessPaymentResume {
+    #[serde(deserialize_with = "crate::types::ability::deserialize_ability_cost_compat")]
+    pub cost: AbilityCost,
+    pub pending_effect: Box<ResolvedAbility>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_event: Option<GameEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect_description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remaining: Vec<PlayerId>,
+    /// The paying player — the unless-payer, not necessarily the ability's
+    /// controller.
+    pub payer: PlayerId,
+    /// Discard source, so resumed picks keep their replacement provenance.
+    pub source_id: ObjectId,
+    /// Cards still un-picked when the batch paused.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remaining_eligible: Vec<ObjectId>,
+    /// Picks still owed after the paused card settles.
+    #[serde(default)]
+    pub remaining_count: u32,
 }
 
 /// CR 601.2h + CR 616.1: Resume paying a sequential cost after a replacement

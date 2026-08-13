@@ -821,20 +821,51 @@ pub(super) fn handle_unless_payment(
                     // Structural precedent: the `Mill` arm below — the other
                     // unless-cost with no choice to offer pays inline and falls
                     // through to the paid path.
+                    //
+                    // CR 118.12 + CR 601.2h: `DiscardCause::Cost`, NOT `Effect`.
+                    // This discard IS the payment, so an effect-caused
+                    // replacement (Library of Leng) must not apply to it — the
+                    // boundary `library_of_leng_does_not_apply_to_discard_cost`
+                    // pins.
                     match crate::game::effects::discard::discard_at_random(
                         state,
-                        player,
-                        pending_effect.source_id,
-                        count as usize,
-                        hand_cards,
-                        None,
+                        crate::game::effects::discard::RandomDiscardRequest {
+                            player,
+                            source_id: pending_effect.source_id,
+                            count: count as usize,
+                            eligible: hand_cards,
+                            cause: crate::game::effects::discard::DiscardCause::Cost,
+                            discard_frame: None,
+                        },
                         events,
                     ) {
                         crate::game::effects::discard::RandomDiscardOutcome::Completed => {}
-                        // CR 616.1: a replacement effect parked a choice; its
-                        // cursor owns the continuation. Do not clobber it and
-                        // do not treat the pause as a declined payment.
-                        crate::game::effects::discard::RandomDiscardOutcome::NeedsReplacementChoice => {
+                        // CR 616.1: a replacement effect parked a choice. Unlike
+                        // the chosen-discard sibling there is no
+                        // `WardDiscardChoice` re-prompt loop to own the
+                        // remainder, and unlike the effect layer this caller
+                        // still owes an unless-payment. Persist BOTH the batch
+                        // cursor and the full payment payload so the drain can
+                        // settle the guarded ability, instead of returning and
+                        // leaving it neither paid nor unpaid at bare priority.
+                        crate::game::effects::discard::RandomDiscardOutcome::NeedsReplacementChoice {
+                            remaining_eligible,
+                            remaining_count,
+                        } => {
+                            state.pending_cost_move_resume =
+                                Some(PendingCostMoveResume::RandomDiscardUnlessPayment(Box::new(
+                                    crate::types::game_state::RandomDiscardUnlessPaymentResume {
+                                        cost: poll_cost.clone(),
+                                        source_id: pending_effect.source_id,
+                                        pending_effect: pending_effect.clone(),
+                                        trigger_event: trigger_event.clone(),
+                                        effect_description: effect_description.clone(),
+                                        remaining: remaining.clone(),
+                                        payer: player,
+                                        remaining_eligible,
+                                        remaining_count: remaining_count as u32,
+                                    },
+                                )));
                             return Ok(action_result(events, state.waiting_for.clone()));
                         }
                     }
@@ -1927,6 +1958,101 @@ pub(super) fn resume_counter_addition_unless_payment(
     else {
         unreachable!("counter-addition unless-payment resume requires its typed continuation")
     };
+    finish_unless_payment(
+        state,
+        true,
+        !payment_succeeded,
+        cost,
+        pending_effect,
+        trigger_event,
+        effect_description,
+        remaining,
+        None,
+        events,
+    )?;
+    Ok(state.waiting_for.clone())
+}
+
+/// CR 701.9b + CR 118.12 + CR 616.1: Resume a RANDOM unless-discard after the
+/// replacement choice that paused it settled.
+///
+/// `delivered` is the boundary the replacement pipeline resolved to, mapped the
+/// same way `resume_counter_addition_unless_payment` maps it:
+///
+/// * `ReplacementDelivered` — the card moved (possibly redirected, e.g. Library
+///   of Leng putting it on top of the library instead of the graveyard). CR
+///   701.9a: it was still discarded, so that pick counts as paid and the batch
+///   continues with the picks it still owes.
+/// * `ReplacementPrevented` — nothing moved. CR 118.3 forbids partial payment,
+///   so the cost is unpayable; abandon the rest of the batch and let the
+///   unless-effect happen.
+///
+/// Either way the payment is settled exactly once through the same
+/// `finish_unless_payment` tail every other unless-cost shape uses.
+pub(super) fn resume_random_discard_unless_payment(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    delivered: bool,
+) -> Result<WaitingFor, EngineError> {
+    let Some(PendingCostMoveResume::RandomDiscardUnlessPayment(parked)) =
+        state.pending_cost_move_resume.take()
+    else {
+        unreachable!("random-discard unless-payment resume requires its typed continuation")
+    };
+    let crate::types::game_state::RandomDiscardUnlessPaymentResume {
+        cost,
+        pending_effect,
+        trigger_event,
+        effect_description,
+        remaining,
+        payer,
+        source_id,
+        remaining_eligible,
+        remaining_count,
+    } = *parked;
+
+    let mut payment_succeeded = delivered;
+    if delivered && remaining_count > 0 {
+        // Finish the batch. A SECOND replacement choice mid-remainder re-parks
+        // the same continuation with the narrowed cursor, so an N-card random
+        // discard can pause once per card without losing the payment.
+        match crate::game::effects::discard::discard_at_random(
+            state,
+            crate::game::effects::discard::RandomDiscardRequest {
+                player: payer,
+                source_id,
+                count: remaining_count as usize,
+                eligible: remaining_eligible,
+                cause: crate::game::effects::discard::DiscardCause::Cost,
+                discard_frame: None,
+            },
+            events,
+        ) {
+            crate::game::effects::discard::RandomDiscardOutcome::Completed => {}
+            crate::game::effects::discard::RandomDiscardOutcome::NeedsReplacementChoice {
+                remaining_eligible,
+                remaining_count,
+            } => {
+                state.pending_cost_move_resume =
+                    Some(PendingCostMoveResume::RandomDiscardUnlessPayment(Box::new(
+                        crate::types::game_state::RandomDiscardUnlessPaymentResume {
+                            cost,
+                            pending_effect,
+                            trigger_event,
+                            effect_description,
+                            remaining,
+                            payer,
+                            source_id,
+                            remaining_eligible,
+                            remaining_count: remaining_count as u32,
+                        },
+                    )));
+                return Ok(state.waiting_for.clone());
+            }
+        }
+        payment_succeeded = true;
+    }
+
     finish_unless_payment(
         state,
         true,

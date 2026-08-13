@@ -5758,6 +5758,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::ActivationMillPayment { .. }
                     | PendingCostMoveResume::LoyaltyActivation { .. }
                     | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+                    | PendingCostMoveResume::RandomDiscardUnlessPayment { .. }
             )
         ),
         // CR 606.4 + CR 616.1: a fully-prevented loyalty counter add (e.g. an
@@ -5781,6 +5782,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::ActivationMillPayment { .. }
                     | PendingCostMoveResume::LoyaltyActivation { .. }
                     | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+                    | PendingCostMoveResume::RandomDiscardUnlessPayment { .. }
             )
         ),
         CostMoveDrainBoundary::PriorityBoundary => matches!(
@@ -5857,6 +5859,19 @@ pub(crate) fn drain_pending_cost_move_resume(
         Some(PendingCostMoveResume::CounterAdditionUnlessPayment { .. })
     ) {
         engine_payment_choices::resume_counter_addition_unless_payment(
+            state,
+            events,
+            matches!(boundary, CostMoveDrainBoundary::ReplacementDelivered { .. }),
+        )?
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::RandomDiscardUnlessPayment { .. })
+    ) {
+        // CR 701.9b + CR 616.1: same Delivered/Prevented -> Paid/Failed mapping
+        // as the counter-addition sibling directly above; a delivered (possibly
+        // redirected) discard counts as paid, a fully prevented one cannot pay
+        // a cost (CR 118.3).
+        engine_payment_choices::resume_random_discard_unless_payment(
             state,
             events,
             matches!(boundary, CostMoveDrainBoundary::ReplacementDelivered { .. }),
@@ -16087,6 +16102,28 @@ mod stage2_injector_tests {
                 //     with a delegation; it sits above this producer and below the first two.
                 //     The merge tree therefore retains main's first two coordinates
                 //     (`:6177`/`:6254`) and shifts this one by −16 to `:9442`.
+                //   Random-discard-as-a-cost (#7320, review round 1): `engine.rs:12004 ⇒
+                //     :12019`, +15, and ONLY the engine.rs entry moved — the four
+                //     effects/mod.rs + scoped_library_search entries did not, which is the
+                //     set-preservation evidence. `git diff -U0` on this file has exactly three
+                //     hunks, ALL inside `drain_pending_cost_move_resume` at `:5761`/`:5785`/
+                //     `:5865` (+1/+1/+13 = +15, zero deletions), i.e. entirely ABOVE this
+                //     producer; predicted `12004+15` equals the observed coordinate exactly.
+                //     They add the `RandomDiscardUnlessPayment` resume to the two drain
+                //     eligibility lists and its dispatch arm — a cost-payment continuation, not
+                //     a prompt mint: it RESUMES an already-minted `UnlessPayment` rather than
+                //     creating a recipient, so it is correctly absent from this census.
+                //     Identity re-established, not assumed: the producer at `:12019` is the
+                //     same announcement-time modal mint this row NAMES — an `Ok(Some(..))` of
+                //     the optional-effect prompt over `player` / `source_id` /
+                //     `trigger_description` / `may_trigger_key` — still inside
+                //     `begin_pending_trigger_target_selection`. (Spelled out rather than
+                //     quoted: the needle above is ASSEMBLED so this row cannot be counted by
+                //     its own instrument, and a verbatim quote here re-introduces exactly the
+                //     self-count that defends against — it inflates `in_test` and reds the
+                //     TOTAL assert instead of this one.) The two asserts
+                //     above this one fired GREEN on the run that caught it — total still 37,
+                //     partition still 5/7/25 — so no producer was added or lost.
                 //
                 // ⚠ THIS ROW FAILS IN CI BEFORE IT FAILS LOCALLY, and that is not a bug in the
                 // row. CI checks out `refs/pull/<n>/merge` — this branch merged with CURRENT
@@ -16426,7 +16463,7 @@ mod stage2_injector_tests {
                 //
                 // SET PRESERVATION: unchanged. Upstream adds no line matching the needle to this file and
                 // neither does this branch — total still 37, partition still 5/7/25.
-                "game/engine.rs:12004".to_string(),
+                "game/engine.rs:12019".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \
