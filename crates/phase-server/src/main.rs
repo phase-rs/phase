@@ -7978,7 +7978,7 @@ mod state_transport_derived_tests {
                 .get(&game_code)
                 .expect("Resolve All retains its session");
             assert!(
-                session.state_revision >= revision_before + 1,
+                session.state_revision > revision_before,
                 "the resolved batch must advance the authoritative revision"
             );
             (session.state_revision, session.state.waiting_for.clone())
