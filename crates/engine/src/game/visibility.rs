@@ -278,20 +278,19 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         };
     }
 
-    // CR 101.4 + CR 101.4b + CR 608.2d: A number a player chose
-    // (`Player::chosen_attributes`) is that player's SECRET. Wheel of Misfortune,
-    // Menacing Ogre and Life at Stake all say "secretly", and The Toymaker's
-    // Trap's committed number must survive an opponent's guess unseen — CR 101.4b
-    // would otherwise let a later chooser read the earlier answers.
+    // CR 101.4 + CR 101.4b + CR 608.2d: A number a player chose but has not yet
+    // REVEALED is that player's secret. Wheel of Misfortune, Menacing Ogre and
+    // Life at Stake all say "secretly", and The Toymaker's Trap's committed
+    // number must survive an opponent's guess unseen — CR 101.4b would otherwise
+    // let a later chooser read the earlier answers.
     //
-    // The redaction is unconditional rather than scoped to a pending prompt: this
-    // player-axis number is an ENGINE LEDGER, read only server-side by
-    // `QuantityRef::PlayerChosenNumber` (and cleared at every top-level
-    // resolution entry), so no client needs another player's copy at any point.
-    // Making its privacy a property of the field instead of a property of the
-    // current `waiting_for` means no future call path can open a window where it
-    // leaks. The public consequences of the reveal — the damage, the discard, the
-    // life loss — are visible in the ordinary way; only the raw ledger is not.
+    // The redaction keys on the ATTRIBUTE KIND, not on the current `waiting_for`:
+    // `ChosenAttribute::Number` is private, `RevealedNumber` is public, and
+    // `Effect::RevealChosenNumbers` converts one into the other when the card's
+    // reveal instruction resolves (CR 608.2c, in written order). Making privacy a
+    // property of the type means no call path can open a window where a still-
+    // secret value leaks, and no reveal can be forgotten — a value is visible
+    // exactly when the game has published it.
     for player in filtered.players.iter_mut() {
         if !can_view_private_for_player(player.id) {
             player.chosen_attributes.retain(|attribute| {
@@ -5383,8 +5382,66 @@ mod tests {
             filter_state_for_viewer(&state, PlayerId(1)).players[0]
                 .chosen_attributes
                 .is_empty(),
-            "privacy is a property of the ledger, not of the current prompt"
+            "privacy is a property of the attribute kind, not of the current prompt"
         );
+
+        // CR 101.4 + CR 608.2c: the OTHER side of the contract. Once the card's
+        // reveal instruction publishes the number (`Number` → `RevealedNumber`,
+        // performed by `Effect::RevealChosenNumbers`), every viewer sees it —
+        // otherwise the engine would keep information secret after the
+        // instruction that makes it public.
+        state.players[0].reveal_chosen_number();
+        assert!(
+            filter_state_for_viewer(&state, PlayerId(1)).players[0]
+                .chosen_attributes
+                .contains(&ChosenAttribute::RevealedNumber(4)),
+            "a revealed number must be visible to every player"
+        );
+        assert!(
+            filter_state_for_viewer(&state, PlayerId(0)).players[0]
+                .chosen_attributes
+                .contains(&ChosenAttribute::RevealedNumber(4)),
+            "revealing must not hide the number from its own chooser"
+        );
+    }
+
+    /// CR 101.4: `reveal_chosen_number` is the single typed transition — it
+    /// preserves the VALUE (every rules read must agree across the reveal),
+    /// is idempotent, and is a no-op for a player who chose nothing (CR 609.3),
+    /// which is what lets a card name every player when only some chose.
+    #[test]
+    fn revealing_a_chosen_number_preserves_value_and_tolerates_non_choosers() {
+        use crate::types::ability::ChosenAttribute;
+        let mut state = GameState::new_two_player(42);
+        state.players[0].chosen_attributes = vec![ChosenAttribute::Number(7)];
+
+        assert_eq!(state.players[0].reveal_chosen_number(), Some(7));
+        assert_eq!(
+            state.players[0].chosen_number(),
+            Some(7),
+            "the value a rules read sees is unchanged by the reveal"
+        );
+        assert_eq!(
+            state.players[0].reveal_chosen_number(),
+            Some(7),
+            "revealing an already-revealed number is idempotent"
+        );
+        assert_eq!(
+            state.players[0]
+                .chosen_attributes
+                .iter()
+                .filter(|a| matches!(
+                    a,
+                    ChosenAttribute::Number(_) | ChosenAttribute::RevealedNumber(_)
+                ))
+                .count(),
+            1,
+            "a player holds exactly one chosen number, in exactly one state"
+        );
+
+        // A player who chose nothing reveals nothing, and gains no attribute.
+        assert_eq!(state.players[1].reveal_chosen_number(), None);
+        assert!(state.players[1].chosen_attributes.is_empty());
     }
 
     /// CR 608.2d: For a `GuessSubject::CommittedChoice` (The Toymaker's Trap),

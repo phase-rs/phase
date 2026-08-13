@@ -2926,6 +2926,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::SwapChosenLabels { first, second } => {
             d.push(("swap".into(), format!("{first} <-> {second}")));
         }
+        Effect::RevealChosenNumbers { players } => {
+            d.push(("reveal chosen numbers".into(), format!("{players:?}")));
+        }
         Effect::ChooseDamageSource { source_filter } => {
             d.push(("source".into(), fmt_target(source_filter)));
         }
@@ -6475,6 +6478,7 @@ fn visit_direct_effect_ability_payloads<'a>(
         | Effect::Choose { .. }
         | Effect::OpponentGuess { .. }
         | Effect::SwapChosenLabels { .. }
+        | Effect::RevealChosenNumbers { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::Suspect { .. }
         | Effect::Unsuspect { .. }

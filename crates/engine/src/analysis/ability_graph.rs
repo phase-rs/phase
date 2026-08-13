@@ -918,6 +918,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
         | Effect::SwapChosenLabels { .. }
+        | Effect::RevealChosenNumbers { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::Suspect { .. }
         | Effect::Unsuspect { .. }

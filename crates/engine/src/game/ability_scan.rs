@@ -464,6 +464,11 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             first: _,
             second: _,
         } => Axes::CONSERVATIVE,
+        // CR 101.4: publishes an already-committed per-player number. Writes only
+        // the visibility half of the chosen-number ledger (`Number` ->
+        // `RevealedNumber`), never a value, so it perturbs no scanned axis; the
+        // player set it names is the only thing to descend into.
+        Effect::RevealChosenNumbers { players } => scan_player_filter(players, mode),
         Effect::EachSourceDealsDamage {
             sources,
             amount,
@@ -5378,6 +5383,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::ApplyPostReplacementDamage { .. }
         | Effect::OpponentGuess { .. }
         | Effect::SwapChosenLabels { .. }
+        | Effect::RevealChosenNumbers { .. }
         | Effect::Draw { .. }
         | Effect::Pump { .. }
         | Effect::PairWith { .. }
@@ -5788,6 +5794,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::ApplyPostReplacementDamage { .. }
         | Effect::OpponentGuess { .. }
         | Effect::SwapChosenLabels { .. }
+        | Effect::RevealChosenNumbers { .. }
         | Effect::Draw { .. }
         | Effect::Pump { .. }
         | Effect::PairWith { .. }
@@ -6006,6 +6013,7 @@ pub(crate) fn effect_is_randomness_bearing(e: &Effect) -> bool {
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::OpponentGuess { .. }
         | Effect::SwapChosenLabels { .. }
+        | Effect::RevealChosenNumbers { .. }
         | Effect::Draw { .. }
         | Effect::Pump { .. }
         | Effect::PairWith { .. }

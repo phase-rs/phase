@@ -38,6 +38,7 @@
 //! graveyard.
 
 use engine::game::scenario::GameScenario;
+use engine::types::ability::ChosenAttribute;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -144,6 +145,21 @@ fn wheel_of_misfortune_burns_the_highest_choosers_and_wheels_everyone_but_the_lo
                     "{choice} must be offered to {player:?}; got {options:?}"
                 );
                 number_choosers.push(player);
+                // CR 101.4b: BEFORE the reveal, a chooser must not be able to
+                // read the answers already given. Checked at the moment the
+                // second and third seats are prompted — the exact window the
+                // card's "secretly" wording exists to close.
+                for (earlier, _) in CHOICES.iter().take(number_choosers.len() - 1) {
+                    let view =
+                        engine::game::visibility::filter_state_for_viewer(runner.state(), player);
+                    assert!(
+                        !view.players[earlier.0 as usize]
+                            .chosen_attributes
+                            .iter()
+                            .any(|a| matches!(a, ChosenAttribute::Number(_))),
+                        "{player:?} must not see {earlier:?}'s number before the reveal"
+                    );
+                }
                 runner
                     .act(GameAction::ChooseOption {
                         choice: (*choice).to_string(),
@@ -159,6 +175,23 @@ fn wheel_of_misfortune_burns_the_highest_choosers_and_wheels_everyone_but_the_lo
                 }
             }
             other => panic!("unexpected prompt during resolution: {other:?}"),
+        }
+    }
+
+    // CR 101.4 + CR 608.2c: AFTER the reveal instruction resolved, every number
+    // is public to every player. This is the other half of the privacy contract
+    // — without it the engine would keep the numbers secret past the instruction
+    // that publishes them, which is what a bare `Effect::NoOp` reveal did.
+    for viewer in [P0, P1, P2] {
+        let view = engine::game::visibility::filter_state_for_viewer(runner.state(), viewer);
+        for (seat, chosen) in CHOICES {
+            let expected: u8 = chosen.parse().expect("scripted choice is numeric");
+            assert!(
+                view.players[seat.0 as usize]
+                    .chosen_attributes
+                    .contains(&ChosenAttribute::RevealedNumber(expected)),
+                "{viewer:?} must see {seat:?}'s revealed number {expected} after the reveal"
+            );
         }
     }
 

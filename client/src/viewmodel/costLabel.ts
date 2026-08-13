@@ -7,6 +7,7 @@ import type {
   SerializedAbility,
   SerializedAbilityCost,
 } from "../adapter/types.ts";
+import i18n from "../i18n";
 import { getCrewPower, getSaddlePower } from "./keywordProps.ts";
 import { renderDescription } from "../utils/description.ts";
 
@@ -189,15 +190,17 @@ function formatQuantityRef(ref: { type: string; [key: string]: unknown }): strin
     case "ChosenNumber": return "the chosen number";
     // CR 101.4: the number a player secretly chose. The engine supplies the
     // player scope (and, for the cross-player scopes, the fold); this only
-    // renders it — "the highest number" / "the lowest number".
+    // renders it — "the highest number" / "the lowest number". Routed through
+    // the i18n boundary; the surrounding labels in this file are legacy raw
+    // English and are tracked separately.
     case "PlayerChosenNumber": {
       const aggregate =
         ref.player != null && typeof ref.player === "object" && "aggregate" in ref.player
           ? (ref.player as { aggregate?: string }).aggregate
           : undefined;
-      if (aggregate === "Max") return "the highest number";
-      if (aggregate === "Min") return "the lowest number";
-      return "the chosen number";
+      if (aggregate === "Max") return i18n.t("quantityRef.highestNumber");
+      if (aggregate === "Min") return i18n.t("quantityRef.lowestNumber");
+      return i18n.t("quantityRef.chosenNumber");
     }
     case "PreviousEffectAmount": return "the previous amount";
     case "EventContextAmount": return "the amount";

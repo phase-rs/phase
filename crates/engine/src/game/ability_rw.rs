@@ -3056,6 +3056,8 @@ fn legacy_effect(x: &Effect) -> bool {
             first: _,
             second: _,
         } => false,
+        // CR 101.4: carries a `PlayerFilter`, not a legacy tag-bearing target.
+        Effect::RevealChosenNumbers { players: _ } => false,
         Effect::Attach { attachment, target } | Effect::UnattachAll { attachment, target } => {
             legacy_target_filter(attachment) || legacy_target_filter(target)
         }
@@ -5609,6 +5611,12 @@ fn rw_effect(
             first: _,
             second: _,
         } => (ext_write(StateKind::Other), None),
+        // CR 101.4 + CR 603.3b: publishes per-player chosen numbers. The write is
+        // to the same per-player chosen-attribute storage `Effect::Choose`
+        // produces, so it is classified with it (`StateKind::Other`, the
+        // unclassifiable/fail-closed kind) rather than given a narrower kind that
+        // no profiled read would conflict with.
+        Effect::RevealChosenNumbers { players: _ } => (ext_write(StateKind::Other), None),
 
         // ---- Histogram-absent ⇒ fail-closed conservative ----
         Effect::StartYourEngines { .. }

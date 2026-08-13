@@ -120,6 +120,7 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::Discarded { .. }
         | GameEvent::Cycled { .. }
         | GameEvent::CardsRevealed { .. }
+        | GameEvent::ChosenNumbersRevealed { .. }
         | GameEvent::BecomesTarget { .. }
         | GameEvent::ReplacementApplied { .. }
         | GameEvent::SpeedChanged { .. }
@@ -328,6 +329,7 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::TurnedFaceUp { .. }
         | GameEvent::TurnedFaceDown { .. }
         | GameEvent::CardsRevealed { .. }
+        | GameEvent::ChosenNumbersRevealed { .. }
         | GameEvent::CombatDamageDealtToPlayer { .. }
         | GameEvent::CrimeCommitted { .. }
         | GameEvent::Regenerated { .. }
@@ -531,6 +533,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::Discarded { .. }
         | GameEvent::Cycled { .. }
         | GameEvent::CardsRevealed { .. }
+        | GameEvent::ChosenNumbersRevealed { .. }
         | GameEvent::Foretold { .. }
         | GameEvent::BecameForetold { .. } => LogCategory::Zone,
 
@@ -927,6 +930,22 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(" reveals: "),
             text(&card_names.join(", ")),
         ],
+
+        // CR 101.4: one line for the whole simultaneous reveal — the numbers
+        // become public together, so rendering them per-player would imply an
+        // ordering the rules do not have.
+        GameEvent::ChosenNumbersRevealed { numbers } => {
+            let mut segments = vec![text("Chosen numbers revealed: ")];
+            for (index, (player, value)) in numbers.iter().enumerate() {
+                if index > 0 {
+                    segments.push(text(", "));
+                }
+                segments.push(player_seg(state, *player));
+                segments.push(text(" "));
+                segments.push(num(i32::from(*value)));
+            }
+            segments
+        }
 
         GameEvent::LifeChanged { player_id, amount } => {
             if *amount >= 0 {

@@ -897,6 +897,7 @@ where
         | Effect::Choose { .. }
         | Effect::OpponentGuess { .. }
         | Effect::SwapChosenLabels { .. }
+        | Effect::RevealChosenNumbers { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::Suspect { .. }
         | Effect::Unsuspect { .. }

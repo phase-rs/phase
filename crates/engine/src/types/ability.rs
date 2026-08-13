@@ -1380,7 +1380,22 @@ pub enum ChosenAttribute {
     OddOrEven(Parity),
     CardName(String),
     /// Stores a chosen number (e.g., "choose a number" for Talion).
+    ///
+    /// On the PLAYER axis (`Player::chosen_attributes`) this is the SECRET half
+    /// of the CR 101.4 secret-number ledger: `game::visibility` redacts it from
+    /// every viewer but its owner. `Effect::RevealChosenNumbers` converts it to
+    /// [`ChosenAttribute::RevealedNumber`], which is public — that conversion is
+    /// the card's "reveal" instruction as an observable state transition.
     Number(u8),
+    /// CR 101.4 + CR 608.2c: A chosen number that a reveal instruction has
+    /// PUBLISHED ("then all players reveal those numbers simultaneously").
+    /// Identical in value to [`ChosenAttribute::Number`] and read
+    /// interchangeably with it by `Player::chosen_number`; the two differ only
+    /// in visibility, which is exactly what the reveal changes. Kept as a
+    /// distinct variant rather than a flag so the secret and published states
+    /// cannot be confused at a read site, and so `game::visibility` redacts on
+    /// the type rather than on a condition it might forget to check.
+    RevealedNumber(u8),
     /// Stores the chosen opponent/player ID (CR 800.4a).
     Player(PlayerId),
     /// Stores two chosen colors as a pair.
@@ -1464,7 +1479,9 @@ impl ChosenAttribute {
             Self::CardType(_) => ChoiceType::card_type(),
             Self::OddOrEven(_) => ChoiceType::OddOrEven,
             Self::CardName(_) => ChoiceType::CardName,
-            Self::Number(_) => ChoiceType::NumberRange {
+            // CR 101.4: the secret and the published number came from the same
+            // `NumberRange` prompt; revealing changes visibility, not category.
+            Self::Number(_) | Self::RevealedNumber(_) => ChoiceType::NumberRange {
                 min: 0,
                 max: 20,
                 distinctness: NumberDistinctness::Repeatable,
@@ -12343,6 +12360,28 @@ pub enum Effect {
         #[serde(default = "default_target_filter_self_ref")]
         target: TargetFilter,
     },
+    /// CR 101.4 + CR 608.2c: Publish the numbers `players` secretly chose earlier
+    /// in this resolution — "then all players reveal those numbers
+    /// simultaneously" (Wheel of Misfortune), "then you reveal the number you
+    /// chose" (The Toymaker's Trap), "Then those numbers are revealed" (Menacing
+    /// Ogre).
+    ///
+    /// Deliberately NOT a member of the `Reveal` / `RevealTop` / `RevealHand`
+    /// family: CR 701.20a defines revealing a CARD ("show that card to all
+    /// players"), and those effects are parameterized over zone, count and card
+    /// filter. A committed number is not a card and has none of those axes — it
+    /// is a per-player choice made during resolution (CR 608.2d), so it gets its
+    /// own publication channel rather than a card-reveal variant bent to fit.
+    ///
+    /// A player's chosen number is private until this effect names them
+    /// (`GameState::revealed_chosen_numbers`, read by `game::visibility`).
+    /// Naming a player who chose no number is a legal no-op (CR 609.3), which is
+    /// what makes `players: All` correct for a card whose choosers were only a
+    /// subset of the table.
+    RevealChosenNumbers {
+        #[serde(default)]
+        players: PlayerFilter,
+    },
     /// CR 701.20a: Reveal the top N card(s) of a player's library.
     RevealTop {
         /// The player whose library to reveal from.
@@ -15550,6 +15589,7 @@ impl Effect {
             Effect::StartYourEngines { .. }
             // CR 311.7: the chaos anchor swap is a non-targeting per-player effect.
             | Effect::SwapChosenLabels { .. }
+            | Effect::RevealChosenNumbers { .. }
             // CR 109.4: owner/type_filter are non-targeting resolution-time
             // filters; the copy source is chosen from the format pool, not
             // declared as a target.
@@ -16428,6 +16468,7 @@ impl Effect {
             | Effect::StartYourEngines { .. }
             | Effect::Suspect { .. }
             | Effect::SwapChosenLabels { .. }
+            | Effect::RevealChosenNumbers { .. }
             | Effect::SwitchPT { .. }
             | Effect::TakeTheInitiative
             | Effect::TargetOnly { .. }
@@ -16980,6 +17021,7 @@ impl Effect {
             | Effect::TargetOnly { .. }
             | Effect::Choose { .. }
             | Effect::SwapChosenLabels { .. }
+            | Effect::RevealChosenNumbers { .. }
             | Effect::ChooseDamageSource { .. }
             | Effect::Suspect { .. }
             | Effect::Unsuspect { .. }
@@ -17258,6 +17300,7 @@ impl Effect {
             | Effect::Cascade
             | Effect::Choose { .. }
             | Effect::SwapChosenLabels { .. }
+            | Effect::RevealChosenNumbers { .. }
             | Effect::ChooseAndSacrificeRest { .. }
             | Effect::EachPlayerCopyChosen { .. }
             | Effect::ChooseDamageSource { .. }
@@ -17519,6 +17562,7 @@ impl Effect {
             | Effect::Cascade
             | Effect::Choose { .. }
             | Effect::SwapChosenLabels { .. }
+            | Effect::RevealChosenNumbers { .. }
             | Effect::ChooseAndSacrificeRest { .. }
             | Effect::EachPlayerCopyChosen { .. }
             | Effect::ChooseDamageSource { .. }
@@ -17721,6 +17765,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Choose { .. } => "Choose",
         Effect::OpponentGuess { .. } => "OpponentGuess",
         Effect::SwapChosenLabels { .. } => "SwapChosenLabels",
+        Effect::RevealChosenNumbers { .. } => "RevealChosenNumbers",
         Effect::ChooseDamageSource { .. } => "ChooseDamageSource",
         Effect::Suspect { .. } => "Suspect",
         Effect::Unsuspect { .. } => "Unsuspect",
@@ -18234,6 +18279,10 @@ impl From<&Effect> for EffectKind {
             // CR 311.7: The chaos swap re-chooses each player's anchor, so it
             // reports as a `Choose`-kind resolution for event/AI purposes.
             Effect::SwapChosenLabels { .. } => EffectKind::Choose,
+            // CR 101.4: publishing a chosen number is a choice-ledger write,
+            // classified with the choice that produced it rather than with the
+            // CR 701.20 card reveals.
+            Effect::RevealChosenNumbers { .. } => EffectKind::Choose,
             Effect::ChooseDamageSource { .. } => EffectKind::ChooseDamageSource,
             Effect::Suspect { .. } => EffectKind::Suspect,
             Effect::Unsuspect { .. } => EffectKind::Unsuspect,

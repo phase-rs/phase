@@ -184,6 +184,7 @@ pub mod remove_from_combat;
 pub mod renown;
 pub mod return_as_aura;
 pub mod reveal;
+pub mod reveal_chosen_numbers;
 pub mod reveal_from_hand;
 pub mod reveal_hand;
 pub mod reveal_top;
@@ -4344,6 +4345,9 @@ pub fn resolve_effect(
         Effect::RevealHand { .. } => reveal_hand::resolve(state, ability, events),
         Effect::RevealFromHand { .. } => reveal_from_hand::resolve(state, ability, events),
         Effect::Reveal { .. } => reveal::resolve(state, ability, events),
+        Effect::RevealChosenNumbers { .. } => {
+            reveal_chosen_numbers::resolve(state, ability, events)
+        }
         Effect::RevealTop { .. } => reveal_top::resolve(state, ability, events),
         Effect::ExileTop { .. } => exile_top::resolve(state, ability, events),
         Effect::ExileFaceDownPile { .. } => exile_face_down_pile::resolve(state, ability, events),
@@ -8336,9 +8340,12 @@ pub fn resolve_ability_chain(
         // sibling per-player choice ledger, for the same reason. The player axis
         // stores no other `Number`, so nothing else is disturbed.
         for player in state.players.iter_mut() {
-            player
-                .chosen_attributes
-                .retain(|attribute| !matches!(attribute, ChosenAttribute::Number(_)));
+            player.chosen_attributes.retain(|attribute| {
+                !matches!(
+                    attribute,
+                    ChosenAttribute::Number(_) | ChosenAttribute::RevealedNumber(_)
+                )
+            });
         }
         state.last_effect_amount = None;
         // CR 120.10: resolution-local excess channel resets with its total twin.

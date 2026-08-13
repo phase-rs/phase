@@ -265,11 +265,37 @@ impl Player {
     /// [`crate::types::ability::QuantityRef::PlayerChosenNumber`] use that to
     /// exclude non-choosers from a highest/lowest fold instead of counting them
     /// as 0.
+    ///
+    /// Reads the secret and the revealed variants interchangeably: revealing a
+    /// number changes who may SEE it, never what it is, so every rules read
+    /// ("the highest number", "each player who chose the lowest number") must
+    /// return the same value on both sides of the reveal.
     pub fn chosen_number(&self) -> Option<u8> {
+        use crate::types::ability::ChosenAttribute;
         self.chosen_attributes.iter().find_map(|attr| match attr {
-            crate::types::ability::ChosenAttribute::Number(n) => Some(*n),
+            ChosenAttribute::Number(n) | ChosenAttribute::RevealedNumber(n) => Some(*n),
             _ => None,
         })
+    }
+
+    /// CR 101.4 + CR 608.2c: Publish this player's secretly-chosen number, the
+    /// state transition behind "then all players reveal those numbers
+    /// simultaneously". Returns the revealed value, or `None` when this player
+    /// chose no number (CR 609.3 — revealing nothing is a legal no-op, which is
+    /// what lets a card name every player when only some of them chose).
+    /// Idempotent: an already-revealed number stays revealed.
+    pub fn reveal_chosen_number(&mut self) -> Option<u8> {
+        use crate::types::ability::ChosenAttribute;
+        let value = self.chosen_number()?;
+        self.chosen_attributes.retain(|attribute| {
+            !matches!(
+                attribute,
+                ChosenAttribute::Number(_) | ChosenAttribute::RevealedNumber(_)
+            )
+        });
+        self.chosen_attributes
+            .push(ChosenAttribute::RevealedNumber(value));
+        Some(value)
     }
 
     /// CR 122.1: Get the current count of a player counter.

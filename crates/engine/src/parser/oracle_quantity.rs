@@ -785,6 +785,32 @@ pub(crate) fn parse_cda_quantity_with_context(
 ) -> Option<QuantityExpr> {
     let text = text.trim().trim_end_matches('.');
 
+    // CR 101.4 + CR 608.2d: "the highest number" / "the lowest number" — the
+    // cross-player extremum of the numbers players secretly chose earlier in THIS
+    // ability (Wheel of Misfortune, Menacing Ogre, Life at Stake).
+    //
+    // Gated on PROVENANCE, never on wording. The phrase is ambiguous in isolation:
+    // Custodi Peacekeeper's "power less than or equal to the highest number you
+    // noted for cards named Custodi Peacekeeper" is a draft-time noted value, and
+    // reading it as a secretly-chosen number silently reinterpreted a card that
+    // has no choice in it at all. `pending_choice_type` is the chunk-loop-threaded
+    // record of the last `Effect::Choose` domain in this ability (set in
+    // `imperative.rs`, carried across chunks by `chain_pending_choice_type`), so
+    // requiring it to be a `NumberRange` binds the reference to an actual
+    // preceding secret-number ledger. Same provenance gate `try_parse_guess_clause`
+    // applies to "guesses which number you chose". Without a proven choice the arm
+    // declines and the phrase falls through to the pre-existing grammar unchanged.
+    if matches!(
+        ctx.pending_choice_type,
+        Some(crate::types::ability::ChoiceType::NumberRange { .. })
+    ) {
+        if let Ok((rest, qty)) = nom_quantity::parse_extreme_chosen_number_ref(text) {
+            if rest.is_empty() {
+                return Some(QuantityExpr::Ref { qty });
+            }
+        }
+    }
+
     // CR 107.1a: "half/third/tenth <inner>, rounded up/down" fractional
     // quantities delivered via a "where X is …" binding or a CDA route through
     // here (Chainer's Torment, Endless Ranks of the Dead, Ghoulcaller's Harvest,

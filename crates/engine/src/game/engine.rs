@@ -16049,9 +16049,24 @@ mod stage2_injector_tests {
                 // prompt. All three producers remain byte-identical
                 // `WaitingFor::OptionalEffectChoice` assignments inside the functions
                 // this row names. The remaining hunks are an import line and `mod tests`.
-                "game/effects/mod.rs:6257".to_string(),
-                "game/effects/mod.rs:6334".to_string(),
-                "game/effects/mod.rs:9543".to_string(),
+                // Reveal-transition follow-up (same PR): `:6257/:6334/:9543 =>
+                // `:6261/:6338/:9550`, `+4/+4/+7`. `git diff -U0` on effects/mod.rs now
+                // has exactly three non-test hunks, and the asymmetry is again the
+                // measurement:
+                //   `@@ -186,0 +187 @@` — `pub mod reveal_chosen_numbers;`. One line,
+                //     above all three producers.
+                //   `@@ -4346,0 +4348,3 @@` — the `Effect::RevealChosenNumbers` dispatch
+                //     arm in `resolve_effect`. Three lines, also above all three (it sits
+                //     in the dispatch table, which precedes every producer).
+                //   `@@ -8339,3 +8343,6 @@` — widening the depth-0 chosen-number clear to
+                //     retain BOTH `Number` and `RevealedNumber`. Net +3, above the THIRD
+                //     producer only, which is its extra `+3`.
+                // The dispatch arm delegates to `reveal_chosen_numbers::resolve`, which
+                // converts `ChosenAttribute::Number` to `RevealedNumber` and emits an
+                // event — it raises no `WaitingFor`, so the census set is unchanged at 5.
+                "game/effects/mod.rs:6261".to_string(),
+                "game/effects/mod.rs:6338".to_string(),
+                "game/effects/mod.rs:9550".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.

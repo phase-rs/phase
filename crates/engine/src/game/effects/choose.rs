@@ -419,9 +419,12 @@ pub(crate) fn record_player_chosen_number(
         return;
     };
     if let Some(player) = state.players.iter_mut().find(|p| p.id == chooser) {
-        player
-            .chosen_attributes
-            .retain(|attribute| !matches!(attribute, ChosenAttribute::Number(_)));
+        player.chosen_attributes.retain(|attribute| {
+            !matches!(
+                attribute,
+                ChosenAttribute::Number(_) | ChosenAttribute::RevealedNumber(_)
+            )
+        });
         player
             .chosen_attributes
             .push(ChosenAttribute::Number(value));

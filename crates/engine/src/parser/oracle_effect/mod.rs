@@ -8695,30 +8695,50 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return clause;
     }
 
-    // CR 101.4 + CR 608.2d: "[then you] reveal the number you chose" / "all
+    // CR 101.4 + CR 608.2c: "[then you] reveal the number you chose" / "all
     // players reveal those numbers simultaneously and determine the highest and
-    // lowest numbers revealed this way" — publishing the secretly-committed
-    // value(s). Revealing information changes no game object: every downstream
-    // clause reads the committed numbers directly (`QuantityRef::ChosenNumber`
-    // off the source, `QuantityRef::PlayerChosenNumber` off each player), and the
-    // "determine the highest/lowest" tail is likewise pure bookkeeping — the
-    // extrema are computed on demand under an `AllPlayers { aggregate }` scope,
-    // never stored. So the reveal is a no-op at the AST layer.
+    // lowest numbers revealed this way" / "then those numbers are revealed" —
+    // publishing the secretly-committed value(s).
+    //
+    // This is a real state transition, not bookkeeping: a chosen number is
+    // PRIVATE to its chooser until published, so the instruction that publishes
+    // it must be modeled or the engine keeps information secret after the card
+    // made it public. `Effect::RevealChosenNumbers` performs that conversion
+    // (`ChosenAttribute::Number` → `RevealedNumber`), which `game::visibility`
+    // reads. The subject selects WHOSE numbers: "you" publishes only the
+    // controller's (The Toymaker's Trap), an unscoped or "all players" subject
+    // publishes everyone's.
+    //
+    // The trailing "and determine the highest and lowest numbers" IS pure
+    // bookkeeping and is consumed without effect — the extrema are computed on
+    // demand by `QuantityRef::PlayerChosenNumber` under an
+    // `AllPlayers { aggregate }` scope, never stored.
     {
         let lower = text.to_ascii_lowercase();
-        let body = opt(value(
-            (),
-            alt((
+        let (body, players) = opt(alt((
+            value(
+                PlayerFilter::Controller,
                 tag::<_, _, OracleError<'_>>("you "),
-                tag("all players "),
-                tag("each player "),
-            )),
-        ))
+            ),
+            value(PlayerFilter::All, tag("all players ")),
+            value(PlayerFilter::All, tag("each player ")),
+        )))
         .parse(lower.as_str())
-        .map(|(rest, _)| rest)
-        .unwrap_or(lower.as_str());
+        .map(|(rest, subject)| {
+            (
+                rest,
+                subject
+                    .unwrap_or_else(crate::game::effects::reveal_chosen_numbers::default_players),
+            )
+        })
+        .unwrap_or_else(|_: nom::Err<OracleError<'_>>| {
+            (
+                lower.as_str(),
+                crate::game::effects::reveal_chosen_numbers::default_players(),
+            )
+        });
         if parse_reveal_chosen_numbers_clause(body).is_ok() {
-            return parsed_clause(Effect::NoOp);
+            return parsed_clause(Effect::RevealChosenNumbers { players });
         }
     }
 
@@ -25510,20 +25530,35 @@ pub(crate) fn parse_named_choice_object(rest: &str) -> Option<ChoiceType> {
     }
 }
 
-/// CR 101.4 + CR 608.2d: The bookkeeping sentence that publishes secretly-chosen
-/// numbers — "reveal the number you chose" (The Toymaker's Trap), "reveal the
-/// chosen numbers" (Life at Stake), "reveal those numbers simultaneously and
-/// determine the highest and lowest numbers revealed this way" (Wheel of
-/// Misfortune). The leading subject ("you " / "all players ") is stripped by the
-/// caller.
+/// CR 101.4 + CR 608.2c: The sentence that publishes secretly-chosen numbers —
+/// "reveal the number you chose" (The Toymaker's Trap), "reveal the chosen
+/// numbers" (Life at Stake), "reveal those numbers simultaneously and determine
+/// the highest and lowest numbers revealed this way" (Wheel of Misfortune),
+/// "those numbers are revealed" (Menacing Ogre's passive voice). The leading
+/// subject ("you " / "all players ") is stripped by the caller, which maps it to
+/// the `PlayerFilter` naming whose numbers are published.
 ///
-/// Composed by axis — object phrase × optional manner adverb × optional
+/// Composed by axis — voice × object phrase × optional manner adverb × optional
 /// "determine" tail, each its own `alt`/`opt` — rather than enumerated as
-/// permutations of whole sentences. Every recognized form lowers to
-/// `Effect::NoOp`: the reveal is an engine-level consequence of the choice
-/// prompts ending (visibility.rs), and the extrema are computed on demand by
-/// `QuantityRef::PlayerChosenNumber`, so there is nothing for an effect to do.
+/// permutations of whole sentences. The recognized forms lower to
+/// `Effect::RevealChosenNumbers`, which performs the private→public conversion
+/// `game::visibility` reads. Only the "determine the highest/lowest" tail is
+/// inert: those extrema are computed on demand by
+/// `QuantityRef::PlayerChosenNumber` rather than stored.
 fn parse_reveal_chosen_numbers_clause(input: &str) -> OracleResult<'_, ()> {
+    // Passive voice carries the object first: "those numbers are revealed".
+    if let Ok((input, _)) = (
+        alt((
+            tag::<_, _, OracleError<'_>>("those numbers"),
+            tag("the chosen numbers"),
+            tag("the numbers"),
+        )),
+        tag(" are revealed"),
+    )
+        .parse(input)
+    {
+        return Ok((input, ()));
+    }
     let (input, _) = tag("reveal ").parse(input)?;
     let (input, _) = alt((
         tag("the number you chose"),

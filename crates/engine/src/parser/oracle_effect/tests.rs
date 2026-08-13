@@ -27519,6 +27519,348 @@ fn strip_each_scope_who_didnt_discard_filter_this_way_is_exact() {
     }
 }
 
+/// CR 101.4 + CR 608.2d: the chosen-number subject restriction is a CLASS, not
+/// Wheel of Misfortune's one sentence. Every cell of polarity × extremum ×
+/// player scope must narrow the subject to a `PlayerAttribute` whose
+/// per-candidate scalar is the player's own secretly-chosen number and whose
+/// threshold is the cross-player extremum of the same scalar — and the body must
+/// survive, deconjugated.
+#[test]
+fn strip_each_player_subject_chosen_number_matrix() {
+    use crate::types::ability::{AggregateFunction, PlayerRelation, PlayerScope};
+
+    fn expect(text: &str) -> (PlayerRelation, Comparator, AggregateFunction, String) {
+        let (scope, body) = strip_each_player_subject(text);
+        let Some(PlayerFilter::PlayerAttribute {
+            relation,
+            attr,
+            comparator,
+            value,
+        }) = scope
+        else {
+            panic!("a chosen-number subject must narrow the player scope: {text}");
+        };
+        // The per-candidate read is THIS player's own number (CR 608.2d), never
+        // an aggregate — an aggregate here would compare the table extremum to
+        // itself and match everyone.
+        assert_eq!(
+            *attr,
+            QuantityRef::PlayerChosenNumber {
+                player: PlayerScope::ScopedPlayer
+            },
+            "per-candidate scalar for {text}"
+        );
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::PlayerChosenNumber {
+                    player: PlayerScope::AllPlayers { aggregate, .. },
+                },
+        } = *value
+        else {
+            panic!("threshold must be a cross-player chosen-number extremum for {text}");
+        };
+        (relation, comparator, aggregate, body)
+    }
+
+    // Wheel of Misfortune's wheel clause: negated polarity × lowest × all players.
+    let (relation, comparator, aggregate, body) =
+        expect("Each player who didn't choose the lowest number discards their hand");
+    assert_eq!(relation, PlayerRelation::All);
+    assert_eq!(comparator, Comparator::NE);
+    assert_eq!(aggregate, AggregateFunction::Min);
+    assert_eq!(body, "discard their hand");
+
+    // Life at Stake's life-loss clause: positive polarity × highest.
+    let (relation, comparator, aggregate, body) =
+        expect("Each player who chose the highest number loses that much life");
+    assert_eq!(relation, PlayerRelation::All);
+    assert_eq!(comparator, Comparator::EQ);
+    assert_eq!(aggregate, AggregateFunction::Max);
+    assert_eq!(body, "lose that much life");
+
+    // Menacing Ogre's participial phrasing, on the opponent relation — the same
+    // restriction reached through a different surface form.
+    let (relation, comparator, aggregate, body) =
+        expect("Each opponent with the highest number loses that much life");
+    assert_eq!(relation, PlayerRelation::Opponent);
+    assert_eq!(comparator, Comparator::EQ);
+    assert_eq!(aggregate, AggregateFunction::Max);
+    assert_eq!(body, "lose that much life");
+}
+
+/// The restriction must NOT fire on shapes it does not model: an unrelated
+/// relative clause, or the anaphoric "that number" with no extremum in scope to
+/// bind it (passing `anaphor: None`, as the subject path does). Binding "that
+/// number" to a guessed extremum would silently invent a referent.
+#[test]
+fn chosen_number_restriction_rejects_unbound_and_unrelated_clauses() {
+    assert!(
+        super::lower::parse_chosen_number_restriction("who chose that number", None).is_err(),
+        "an anaphor with no referent in scope must decline, not guess an extremum"
+    );
+    assert!(
+        super::lower::parse_chosen_number_restriction(
+            "who chose that number",
+            Some(crate::types::ability::AggregateFunction::Max)
+        )
+        .is_ok(),
+        "the same anaphor binds once its referent is supplied"
+    );
+    assert!(
+        super::lower::parse_chosen_number_restriction("who didn't discard a card", None).is_err(),
+        "an unrelated decline tail is not a chosen-number restriction"
+    );
+    assert!(
+        super::lower::parse_chosen_number_restriction("who controls an artifact", None).is_err(),
+        "a controls-clause is not a chosen-number restriction"
+    );
+}
+
+/// CR 101.4 + CR 120.3: Wheel of Misfortune's whole sentence, end to end at the
+/// AST layer. Every clause must lower to a typed effect — the pre-fix parse was
+/// four consecutive `Unimplemented` links — and the two extrema must be
+/// DIFFERENT (`Max` for the damage, `Min` for the wheel), which a single shared
+/// "the chosen number" reading would collapse.
+#[test]
+fn wheel_of_misfortune_lowers_every_clause() {
+    use crate::types::ability::{AggregateFunction, PlayerScope};
+
+    fn collect<'a>(a: &'a AbilityDefinition, out: &mut Vec<&'a AbilityDefinition>) {
+        out.push(a);
+        if let Some(s) = a.sub_ability.as_deref() {
+            collect(s, out);
+        }
+        if let Some(e) = a.else_ability.as_deref() {
+            collect(e, out);
+        }
+    }
+
+    let text = "Each player secretly chooses a number 0 or greater, then all players reveal \
+         those numbers simultaneously and determine the highest and lowest numbers revealed \
+         this way. Wheel of Misfortune deals damage equal to the highest number to each player \
+         who chose that number. Each player who didn't choose the lowest number discards their \
+         hand, then draws seven cards.";
+    let parsed = parse_oracle_text(
+        text,
+        "Wheel of Misfortune",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let ability = parsed.abilities.first().expect("expected a spell ability");
+
+    let mut links = Vec::new();
+    collect(ability, &mut links);
+    assert!(
+        !links
+            .iter()
+            .any(|link| matches!(&*link.effect, Effect::Unimplemented { .. })),
+        "no clause may fall back to Unimplemented: {:#?}",
+        links.iter().map(|l| &l.effect).collect::<Vec<_>>()
+    );
+
+    // CR 608.2d: "each player secretly chooses a number 0 or greater" — the
+    // per-player choice, which must PERSIST or the later extremum reads have
+    // nothing to fold.
+    let Effect::Choose {
+        choice_type: ChoiceType::NumberRange { min, .. },
+        persist,
+        ..
+    } = &*ability.effect
+    else {
+        panic!("head must be the number choice, got {:#?}", ability.effect);
+    };
+    assert_eq!(*min, 0, "\"a number 0 or greater\" starts at zero");
+    assert!(
+        *persist,
+        "a chosen number a later clause reads must persist"
+    );
+    assert_eq!(ability.player_scope, Some(PlayerFilter::All));
+
+    // CR 120.3: the damage amount and its recipient set are BOTH keyed on the
+    // highest number.
+    let damage = links
+        .iter()
+        .find_map(|link| match &*link.effect {
+            Effect::DamageEachPlayer {
+                amount,
+                player_filter,
+            } => Some((amount.clone(), player_filter.clone())),
+            _ => None,
+        })
+        .expect("the damage clause must lower to DamageEachPlayer");
+    assert_eq!(
+        damage.0,
+        QuantityExpr::Ref {
+            qty: QuantityRef::PlayerChosenNumber {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Max,
+                    exclude: None,
+                },
+            },
+        },
+        "\"damage equal to the highest number\""
+    );
+    let PlayerFilter::PlayerAttribute {
+        comparator,
+        value: recipient_threshold,
+        ..
+    } = damage.1
+    else {
+        panic!("\"each player who chose that number\" must narrow the recipients");
+    };
+    assert_eq!(comparator, Comparator::EQ);
+    assert_eq!(
+        *recipient_threshold, damage.0,
+        "\"that number\" must anaphor the SAME extremum the amount named"
+    );
+
+    // CR 701.9a + CR 121.1: the wheel half reads the LOWEST number under NE.
+    let wheel_scope = links
+        .iter()
+        .find_map(|link| match (&*link.effect, &link.player_scope) {
+            (Effect::Discard { .. }, Some(scope)) => Some(scope.clone()),
+            _ => None,
+        })
+        .expect("the discard clause must carry the narrowed scope");
+    assert_eq!(
+        wheel_scope,
+        PlayerFilter::PlayerAttribute {
+            relation: crate::types::ability::PlayerRelation::All,
+            attr: Box::new(QuantityRef::PlayerChosenNumber {
+                player: PlayerScope::ScopedPlayer,
+            }),
+            comparator: Comparator::NE,
+            value: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::PlayerChosenNumber {
+                    player: PlayerScope::AllPlayers {
+                        aggregate: AggregateFunction::Min,
+                        exclude: None,
+                    },
+                },
+            }),
+        },
+        "\"each player who didn't choose the lowest number\""
+    );
+    // CR 608.2c: the ", then draws seven cards" continuation inherits the SAME
+    // narrowed subject — a plain `All` here would wheel the lowest chooser too.
+    let draw_scope = links
+        .iter()
+        .find_map(|link| match (&*link.effect, &link.player_scope) {
+            (Effect::Draw { .. }, Some(scope)) => Some(scope.clone()),
+            _ => None,
+        })
+        .expect("the draw continuation must carry a scope");
+    assert_eq!(draw_scope, wheel_scope);
+}
+
+/// CR 101.4 + CR 608.2d: sweep of every card the CI parse-diff flagged for this
+/// change, asserting the invariant that makes the chosen-number reference safe:
+/// a card may only READ a secretly-chosen number if it also CREATES one.
+///
+/// This is the class-level answer to "re-check every changed card": the flagged
+/// set is all "each player secretly …" cards that previously died at
+/// `Unimplemented { secretly }`, plus two controls that contain the same words
+/// with no choice behind them. Wording-matched parsing passes the first six and
+/// fails the controls; provenance-bound parsing passes all eight.
+#[test]
+fn secret_number_provenance_invariant_holds_across_the_class() {
+    // Every card the CI parse-diff flagged for this change, by verbatim Oracle
+    // text (Scryfall). They are all members of the "each player secretly …"
+    // class: before the adverb peel each died at `Unimplemented { secretly }`,
+    // so every one of them is an unlock rather than a reinterpretation. The
+    // last two are the CONTROLS: they contain the words this grammar keys on
+    // but no secret choice at all.
+    const CARDS: &[(&str, &str)] = &[
+        ("Círdan the Shipwright", "Vigilance\nSecret council — Whenever Círdan enters or attacks, each player secretly votes for a player, then those votes are revealed. Each player draws a card for each vote they received. Each player who received no votes may put a permanent card from their hand onto the battlefield."),
+        ("Mob Verdict", "Secret council — Each player secretly votes for another player, then those votes are revealed. For each vote an opponent received, Mob Verdict deals 2 damage to that player and each creature that player controls. For each vote you received, draw a card."),
+        ("Mana Conference", "When Mana Conference enters the battlefield, each player secretly chooses a basic land type, then those choices are revealed. Mana Conference gains each basic land type that received at least one vote."),
+        ("Prisoner's Dilemma", "Each opponent secretly chooses silence or snitch, then the choices are revealed. If each opponent chose silence, Prisoner's Dilemma deals 4 damage to each of them. If each opponent chose snitch, Prisoner's Dilemma deals 8 damage to each of them. Otherwise, Prisoner's Dilemma deals 12 damage to each opponent who chose silence."),
+        ("Menacing Ogre", "Trample, haste\nWhen this creature enters, each player secretly chooses a number. Then those numbers are revealed. Each player with the highest number loses that much life. If you are one of those players, put two +1/+1 counters on this creature."),
+        ("Itazura, Lingering Wick", "At the beginning of your upkeep, exile the top three cards of your library. Each opponent secretly chooses a number 0 or greater. Then those numbers are revealed. Choose an opponent with the highest number. Itazura deals that much damage to them, then they may cast a spell from among those cards without paying its mana cost. You put a card from among them that wasn't cast this way into your hand."),
+        // CONTROL: a draft-time NOTED number, no choice anywhere on the card.
+        ("Custodi Peacekeeper", "Reveal this card as you draft it and note how many cards you've drafted this draft round, including this card.\n{W}, {T}: Tap target creature with power less than or equal to the highest number you noted for cards named Custodi Peacekeeper."),
+        // CONTROL: "highest"/"number" in a pure counting phrase.
+        ("Counting Control", "Draw cards equal to the highest number of cards in hand among players."),
+    ];
+
+    for (name, oracle) in CARDS {
+        let parsed = parse_oracle_text(oracle, name, &[], &["Creature".to_string()], &[]);
+        let rendered = format!("{parsed:?}");
+        let reads_chosen_number = rendered.contains("PlayerChosenNumber");
+        let has_number_choice = rendered.contains("NumberRange");
+
+        // THE INVARIANT: a chosen-number reference may exist only where the same
+        // card actually creates a secret number to refer to. This is what makes
+        // the reference provenance-bound instead of wording-matched, and it is
+        // the property whose absence rewrote Custodi Peacekeeper.
+        assert!(
+            !reads_chosen_number || has_number_choice,
+            "{name} reads a secretly-chosen number with no NumberRange choice to bind it to"
+        );
+    }
+}
+
+/// CR 608.2d: "the highest number" is only a secretly-chosen number when a
+/// preceding choice in the SAME ability created one. Custodi Peacekeeper's
+/// "power less than or equal to the highest number you noted for cards named
+/// Custodi Peacekeeper" is a draft-time noted value with no choice behind it, so
+/// the chosen-number grammar must not touch it.
+///
+/// Fail-on-revert: registering the extremum in the context-free
+/// `parse_quantity_ref` alt (its original shape) rewrote this card's `Tap` target
+/// to `power ≤ secretly chosen number (max of all players)` — a silent
+/// reinterpretation of an unrelated card, caught by the CI parse-diff.
+#[test]
+fn noted_number_is_not_a_secretly_chosen_number() {
+    const CUSTODI_PEACEKEEPER: &str = "Reveal this card as you draft it and note how many cards you've drafted this draft round, including this card.\n{W}, {T}: Tap target creature with power less than or equal to the highest number you noted for cards named Custodi Peacekeeper.";
+    let parsed = parse_oracle_text(
+        CUSTODI_PEACEKEEPER,
+        "Custodi Peacekeeper",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+
+    fn mentions_chosen_number(def: &AbilityDefinition) -> bool {
+        let mut found = false;
+        def.effect.for_each_quantity_expr(&mut |expr| {
+            if let QuantityExpr::Ref {
+                qty: QuantityRef::PlayerChosenNumber { .. },
+            } = expr
+            {
+                found = true;
+            }
+        });
+        let filter_mentions = format!("{:?}", def.effect).contains("PlayerChosenNumber")
+            || format!("{:?}", def.player_scope).contains("PlayerChosenNumber");
+        found
+            || filter_mentions
+            || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(mentions_chosen_number)
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(mentions_chosen_number)
+    }
+
+    // Reach guard: the card really did parse into abilities, so the negative
+    // assertion below cannot pass vacuously on an empty parse.
+    assert!(
+        !parsed.abilities.is_empty(),
+        "Custodi Peacekeeper must still produce its activated ability"
+    );
+    for ability in &parsed.abilities {
+        assert!(
+            !mentions_chosen_number(ability),
+            "a noted number must not be reinterpreted as a secretly-chosen one: {:#?}",
+            ability.effect
+        );
+    }
+}
+
 /// CR 118.12 + CR 608.2d + CR 109.5: `strip_each_scope_who_does_subject`
 /// covers the full subject-only × scope × positive-"does" matrix (The Second
 /// Doctor: "each opponent who does can't attack you …"; Step Between Worlds:

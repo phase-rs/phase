@@ -1528,6 +1528,7 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::Choose { .. } => {}
         Effect::OpponentGuess { .. } => {}
         Effect::SwapChosenLabels { .. } => {}
+        Effect::RevealChosenNumbers { .. } => {}
         Effect::ChooseDamageSource { .. } => {}
         Effect::Suspect { .. } => {}
         Effect::Unsuspect { .. } => {}
