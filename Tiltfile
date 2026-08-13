@@ -22,6 +22,26 @@ enabled = config.parse().get('enable', [])
 # restarts the watching resources mid-build.
 TMP_IGNORE = ['**/*.tmp.*']
 
+# probe-pin isolates through `unshare --map-root-user --mount` (util-linux) and runs its target
+# under `timeout` (GNU coreutils). macOS ships neither, and there is no Darwin equivalent of an
+# unprivileged mount namespace to port to — so both probe-pin resources abort on a Darwin host
+# no matter what the tree contains. Gate their auto_init rather than let them boot straight into
+# a permanent red: a gate that is red on every change teaches everyone to stop reading the
+# colour, which costs more than the gate earns. They stay VISIBLE and clickable, like every
+# other opt-in resource here, so the refusal is still one click away when someone wants to see
+# it. `os.name` is consulted FIRST and short-circuits, so a Windows host never reaches `uname`
+# — which it does not ship, and which would fail Tiltfile LOAD rather than one resource.
+IS_LINUX = (
+    os.name == 'posix'
+    and str(local('uname -s', quiet = True, echo_off = True)).strip() == 'Linux'
+)
+
+# auto_init alone would NOT be enough: it governs only the STARTUP run, and the default
+# TRIGGER_MODE_AUTO re-runs a resource whenever its deps change. Both probe-pin resources watch
+# 'crates/probe-pin/', so off Linux the very next edit there would drag them back into the red
+# that auto_init just avoided. Off-Linux they must stop watching too, not merely stop booting.
+PROBE_PIN_TRIGGER = TRIGGER_MODE_AUTO if IS_LINUX else TRIGGER_MODE_MANUAL
+
 # Must stay a SUPERSET of what `scripts/engine-source-hash.sh` hashes as the engine cache
 # key (src + data + build.rs + Cargo.toml). `data/` is `include_str!`d into the binary and
 # `build.rs`/`Cargo.toml` change what gets compiled, so a change to any of them changes the
@@ -272,15 +292,22 @@ local_resource('probe-pin-check',
     # TMP_IGNORE is a FILENAME glob ('**/*.tmp.*') and does not match a tmp/ DIRECTORY, so the
     # Tier-2 tests' scratch writes under tests/fixtures/tmp/ would retrigger this resource.
     ignore = TMP_IGNORE + ['**/tmp/**'],
-    auto_init = 'lint' in enabled,
+    auto_init = 'lint' in enabled and IS_LINUX,
+    trigger_mode = PROBE_PIN_TRIGGER,
     allow_parallel = True,
     labels = ['lint'],
 )
 
 # The Tier-2 suite is #[ignore]d because GitHub's runners deny unprivileged user namespaces
 # (unshare -> /proc/self/uid_map EPERM), so GH CI never executes a real mount. THIS resource is
-# what keeps that honest: the local venue does have the capability, so Tier 2 runs here on every
-# change. Without it, "ignored in CI" quietly becomes "never run anywhere".
+# what keeps that honest: a LINUX local venue does have the capability, so Tier 2 runs there on
+# every change. Without it, "ignored in CI" quietly becomes "never run anywhere".
+#
+# On a non-Linux host, "never run anywhere" is not a hedge — it is the literal state. CI cannot
+# mount, and Darwin has no `unshare` to try, so Tier 2's claims are carried entirely by whatever
+# Linux venue last executed them. IS_LINUX only stops this resource auto-starting into a red it
+# can never clear; it does not make that gap smaller. The tests are deliberately NOT cfg'd out,
+# so a manual run here still prints probe-pin's own named refusal rather than a zero-test green.
 #
 # `-- --ignored` runs ONLY the ignored tests, which is exactly this suite. A non-zero exit turns
 # the resource red like any other gate — a real Tier-2 gate, not a fire-and-forget reporter.
@@ -298,7 +325,8 @@ local_resource('probe-pin-e2e',
            'CARGO_TARGET_DIR=target/probe-pin-e2e cargo test -p probe-pin --test isolation_e2e -- --ignored'],
     deps = ['crates/probe-pin/'],
     ignore = TMP_IGNORE + ['**/tmp/**'],
-    auto_init = 'lint' in enabled,
+    auto_init = 'lint' in enabled and IS_LINUX,
+    trigger_mode = PROBE_PIN_TRIGGER,
     allow_parallel = True,
     labels = ['lint'],
 )
