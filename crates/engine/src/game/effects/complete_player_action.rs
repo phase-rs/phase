@@ -84,6 +84,32 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
         assert_eq!(events.len(), 1);
 
+        // `succeeded` compares the whole `EffectResolutionResult`, so each field
+        // is load-bearing on its own. Without these two near misses a resolver
+        // that checked only `cause`, or only `count`, would still pass — the
+        // matching case below differs from the `None` case above in both fields
+        // at once, so neither field is exercised in isolation.
+        for near_miss in [
+            EffectResolutionResult {
+                cause: ThisWayCause::Sacrificed,
+                count: 2,
+            },
+            EffectResolutionResult {
+                cause: ThisWayCause::Exiled,
+                count: 1,
+            },
+        ] {
+            ability.context.prior_effect_result = Some(near_miss);
+            events.clear();
+            resolve(&mut state, &ability, &mut events).unwrap();
+            assert_eq!(
+                events.len(),
+                1,
+                "{near_miss:?} does not equal the required result, so the action \
+                 must not be published"
+            );
+        }
+
         ability.context.prior_effect_result = Some(EffectResolutionResult {
             cause: ThisWayCause::Sacrificed,
             count: 1,
