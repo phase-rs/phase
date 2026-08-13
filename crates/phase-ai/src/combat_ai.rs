@@ -948,8 +948,8 @@ pub fn choose_blockers_with_profile(
                 priority == 0 && attacker_power >= 2 && matches!(objective, CombatObjective::Race);
             // CR 903.10a: Skip chumps that don't actually save under commander damage
             // (e.g. 1/1 in front of a 12/12 trample commander with 3 cmd-damage headroom).
-            let chump_unsafe = priority == 0
-                && commander_chump_unsafe(state, player, attacker_id, blocker_toughness);
+            let chump_unsafe =
+                priority == 0 && commander_chump_unsafe(state, player, attacker_id, &[blocker_id]);
             let favorable_trade =
                 priority != 1 || selected_blocker_value <= attacker_value + damage_prevented as f64;
             if !chump_unsafe
@@ -1127,34 +1127,21 @@ pub fn choose_blockers_with_profile(
             gang_value += value;
         }
 
-        // CR 702.19b: how much a gang actually absorbs. A trampling attacker must
-        // assign each blocker its lethal damage before any excess is assigned to the
-        // player, so absorption is the sum of those per-blocker minimums — NOT raw
-        // toughness. `lethal_damage_needed` is the resolver's own authority: it
-        // subtracts damage already marked, and returns 1 under deathtouch (CR
-        // 702.2c), which is why a deathtouch trampler absorbs almost nothing however
-        // large the gang. Summing raw toughness here approved gangs that left lethal
-        // trample damage against already-damaged blockers.
-        let gang_absorption = |set: &[ObjectId]| -> i32 {
-            set.iter()
-                .map(|&bid| {
-                    engine::game::combat_damage::lethal_damage_needed(
-                        state,
-                        bid,
-                        attacker_has_deathtouch,
-                    ) as i32
-                })
-                .sum()
+        // The engine owns this calculation. `combat_damage_to_defender` models both
+        // damage steps (CR 702.4b), the blockers a first striker removes between them
+        // (CR 702.7b), per-blocker lethal minimums including damage already marked
+        // (CR 702.19b), a blocked trampler left with no blockers (CR 702.19d), and
+        // deathtouch (CR 702.2c). Every one of those interacts, and the AI's previous
+        // hand-rolled single-step estimate got the double-strike case wrong by a
+        // whole second strike.
+        let damage_through = |set: &[ObjectId]| -> i32 {
+            engine::game::combat_damage::combat_damage_to_defender(state, attacker_id, set)
         };
-        // CR 510.1c + CR 702.19b: only trample can put damage past a legal block, so
-        // a nontrampler is unconditionally survivable once blocked. The `>= 2` floor
-        // mirrors the single-blocker pass's `damage_prevented >= 2`.
+        // CR 510.1c: a block that lets nothing through is a full save whatever
+        // becomes of the blockers. Otherwise it has to get the player under lethal.
         let averts_lethal = |set: &[ObjectId]| -> bool {
-            if !attacker_has_trample {
-                return true;
-            }
-            let absorbed = gang_absorption(set);
-            absorbed >= 2 && attacker_power.saturating_sub(absorbed) < effective_life
+            let through = damage_through(set);
+            through < effective_life && (through == 0 || attacker_power - through >= 2)
         };
 
         // CR 509.1b + CR 510.1c + CR 702.7b + CR 702.19b: the survival gang answers a
@@ -1167,11 +1154,32 @@ pub fn choose_blockers_with_profile(
         // left an 11/11 menace first-strike trampler unblockable by two 4/4s at 4
         // life, though that block absorbs 4+4 and tramples only 3.
         //
-        // Grows cheapest-first past the floor until the residual is survivable, so it
-        // spends the fewest creatures that actually save the game.
+        // Ordering: against a trampler what a blocker contributes is absorption, not
+        // cheapness, so take the biggest absorbers first and break ties on value —
+        // a value-ordered walk spends several 1/1s where one 6/6 would do. Against a
+        // nontrampler any legal block already prevents everything (CR 510.1c), so the
+        // cheapest bodies are correct there and the existing value order stands.
         let survival_gang: Option<Vec<ObjectId>> = if floor_stabilize_route {
+            let mut pool: Vec<(ObjectId, f64)> = gang_candidates
+                .iter()
+                .map(|&(bid, _, value)| (bid, value))
+                .collect();
+            if attacker_has_trample {
+                pool.sort_by(|a, b| {
+                    let absorb = |bid: ObjectId| {
+                        engine::game::combat_damage::lethal_damage_needed(
+                            state,
+                            bid,
+                            attacker_has_deathtouch,
+                        )
+                    };
+                    absorb(b.0)
+                        .cmp(&absorb(a.0))
+                        .then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                });
+            }
             let mut set: Vec<ObjectId> = Vec::new();
-            for &(bid, _, _) in &gang_candidates {
+            for &(bid, _) in &pool {
                 if set.len() >= needed_blockers && averts_lethal(&set) {
                     break;
                 }
@@ -1224,8 +1232,7 @@ pub fn choose_blockers_with_profile(
         // The survival route already proved its own set legal and lethal-averting;
         // it only remains to reject the two shapes that save nothing.
         let stabilizing_gang = survival_gang.filter(|set| {
-            !reflects_damage(set)
-                && !commander_chump_unsafe(state, player, attacker_id, gang_absorption(set))
+            !reflects_damage(set) && !commander_chump_unsafe(state, player, attacker_id, set)
         });
 
         // Gang-block to kill when the trade is worth it, else to survive. Never below
@@ -1353,12 +1360,7 @@ pub fn choose_blockers_with_profile(
                 if !can_block_with_engine_map(state, bid, attacker_id, valid_block_targets) {
                     return false;
                 }
-                let blocker_toughness = state
-                    .objects
-                    .get(&bid)
-                    .and_then(|b| b.toughness)
-                    .unwrap_or(1);
-                !commander_chump_unsafe(state, player, attacker_id, blocker_toughness)
+                !commander_chump_unsafe(state, player, attacker_id, &[bid])
             });
             if let Some(&blocker_id) = safe_blocker {
                 assignments.push((blocker_id, attacker_id));
@@ -1391,28 +1393,19 @@ fn commander_chump_unsafe(
     state: &GameState,
     defender: PlayerId,
     attacker_id: ObjectId,
-    chump_toughness: i32,
+    blockers: &[ObjectId],
 ) -> bool {
     let Some(headroom) = commander_lethal_headroom(state, defender, attacker_id) else {
         return false;
     };
-    let Some(attacker) = state.objects.get(&attacker_id) else {
-        return false;
-    };
-    let power = attacker.power.unwrap_or(0).max(0);
-    let trample_through = if attacker.has_keyword(&Keyword::Trample) {
-        // CR 702.2c: Deathtouch makes any nonzero damage lethal, so the trampler need only
-        // assign 1 to the blocker before sending excess to the player.
-        let lethal_to_blocker = if attacker.has_keyword(&Keyword::Deathtouch) {
-            1
-        } else {
-            chump_toughness
-        };
-        (power - lethal_to_blocker).max(0)
-    } else {
-        0
-    };
-    trample_through as u32 >= headroom
+    // CR 903.10a: unsafe when what still gets through would cross the
+    // commander-damage threshold. Delegates to the engine's damage authority rather
+    // than re-deriving trample and deathtouch here — the previous local version took
+    // a single blocker's toughness and replaced it with 1 under deathtouch (CR
+    // 702.2c), which is right for one chump blocker and throws away a whole gang's
+    // absorption when handed one, rejecting legal blocks that do prevent lethality.
+    engine::game::combat_damage::combat_damage_to_defender(state, attacker_id, blockers) as u32
+        >= headroom
 }
 
 fn determine_attack_objective(
@@ -4775,6 +4768,76 @@ mod tests {
             "CR 702.19b: blockers that die in the first-strike step still absorb \
              their lethal damage — 4+4 of 11 leaves 3 against 4 life. Got \
              {assignments:?}"
+        );
+    }
+
+    /// CR 702.4b + CR 702.19d: a double striker assigns damage in BOTH steps. The
+    /// first step kills these blockers and tramples 3; the second finds no blockers
+    /// and, per CR 702.19d, assigns its full 11 to the player "as though all
+    /// blocking creatures have been assigned lethal damage". 14 total against 4
+    /// life, so the block does not save and must be declined.
+    ///
+    /// Discriminating for the single-step model: counting one step reads this as
+    /// 3 through and approves a block that loses the game.
+    #[test]
+    fn menace_double_strike_trampler_is_declined_when_the_second_strike_still_kills() {
+        let (state, attacker, _) = lethal_attacker_board_with(
+            4,
+            2,
+            vec![Keyword::Menace, Keyword::DoubleStrike, Keyword::Trample],
+        );
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        let on_attacker = assignments.iter().filter(|&&(_, a)| a == attacker).count();
+        assert_eq!(
+            on_attacker, 0,
+            "CR 702.4b + CR 702.19d: the second strike finds an empty block and \
+             tramples 11 more into a player already down to 1. Got {assignments:?}"
+        );
+    }
+
+    /// Ordering: against a trampler a blocker contributes absorption, not cheapness.
+    /// One 6/6 absorbs the whole gap that three 1/1s cannot, so the AI must reach for
+    /// it rather than walking the value order and spending bodies that do not save.
+    ///
+    /// 8/8 menace trampler at 3 life: 1/1s absorb 1 each (three of them leave 5), the
+    /// 6/6 absorbs 6 and leaves 2. The floor is 2, so the answer is the 6/6 plus one
+    /// 1/1 — absorbing 7, leaving 1.
+    #[test]
+    fn trample_survival_gang_prefers_absorbers_over_cheap_bodies() {
+        let mut state = setup();
+        state.players[1].life = 3;
+        let attacker = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Attacker",
+            8,
+            8,
+            vec![Keyword::Menace, Keyword::Trample],
+        );
+        let big = add_creature(&mut state, PlayerId(1), "Big", 1, 6, vec![]);
+        for i in 0..3 {
+            add_creature(&mut state, PlayerId(1), &format!("Small {i}"), 1, 1, vec![]);
+        }
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        let on_attacker: Vec<_> = assignments
+            .iter()
+            .filter(|&&(_, a)| a == attacker)
+            .map(|&(b, _)| b)
+            .collect();
+        assert!(
+            on_attacker.contains(&big),
+            "CR 702.19b: the 6-toughness blocker absorbs 6 of the 8 — a value-ordered \
+             walk spends 1/1s that cannot close the gap. Got {assignments:?}"
+        );
+        assert_eq!(
+            on_attacker.len(),
+            2,
+            "the floor is 2 and the 6/6 plus one 1/1 already leaves 1 damage — no \
+             further creatures should be spent. Got {assignments:?}"
         );
     }
 

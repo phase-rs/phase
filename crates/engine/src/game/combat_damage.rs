@@ -1087,6 +1087,140 @@ fn assign_attacker_damage(
     }
 }
 
+/// How much combat damage `attacker_id` assigns to the defending player over the
+/// whole combat damage phase if exactly `blockers` block it.
+///
+/// The single authority for "does this block save me". Consumers must not
+/// re-derive it: every hand-rolled version of this calculation has gotten one of
+/// the rules below wrong, because they interact.
+///
+/// - CR 510.1a: a creature assigns damage equal to its power; 0 or less assigns none.
+/// - CR 510.1b: an empty `blockers` slice means unblocked — all power to the player.
+/// - CR 510.1c: a blocked creature assigns to its blockers, and none to the player.
+/// - CR 702.19b: trample assigns lethal to every blocker first, then the excess to
+///   the player — and *no* damage to the player if lethal is not assigned to all of
+///   them. "Lethal" counts damage already marked (via `lethal_damage_needed`).
+/// - CR 702.19d: a blocked trampler with no blockers left when damage is assigned
+///   assigns everything to the player, as though all blockers had been assigned
+///   lethal damage. This is what makes the second strike of a double striker so
+///   dangerous: the first strike step usually empties the block.
+/// - CR 702.4b + CR 702.7b: first and double strike split combat into two damage
+///   steps. Blockers killed in the first step are gone for the second, and a
+///   first-striking blocker can kill the attacker before its regular-step damage.
+/// - CR 702.2c: deathtouch makes 1 damage lethal, so a deathtouch trampler is
+///   absorbed by almost nothing.
+///
+/// Assignment within a step is resolved as the worst case for the defending
+/// player, since the attacking player chooses (CR 702.19b): lethal is assigned to
+/// the cheapest blockers first, maximising how many die and therefore how little
+/// absorption survives into the second step.
+pub fn combat_damage_to_defender(
+    state: &GameState,
+    attacker_id: ObjectId,
+    blockers: &[ObjectId],
+) -> i32 {
+    let Some(attacker) = state.objects.get(&attacker_id) else {
+        return 0;
+    };
+    // CR 510.1a: a creature assigning 0 or less assigns no combat damage at all.
+    let power = attacker.power.unwrap_or(0).max(0);
+    if power == 0 {
+        return 0;
+    }
+    // CR 510.1b: unblocked — the whole power reaches the player.
+    if blockers.is_empty() {
+        return power;
+    }
+
+    let has_trample = attacker.has_keyword(&Keyword::Trample);
+    let has_deathtouch = attacker.has_keyword(&Keyword::Deathtouch);
+    let has_double_strike = attacker.has_keyword(&Keyword::DoubleStrike);
+    let attacker_strikes_first = has_double_strike || attacker.has_keyword(&Keyword::FirstStrike);
+
+    // Remaining lethal per blocker, in the order the attacker would exhaust them.
+    let mut remaining: Vec<i32> = blockers
+        .iter()
+        .map(|&bid| lethal_damage_needed(state, bid, has_deathtouch) as i32)
+        .collect();
+    remaining.sort_unstable();
+
+    // CR 702.7b: which blockers assign their damage in the first-strike step.
+    let first_strike_blockers: Vec<&GameObject> = blockers
+        .iter()
+        .filter_map(|bid| state.objects.get(bid))
+        .filter(|b| b.has_keyword(&Keyword::FirstStrike) || b.has_keyword(&Keyword::DoubleStrike))
+        .collect();
+
+    let mut to_player = 0;
+    let mut attacker_alive = true;
+
+    // CR 702.4b: the first combat damage step exists at all only if some
+    // participant has first or double strike.
+    if attacker_strikes_first || !first_strike_blockers.is_empty() {
+        if attacker_strikes_first {
+            to_player += assign_step_to_defender(&mut remaining, power, has_trample);
+        }
+        // CR 702.7b: first-striking blockers assign now, and can kill the attacker
+        // before it ever reaches the regular step.
+        let attacker_lethal = lethal_damage_needed(
+            state,
+            attacker_id,
+            first_strike_blockers
+                .iter()
+                .any(|b| b.has_keyword(&Keyword::Deathtouch)),
+        ) as i32;
+        let first_strike_damage: i32 = first_strike_blockers
+            .iter()
+            .map(|b| b.power.unwrap_or(0).max(0))
+            .sum();
+        if first_strike_damage >= attacker_lethal {
+            attacker_alive = false;
+        }
+    }
+
+    // CR 702.4b: the attacker assigns in the regular step if it has double strike,
+    // or if it never had first strike and so has not assigned at all yet.
+    if attacker_alive && (has_double_strike || !attacker_strikes_first) {
+        to_player += assign_step_to_defender(&mut remaining, power, has_trample);
+    }
+
+    to_player
+}
+
+/// One combat damage step's worth of assignment from a single attacker, returning
+/// the damage that reaches the defending player and consuming the blockers it
+/// kills. See `combat_damage_to_defender` for the governing rules.
+fn assign_step_to_defender(remaining: &mut Vec<i32>, power: i32, has_trample: bool) -> i32 {
+    if remaining.is_empty() {
+        // CR 702.19d: blocked, but nothing is blocking it now — a trampler assigns
+        // everything to the player. CR 510.1c: without trample it assigns nothing.
+        return if has_trample { power } else { 0 };
+    }
+
+    let total_lethal: i32 = remaining.iter().sum();
+
+    // CR 702.19b: excess reaches the player only once EVERY blocker has been
+    // assigned lethal damage.
+    if has_trample && power > total_lethal {
+        remaining.clear();
+        return power - total_lethal;
+    }
+
+    // Otherwise every point is spent on blockers. Kill the cheapest first — the
+    // attacking player chooses, and fewer survivors means less absorption in any
+    // later step.
+    let mut budget = power;
+    remaining.retain(|&lethal| {
+        if budget >= lethal {
+            budget -= lethal;
+            false
+        } else {
+            true
+        }
+    });
+    0
+}
+
 /// How much damage is needed to kill this creature.
 /// CR 702.2c: Deathtouch — any amount of damage from a deathtouch source is lethal.
 ///
@@ -4318,5 +4452,133 @@ mod tests {
             "attacker with regen shield must survive lethal combat damage"
         );
         assert_eq!(state.objects[&attacker].damage_marked, 0);
+    }
+
+    // ── `combat_damage_to_defender` (CR 510.1 / 702.4b / 702.7b / 702.19b/d) ──
+    //
+    // The building block itself, exercised over the rule interactions rather than
+    // through any one consumer. Each case is a different pair of rules meeting.
+
+    fn kw(state: &mut GameState, id: ObjectId, keywords: Vec<Keyword>) {
+        state.objects.get_mut(&id).unwrap().keywords = keywords;
+    }
+
+    #[test]
+    fn unblocked_attacker_assigns_its_whole_power() {
+        let mut state = setup();
+        let a = create_creature(&mut state, PlayerId(0), "A", 7, 7);
+        // CR 510.1b
+        assert_eq!(combat_damage_to_defender(&state, a, &[]), 7);
+    }
+
+    #[test]
+    fn blocked_nontrampler_assigns_nothing_to_the_player() {
+        let mut state = setup();
+        let a = create_creature(&mut state, PlayerId(0), "A", 11, 11);
+        let b = create_creature(&mut state, PlayerId(1), "B", 1, 1);
+        // CR 510.1c: even a 1/1 chump stops all 11.
+        assert_eq!(combat_damage_to_defender(&state, a, &[b]), 0);
+    }
+
+    #[test]
+    fn trampler_assigns_the_excess_over_lethal_to_blockers() {
+        let mut state = setup();
+        let a = create_creature(&mut state, PlayerId(0), "A", 11, 11);
+        kw(&mut state, a, vec![Keyword::Trample]);
+        let b1 = create_creature(&mut state, PlayerId(1), "B1", 1, 4);
+        let b2 = create_creature(&mut state, PlayerId(1), "B2", 1, 4);
+        // CR 702.19b: 4 + 4 lethal, 3 excess.
+        assert_eq!(combat_damage_to_defender(&state, a, &[b1, b2]), 3);
+    }
+
+    #[test]
+    fn trampler_assigns_nothing_when_it_cannot_cover_every_blocker() {
+        let mut state = setup();
+        let a = create_creature(&mut state, PlayerId(0), "A", 5, 5);
+        kw(&mut state, a, vec![Keyword::Trample]);
+        let b1 = create_creature(&mut state, PlayerId(1), "B1", 1, 4);
+        let b2 = create_creature(&mut state, PlayerId(1), "B2", 1, 4);
+        // CR 702.19b: "need not assign lethal damage to all those blocking creatures
+        // but in that case can't assign any damage to the player".
+        assert_eq!(combat_damage_to_defender(&state, a, &[b1, b2]), 0);
+    }
+
+    #[test]
+    fn marked_damage_lowers_the_lethal_each_blocker_absorbs() {
+        let mut state = setup();
+        let a = create_creature(&mut state, PlayerId(0), "A", 11, 11);
+        kw(&mut state, a, vec![Keyword::Trample]);
+        let b1 = create_creature(&mut state, PlayerId(1), "B1", 1, 4);
+        let b2 = create_creature(&mut state, PlayerId(1), "B2", 1, 4);
+        state.objects.get_mut(&b1).unwrap().damage_marked = 3;
+        state.objects.get_mut(&b2).unwrap().damage_marked = 3;
+        // CR 702.19b: "take into account damage already marked" — 1 + 1, not 4 + 4.
+        assert_eq!(combat_damage_to_defender(&state, a, &[b1, b2]), 9);
+    }
+
+    #[test]
+    fn deathtouch_trampler_needs_only_one_damage_per_blocker() {
+        let mut state = setup();
+        let a = create_creature(&mut state, PlayerId(0), "A", 11, 11);
+        kw(&mut state, a, vec![Keyword::Trample, Keyword::Deathtouch]);
+        let b1 = create_creature(&mut state, PlayerId(1), "B1", 1, 6);
+        let b2 = create_creature(&mut state, PlayerId(1), "B2", 1, 6);
+        // CR 702.2c: 1 each is lethal, so 9 tramples through despite 12 toughness.
+        assert_eq!(combat_damage_to_defender(&state, a, &[b1, b2]), 9);
+    }
+
+    #[test]
+    fn double_strike_trampler_strikes_the_empty_block_again() {
+        let mut state = setup();
+        let a = create_creature(&mut state, PlayerId(0), "A", 11, 11);
+        kw(&mut state, a, vec![Keyword::DoubleStrike, Keyword::Trample]);
+        let b1 = create_creature(&mut state, PlayerId(1), "B1", 1, 4);
+        let b2 = create_creature(&mut state, PlayerId(1), "B2", 1, 4);
+        // CR 702.4b: first step assigns 4 + 4 lethal and tramples 3, emptying the
+        // block; CR 702.19d: the regular step then assigns all 11 to the player.
+        assert_eq!(combat_damage_to_defender(&state, a, &[b1, b2]), 14);
+    }
+
+    #[test]
+    fn double_strike_without_trample_still_assigns_nothing_to_the_player() {
+        let mut state = setup();
+        let a = create_creature(&mut state, PlayerId(0), "A", 11, 11);
+        kw(&mut state, a, vec![Keyword::DoubleStrike]);
+        let b = create_creature(&mut state, PlayerId(1), "B", 1, 1);
+        // CR 510.1c: the second strike has no blockers and no trample, so no damage
+        // is assigned at all — the distinction CR 702.19d turns on.
+        assert_eq!(combat_damage_to_defender(&state, a, &[b]), 0);
+    }
+
+    #[test]
+    fn first_striking_blocker_that_kills_the_attacker_stops_the_regular_step() {
+        let mut state = setup();
+        let a = create_creature(&mut state, PlayerId(0), "A", 11, 2);
+        kw(&mut state, a, vec![Keyword::Trample]);
+        let b = create_creature(&mut state, PlayerId(1), "B", 3, 1);
+        kw(&mut state, b, vec![Keyword::FirstStrike]);
+        // CR 702.7b: the blocker's 3 kills the 11/2 in the first step, so the
+        // attacker never assigns its own damage at all.
+        assert_eq!(combat_damage_to_defender(&state, a, &[b]), 0);
+    }
+
+    #[test]
+    fn first_strike_attacker_kills_blockers_before_they_can_trade() {
+        let mut state = setup();
+        let a = create_creature(&mut state, PlayerId(0), "A", 11, 11);
+        kw(&mut state, a, vec![Keyword::FirstStrike, Keyword::Trample]);
+        let b = create_creature(&mut state, PlayerId(1), "B", 1, 4);
+        // CR 702.7b: a lone first-strike step — 4 lethal, 7 through. It does NOT
+        // strike again (that would need double strike).
+        assert_eq!(combat_damage_to_defender(&state, a, &[b]), 7);
+    }
+
+    #[test]
+    fn zero_power_attacker_assigns_no_combat_damage() {
+        let mut state = setup();
+        let a = create_creature(&mut state, PlayerId(0), "A", 0, 3);
+        kw(&mut state, a, vec![Keyword::Trample]);
+        // CR 510.1a
+        assert_eq!(combat_damage_to_defender(&state, a, &[]), 0);
     }
 }
