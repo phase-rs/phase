@@ -50,6 +50,17 @@ use super::life_costs::PayLifeCostResult;
 const TERMINAL_CAST_CANCELLATION_ERROR: &str = "__terminal_cast_cancellation__";
 pub(crate) const ABANDONED_CAST_FINALIZATION_ERROR: &str = "__abandoned_cast_finalization__";
 
+fn abandoned_cast_finalization_error() -> EngineError {
+    EngineError::InvalidAction(ABANDONED_CAST_FINALIZATION_ERROR.to_string())
+}
+
+pub(crate) fn is_abandoned_cast_finalization(error: &EngineError) -> bool {
+    matches!(
+        error,
+        EngineError::InvalidAction(message) if message == ABANDONED_CAST_FINALIZATION_ERROR
+    )
+}
+
 fn ensure_pending_spell_announcement_is_live(
     state: &GameState,
     pending: &PendingCast,
@@ -60,9 +71,7 @@ fn ensure_pending_spell_announcement_is_live(
             .iter()
             .any(|entry| entry.id == pending.object_id)
     {
-        return Err(EngineError::InvalidAction(
-            ABANDONED_CAST_FINALIZATION_ERROR.to_string(),
-        ));
+        return Err(abandoned_cast_finalization_error());
     }
     Ok(())
 }
@@ -9194,7 +9203,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
         .stack
         .iter()
         .rposition(|entry| entry.id == object_id)
-        .ok_or_else(|| EngineError::InvalidAction(ABANDONED_CAST_FINALIZATION_ERROR.to_string()))?;
+        .ok_or_else(abandoned_cast_finalization_error)?;
 
     // CR 702.150a: Record how many of this spell's Phyrexian mana symbols are
     // being paid with life. A compleated planeswalker entering from this spell
@@ -12478,15 +12487,11 @@ fn finalize_mana_payment_with_resume(
     // Phyrexian mana AND at least one shard has both mana and life options available.
     // `PendingCast` stays in `state.pending_cast` across the pause — the resume handler
     // in `engine.rs` calls `finalize_mana_payment_with_phyrexian_choices`.
-    if state
-        .pending_cast
-        .as_ref()
-        .is_some_and(|pending| ensure_pending_spell_announcement_is_live(state, pending).is_err())
-    {
-        state.pending_cast = None;
-        return Err(EngineError::InvalidAction(
-            ABANDONED_CAST_FINALIZATION_ERROR.to_string(),
-        ));
+    if let Some(pending) = state.pending_cast.as_ref() {
+        if let Err(error) = ensure_pending_spell_announcement_is_live(state, pending) {
+            state.pending_cast = None;
+            return Err(error);
+        }
     }
     if let Some(pending_ref) = state.pending_cast.as_ref() {
         let mana_cost = pending_ref.cost.clone();
@@ -12851,14 +12856,7 @@ fn finalize_mana_payment_with_resume(
     state.active_casting_permission_index = None;
     match finalize_result {
         Ok(waiting_for) => Ok(waiting_for),
-        Err(err)
-            if matches!(
-                &err,
-                EngineError::InvalidAction(message) if message == ABANDONED_CAST_FINALIZATION_ERROR
-            ) =>
-        {
-            Err(err)
-        }
+        Err(err) if is_abandoned_cast_finalization(&err) => Err(err),
         // CR 601.2h + CR 605.3b + CR 616.1: An auto-tapped mana ability may
         // pause on a replacement-aware cost move. Its serialized cursor owns
         // the source activation; retain the outer cast for the exact
@@ -13246,14 +13244,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
     state.active_casting_permission_index = None;
     match finalize_result {
         Ok(waiting_for) => Ok(waiting_for),
-        Err(err)
-            if matches!(
-                &err,
-                EngineError::InvalidAction(message) if message == ABANDONED_CAST_FINALIZATION_ERROR
-            ) =>
-        {
-            Err(err)
-        }
+        Err(err) if is_abandoned_cast_finalization(&err) => Err(err),
         // CR 601.2h + CR 605.3b + CR 616.1: See the ordinary payment resume
         // above. A Phyrexian choice does not change the cursor ownership.
         Err(_) if super::casting::mana_ability_cost_payment_is_paused(state) => {

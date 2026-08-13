@@ -80,7 +80,18 @@ fn abandon_pending_spell_casts(
                 CollectEvidenceResume::Casting { pending_cast, .. }
                     if is_abandoned_spell(state, departing_player, spell_ids, pending_cast)
             ),
-            _ => false,
+            PendingCostMoveResume::ActivationMillPayment { pending, .. } => {
+                is_abandoned_spell(state, departing_player, spell_ids, pending)
+            }
+            PendingCostMoveResume::Cast { pending: None, .. }
+            | PendingCostMoveResume::WardSacrificePayment { .. }
+            | PendingCostMoveResume::ReplacementMayCost { .. }
+            | PendingCostMoveResume::Foretell { .. }
+            | PendingCostMoveResume::DelveManaPayment { .. }
+            | PendingCostMoveResume::UnlessBouncePayment { .. }
+            | PendingCostMoveResume::ManaAbilityPayment { .. }
+            | PendingCostMoveResume::LoyaltyActivation { .. }
+            | PendingCostMoveResume::CounterAdditionUnlessPayment { .. } => false,
         };
         if !abandons_spell {
             state.pending_cost_move_resume = Some(resume);
@@ -730,6 +741,10 @@ fn do_eliminate(
         .record_player_leave(command)
         .expect("resolved player leave must have a live journal cause");
 
+    // CR 800.4a + CR 616.1: Capture the parked replacement chooser before
+    // cast-abandonment teardown can replace its prompt with priority.
+    let leaving_is_latched_chooser = state.waiting_for.acting_player() == Some(player);
+
     abandon_source_bound_resolution_prompt(state, player);
     retire_pending_zone_change_contexts_owned_by(state, player);
     abandon_change_zone_family_for_controller(state, player);
@@ -898,7 +913,8 @@ fn do_eliminate(
     // `begin_pending_trigger_target_selection` (which gates on `pending_trigger`)
     // back into target selection for a dead entry id, panicking in
     // `mutate_pending_trigger_entry`. Clear the cursor only when the entry it
-    // tracks is no longer on the stack, mirroring the `pending_cast` cleanup below.
+    // tracks is no longer on the stack, mirroring the early
+    // `abandon_pending_spell_casts` teardown above.
     if state
         .pending_trigger_entry
         .is_some_and(|entry_id| !state.stack.iter().any(|entry| entry.id == entry_id))
@@ -928,9 +944,9 @@ fn do_eliminate(
     // Key off the LATCHED chooser identity, not the mutating object graph:
     // `waiting_for.acting_player()` is the affected player for both
     // `ReplacementChoice{player}` (game_state.rs) and a MayCost sub-choice re-park
-    // (payer == affected, replacement.rs), and `do_eliminate` never mutates
-    // `waiting_for` (the rewrite runs after the loop), so this key is CONSTANT
-    // across a simultaneous multi-elimination batch and object-graph-independent.
+    // (payer == affected, replacement.rs). The identity was captured before
+    // teardown can mutate `waiting_for`, so it remains constant across a
+    // simultaneous multi-elimination batch and object-graph-independent.
     // (`ProposedEvent::affected_player` would mis-resolve here: once a co-eliminated
     // lower-id loser has exiled the affected object, its effective controller is
     // reverted to its owner — CR 616.1's owner-fallback is pre-existing and NOT
@@ -947,7 +963,6 @@ fn do_eliminate(
     // remaining players (not field-nulling), tracked as a separate follow-up. This
     // fix deliberately addresses only the CR 704.4 SBA-freeze introduced by the
     // `pending_replacement` guard.
-    let leaving_is_latched_chooser = state.waiting_for.acting_player() == Some(player);
     // CR 800.4a: Tear down choices and continuations owned by the leaving player.
     // CR 616.1: SearchFound owns an outer per-card batch, and a replacement-
     // selected zone move may own a nested batch completion. The
@@ -981,7 +996,7 @@ fn do_eliminate(
     // `pending_replacement` (nested `ContinueZoneDeliveryTail` early-return,
     // engine_replacement.rs), so it is torn down under its OWN controller-keyed
     // guard — cleared only for the LEAVING player's own resolution (mirroring the
-    // `pending_cast` controller key above) so a living player's paused resolution
+    // cast-abandonment controller key above) so a living player's paused resolution
     // survives an opponent's departure.
     if state
         .active_spell_resolution()
