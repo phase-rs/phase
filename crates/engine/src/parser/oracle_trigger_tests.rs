@@ -2493,10 +2493,9 @@ fn trigger_etb_subject_enters_untapped_attaches_negated_condition() {
         .expect("decline token continuation");
     assert_eq!(
         decline.condition,
-        Some(AbilityCondition::EffectOutcome {
-            signal: crate::types::ability::EffectOutcomeSignal::OptionalEffectPerformed,
-        })
-        .negate(),
+        Some(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::effect_performed()),
+        }),
         "the Vampire token must remain the optional tap's decline branch"
     );
 }
