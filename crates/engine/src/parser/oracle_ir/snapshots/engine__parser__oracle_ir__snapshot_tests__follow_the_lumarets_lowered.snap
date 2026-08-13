@@ -40,6 +40,7 @@ expression: "&lowered"
           ]
         },
         "rest_destination": "Library",
+        "rest_order": "random",
         "reveal": false,
         "enter_tapped": false
       },
@@ -81,6 +82,7 @@ expression: "&lowered"
             ]
           },
           "rest_destination": "Library",
+          "rest_order": "random",
           "reveal": true,
           "enter_tapped": false
         },

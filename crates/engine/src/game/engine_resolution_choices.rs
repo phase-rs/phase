@@ -1,9 +1,11 @@
 // engine-citation-gate: symbol anchors only
 use std::collections::{HashMap, HashSet};
 
+use rand::seq::SliceRandom;
+
 use crate::types::ability::{
-    AbilityCost, ChoiceType, ChosenAttribute, Effect, EffectKind, GuessOutcome, LibraryPosition,
-    QuantityExpr, QuantityRef, ResolvedAbility, TargetRef, ThisWayCause,
+    AbilityCost, ChoiceType, ChosenAttribute, DigRestOrder, Effect, EffectKind, GuessOutcome,
+    LibraryPosition, QuantityExpr, QuantityRef, ResolvedAbility, TargetRef, ThisWayCause,
 };
 use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
@@ -759,10 +761,18 @@ pub(crate) fn route_rest_partition(
     state: &mut GameState,
     rest_ids: &[ObjectId],
     rest_zone: Zone,
+    rest_order: DigRestOrder,
     source_id: Option<ObjectId>,
     events: &mut Vec<GameEvent>,
 ) -> crate::game::zone_pipeline::BatchMoveResult {
-    route_rest_partition_then(state, rest_ids, rest_zone, source_id, None, events)
+    let mut ordered_ids = rest_ids.to_vec();
+    if rest_zone == Zone::Library && rest_order == DigRestOrder::Random {
+        // CR 400.5 + CR 608.2c: Exact Oracle text requires a randomized
+        // remainder; only this rest pile, not the remainder of the library,
+        // consumes entropy.
+        ordered_ids.shuffle(&mut state.rng);
+    }
+    route_rest_partition_then(state, &ordered_ids, rest_zone, source_id, None, events)
 }
 
 fn route_rest_partition_then(
@@ -1754,6 +1764,7 @@ pub(super) fn handle_resolution_choice(
                             source_id: Some(source_id),
                             rest_cards: graveyard_cards,
                             rest_destination: Zone::Graveyard,
+                            rest_order: DigRestOrder::Preserve,
                             clear_markers: cards.clone(),
                             publish_tracked_set: None,
                             emit_reveal_until_resolved: None,
@@ -1992,6 +2003,7 @@ pub(super) fn handle_resolution_choice(
                                     source_id: Some(source_id),
                                     rest_cards: misses,
                                     rest_destination,
+                                    rest_order: DigRestOrder::Preserve,
                                     clear_markers,
                                     publish_tracked_set: None,
                                     emit_reveal_until_resolved: None,
@@ -2068,6 +2080,7 @@ pub(super) fn handle_resolution_choice(
                     source_id: Some(source_id),
                     rest_cards: Vec::new(),
                     rest_destination,
+                    rest_order: DigRestOrder::Preserve,
                     clear_markers,
                     publish_tracked_set: None,
                     emit_reveal_until_resolved: None,
@@ -3303,6 +3316,7 @@ pub(super) fn handle_resolution_choice(
                 selectable_cards,
                 kept_destination,
                 rest_destination,
+                rest_order,
                 enter_tapped,
                 source_id: dig_source_id,
                 ..
@@ -3345,7 +3359,7 @@ pub(super) fn handle_resolution_choice(
             // filtered dig that matched nothing accepted arbitrary object ids.
             validate_dig_selection(&kept, &cards, &selectable_cards)?;
 
-            let unkept: Vec<_> = cards
+            let mut unkept: Vec<_> = cards
                 .iter()
                 .filter(|id| !kept.contains(id))
                 .copied()
@@ -3365,6 +3379,11 @@ pub(super) fn handle_resolution_choice(
                     }
                     match rest_destination {
                         Some(Zone::Library) => {
+                            if rest_order == DigRestOrder::Random {
+                                // CR 400.5 + CR 608.2c: Randomize exactly the
+                                // unchosen pile immediately before bottom placement.
+                                unkept.shuffle(&mut state.rng);
+                            }
                             for &obj_id in &unkept {
                                 // allow-raw-zone: looked-at cards remain library objects until a keep decision (CR 701.20b/e).
                                 player_state.library.push_back(obj_id);
@@ -3419,6 +3438,7 @@ pub(super) fn handle_resolution_choice(
                                     source_id: dig_source_id,
                                     rest_cards: Vec::new(),
                                     rest_destination: zone,
+                                    rest_order: DigRestOrder::Preserve,
                                     clear_markers: Vec::new(),
                                     publish_tracked_set: None,
                                     emit_reveal_until_resolved: None,
@@ -3477,6 +3497,7 @@ pub(super) fn handle_resolution_choice(
                                     unkept
                                 },
                                 rest_destination: rest_destination.unwrap_or(Zone::Graveyard),
+                                rest_order,
                                 publish_tracked_set: publish_set,
                                 continuation_targets: kept.clone(),
                             },
@@ -3543,6 +3564,7 @@ pub(super) fn handle_resolution_choice(
                                     source_id: dig_source_id,
                                     rest_cards: unkept.clone(),
                                     rest_destination: rest_destination.unwrap_or(Zone::Graveyard),
+                                    rest_order,
                                     clear_markers: Vec::new(),
                                     publish_tracked_set: Some(kept.clone()),
                                     emit_reveal_until_resolved: None,
@@ -3587,6 +3609,7 @@ pub(super) fn handle_resolution_choice(
                     state,
                     &unkept,
                     rest_destination.unwrap_or(Zone::Graveyard),
+                    rest_order,
                     dig_source_id,
                     events,
                 ) {
@@ -3603,6 +3626,7 @@ pub(super) fn handle_resolution_choice(
                                 source_id: dig_source_id,
                                 rest_cards: Vec::new(),
                                 rest_destination: rest_destination.unwrap_or(Zone::Graveyard),
+                                rest_order,
                                 clear_markers: Vec::new(),
                                 publish_tracked_set: Some(publish_set),
                                 emit_reveal_until_resolved: None,
@@ -7151,6 +7175,7 @@ fn route_kept_card_or_defer(
                     source_id: Some(source_id),
                     rest_cards: misses.to_vec(),
                     rest_destination,
+                    rest_order: DigRestOrder::Preserve,
                     clear_markers,
                     publish_tracked_set: None,
                     emit_reveal_until_resolved: None,
@@ -7723,12 +7748,19 @@ pub(crate) fn run_batch_completion(
             source_id,
             rest_cards,
             rest_destination,
+            rest_order,
             publish_tracked_set,
             continuation_targets,
         } => {
             if !rest_cards.is_empty() {
-                match route_rest_partition(state, &rest_cards, rest_destination, source_id, events)
-                {
+                match route_rest_partition(
+                    state,
+                    &rest_cards,
+                    rest_destination,
+                    rest_order,
+                    source_id,
+                    events,
+                ) {
                     crate::game::zone_pipeline::BatchMoveResult::Done => {}
                     crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
                         crate::game::zone_pipeline::defer_completion_on_pause(
@@ -7738,6 +7770,7 @@ pub(crate) fn run_batch_completion(
                                 source_id,
                                 rest_cards: Vec::new(),
                                 rest_destination,
+                                rest_order,
                                 publish_tracked_set,
                                 continuation_targets,
                             },
@@ -7814,6 +7847,7 @@ pub(crate) fn run_batch_completion(
             source_id,
             rest_cards,
             rest_destination,
+            rest_order,
             clear_markers,
             publish_tracked_set,
             emit_reveal_until_resolved,
@@ -7824,8 +7858,14 @@ pub(crate) fn run_batch_completion(
             // Library-bottom placement and any CR 616.1 pause. Dispatch on the
             // dig-only payload so each site keeps its synchronous semantics.
             if publish_tracked_set.is_some() {
-                match route_rest_partition(state, &rest_cards, rest_destination, source_id, events)
-                {
+                match route_rest_partition(
+                    state,
+                    &rest_cards,
+                    rest_destination,
+                    rest_order,
+                    source_id,
+                    events,
+                ) {
                     crate::game::zone_pipeline::BatchMoveResult::Done => {}
                     crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
                         crate::game::zone_pipeline::defer_completion_on_pause(
@@ -7835,6 +7875,7 @@ pub(crate) fn run_batch_completion(
                                 source_id,
                                 rest_cards: Vec::new(),
                                 rest_destination,
+                                rest_order,
                                 clear_markers,
                                 publish_tracked_set,
                                 emit_reveal_until_resolved,
@@ -7854,6 +7895,7 @@ pub(crate) fn run_batch_completion(
                     source_id,
                     rest_cards: Vec::new(),
                     rest_destination,
+                    rest_order: DigRestOrder::Preserve,
                     clear_markers,
                     publish_tracked_set: None,
                     emit_reveal_until_resolved,
@@ -9776,6 +9818,7 @@ mod tests {
                 selectable_cards: vec![black, white],
                 kept_destination: Some(Zone::Library),
                 rest_destination: Some(Zone::Library),
+                rest_order: DigRestOrder::Preserve,
                 source_id: None,
                 enter_tapped: false,
             },
@@ -9787,6 +9830,137 @@ mod tests {
         assert!(
             !has_flying(&state, vampire),
             "dig kept white on top → Flying must be recomputed away"
+        );
+    }
+
+    /// CR 400.5 + CR 608.2c: a Dig's explicit random-bottom instruction draws
+    /// exactly once from the game's seeded RNG immediately before the unkept
+    /// cards are appended. Its Preserve sibling must retain the look order and
+    /// leave the RNG untouched.
+    #[test]
+    fn dig_choice_library_rest_honors_random_and_preserve_order() {
+        fn state_with_looked_at_cards() -> (GameState, [ObjectId; 3], ObjectId) {
+            let mut state = GameState::new_two_player(0x6367);
+            let _keep = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Keep".to_string(),
+                Zone::Library,
+            );
+            let rest = [
+                create_object(
+                    &mut state,
+                    CardId(2),
+                    PlayerId(0),
+                    "Rest One".to_string(),
+                    Zone::Library,
+                ),
+                create_object(
+                    &mut state,
+                    CardId(3),
+                    PlayerId(0),
+                    "Rest Two".to_string(),
+                    Zone::Library,
+                ),
+                create_object(
+                    &mut state,
+                    CardId(4),
+                    PlayerId(0),
+                    "Rest Three".to_string(),
+                    Zone::Library,
+                ),
+            ];
+            let below = create_object(
+                &mut state,
+                CardId(5),
+                PlayerId(0),
+                "Below Look Window".to_string(),
+                Zone::Library,
+            );
+            // `create_object` appends to the library, making this exact
+            // top-to-bottom window `[keep, rest..., below]`.
+            (state, rest, below)
+        }
+
+        let (mut random_state, rest, below) = state_with_looked_at_cards();
+        let keep = random_state.players[0].library[0];
+        let mut expected_rest = rest.to_vec();
+        let mut expected_rng = random_state.rng.clone();
+        expected_rest.shuffle(&mut expected_rng);
+        let mut events = Vec::new();
+        handle_resolution_choice(
+            &mut random_state,
+            WaitingFor::DigChoice {
+                player: PlayerId(0),
+                library_owner: PlayerId(0),
+                cards: vec![keep, rest[0], rest[1], rest[2]],
+                keep_count: 1,
+                up_to: false,
+                selectable_cards: vec![keep, rest[0], rest[1], rest[2]],
+                kept_destination: Some(Zone::Library),
+                rest_destination: Some(Zone::Library),
+                rest_order: DigRestOrder::Random,
+                source_id: None,
+                enter_tapped: false,
+            },
+            GameAction::SelectCards { cards: vec![keep] },
+            &mut events,
+        )
+        .expect("random-bottom Dig choice resolves");
+
+        assert_eq!(
+            random_state.players[0]
+                .library
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            [vec![keep, below], expected_rest].concat(),
+            "random rest must occupy the bottom in the seeded permutation"
+        );
+        assert_eq!(
+            random_state.rng.get_word_pos(),
+            expected_rng.get_word_pos(),
+            "random rest must consume exactly the seeded shuffle stream"
+        );
+
+        let (mut preserve_state, rest, below) = state_with_looked_at_cards();
+        let keep = preserve_state.players[0].library[0];
+        let before_rng = preserve_state.rng.get_word_pos();
+        let mut events = Vec::new();
+        handle_resolution_choice(
+            &mut preserve_state,
+            WaitingFor::DigChoice {
+                player: PlayerId(0),
+                library_owner: PlayerId(0),
+                cards: vec![keep, rest[0], rest[1], rest[2]],
+                keep_count: 1,
+                up_to: false,
+                selectable_cards: vec![keep, rest[0], rest[1], rest[2]],
+                kept_destination: Some(Zone::Library),
+                rest_destination: Some(Zone::Library),
+                rest_order: DigRestOrder::Preserve,
+                source_id: None,
+                enter_tapped: false,
+            },
+            GameAction::SelectCards { cards: vec![keep] },
+            &mut events,
+        )
+        .expect("preserve-bottom Dig choice resolves");
+
+        assert_eq!(
+            preserve_state.players[0]
+                .library
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![keep, below, rest[0], rest[1], rest[2]],
+            "legacy/non-random Dig rest must preserve the looked-at order"
+        );
+        assert_eq!(
+            preserve_state.rng.get_word_pos(),
+            before_rng,
+            "preserved rest must not consume RNG"
         );
     }
 
