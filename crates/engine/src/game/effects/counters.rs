@@ -24,6 +24,7 @@ use crate::types::resolved_commands::{
     ResolvedObjectCounterCommand, ResolvedObjectCounterEdit,
     ResolvedObjectCounterReplayInvariantError,
 };
+use crate::types::zones::Zone;
 
 /// CR 306.5c + CR 310.4c: After mutating the counter map, re-derive the
 /// `obj.loyalty` / `obj.defense` field so the counter count and the cached
@@ -686,15 +687,19 @@ fn apply_pending_counter_post_action(
                 events,
             );
             let completion = status.completion;
-            if let Some(pending) = state.active_copy_token_mut() {
-                pending.created_ids.extend(status.created_ids);
-            } else {
-                state.last_created_token_ids.extend(status.created_ids);
-            }
+            super::token_copy::extend_copy_batch_created_ids(state, status.created_ids);
             match completion {
                 super::token_copy::CopyTokenApplyCompletion::Completed => true,
                 super::token_copy::CopyTokenApplyCompletion::Paused => false,
             }
+        }
+        PendingCounterPostAction::ContinueCopyTokenEntryAfterAuraHost { object_id, tail } => {
+            // CR 303.4f: the host choice is answered and the attach is applied;
+            // run the rest of this token's entry (copy exceptions, entry counters,
+            // entry events) plus the rest of the batch.
+            super::token_copy::continue_copy_token_entry_after_aura_host(
+                state, object_id, *tail, events,
+            )
         }
         PendingCounterPostAction::ApplyCopyTokenModificationsAndFinalize {
             object_id,
@@ -788,6 +793,7 @@ fn apply_pending_counter_post_action(
             source_id,
             duration,
             exile_tracking,
+            enters_attacking,
             drain,
         } => {
             // CR 614.12a: the delivery tail may surface a Devour as-enters
@@ -814,7 +820,25 @@ fn apply_pending_counter_post_action(
                 None,
                 events,
             ) {
-                super::change_zone::ZoneDeliveryResult::Done => true,
+                super::change_zone::ZoneDeliveryResult::Done => {
+                    if enters_attacking && to == Zone::Battlefield {
+                        let controller = state
+                            .objects
+                            .get(&object_id)
+                            .map(|object| object.controller)
+                            .expect("a settled battlefield entrant must exist");
+                        // CR 508.4: an entrant joins combat only after its
+                        // replacement-modified entry has fully settled.
+                        if crate::game::combat::choose_entry_attack_target_or_enter(
+                            state, object_id, controller,
+                        )
+                        .is_some()
+                        {
+                            return false;
+                        }
+                    }
+                    true
+                }
                 super::change_zone::ZoneDeliveryResult::NeedsChoice(_) => false,
             }
         }

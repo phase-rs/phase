@@ -36,6 +36,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     // CR 701.42 / CR 508.4: meld pair and attacking-entry destination dialogs.
     "MeldPairChoice",
     "MeldAttackTargetChoice",
+    "EntryAttackTargetChoice",
     // Cast / activation chain — ManaPayment + PhyrexianPayment share ManaPaymentUI.
     ...MANA_PAYMENT_WAITING_FOR_TYPES,
     "ManaSourceSelection",

@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-08-12T00:00:00Z",
+  "updated": "2026-08-13T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -842,28 +842,8 @@
       ],
       "main": [
         {
-          "count": 5,
-          "name": "Island"
-        },
-        {
-          "count": 4,
-          "name": "Gran-Gran"
-        },
-        {
-          "count": 1,
-          "name": "Otawara, Soaring City"
-        },
-        {
-          "count": 4,
-          "name": "Stormchaser's Talent"
-        },
-        {
           "count": 2,
-          "name": "Ral, Crackling Wit"
-        },
-        {
-          "count": 1,
-          "name": "Torch the Tower"
+          "name": "Abandon Attachments"
         },
         {
           "count": 2,
@@ -874,52 +854,48 @@
           "name": "Boomerang Basics"
         },
         {
-          "count": 2,
-          "name": "Vivi Ornitier"
-        },
-        {
-          "count": 4,
-          "name": "Riverglide Pathway"
+          "count": 3,
+          "name": "Combustion Technique"
         },
         {
           "count": 4,
           "name": "Consider"
         },
         {
-          "count": 3,
-          "name": "Combustion Technique"
+          "count": 4,
+          "name": "Divide by Zero"
         },
         {
           "count": 3,
           "name": "Firebending Lesson"
         },
         {
-          "count": 1,
-          "name": "Spell Pierce"
-        },
-        {
-          "count": 2,
-          "name": "Shivan Reef"
-        },
-        {
-          "count": 2,
-          "name": "Abandon Attachments"
-        },
-        {
-          "count": 1,
-          "name": "Riverpyre Verge"
-        },
-        {
-          "count": 2,
-          "name": "It'll Quench Ya!"
+          "count": 4,
+          "name": "Gran-Gran"
         },
         {
           "count": 2,
           "name": "Igneous Inspiration"
         },
         {
+          "count": 2,
+          "name": "It'll Quench Ya!"
+        },
+        {
+          "count": 1,
+          "name": "Otawara, Soaring City"
+        },
+        {
+          "count": 2,
+          "name": "Shivan Reef"
+        },
+        {
           "count": 4,
-          "name": "Steam Vents"
+          "name": "Riverglide Pathway"
+        },
+        {
+          "count": 2,
+          "name": "Riverpyre Verge"
         },
         {
           "count": 4,
@@ -927,14 +903,34 @@
         },
         {
           "count": 4,
-          "name": "Divide by Zero"
+          "name": "Steam Vents"
+        },
+        {
+          "count": 4,
+          "name": "Stormchaser's Talent"
+        },
+        {
+          "count": 1,
+          "name": "Torch the Tower"
+        },
+        {
+          "count": 2,
+          "name": "Vivi Ornitier"
+        },
+        {
+          "count": 4,
+          "name": "Island"
+        },
+        {
+          "count": 1,
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 2,
+          "name": "Ral, Crackling Wit"
         }
       ],
       "sideboard": [
-        {
-          "count": 1,
-          "name": "Flashfreeze"
-        },
         {
           "count": 2,
           "name": "Abrade"
@@ -945,19 +941,27 @@
         },
         {
           "count": 1,
-          "name": "Combustion Technique"
-        },
-        {
-          "count": 1,
           "name": "Boomerang Basics"
         },
         {
           "count": 1,
-          "name": "Iroh's Demonstration"
+          "name": "Combustion Technique"
         },
         {
           "count": 1,
           "name": "Firebending Lesson"
+        },
+        {
+          "count": 1,
+          "name": "Flashfreeze"
+        },
+        {
+          "count": 1,
+          "name": "Improvisation Capstone"
+        },
+        {
+          "count": 1,
+          "name": "Iroh's Demonstration"
         },
         {
           "count": 2,
@@ -970,10 +974,6 @@
         {
           "count": 2,
           "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 1,
-          "name": "Improvisation Capstone"
         }
       ]
     },

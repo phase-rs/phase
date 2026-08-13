@@ -647,7 +647,7 @@ fn bind_parent_target_filter(filter: &mut TargetFilter, parent_targets: &[Target
     *filter = concrete_parent_target_filter(filter, parent_targets);
 }
 
-fn concrete_parent_target_filter(
+pub(crate) fn concrete_parent_target_filter(
     filter: &TargetFilter,
     parent_targets: &[TargetRef],
 ) -> TargetFilter {
@@ -1032,6 +1032,13 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
                     bound_target.rebind_tracked_set_sentinel(real_id);
                     bound_target
                 }
+                TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => {
+                    TargetFilter::TrackedSetFiltered {
+                        id: real_id,
+                        filter: Box::new(target.clone()),
+                        caused_by: None,
+                    }
+                }
                 _ => TargetFilter::TrackedSet { id: real_id },
             };
             *effect = Effect::ChangeZoneAll {
@@ -1040,6 +1047,7 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
                 target: bound_target,
                 enters_under: enters_under.clone(),
                 enter_tapped: *enter_tapped,
+                enters_attacking: false,
                 enter_with_counters: enter_with_counters.clone(),
                 face_down_profile: face_down_profile.clone(),
                 library_position: None,
@@ -1105,7 +1113,7 @@ fn bind_tracked_set_to_ability_chain(ability: &mut ResolvedAbility, real_id: Tra
 ///
 /// `_ => false` IS CORRECT HERE. `TargetFilter` is a broad, open enum and the
 /// shipped template ends the same way. Do NOT try to exhaust it.
-fn filter_refs_parent_object_anaphor(filter: &TargetFilter) -> bool {
+pub(super) fn filter_refs_parent_object_anaphor(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => true,
         // CR 608.2h + CR 108.3: these derive a PLAYER, not an object.
@@ -1126,6 +1134,9 @@ fn filter_refs_parent_object_anaphor(filter: &TargetFilter) -> bool {
             filters.iter().any(filter_refs_parent_object_anaphor)
         }
         TargetFilter::Not { filter } => filter_refs_parent_object_anaphor(filter),
+        TargetFilter::TrackedSetFiltered { filter, .. } => {
+            filter_refs_parent_object_anaphor(filter)
+        }
         _ => false,
     }
 }
@@ -2128,6 +2139,7 @@ mod tests {
                 target: TargetFilter::Any,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -2184,6 +2196,7 @@ mod tests {
                 },
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -2263,6 +2276,7 @@ mod tests {
                 },
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -2341,6 +2355,7 @@ mod tests {
                 },
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -2415,6 +2430,7 @@ mod tests {
                 },
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -2529,6 +2545,85 @@ mod tests {
             }
             other => panic!("Expected ChangeZoneAll, got {:?}", other),
         }
+    }
+
+    /// CR 400.7 + CR 603.7c (issue #7100): tracked-set binding must retain a
+    /// parent-object anaphor long enough to capture its incarnation. A later
+    /// zone change creates a new object that the delayed member scan cannot
+    /// affect, while the original incarnation remains eligible.
+    #[test]
+    fn tracked_set_delayed_change_zone_preserves_parent_target_incarnation() {
+        let mut state = GameState::new_two_player(42);
+        let creature = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Eerie Interlude target".to_string(),
+            Zone::Battlefield,
+        );
+        let set_id = TrackedSetId(1);
+        state.tracked_object_sets.insert(set_id, vec![creature]);
+        state.chain_tracked_set_id = Some(set_id);
+        state.next_tracked_set_id = 2;
+
+        let effect = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        );
+        let create = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(effect),
+                uses_tracked_set: true,
+            },
+            vec![TargetRef::Object(creature)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &create, &mut events).expect("delayed trigger installs");
+
+        let delayed = state.delayed_triggers[0].ability.clone();
+        assert_eq!(delayed.target_incarnations.len(), 1);
+        assert!(delayed.target_pin_is_current(creature, &state));
+        assert!(matches!(
+            &delayed.effect,
+            Effect::ChangeZoneAll {
+                target: TargetFilter::TrackedSetFiltered { id, filter, .. },
+                ..
+            } if *id == set_id && matches!(filter.as_ref(), TargetFilter::ParentTarget)
+        ));
+
+        crate::game::effects::resolve_ability_chain(&mut state, &delayed, &mut events, 0)
+            .expect("current delayed trigger resolves");
+        assert_eq!(state.objects[&creature].zone, Zone::Exile);
+
+        crate::game::zones::move_to_zone(&mut state, creature, Zone::Graveyard, &mut events);
+        crate::game::zones::move_to_zone(&mut state, creature, Zone::Battlefield, &mut events);
+        let stale_delayed = state.delayed_triggers[0].ability.clone();
+        assert!(!stale_delayed.target_pin_is_current(creature, &state));
+
+        crate::game::effects::resolve_ability_chain(&mut state, &stale_delayed, &mut events, 0)
+            .expect("stale delayed trigger resolves");
+        assert_eq!(
+            state.objects[&creature].zone,
+            Zone::Battlefield,
+            "a later incarnation must not be matched through the tracked set"
+        );
     }
 
     #[test]
@@ -3748,6 +3843,7 @@ mod tests {
                 },
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,

@@ -12018,7 +12018,7 @@ fn trigger_you_proliferate() {
 }
 
 #[test]
-fn trigger_you_forage() {
+fn trigger_you_forage_uses_generic_player_action_path() {
     let def = parse_trigger_line(
         "Whenever you forage, put a +1/+1 counter on this creature.",
         "Corpseberry Cultivator",
@@ -12026,6 +12026,36 @@ fn trigger_you_forage() {
     assert_eq!(def.mode, TriggerMode::PlayerPerformedAction);
     assert_eq!(def.valid_target, Some(TargetFilter::Controller));
     assert_eq!(def.player_actions, Some(vec![PlayerActionKind::Forage]));
+}
+
+#[test]
+fn trigger_opponent_forages_preserves_player_scope() {
+    let def = parse_trigger_line(
+        "Whenever an opponent forages, draw a card.",
+        "Synthetic Forage Observer",
+    );
+    assert_eq!(def.mode, TriggerMode::PlayerPerformedAction);
+    assert_eq!(
+        def.valid_target,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        ))
+    );
+    assert_eq!(def.player_actions, Some(vec![PlayerActionKind::Forage]));
+}
+
+#[test]
+fn trigger_player_action_list_includes_forage_without_prefix_matches() {
+    assert_eq!(
+        parse_player_action_list("scries, surveils, or forages"),
+        Some(vec![
+            PlayerActionKind::Scry,
+            PlayerActionKind::Surveil,
+            PlayerActionKind::Forage,
+        ])
+    );
+    assert_eq!(parse_player_action_list("forager"), None);
+    assert_eq!(parse_player_action_list("forageable"), None);
 }
 
 #[test]

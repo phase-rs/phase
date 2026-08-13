@@ -1,9 +1,11 @@
 // engine-citation-gate: symbol anchors only
 use std::collections::{HashMap, HashSet};
 
+use rand::seq::SliceRandom;
+
 use crate::types::ability::{
-    AbilityCost, ChoiceType, ChosenAttribute, Effect, EffectKind, GuessOutcome, LibraryPosition,
-    QuantityExpr, QuantityRef, ResolvedAbility, TargetRef, ThisWayCause,
+    AbilityCost, ChoiceType, ChosenAttribute, DigRestOrder, Effect, EffectKind, GuessOutcome,
+    LibraryPosition, QuantityExpr, QuantityRef, ResolvedAbility, TargetRef, ThisWayCause,
 };
 use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
@@ -585,6 +587,16 @@ fn batch_or_drain_observer_triggers(
                         || !matches!(ev, GameEvent::ZoneChanged { .. }))
             })
             .cloned()
+            .chain(
+                // CR 603.2 + CR 608.2c: a typed completion continuation may
+                // publish the player action that the interactive move just
+                // completed. Include that semantic event without widening the
+                // owner-bounded zone slice to continuation-produced zone moves.
+                events[event_slice_end..]
+                    .iter()
+                    .filter(|event| matches!(event, GameEvent::PlayerPerformedAction { .. }))
+                    .cloned(),
+            )
             .collect();
         super::triggers::collect_triggers_into_deferred(state, &trigger_events);
         if let Some(wf) = super::triggers::drain_deferred_trigger_queue(state, events) {
@@ -604,6 +616,15 @@ fn batch_or_drain_observer_triggers(
                         || !matches!(ev, GameEvent::ZoneChanged { .. }))
             })
             .cloned()
+            .chain(
+                // CR 603.2 + CR 608.2c: see the settled branch above. Park a
+                // completion action across a further continuation prompt, but
+                // do not fold that continuation's zone changes into this owner.
+                events[event_slice_end..]
+                    .iter()
+                    .filter(|event| matches!(event, GameEvent::PlayerPerformedAction { .. }))
+                    .cloned(),
+            )
             .collect();
         super::triggers::collect_triggers_into_deferred(state, &trigger_events);
         None
@@ -654,6 +675,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
         waiting_for,
         WaitingFor::MeldPairChoice { .. }
             | WaitingFor::MeldAttackTargetChoice { .. }
+            | WaitingFor::EntryAttackTargetChoice { .. }
             | WaitingFor::ScryChoice { .. }
             | WaitingFor::ArrangePlanarDeckTopChoice { .. }
             | WaitingFor::RedistributeLifeTotals { .. }
@@ -759,10 +781,18 @@ pub(crate) fn route_rest_partition(
     state: &mut GameState,
     rest_ids: &[ObjectId],
     rest_zone: Zone,
+    rest_order: DigRestOrder,
     source_id: Option<ObjectId>,
     events: &mut Vec<GameEvent>,
 ) -> crate::game::zone_pipeline::BatchMoveResult {
-    route_rest_partition_then(state, rest_ids, rest_zone, source_id, None, events)
+    let mut ordered_ids = rest_ids.to_vec();
+    if rest_zone == Zone::Library && rest_order == DigRestOrder::Random {
+        // CR 400.5 + CR 608.2c: Exact Oracle text requires a randomized
+        // remainder; only this rest pile, not the remainder of the library,
+        // consumes entropy.
+        ordered_ids.shuffle(&mut state.rng);
+    }
+    route_rest_partition_then(state, &ordered_ids, rest_zone, source_id, None, events)
 }
 
 fn route_rest_partition_then(
@@ -1527,6 +1557,9 @@ pub(super) fn handle_resolution_choice(
             },
             GameAction::ChooseEntryAttackTarget { target },
         ) => {
+            // CR 508.4: the entering creature's controller chooses one of the
+            // engine-issued defending players, planeswalkers, or battles.
+            // `entry_attack_target_defender` applies CR 508.4a if it went stale.
             if !valid_targets.contains(&target) {
                 return Err(EngineError::InvalidAction(
                     "entry attack target is not one of the offered destinations".to_string(),
@@ -1535,6 +1568,35 @@ pub(super) fn handle_resolution_choice(
             state.waiting_for = WaitingFor::Priority { player };
             crate::game::meld::finish_meld_attack_choice(state, context, target, events);
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
+        (
+            WaitingFor::EntryAttackTargetChoice {
+                player,
+                object_id,
+                valid_targets,
+            },
+            GameAction::ChooseEntryAttackTarget { target },
+        ) => {
+            // CR 508.4: the entering creature's controller chooses one of the
+            // engine-issued defending players, planeswalkers, or battles.
+            // `entry_attack_target_defender` applies CR 508.4a if it went stale.
+            if !valid_targets.contains(&target) {
+                return Err(EngineError::InvalidAction(
+                    "entry attack target is not one of the offered destinations".to_string(),
+                ));
+            }
+            state.waiting_for = WaitingFor::Priority { player };
+            if let Some(defending_player) =
+                crate::game::combat::entry_attack_target_defender(state, player, target)
+            {
+                crate::game::combat::enter_attacking_at_target(
+                    state,
+                    object_id,
+                    defending_player,
+                    target,
+                );
+            }
+            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (
             WaitingFor::ScryChoice { player, cards },
@@ -1754,6 +1816,7 @@ pub(super) fn handle_resolution_choice(
                             source_id: Some(source_id),
                             rest_cards: graveyard_cards,
                             rest_destination: Zone::Graveyard,
+                            rest_order: DigRestOrder::Preserve,
                             clear_markers: cards.clone(),
                             publish_tracked_set: None,
                             emit_reveal_until_resolved: None,
@@ -1972,6 +2035,7 @@ pub(super) fn handle_resolution_choice(
                         source_id,
                     );
                     req.mods.enter_tapped = enter_tapped;
+                    req.mods.enters_attacking = enters_attacking;
                     match crate::game::zone_pipeline::move_object(state, req, events) {
                         crate::game::zone_pipeline::ZoneMoveResult::Done => {}
                         // CR 303.4f / CR 616.1: the accepted card's battlefield
@@ -1992,6 +2056,7 @@ pub(super) fn handle_resolution_choice(
                                     source_id: Some(source_id),
                                     rest_cards: misses,
                                     rest_destination,
+                                    rest_order: DigRestOrder::Preserve,
                                     clear_markers,
                                     publish_tracked_set: None,
                                     emit_reveal_until_resolved: None,
@@ -2001,19 +2066,6 @@ pub(super) fn handle_resolution_choice(
                                 state.waiting_for.clone(),
                             ));
                         }
-                    }
-                    // CR 508.4: "...tapped and attacking" — place the accepted card
-                    // in combat. `source_id` (the ability source / trigger attacker)
-                    // supplies the defending player, matching the synchronous path.
-                    if enters_attacking {
-                        let controller = state
-                            .objects
-                            .get(&hit_card)
-                            .map(|obj| obj.controller)
-                            .unwrap_or(player);
-                        crate::game::combat::enter_attacking(
-                            state, hit_card, source_id, controller,
-                        );
                     }
                 } else {
                     // CR 614.6: a kept card accepted to a non-battlefield zone
@@ -2068,6 +2120,7 @@ pub(super) fn handle_resolution_choice(
                     source_id: Some(source_id),
                     rest_cards: Vec::new(),
                     rest_destination,
+                    rest_order: DigRestOrder::Preserve,
                     clear_markers,
                     publish_tracked_set: None,
                     emit_reveal_until_resolved: None,
@@ -3303,7 +3356,9 @@ pub(super) fn handle_resolution_choice(
                 selectable_cards,
                 kept_destination,
                 rest_destination,
+                rest_order,
                 enter_tapped,
+                enters_attacking,
                 source_id: dig_source_id,
                 ..
             },
@@ -3345,7 +3400,7 @@ pub(super) fn handle_resolution_choice(
             // filtered dig that matched nothing accepted arbitrary object ids.
             validate_dig_selection(&kept, &cards, &selectable_cards)?;
 
-            let unkept: Vec<_> = cards
+            let mut unkept: Vec<_> = cards
                 .iter()
                 .filter(|id| !kept.contains(id))
                 .copied()
@@ -3365,6 +3420,11 @@ pub(super) fn handle_resolution_choice(
                     }
                     match rest_destination {
                         Some(Zone::Library) => {
+                            if rest_order == DigRestOrder::Random {
+                                // CR 400.5 + CR 608.2c: Randomize exactly the
+                                // unchosen pile immediately before bottom placement.
+                                unkept.shuffle(&mut state.rng);
+                            }
                             for &obj_id in &unkept {
                                 // allow-raw-zone: looked-at cards remain library objects until a keep decision (CR 701.20b/e).
                                 player_state.library.push_back(obj_id);
@@ -3419,6 +3479,7 @@ pub(super) fn handle_resolution_choice(
                                     source_id: dig_source_id,
                                     rest_cards: Vec::new(),
                                     rest_destination: zone,
+                                    rest_order: DigRestOrder::Preserve,
                                     clear_markers: Vec::new(),
                                     publish_tracked_set: None,
                                     emit_reveal_until_resolved: None,
@@ -3477,6 +3538,7 @@ pub(super) fn handle_resolution_choice(
                                     unkept
                                 },
                                 rest_destination: rest_destination.unwrap_or(Zone::Graveyard),
+                                rest_order,
                                 publish_tracked_set: publish_set,
                                 continuation_targets: kept.clone(),
                             },
@@ -3503,6 +3565,7 @@ pub(super) fn handle_resolution_choice(
                     );
                     req.mods.enter_tapped =
                         crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped);
+                    req.mods.enters_attacking = enters_attacking;
                     match crate::game::zone_pipeline::move_object(state, req, events) {
                         crate::game::zone_pipeline::ZoneMoveResult::Done => {}
                         // CR 303.4f / CR 616.1: the kept card's battlefield
@@ -3543,6 +3606,7 @@ pub(super) fn handle_resolution_choice(
                                     source_id: dig_source_id,
                                     rest_cards: unkept.clone(),
                                     rest_destination: rest_destination.unwrap_or(Zone::Graveyard),
+                                    rest_order,
                                     clear_markers: Vec::new(),
                                     publish_tracked_set: Some(kept.clone()),
                                     emit_reveal_until_resolved: None,
@@ -3587,6 +3651,7 @@ pub(super) fn handle_resolution_choice(
                     state,
                     &unkept,
                     rest_destination.unwrap_or(Zone::Graveyard),
+                    rest_order,
                     dig_source_id,
                     events,
                 ) {
@@ -3603,6 +3668,7 @@ pub(super) fn handle_resolution_choice(
                                 source_id: dig_source_id,
                                 rest_cards: Vec::new(),
                                 rest_destination: rest_destination.unwrap_or(Zone::Graveyard),
+                                rest_order,
                                 clear_markers: Vec::new(),
                                 publish_tracked_set: Some(publish_set),
                                 emit_reveal_until_resolved: None,
@@ -4377,6 +4443,7 @@ pub(super) fn handle_resolution_choice(
                 branch_descriptions: _,
                 parent_targets,
                 context,
+                continuation,
                 replacement_applied,
                 remaining_players,
             },
@@ -4392,6 +4459,7 @@ pub(super) fn handle_resolution_choice(
                     branches,
                     parent_targets,
                     context,
+                    continuation,
                     replacement_applied,
                     remaining_players,
                     index,
@@ -4942,7 +5010,16 @@ pub(super) fn handle_resolution_choice(
                     effects::PendingPlayerScopeSacrificeOutcome::Completed {
                         events_before_sacrifice,
                         events_after_sacrifice,
+                        sacrificed_count,
                     } => {
+                        effects::stamp_active_player_action_completion(
+                            state,
+                            source_id,
+                            crate::types::ability::EffectResolutionResult {
+                                cause: crate::types::ability::ThisWayCause::Sacrificed,
+                                count: sacrificed_count,
+                            },
+                        );
                         // CR 614.12a + CR 614.13a: a direct sacrifice selection can be the
                         // complete body of a paused post-replacement dispatch
                         // (Devour). Retire that exact resident before its outer
@@ -5093,6 +5170,22 @@ pub(super) fn handle_resolution_choice(
                     source_id,
                     subject: None,
                 });
+                let result = match effect_kind {
+                    EffectKind::Sacrifice => Some(crate::types::ability::EffectResolutionResult {
+                        cause: crate::types::ability::ThisWayCause::Sacrificed,
+                        count: 0,
+                    }),
+                    EffectKind::ChangeZone => destination
+                        .and_then(effects::this_way_cause_for_zone)
+                        .map(|cause| crate::types::ability::EffectResolutionResult {
+                            cause,
+                            count: 0,
+                        }),
+                    _ => None,
+                };
+                if let Some(result) = result {
+                    effects::stamp_active_player_action_completion(state, source_id, result);
+                }
                 set_priority(state, player);
                 resume_with_error_propagation(state, events)?;
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
@@ -5130,7 +5223,16 @@ pub(super) fn handle_resolution_choice(
                         effects::PendingPlayerScopeSacrificeOutcome::Completed {
                             events_before_sacrifice,
                             events_after_sacrifice,
+                            sacrificed_count,
                         } => {
+                            effects::stamp_active_player_action_completion(
+                                state,
+                                source_id,
+                                crate::types::ability::EffectResolutionResult {
+                                    cause: crate::types::ability::ThisWayCause::Sacrificed,
+                                    count: sacrificed_count,
+                                },
+                            );
                             // CR 614.12a + CR 614.13a: see the matching player-scope
                             // sacrifice completion above. This EffectZoneChoice
                             // path can complete a Devour drain without an
@@ -5169,6 +5271,10 @@ pub(super) fn handle_resolution_choice(
                         )
                     })?;
                     let chosen_ids: Vec<_> = chosen.to_vec();
+                    let completion_cause = effects::this_way_cause_for_zone(dest_zone);
+                    let tracks_player_action_completion = completion_cause.is_some_and(|cause| {
+                        effects::active_player_action_completion_requires(state, source_id, cause)
+                    });
                     let mut logical_zone_change_group =
                         crate::game::triggers::allocate_logical_zone_change_group(
                             state,
@@ -5291,7 +5397,16 @@ pub(super) fn handle_resolution_choice(
                                             conditional_enter_with_counters.clone(),
                                         duration: ctx.duration.clone(),
                                         track_exiled_by_source: ctx.track_exiled_by_source,
-                                        moved_count: None,
+                                        moved_count: tracks_player_action_completion.then(|| {
+                                                i32::try_from(
+                                                    effects::change_zone::count_selected_zone_arrivals(
+                                                        &events[events_before_effect..],
+                                                        &chosen_ids,
+                                                        dest_zone,
+                                                    ),
+                                                )
+                                                .expect("selected zone arrivals fit in i32")
+                                            }),
                                         // CR 708.2a + CR 708.3: preserve the
                                         // face-down profile across a further pause.
                                         face_down_profile: ctx.face_down_profile.clone(),
@@ -5364,7 +5479,16 @@ pub(super) fn handle_resolution_choice(
                                             conditional_enter_with_counters.clone(),
                                         duration: ctx.duration.clone(),
                                         track_exiled_by_source: ctx.track_exiled_by_source,
-                                        moved_count: None,
+                                        moved_count: tracks_player_action_completion.then(|| {
+                                                i32::try_from(
+                                                    effects::change_zone::count_selected_zone_arrivals(
+                                                        &events[events_before_effect..],
+                                                        &chosen_ids,
+                                                        dest_zone,
+                                                    ),
+                                                )
+                                                .expect("selected zone arrivals fit in i32")
+                                            }),
                                         // CR 708.2a + CR 708.3: preserve the
                                         // face-down profile across a further pause.
                                         face_down_profile: ctx.face_down_profile.clone(),
@@ -5887,6 +6011,20 @@ pub(super) fn handle_resolution_choice(
                     library_position,
                     false,
                 );
+            }
+            if matches!(effect_kind, EffectKind::ChangeZone) {
+                if let Some(cause) = destination.and_then(effects::this_way_cause_for_zone) {
+                    let count = effects::change_zone::count_selected_zone_arrivals(
+                        &events[events_before_effect..],
+                        &chosen,
+                        destination.expect("ChangeZone destination checked above"),
+                    );
+                    effects::stamp_active_player_action_completion(
+                        state,
+                        source_id,
+                        crate::types::ability::EffectResolutionResult { cause, count },
+                    );
+                }
             }
             state.last_effect_count = Some(chosen.len() as i32);
             events.push(GameEvent::EffectResolved {
@@ -7151,6 +7289,7 @@ fn route_kept_card_or_defer(
                     source_id: Some(source_id),
                     rest_cards: misses.to_vec(),
                     rest_destination,
+                    rest_order: DigRestOrder::Preserve,
                     clear_markers,
                     publish_tracked_set: None,
                     emit_reveal_until_resolved: None,
@@ -7723,12 +7862,19 @@ pub(crate) fn run_batch_completion(
             source_id,
             rest_cards,
             rest_destination,
+            rest_order,
             publish_tracked_set,
             continuation_targets,
         } => {
             if !rest_cards.is_empty() {
-                match route_rest_partition(state, &rest_cards, rest_destination, source_id, events)
-                {
+                match route_rest_partition(
+                    state,
+                    &rest_cards,
+                    rest_destination,
+                    rest_order,
+                    source_id,
+                    events,
+                ) {
                     crate::game::zone_pipeline::BatchMoveResult::Done => {}
                     crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
                         crate::game::zone_pipeline::defer_completion_on_pause(
@@ -7738,6 +7884,7 @@ pub(crate) fn run_batch_completion(
                                 source_id,
                                 rest_cards: Vec::new(),
                                 rest_destination,
+                                rest_order,
                                 publish_tracked_set,
                                 continuation_targets,
                             },
@@ -7814,6 +7961,7 @@ pub(crate) fn run_batch_completion(
             source_id,
             rest_cards,
             rest_destination,
+            rest_order,
             clear_markers,
             publish_tracked_set,
             emit_reveal_until_resolved,
@@ -7824,8 +7972,14 @@ pub(crate) fn run_batch_completion(
             // Library-bottom placement and any CR 616.1 pause. Dispatch on the
             // dig-only payload so each site keeps its synchronous semantics.
             if publish_tracked_set.is_some() {
-                match route_rest_partition(state, &rest_cards, rest_destination, source_id, events)
-                {
+                match route_rest_partition(
+                    state,
+                    &rest_cards,
+                    rest_destination,
+                    rest_order,
+                    source_id,
+                    events,
+                ) {
                     crate::game::zone_pipeline::BatchMoveResult::Done => {}
                     crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
                         crate::game::zone_pipeline::defer_completion_on_pause(
@@ -7835,6 +7989,7 @@ pub(crate) fn run_batch_completion(
                                 source_id,
                                 rest_cards: Vec::new(),
                                 rest_destination,
+                                rest_order,
                                 clear_markers,
                                 publish_tracked_set,
                                 emit_reveal_until_resolved,
@@ -7854,6 +8009,7 @@ pub(crate) fn run_batch_completion(
                     source_id,
                     rest_cards: Vec::new(),
                     rest_destination,
+                    rest_order: DigRestOrder::Preserve,
                     clear_markers,
                     publish_tracked_set: None,
                     emit_reveal_until_resolved,
@@ -7898,6 +8054,7 @@ pub(crate) fn run_batch_completion(
             selected,
             destination,
             enter_tapped,
+            enters_attacking,
         } => {
             crate::game::effects::dig::move_mass_put_all_selected(
                 state,
@@ -7906,6 +8063,7 @@ pub(crate) fn run_batch_completion(
                 selected,
                 destination,
                 enter_tapped,
+                enters_attacking,
                 events,
             );
             crate::game::zone_pipeline::BatchMoveResult::Done
@@ -9776,8 +9934,10 @@ mod tests {
                 selectable_cards: vec![black, white],
                 kept_destination: Some(Zone::Library),
                 rest_destination: Some(Zone::Library),
+                rest_order: DigRestOrder::Preserve,
                 source_id: None,
                 enter_tapped: false,
+                enters_attacking: false,
             },
             GameAction::SelectCards { cards: vec![white] },
             &mut events,
@@ -9787,6 +9947,139 @@ mod tests {
         assert!(
             !has_flying(&state, vampire),
             "dig kept white on top → Flying must be recomputed away"
+        );
+    }
+
+    /// CR 400.5 + CR 608.2c: a Dig's explicit random-bottom instruction draws
+    /// exactly once from the game's seeded RNG immediately before the unkept
+    /// cards are appended. Its Preserve sibling must retain the look order and
+    /// leave the RNG untouched.
+    #[test]
+    fn dig_choice_library_rest_honors_random_and_preserve_order() {
+        fn state_with_looked_at_cards() -> (GameState, [ObjectId; 3], ObjectId) {
+            let mut state = GameState::new_two_player(0x6367);
+            let _keep = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Keep".to_string(),
+                Zone::Library,
+            );
+            let rest = [
+                create_object(
+                    &mut state,
+                    CardId(2),
+                    PlayerId(0),
+                    "Rest One".to_string(),
+                    Zone::Library,
+                ),
+                create_object(
+                    &mut state,
+                    CardId(3),
+                    PlayerId(0),
+                    "Rest Two".to_string(),
+                    Zone::Library,
+                ),
+                create_object(
+                    &mut state,
+                    CardId(4),
+                    PlayerId(0),
+                    "Rest Three".to_string(),
+                    Zone::Library,
+                ),
+            ];
+            let below = create_object(
+                &mut state,
+                CardId(5),
+                PlayerId(0),
+                "Below Look Window".to_string(),
+                Zone::Library,
+            );
+            // `create_object` appends to the library, making this exact
+            // top-to-bottom window `[keep, rest..., below]`.
+            (state, rest, below)
+        }
+
+        let (mut random_state, rest, below) = state_with_looked_at_cards();
+        let keep = random_state.players[0].library[0];
+        let mut expected_rest = rest.to_vec();
+        let mut expected_rng = random_state.rng.clone();
+        expected_rest.shuffle(&mut expected_rng);
+        let mut events = Vec::new();
+        handle_resolution_choice(
+            &mut random_state,
+            WaitingFor::DigChoice {
+                player: PlayerId(0),
+                library_owner: PlayerId(0),
+                cards: vec![keep, rest[0], rest[1], rest[2]],
+                keep_count: 1,
+                up_to: false,
+                selectable_cards: vec![keep, rest[0], rest[1], rest[2]],
+                kept_destination: Some(Zone::Library),
+                rest_destination: Some(Zone::Library),
+                rest_order: DigRestOrder::Random,
+                source_id: None,
+                enter_tapped: false,
+                enters_attacking: false,
+            },
+            GameAction::SelectCards { cards: vec![keep] },
+            &mut events,
+        )
+        .expect("random-bottom Dig choice resolves");
+
+        assert_eq!(
+            random_state.players[0]
+                .library
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            [vec![keep, below], expected_rest].concat(),
+            "random rest must occupy the bottom in the seeded permutation"
+        );
+        assert_eq!(
+            random_state.rng.get_word_pos(),
+            expected_rng.get_word_pos(),
+            "random rest must consume exactly the seeded shuffle stream"
+        );
+
+        let (mut preserve_state, rest, below) = state_with_looked_at_cards();
+        let keep = preserve_state.players[0].library[0];
+        let before_rng = preserve_state.rng.get_word_pos();
+        let mut events = Vec::new();
+        handle_resolution_choice(
+            &mut preserve_state,
+            WaitingFor::DigChoice {
+                player: PlayerId(0),
+                library_owner: PlayerId(0),
+                cards: vec![keep, rest[0], rest[1], rest[2]],
+                keep_count: 1,
+                up_to: false,
+                selectable_cards: vec![keep, rest[0], rest[1], rest[2]],
+                kept_destination: Some(Zone::Library),
+                rest_destination: Some(Zone::Library),
+                rest_order: DigRestOrder::Preserve,
+                source_id: None,
+                enter_tapped: false,
+                enters_attacking: false,
+            },
+            GameAction::SelectCards { cards: vec![keep] },
+            &mut events,
+        )
+        .expect("preserve-bottom Dig choice resolves");
+
+        assert_eq!(
+            preserve_state.players[0]
+                .library
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![keep, below, rest[0], rest[1], rest[2]],
+            "legacy/non-random Dig rest must preserve the looked-at order"
+        );
+        assert_eq!(
+            preserve_state.rng.get_word_pos(),
+            before_rng,
+            "preserved rest must not consume RNG"
         );
     }
 

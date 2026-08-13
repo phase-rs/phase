@@ -2094,6 +2094,28 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
         // (the spell lives on the STACK). Re-validate against the source leaf
         // (`InZone Stack`-aware) instead, preserving the spell target.
         validate_pinned_targets(state, &validated.targets, &src_leaf, &validated)
+    } else if matches!(
+        &validated.effect,
+        Effect::ChangeZoneAll { target, .. } if crate::game::effects::filter_refs_parent_target(target)
+    ) {
+        // CR 115.1 + CR 608.2b: `ChangeZoneAll` is a resolution-time mass
+        // instruction when its filter carries a delayed `ParentTarget` snapshot
+        // inside a tracked set. Treating that internal filter as a target would
+        // fizzle a valid Exile -> Battlefield return before the mass resolver
+        // can inspect the tracked member. Ordinary ChangeZoneAll player filters
+        // remain declared targets and follow the generic validation below.
+        validated.targets.clone()
+    } else if matches!(
+        mass_all_target_filter(&validated.effect),
+        Some(TargetFilter::Player)
+    ) {
+        // CR 115.1 + CR 608.2b: A bare `Player` mass-operation filter (such as
+        // "exile target player's graveyard") is represented by a companion
+        // declared-player slot. The mass filter is normally a resolution-time
+        // population scan, so it has no `target_filter()` entry; validate this
+        // exceptional declared target against the same legal-player set used
+        // to build the slot.
+        validate_pinned_targets(state, &validated.targets, &TargetFilter::Player, &validated)
     } else {
         match triggers::extract_target_filter_from_effect(&validated.effect) {
             Some(filter) if matches!(validated.effect, Effect::PairWith { .. }) => {
@@ -8661,6 +8683,56 @@ mod tests {
         );
     }
 
+    /// CR 115.1 + CR 603.7c: delayed plural returns become `ChangeZoneAll`
+    /// with a tracked-set filter, but their snapshotted referent is still not a
+    /// chosen target. It must survive validation while it is in exile.
+    #[test]
+    fn validate_targets_in_chain_preserves_delayed_tracked_set_snapshot_off_battlefield() {
+        let format = FormatConfig::duel_commander();
+        let mut state = GameState::new(format, 2, 2);
+        let victim = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Exile,
+        );
+        let set_id = TrackedSetId(1);
+        state.tracked_object_sets.insert(set_id, vec![victim]);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Exile),
+                destination: Zone::Battlefield,
+                target: TargetFilter::TrackedSetFiltered {
+                    id: set_id,
+                    filter: Box::new(TargetFilter::ParentTarget),
+                    caused_by: None,
+                },
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                random_order: false,
+            },
+            vec![TargetRef::Object(victim)],
+            ObjectId(99),
+            PlayerId(0),
+        );
+
+        let validated = validate_targets_in_chain(&state, &ability);
+        assert_eq!(validated.targets, ability.targets);
+        assert!(
+            !crate::game::targeting::check_fizzle(
+                &flatten_targets_in_chain(&ability),
+                &flatten_targets_in_chain(&validated),
+            ),
+            "a delayed tracked-set return must not fizzle before its mass resolver runs"
+        );
+    }
+
     /// CR 608.2b (phase-rs/phase#5449 review): an `Effect::Attach` node whose
     /// `attachment`/`target` are both context-refs (SelfRef/ParentTarget —
     /// neither needs its own target slot) must not have its `.targets` wiped
@@ -13269,6 +13341,7 @@ mod tests {
                 target: TargetFilter::Player,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -13291,6 +13364,45 @@ mod tests {
         assert!(slots[0]
             .legal_targets
             .contains(&TargetRef::Player(PlayerId(1))));
+    }
+
+    /// CR 115.1 + CR 608.2b: a ChangeZoneAll player filter is a declared
+    /// player target, unlike an internal delayed ParentTarget filter. It must
+    /// be revalidated and cannot keep an eliminated player alive as a target.
+    #[test]
+    fn validate_targets_in_chain_drops_eliminated_change_zone_all_player_target() {
+        let mut state = GameState::new_two_player(42);
+        state.players[1].is_eliminated = true;
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Exile,
+                target: TargetFilter::Player,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                random_order: false,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(900),
+            PlayerId(0),
+        );
+
+        let validated = validate_targets_in_chain(&state, &ability);
+        assert!(
+            validated.targets.is_empty(),
+            "an eliminated player must not survive ChangeZoneAll target revalidation"
+        );
+        assert!(
+            crate::game::targeting::check_fizzle(
+                &flatten_targets_in_chain(&ability),
+                &flatten_targets_in_chain(&validated),
+            ),
+            "a ChangeZoneAll ability whose sole player target is gone must fizzle"
+        );
     }
 
     /// CR 109.4 + CR 115.1 + CR 506.2: Karazikar regression guard.

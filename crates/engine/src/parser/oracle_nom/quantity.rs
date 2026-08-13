@@ -828,12 +828,26 @@ fn parse_chosen_number_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     value(QuantityRef::ChosenNumber, tag("the chosen number")).parse(input)
 }
 
+/// CR 608.2c: The amount of energy paid in the immediately preceding
+/// resolution-time payment, because resolving instructions follow their written
+/// order.
+/// `PayAmountChoice` records this value in `last_effect_count` before it resumes
+/// the chained effect, which is the runtime carrier for `EventContextAmount`.
+fn parse_paid_energy_this_way_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    value(
+        QuantityRef::EventContextAmount,
+        preceded(opt(tag("the ")), tag("amount of {e} paid this way")),
+    )
+    .parse(input)
+}
+
 pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         alt((
             parse_guessed_number_ref,
             parse_object_count_by_shared_quality,
             parse_chosen_number_ref,
+            parse_paid_energy_this_way_ref,
             parse_intensity_ref,
             // CR 120.10: must precede the generic damage/number arms so the
             // "excess" channel wins over a plain damage reading.
@@ -8505,6 +8519,18 @@ mod tests {
             }
         );
         assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_paid_energy_this_way_uses_resolution_payment_amount() {
+        for phrase in [
+            "the amount of {e} paid this way",
+            "amount of {e} paid this way",
+        ] {
+            let (rest, qty) = parse_quantity_ref(phrase).unwrap();
+            assert_eq!(rest, "", "{phrase:?} must fully consume");
+            assert_eq!(qty, QuantityRef::EventContextAmount, "{phrase:?}");
+        }
     }
 
     #[test]

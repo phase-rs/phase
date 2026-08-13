@@ -3974,7 +3974,10 @@ fn integration_full_turn_cycle() {
     assert_eq!(state.phase, Phase::BeginCombat);
 
     // Beginning of combat has its own priority window. With no attackers, the
-    // subsequent forced empty declaration skips only blockers and damage.
+    // subsequent forced empty declaration skips blockers and damage, then
+    // reaches the normal EndCombat priority window.
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     assert_eq!(state.phase, Phase::PostCombatMain);
@@ -5926,8 +5929,10 @@ fn full_turn_integration_with_mulligan() {
     // PreCombatMain: P1 passes -> BeginCombat priority.
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     assert_eq!(state.phase, Phase::BeginCombat);
-    // BeginCombat: both pass. No attackers are declared, so only Declare
-    // Blockers and Combat Damage are skipped before PostCombatMain.
+    // BeginCombat: both pass. No attackers are declared, so Declare Blockers
+    // and Combat Damage are skipped before the EndCombat priority window.
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     assert_eq!(state.phase, Phase::PostCombatMain);

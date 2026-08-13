@@ -2158,6 +2158,9 @@ fn legacy_object_scope(s: &ObjectScope) -> bool {
         // Source-persistent exile-pile member read (not one of the retained
         // legacy refs), mirroring the OtherRevealedCard precedent.
         | ObjectScope::OwnedLinkedExileCard
+        // CR 120.1: the per-iteration batch source is resolution-local, not one
+        // of the retained legacy refs (mirrors EventTarget).
+        | ObjectScope::BatchSource
         | ObjectScope::EventTarget => false,
     }
 }
@@ -3421,6 +3424,7 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::Learn
         | Effect::NoteManaSpent
         | Effect::Forage
+        | Effect::CompletePlayerAction { .. }
         | Effect::Harness
         | Effect::CollectEvidence { .. }
         | Effect::Specialize
@@ -3646,6 +3650,10 @@ fn read_object_scope(scope: &ObjectScope, kind: StateKind) -> RwProfile {
         // `ObjectScope::Recipient` and the `LastRevealed => empty` classification;
         // contributes no observable `reads_board`/`reads_src`.
         ObjectScope::OtherRevealedCard => RwProfile::empty(),
+        // CR 120.1 + CR 208.3: the per-iteration batch source reads the batch
+        // member's live power — a mutable board characteristic (mirrors
+        // `Target`/`Anaphoric`/`Demonstrative`).
+        ObjectScope::BatchSource => reads_board_of(kind),
         // D5 carrier: `CostPaidObject` is one of the 12 retained refs.
         ObjectScope::CostPaidObject => legacy_ref(),
     }
@@ -4590,6 +4598,7 @@ fn rw_effect(
             enter_with_counters,
             enters_under: _,
             enter_tapped: _,
+            enters_attacking: _,
             face_down_profile: _,
             library_position: _,
             random_order: _,
@@ -4675,8 +4684,10 @@ fn rw_effect(
             keep_count: _,
             up_to: _,
             rest_destination: _,
+            rest_order: _,
             reveal: _,
             enter_tapped: _,
+            enters_attacking: _,
             source: _,
         } => {
             let mut p = ext_write(StateKind::SetMembership);
@@ -4758,6 +4769,7 @@ fn rw_effect(
             p.writes_membership_external_zones.merge(ZoneSpan::Any);
             (p, None)
         }
+        Effect::CompletePlayerAction { .. } => (RwProfile::conservative(), None),
         Effect::Connive { target, count } => {
             let (mut p, sc) = obj(StateKind::ObjectCounters, target);
             p.writes_external.set(StateKind::HandLibrary);

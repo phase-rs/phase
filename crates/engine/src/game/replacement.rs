@@ -102,10 +102,7 @@ const GRANTED_BLOODTHIRST_INDEX: usize = usize::MAX - 8;
 /// controller; if an effect asks for a card's controller, use its owner
 /// instead. Command-zone emblems keep their controller under CR 109.4c.
 pub(crate) fn replacement_source_player(obj: &GameObject) -> PlayerId {
-    match obj.zone {
-        Zone::Battlefield | Zone::Stack | Zone::Command => obj.controller,
-        Zone::Library | Zone::Hand | Zone::Graveyard | Zone::Exile => obj.owner,
-    }
+    obj.controller_or_owner()
 }
 
 fn compleated_replacement_id(object_id: ObjectId) -> ReplacementId {
@@ -218,7 +215,7 @@ fn commander_hand_or_library_return_object(
     state
         .liminal_entries
         .get(&object_id)
-        .map(|entry| &entry.object)
+        .map(|entry| entry.object.projected())
         .or_else(|| state.objects.get(&object_id))
 }
 
@@ -1674,6 +1671,7 @@ fn discard_applier(
             cause: None,
             attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
@@ -5482,6 +5480,7 @@ fn replacement_condition_quantity_ctx(
         trigger_source: None,
         recipient: None,
         scoped_player,
+        damage_source: None,
     }
 }
 
@@ -6253,7 +6252,7 @@ fn object_replacement_candidate_applies(
     let liminal_obj = liminal_entry_ref(event)
         .filter(|entry_ref| *entry_ref == rid.source)
         .and_then(|entry_ref| state.liminal_entries.get(&entry_ref))
-        .map(|entry| &entry.object);
+        .map(|entry| entry.object.projected());
     let Some(obj) = liminal_obj.or_else(|| state.objects.get(&rid.source)) else {
         return false;
     };
@@ -6796,6 +6795,7 @@ fn legacy_object_replacement_candidates(
             candidates.extend(
                 entry
                     .object
+                    .projected()
                     .replacement_definitions
                     .iter_all()
                     .enumerate()
@@ -6845,6 +6845,7 @@ fn indexed_object_replacement_candidates_from_index(
             candidates.extend(
                 entry
                     .object
+                    .projected()
                     .replacement_definitions
                     .iter_all()
                     .enumerate()
@@ -7711,6 +7712,7 @@ fn extract_etb_counters_from_effect(
                 trigger_source: None,
                 recipient: None,
                 scoped_player: None,
+                damage_source: None,
             };
             let n = match count {
                 QuantityExpr::Fixed { value } => (*value).max(0) as u32,
@@ -7743,6 +7745,7 @@ fn extract_etb_counters_from_effect(
                     trigger_source: None,
                     recipient: None,
                     scoped_player: None,
+                    damage_source: None,
                 };
                 let n =
                     crate::game::quantity::resolve_quantity_with_ctx(state, count, controller, ctx)
@@ -8138,7 +8141,7 @@ fn apply_single_replacement(
         state
             .liminal_entries
             .get(&rid.source)
-            .map(|entry| &entry.object)
+            .map(|entry| entry.object.projected())
             .or_else(|| state.objects.get(&rid.source))
             .and_then(|obj| obj.replacement_definitions.get(rid.index))
     };
@@ -8366,6 +8369,12 @@ fn apply_single_replacement(
                         | (ProposedEvent::Scry { .. }, Effect::Scry { .. })
                         | (ProposedEvent::Proliferate { .. }, Effect::Proliferate)
                         | (ProposedEvent::LifeGain { .. }, Effect::GainLife { .. })
+                        // CR 614.1a: these specialized appliers already perform
+                        // their exact, unchained execute body inline. Parking it
+                        // would create an un-dispatchable sibling drain for every
+                        // affected event (issue #5676).
+                        | (ProposedEvent::CoinFlip { .. }, Effect::FlipCoins { .. })
+                        | (ProposedEvent::Damage { .. }, Effect::RemoveAllDamage { .. })
                         // CR 614.1a + CR 111.1: Full token substitution
                         // (Divine Visitation) is performed inline by
                         // `create_token_applier`; stashing the same
@@ -9172,7 +9181,7 @@ fn replacement_definition_for_id(
     state
         .liminal_entries
         .get(&rid.source)
-        .map(|entry| &entry.object)
+        .map(|entry| entry.object.projected())
         .or_else(|| state.objects.get(&rid.source))
         .and_then(|obj| obj.replacement_definitions.get(rid.index))
         // CR 121.2: an instruction to draw multiple cards is performed as that many
@@ -10574,7 +10583,9 @@ mod tests {
         state.liminal_entries.insert(
             entry_ref,
             LiminalEntry {
-                object: liminal,
+                object: crate::types::game_state::LiminalEntrant::Token(
+                    crate::types::game_state::TokenProjection::materialize(liminal),
+                ),
                 name: "Liminal Copy".to_string(),
                 source_id: ObjectId(999),
                 controller: PlayerId(0),
@@ -11149,6 +11160,7 @@ mod tests {
             cause: None,
             attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
@@ -13368,6 +13380,7 @@ mod tests {
             cause: None,
             attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
@@ -14469,6 +14482,7 @@ mod tests {
             cause: None,
             attach_to: None,
             enter_tapped: EtbTapState::Tapped,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
@@ -17620,6 +17634,7 @@ mod tests {
             cause: None,
             attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
@@ -17666,6 +17681,7 @@ mod tests {
             cause: None,
             attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,

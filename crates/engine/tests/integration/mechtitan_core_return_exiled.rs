@@ -58,6 +58,7 @@ fn install_mechtitan_return_trigger(state: &mut GameState, core: ObjectId, token
             target: TargetFilter::ExiledBySource,
             enters_under: None,
             enter_tapped: EtbTapState::Tapped,
+            enters_attacking: false,
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: None,

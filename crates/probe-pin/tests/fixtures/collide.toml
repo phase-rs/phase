@@ -1,0 +1,44 @@
+# §7 step 9's wiring pin (MAJOR-2, impl review). P1's anchor list is a SUBSET of P2's captured
+# failure — "…got" is inside "…got 202" — so the two probes are not distinguished, and nothing
+# but the step-9 all-pairs scan over the CAPTURES can see it: `manifest::validate` compares
+# anchor lists to each other (they differ), never an anchor list to another probe's failure.
+version = 1
+
+[target]
+mode         = "runtime-read"
+package      = "probe-pin"
+test         = "pure_logic"
+filter       = "ppfixture_census"
+filter_match = "substring"
+timeout_secs = 60
+
+[output]
+file   = "crates/probe-pin/tests/fixtures/tmp/collide_block.md"
+marker = "PROBE-PIN"
+
+[[probe]]
+id = "P0_control"
+  [probe.expect]
+  outcome = "pass"
+
+[[probe]]
+id = "P1_drop_second_site"
+  [[probe.mutation]]
+  kind    = "replace"
+  file    = "crates/probe-pin/tests/fixtures/prod.txt"
+  find    = "SITE-TWO marker beta\n"
+  replace = ""
+  [probe.expect]
+  outcome = "fail"
+  anchor  = ["CENSUS VIOLATED: expected 2 sites, got"]
+
+[[probe]]
+id = "P2_pad_reaches_target"
+  [[probe.mutation]]
+  kind   = "prepend"
+  files  = ["crates/probe-pin/tests/fixtures/prod.txt"]
+  text   = "// pad marker\n"
+  repeat = 200
+  [probe.expect]
+  outcome = "fail"
+  anchor  = ["CENSUS VIOLATED: expected 2 sites, got 202"]

@@ -1646,6 +1646,7 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::Adapt { .. } => {}
         Effect::Learn => {}
         Effect::Forage => {}
+        Effect::CompletePlayerAction { .. } => {}
         Effect::Harness => {}
         Effect::CollectEvidence { .. } => {}
         Effect::Endure { .. } => {}

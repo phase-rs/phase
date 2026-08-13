@@ -6387,9 +6387,9 @@ fn strip_distribute_among_target_quantifier<'a>(
     strip_optional_target_prefix(text)
 }
 
-/// CR 115.1d: Strip optional target-count prefixes before a targeted phrase.
-/// "up to one target creature" → ("target creature", Some { min: 0, max: Some(1) })
-/// "up to one other target creature or spell" → ("other target creature or spell", Some { ... })
+/// Strip optional target-count prefixes before a targeted phrase.
+/// For spells, CR 115.1a + CR 115.6 + CR 601.2c: the caster announces
+/// zero through the stated maximum legal targets as the spell is cast.
 pub(crate) fn strip_optional_target_prefix(text: &str) -> (&str, Option<MultiTargetSpec>) {
     let lower = text.to_ascii_lowercase();
     let Ok((after_up_to, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(lower.as_str()) else {
@@ -8054,6 +8054,10 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
         ));
     }
 
+    let (after_to, multi_target) = strip_optional_target_prefix(after_to);
+    if let Some(spec) = multi_target {
+        ctx.pending_damage_multi_target = Some(spec);
+    }
     let (target, rem) = parse_target_with_ctx(after_to, ctx);
     let (target, rem) = refine_damage_target_remainder(target, rem);
     let rem = trim_dangling_target_word(rem);
@@ -12427,8 +12431,10 @@ mod where_x_tests {
                                     ]),
                                 ),
                                 rest_destination: Some(Zone::Library),
+                                rest_order: crate::types::ability::DigRestOrder::Preserve,
                                 reveal: true,
                                 enter_tapped: false,
+                                enters_attacking: false,
                                 source: DigSource::Library,
                             },
                         ),

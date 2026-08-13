@@ -18597,6 +18597,33 @@ mod sorcery_speed_invariant_tests {
             )),
             "materials-exile sub-cost present (CR 702.167a/b)"
         );
+
+        // CR 702.167a + CR 113.6m: Craft's cost EXILES THE PERMANENT FROM THE
+        // BATTLEFIELD, so CR 113.6m's `unless` clause ("a previous part of its
+        // cost … specifies that the object is put into that zone") exempts it,
+        // and CR 113.6j makes the battlefield the only zone the cost is payable
+        // from. Craft is synthesized here, never through
+        // `parse_activated_ability_ir`, so the CR 113.6m effect-side derivation
+        // cannot reach it — this pins that.
+        assert_eq!(
+            def.activation_zone, None,
+            "craft functions from the battlefield"
+        );
+        // Second, independent line of defense: even on a hypothetical parser
+        // path, `activation_zone_from_self_cost` matches this cost component
+        // FIRST and yields Battlefield, so the effect side is never consulted.
+        assert!(
+            costs.iter().any(|c| matches!(
+                c,
+                AbilityCost::Exile {
+                    zone: Some(Zone::Battlefield),
+                    filter: Some(TargetFilter::SelfRef),
+                    ..
+                }
+            )),
+            "the self-exile cost names the battlefield, so the cost-side \
+             derivation wins before the effect side is consulted"
+        );
     }
 
     /// CR 702.87a: Level Up synthesis must carry AsSorcery.

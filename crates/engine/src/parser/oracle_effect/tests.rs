@@ -10,8 +10,8 @@ use crate::parser::parse_oracle_text;
 use crate::types::ability::CardPlayMode::{Cast, Play};
 use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermission};
 use crate::types::ability::{
-    AttachmentKind, CardSelectionMode, CastManaObjectScope, CastManaSpentMetric, ExcessRecipient,
-    ForEachCategoryAction, ModalChoice, PerpetualModification, SeatDirection,
+    AttachmentKind, CardSelectionMode, CastManaObjectScope, CastManaSpentMetric, DigRestOrder,
+    ExcessRecipient, ForEachCategoryAction, ModalChoice, PerpetualModification, SeatDirection,
 };
 use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
@@ -3632,6 +3632,7 @@ fn dig_conditional_instead_alternative_preserves_both_branches() {
         up_to,
         filter,
         rest_destination,
+        rest_order,
         destination,
         ..
     } = &*def.effect
@@ -3646,6 +3647,7 @@ fn dig_conditional_instead_alternative_preserves_both_branches() {
     assert!(!*up_to, "alt branch is exact-2 (not up-to)");
     assert_eq!(*destination, Some(Zone::Hand));
     assert_eq!(*rest_destination, Some(Zone::Library));
+    assert_eq!(*rest_order, DigRestOrder::Random);
     let TargetFilter::Or { filters } = filter else {
         panic!("alt filter should be Or, got {:?}", filter);
     };
@@ -3681,6 +3683,7 @@ fn dig_conditional_instead_alternative_preserves_both_branches() {
         up_to: base_up_to,
         filter: base_filter,
         rest_destination: base_rest,
+        rest_order: base_rest_order,
         ..
     } = &*base.effect
     else {
@@ -3690,6 +3693,11 @@ fn dig_conditional_instead_alternative_preserves_both_branches() {
     assert_eq!(*base_keep, Some(1));
     assert!(*base_up_to, "base branch is up-to 1");
     assert_eq!(*base_rest, Some(Zone::Library), "PutRest must recurse");
+    assert_eq!(
+        *base_rest_order,
+        DigRestOrder::Random,
+        "PutRest order must recurse"
+    );
     let TargetFilter::Or {
         filters: base_filters,
     } = base_filter
@@ -8221,6 +8229,7 @@ fn effect_exile_target_player_graveyard_is_change_zone_all() {
                     target: TargetFilter::Player,
                     enters_under: None,
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
                     enter_with_counters: _,
                     face_down_profile: None,
                     library_position: None,
@@ -8420,6 +8429,7 @@ fn effect_put_exiled_with_this_artifact_into_graveyard() {
                 target: TargetFilter::ExiledBySource,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: _,
                 face_down_profile: None,
                 library_position: None,
@@ -12117,6 +12127,7 @@ fn all_player_hand_shuffle_normalizer_requires_an_immediate_defaulted_pair() {
             target,
             enters_under: None,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: None,
@@ -12945,6 +12956,7 @@ fn compound_shuffle_hand_and_graveyard_into_library() {
             target: TargetFilter::Controller,
             enters_under: None,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: _,
             face_down_profile: None,
             library_position: None,
@@ -12964,6 +12976,7 @@ fn compound_shuffle_hand_and_graveyard_into_library() {
             target: TargetFilter::Controller,
             enters_under: None,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: _,
             face_down_profile: None,
             library_position: None,
@@ -22541,6 +22554,7 @@ fn exiled_cause_publishers_all_stamp_exiled_at_runtime() {
             target: TargetFilter::Any,
             enters_under: None,
             enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: None,
@@ -22646,8 +22660,10 @@ fn exiled_cause_publishers_all_stamp_exiled_at_runtime() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
+            rest_order: crate::types::ability::DigRestOrder::Preserve,
             reveal: false,
             enter_tapped: false,
+            enters_attacking: false,
             source: crate::types::ability::DigSource::default(),
         },
         Effect::ExileHaunting {
@@ -35494,6 +35510,95 @@ fn find_deal_damage(def: &AbilityDefinition) -> &Effect {
     panic!("no DealDamage sub-clause found in chain: {def:?}");
 }
 
+/// Find the `DealDamage` ability node so target-count metadata can be asserted
+/// alongside its effect shape.
+#[cfg(test)]
+fn find_deal_damage_ability(def: &AbilityDefinition) -> &AbilityDefinition {
+    let mut cur = def.sub_ability.as_deref();
+    while let Some(ability) = cur {
+        if matches!(ability.effect.as_ref(), Effect::DealDamage { .. }) {
+            return ability;
+        }
+        cur = ability.sub_ability.as_deref();
+    }
+    panic!("no DealDamage sub-clause found in chain: {def:?}");
+}
+
+/// SHAPE: generic damage-recipient parsing preserves the optional target count
+/// and the "other" filter property before it reaches the canonical target parser.
+#[test]
+fn generic_damage_up_to_one_other_target_preserves_target_shape() {
+    let def = parse_effect_chain(
+        "~ deals 2 damage to up to one other target creature.",
+        AbilityKind::Spell,
+    );
+
+    let Effect::DealDamage { target, .. } = def.effect.as_ref() else {
+        panic!("expected DealDamage, got {:?}", def.effect);
+    };
+    let TargetFilter::Typed(filter) = target else {
+        panic!("expected typed damage recipient, got {target:?}");
+    };
+    assert!(
+        filter.properties.contains(&FilterProp::Another),
+        "other target must remain FilterProp::Another, got {filter:?}"
+    );
+    assert_eq!(
+        def.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+        "up to one recipient must retain its optional 0..=1 target count"
+    );
+}
+
+/// SHAPE: Venom Blast's exact two-sentence Oracle chain keeps both instructions
+/// and turns its optional "other target" recipient into a target slot.
+#[test]
+fn venom_blast_put_counters_then_optional_other_target_damage_shape() {
+    let def = parse_effect_chain(
+        "Put two +1/+1 counters on target creature you control. It deals damage equal to its power to up to one other target creature.",
+        AbilityKind::Spell,
+    );
+
+    assert!(
+        matches!(def.effect.as_ref(), Effect::PutCounter { .. }),
+        "Venom Blast must begin with PutCounter, got {:?}",
+        def.effect
+    );
+    assert!(
+        !ability_chain_has_unimplemented(&def),
+        "Venom Blast must not leave an unimplemented clause: {def:#?}"
+    );
+
+    let damage = find_deal_damage_ability(&def);
+    let Effect::DealDamage {
+        target,
+        amount,
+        damage_source,
+        ..
+    } = damage.effect.as_ref()
+    else {
+        unreachable!("finder returned a non-damage ability");
+    };
+    let TargetFilter::Typed(filter) = target else {
+        panic!("expected typed other-creature recipient, got {target:?}");
+    };
+    assert!(filter.properties.contains(&FilterProp::Another));
+    assert_eq!(*damage_source, Some(DamageSource::Target));
+    assert_eq!(
+        *amount,
+        QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::Anaphoric,
+            },
+        }
+    );
+    assert_eq!(
+        damage.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+        "Venom Blast's recipient must be an optional up-to-one target"
+    );
+}
+
 /// #699 (Power{Anaphoric} variant). Ambuscade: the boosted creature deals
 /// damage to a FRESH opponent target. The anaphoric rewrite must NOT clobber
 /// the recipient to ParentTarget (that made the creature damage itself).
@@ -35644,6 +35749,11 @@ fn one_sided_fight_conditional_boost_variant() {
         }
         other => panic!("expected DealDamage, got {other:?}"),
     }
+    assert_eq!(
+        find_deal_damage_ability(&def).multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+        "Burrog Barrage's bare up-to-one recipient must retain its optional target count"
+    );
 }
 
 /// NO-REGRESSION: a pronoun-only rider ("Destroy target creature. It can't

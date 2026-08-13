@@ -245,6 +245,7 @@ pub(crate) fn continue_assemble_batch(
             parent_targets: Vec::new(),
             context: crate::types::ability::SpellContext::default(),
             replacement_applied: Default::default(),
+            continuation: None,
             players: vec![player],
         },
     );
@@ -421,6 +422,7 @@ fn prompt_reassemble_sprocket_choice(
             parent_targets: ability.targets.clone(),
             context: ability.context.clone(),
             replacement_applied: ability.replacement_applied.clone(),
+            continuation: None,
             players: vec![ability.controller],
         },
     );

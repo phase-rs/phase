@@ -1254,12 +1254,20 @@ fn every_single_id_anaphora_publish_lives_in_an_authority() {
          Ambiguous hits = {ambiguous_production:#?}"
     );
 
+    // Issue #5904 moved TWO of these from `counters.rs` to `token_copy.rs` without changing
+    // the total, which is exactly the shape this pin's own instructions ask for. The
+    // `ContinueCopyTokenCreation` resume arm's `if let Some(pending) = active_copy_token_mut()
+    // { pending.created_ids.extend(..) } else { last_created_token_ids.extend(..) }` pair was
+    // about to be COPIED verbatim into the new `ContinueCopyTokenEntryAfterAuraHost` resume,
+    // so it was lifted into `token_copy::extend_copy_batch_created_ids` instead and both arms
+    // now call it. Same five calls, same bulk arguments (`status.created_ids`, a `Vec`), one
+    // fewer place to write the destination-selection rule wrong. `counters.rs` therefore drops
+    // out of this multiset entirely; its absence is now a claim, not an omission.
     assert_eq!(
         production_multiset(&ambiguous_production),
         vec![
-            ("engine/src/game/effects/counters.rs".to_string(), 2),
             ("engine/src/game/effects/token.rs".to_string(), 1),
-            ("engine/src/game/effects/token_copy.rs".to_string(), 2),
+            ("engine/src/game/effects/token_copy.rs".to_string(), 4),
         ],
         "per-file argument-ambiguous mutator multiset moved. All five of these are bulk \
          republishes today — `.extend(status.created_ids)` and `.extend(state.\

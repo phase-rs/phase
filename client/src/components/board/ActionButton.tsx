@@ -278,7 +278,8 @@ export function ActionButton() {
   // grows. Surfaced with the same pulsing cancel affordance as UntilTurnBoundary
   // so the player can revoke it between opponents' windows.
   const isResolvingStack = autoPass?.type === "UntilStackEmpty";
-  const canActDuringAutoPass = mode === "combat-blockers";
+  const canActDuringAutoPass =
+    mode === "combat-attackers" || mode === "combat-blockers";
 
   const actionPending = useMultiplayerStore((s) => s.actionPending);
   const isResolvingAll = useGameStore((s) => s.isResolvingAll);
@@ -293,7 +294,7 @@ export function ActionButton() {
   return (
     <>
       <div className={panelClassName} data-action-button-panel>
-        {mode === "combat-attackers" && !isEndingTurn && (
+        {mode === "combat-attackers" && (
           <>
             <button
               disabled={actionBlocked}
