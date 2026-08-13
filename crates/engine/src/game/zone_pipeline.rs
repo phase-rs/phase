@@ -3843,13 +3843,12 @@ pub(crate) fn deliver_replaced_zone_change(
                 .objects
                 .get(&object_id)
                 .map(|object| object.controller)
-                .unwrap_or(PlayerId(0));
-            crate::game::combat::enter_attacking(
-                state,
-                object_id,
-                cause.or(source_id).unwrap_or(object_id),
-                controller,
-            );
+                .expect("a settled battlefield entrant must exist");
+            if let Some(player) = crate::game::combat::choose_entry_attack_target_or_enter(
+                state, object_id, controller, events,
+            ) {
+                return ZoneDeliveryResult::NeedsChoice(player);
+            }
         }
         return result;
     }

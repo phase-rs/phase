@@ -4150,6 +4150,7 @@ pub(super) fn apply_clause_continuation(
                         target: TargetFilter::LastRevealed,
                         enters_under: None,
                         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                        enters_attacking: false,
                         enter_with_counters: vec![],
                         face_down_profile: None,
                         library_position: None,
@@ -4195,6 +4196,7 @@ pub(super) fn apply_clause_continuation(
                             target: TargetFilter::LastRevealed,
                             enters_under: None,
                             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                            enters_attacking: false,
                             enter_with_counters: vec![],
                             face_down_profile: None,
                             library_position,
@@ -4478,6 +4480,7 @@ pub(super) fn apply_clause_continuation(
                                 enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(
                                     enter_tapped,
                                 ),
+                                enters_attacking,
                                 enter_with_counters: vec![],
                                 face_down_profile,
                                 library_position: None,
@@ -4514,7 +4517,7 @@ pub(super) fn apply_clause_continuation(
                                 enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(
                                     enter_tapped,
                                 ),
-                                enters_attacking: false,
+                                enters_attacking,
                                 up_to: is_up_to,
                                 enter_with_counters: vec![],
                                 conditional_enter_with_counters: vec![],
@@ -4806,6 +4809,14 @@ pub(super) fn apply_clause_continuation(
                     // object's type at ChangeZone resolution instead of
                     // applying them unconditionally.
                     *enters_modified_if = moved_filter;
+                }
+                Effect::ChangeZoneAll {
+                    enters_attacking,
+                    enter_tapped,
+                    ..
+                } => {
+                    *enters_attacking = true;
+                    *enter_tapped = crate::types::zones::EtbTapState::Tapped;
                 }
                 Effect::Dig {
                     enters_attacking,

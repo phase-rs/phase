@@ -812,7 +812,7 @@ pub fn resolve(
                 ability.duration.as_ref(),
                 effect_enter_transformed,
                 eff_tapped,
-                false,
+                eff_attacking,
                 enters_under_player,
                 &per_obj_enter_counters,
                 face_down_profile.as_ref(),
@@ -823,19 +823,6 @@ pub fn resolve(
             ) {
                 ZoneMoveResult::Done => {
                     state.last_effect_count = Some(1);
-                    if eff_attacking && dest_zone == Zone::Battlefield {
-                        let controller = state
-                            .objects
-                            .get(&chosen)
-                            .map(|obj| obj.controller)
-                            .unwrap_or(ability.controller);
-                        crate::game::combat::enter_attacking(
-                            state,
-                            chosen,
-                            ability.source_id,
-                            controller,
-                        );
-                    }
                 }
                 ZoneMoveResult::NeedsChoice(player) => {
                     // CR 614.12a: single-pick branch (Random single / single-eligible)
@@ -909,7 +896,7 @@ pub fn resolve(
                 ability.duration.as_ref(),
                 effect_enter_transformed,
                 eff_tapped,
-                false,
+                eff_attacking,
                 enters_under_player,
                 &per_obj_enter_counters,
                 face_down_profile.as_ref(),
@@ -920,19 +907,6 @@ pub fn resolve(
             ) {
                 ZoneMoveResult::Done => {
                     state.last_effect_count = Some(1);
-                    if eff_attacking && dest_zone == Zone::Battlefield {
-                        let controller = state
-                            .objects
-                            .get(&chosen)
-                            .map(|obj| obj.controller)
-                            .unwrap_or(ability.controller);
-                        crate::game::combat::enter_attacking(
-                            state,
-                            chosen,
-                            ability.source_id,
-                            controller,
-                        );
-                    }
                 }
                 ZoneMoveResult::NeedsChoice(player) => {
                     // CR 614.12a: single-pick branch (Random single / single-eligible)
@@ -1520,7 +1494,7 @@ pub(crate) fn process_one_zone_move_with_terminal(
         ctx.duration.as_ref(),
         ctx.enter_transformed,
         eff_tapped,
-        false,
+        eff_attacking,
         ctx.enters_under_player,
         &ctx.enter_with_counters,
         ctx.face_down_profile.as_ref(),
@@ -1530,20 +1504,6 @@ pub(crate) fn process_one_zone_move_with_terminal(
         events,
     );
 
-    if matches!(
-        result,
-        crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(_)
-    ) {
-        // CR 508.4: Place on battlefield attacking (not declared as attacker).
-        if eff_attacking && ctx.destination == Zone::Battlefield {
-            let controller = state
-                .objects
-                .get(&obj_id)
-                .map(|obj| obj.controller)
-                .unwrap_or(ctx.controller);
-            crate::game::combat::enter_attacking(state, obj_id, ctx.source_id, controller);
-        }
-    }
     result
 }
 
@@ -1638,6 +1598,7 @@ pub fn resolve_all(
         dest_zone,
         target_filter,
         enter_tapped,
+        enters_attacking,
         enter_with_counters,
         effect_library_position,
         random_order,
@@ -1648,6 +1609,7 @@ pub fn resolve_all(
             target,
             enters_under: _,
             enter_tapped,
+            enters_attacking,
             enter_with_counters,
             face_down_profile: _,
             library_position,
@@ -1681,6 +1643,7 @@ pub fn resolve_all(
                 *destination,
                 target.clone(),
                 *enter_tapped,
+                *enters_attacking,
                 resolved_counters,
                 library_position.clone(),
                 *random_order,
@@ -2007,7 +1970,7 @@ pub fn resolve_all(
             ability.duration.as_ref(),
             false,
             enter_tapped,
-            false,
+            enters_attacking,
             enters_under_player,
             &enter_with_counters,
             face_down_profile.as_ref(),
@@ -2035,6 +1998,10 @@ pub fn resolve_all(
                 }
             }
             crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsChoice(player) => {
+                let entry_target_choice = matches!(
+                    state.waiting_for,
+                    crate::types::game_state::WaitingFor::EntryAttackTargetChoice { .. }
+                );
                 // CR 614.12a + CR 614.13: a Devour as-enters sacrifice surfaced its
                 // own `EffectZoneChoice` (or a counter-pause replacement choice).
                 // Stash the unprocessed co-entering members so
@@ -2057,7 +2024,7 @@ pub fn resolve_all(
                 state.push_change_zone_iteration_after_child(
                     crate::types::game_state::PendingChangeZoneIteration {
                         logical_zone_change_group,
-                        paused_current: Some(
+                        paused_current: (!entry_target_choice).then(|| {
                             state
                                 .pending_zone_change_delivery_from_replacement()
                                 .or_else(|| {
@@ -2066,8 +2033,8 @@ pub fn resolve_all(
                                         boundary
                                     })
                                 })
-                                .expect("zone-change pause must retain its exact boundary"),
-                        ),
+                                .expect("replacement pause must retain its exact boundary")
+                        }),
                         remaining: matching[i + 1..].to_vec(),
                         source_id: ability.source_id,
                         controller: ability.controller,
@@ -2076,14 +2043,14 @@ pub fn resolve_all(
                         enter_transformed: false,
                         enter_tapped,
                         enters_under_player,
-                        enters_attacking: false,
+                        enters_attacking,
                         // CR 122.1h: resumed members of a paused mass return still
                         // receive their counters (Shilgengar's finality counter).
                         enter_with_counters: enter_with_counters.clone(),
                         conditional_enter_with_counters: vec![],
                         duration: ability.duration.clone(),
                         track_exiled_by_source,
-                        moved_count: Some(moved_count),
+                        moved_count: Some(moved_count + i32::from(entry_target_choice)),
                         face_down_profile: face_down_profile.clone(),
                         library_placement: effect_library_position.clone(),
                         // CR 614.12: mass zone moves carry no moved-object type gate.
@@ -2132,7 +2099,7 @@ pub fn resolve_all(
                         enter_transformed: false,
                         enter_tapped,
                         enters_under_player,
-                        enters_attacking: false,
+                        enters_attacking,
                         // CR 122.1h: resumed members of a paused mass return still
                         // receive their counters (Shilgengar's finality counter).
                         enter_with_counters: enter_with_counters.clone(),
@@ -3088,6 +3055,7 @@ mod tests {
                 target: TargetFilter::None,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -3479,6 +3447,7 @@ mod tests {
                 ])),
                 enters_under: None,
                 enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -4487,6 +4456,7 @@ mod tests {
                 target: TargetFilter::None,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -4539,6 +4509,7 @@ mod tests {
                 target: TargetFilter::Player,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -4630,6 +4601,7 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -4705,6 +4677,7 @@ mod tests {
                 }),
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -4770,6 +4743,7 @@ mod tests {
                 target: TargetFilter::Player,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -4845,6 +4819,7 @@ mod tests {
                 ),
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Tapped,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -4879,6 +4854,7 @@ mod tests {
                 target: TargetFilter::Player,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -4954,6 +4930,7 @@ mod tests {
                 }),
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -5059,6 +5036,7 @@ mod tests {
                 target: TargetFilter::ExiledBySource,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -5487,6 +5465,7 @@ mod tests {
                     }),
                     enters_under: None,
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
                     enter_with_counters: vec![],
                     face_down_profile: None,
                     library_position: None,
@@ -5892,6 +5871,7 @@ mod tests {
                 target: TargetFilter::LastRevealed,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: Some(LibraryPosition::Bottom),
@@ -5962,6 +5942,7 @@ mod tests {
                 target: TargetFilter::LastRevealed,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: Some(LibraryPosition::Bottom),
@@ -7043,6 +7024,7 @@ mod tests {
                 target: TargetFilter::Controller,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -7181,6 +7163,7 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 enters_under: Some(ControllerRef::You),
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -7234,6 +7217,7 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 enters_under: Some(ControllerRef::Opponent),
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -7343,6 +7327,7 @@ mod tests {
                 ),
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -7443,6 +7428,7 @@ mod tests {
                 ),
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -7578,6 +7564,7 @@ mod tests {
                     ])),
                     enters_under: None,
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
                     enter_with_counters: vec![],
                     face_down_profile: None,
                     library_position: None,
@@ -7786,6 +7773,7 @@ mod tests {
                 },
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -7855,6 +7843,7 @@ mod tests {
                 },
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Tapped,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -7938,6 +7927,7 @@ mod tests {
                 },
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -8013,6 +8003,7 @@ mod tests {
                 },
                 enters_under: Some(ControllerRef::You),
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: Some(FaceDownProfile {
                     power: Some(2),
@@ -8096,6 +8087,7 @@ mod tests {
                 },
                 enters_under: None,
                 enter_tapped: EtbTapState::Tapped,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -8168,6 +8160,7 @@ mod tests {
                 },
                 enters_under: None,
                 enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -8208,6 +8201,7 @@ mod tests {
                 },
                 enters_under: Some(ControllerRef::You),
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: Some(FaceDownProfile::vanilla_2_2()),
                 library_position: None,
@@ -8833,6 +8827,7 @@ mod tests {
                 target: TargetFilter::Any,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,

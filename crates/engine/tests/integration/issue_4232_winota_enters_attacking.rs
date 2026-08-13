@@ -7,6 +7,7 @@ use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::WaitingFor;
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 
 const WINOTA_ORACLE: &str = "Whenever a non-Human creature you control attacks, look at the top six cards of your library. You may put a Human creature card from among them onto the battlefield tapped and attacking. It gains indestructible until end of turn. Put the rest of the cards on the bottom of your library in a random order.";
 
@@ -28,11 +29,12 @@ fn advance_to_dig_choice(runner: &mut GameRunner) {
     panic!("Winota's attack trigger never reached DigChoice");
 }
 
-/// CR 508.4 + CR 506.3: a creature that enters attacking joins the current
-/// combat tapped, attacking the same defending player as the triggering attack.
+/// CR 508.4 + CR 506.3: the controller chooses a legal defender for a creature
+/// that enters attacking, independent of the trigger's original attack target.
 #[test]
 fn winota_puts_selected_human_onto_battlefield_tapped_and_attacking() {
-    let mut scenario = GameScenario::new();
+    let p2 = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
 
     let human = scenario.add_card_to_library_top(P0, "Winota Human");
@@ -79,6 +81,18 @@ fn winota_puts_selected_human_onto_battlefield_tapped_and_attacking() {
     runner
         .act(GameAction::SelectCards { cards: vec![human] })
         .expect("put the selected Human onto the battlefield");
+    let WaitingFor::EntryAttackTargetChoice { valid_targets, .. } =
+        runner.state().waiting_for.clone()
+    else {
+        panic!("Winota's Human must choose among multiple defenders");
+    };
+    assert!(valid_targets.contains(&AttackTarget::Player(P1)));
+    assert!(valid_targets.contains(&AttackTarget::Player(p2)));
+    runner
+        .act(GameAction::ChooseEntryAttackTarget {
+            target: AttackTarget::Player(p2),
+        })
+        .expect("choose a different legal defender for Winota's Human");
     runner.advance_until_stack_empty();
 
     let human_object = runner.state().objects.get(&human).expect("Human object");
@@ -93,5 +107,5 @@ fn winota_puts_selected_human_onto_battlefield_tapped_and_attacking() {
         .iter()
         .find(|attacker_info| attacker_info.object_id == human)
         .expect("the selected Human must enter attacking");
-    assert_eq!(human_attack.defending_player, P1);
+    assert_eq!(human_attack.defending_player, p2);
 }

@@ -2476,6 +2476,7 @@ fn earthbended_land_returns_tapped_after_exile() {
             target: TargetFilter::SpecificObject { id: land_id },
             enters_under: None,
             enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: None,

@@ -826,15 +826,16 @@ fn apply_pending_counter_post_action(
                             .objects
                             .get(&object_id)
                             .map(|object| object.controller)
-                            .unwrap_or(PlayerId(0));
+                            .expect("a settled battlefield entrant must exist");
                         // CR 508.4: an entrant joins combat only after its
                         // replacement-modified entry has fully settled.
-                        crate::game::combat::enter_attacking(
-                            state,
-                            object_id,
-                            cause.or(source_id).unwrap_or(object_id),
-                            controller,
-                        );
+                        if crate::game::combat::choose_entry_attack_target_or_enter(
+                            state, object_id, controller, events,
+                        )
+                        .is_some()
+                        {
+                            return false;
+                        }
                     }
                     true
                 }

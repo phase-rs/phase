@@ -4598,6 +4598,7 @@ fn rw_effect(
             enter_with_counters,
             enters_under: _,
             enter_tapped: _,
+            enters_attacking: _,
             face_down_profile: _,
             library_position: _,
             random_order: _,

@@ -255,6 +255,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         WaitingFor::Priority { .. }
         | WaitingFor::MeldPairChoice { .. }
         | WaitingFor::MeldAttackTargetChoice { .. }
+        | WaitingFor::EntryAttackTargetChoice { .. }
         | WaitingFor::MulliganDecision { .. }
         | WaitingFor::AssistChoosePlayer { .. }
         | WaitingFor::ExertChoice { .. }
@@ -481,6 +482,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         WaitingFor::Priority { .. }
         | WaitingFor::MeldPairChoice { .. }
         | WaitingFor::MeldAttackTargetChoice { .. }
+        | WaitingFor::EntryAttackTargetChoice { .. }
         | WaitingFor::ChooseXValue { .. }
         | WaitingFor::UntapChoice { .. }
         | WaitingFor::ExertChoice { .. }
@@ -3422,6 +3424,7 @@ fn selection_projection(
         WaitingFor::Priority { .. }
         | WaitingFor::MeldPairChoice { .. }
         | WaitingFor::MeldAttackTargetChoice { .. }
+        | WaitingFor::EntryAttackTargetChoice { .. }
         | WaitingFor::ManaPayment { .. }
         | WaitingFor::ManaSourceSelection { .. }
         | WaitingFor::AssistChoosePlayer { .. }
