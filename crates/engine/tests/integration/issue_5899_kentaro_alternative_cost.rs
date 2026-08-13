@@ -6,7 +6,7 @@ use engine::game::scenario::{GameScenario, P0};
 use engine::types::ability::{AbilityCost, AdditionalCost};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
-use engine::types::mana::{ManaCost, ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 
 const KENTARO_ORACLE: &str = "You may pay {X} rather than pay the mana cost for Samurai spells you cast, where X is that spell's mana value.";
@@ -19,7 +19,10 @@ fn kentaro_offers_and_pays_the_matching_samurai_mana_value() {
     let samurai = scenario
         .add_creature_to_hand(P0, "Test Samurai", 3, 3)
         .with_subtypes(vec!["Samurai"])
-        .with_mana_cost(ManaCost::generic(3))
+        .with_mana_cost(ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::Red],
+        })
         .id();
     scenario.with_mana_pool(
         P0,
