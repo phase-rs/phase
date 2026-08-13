@@ -22657,6 +22657,7 @@ fn exiled_cause_publishers_all_stamp_exiled_at_runtime() {
             rest_order: crate::types::ability::DigRestOrder::Preserve,
             reveal: false,
             enter_tapped: false,
+            enters_attacking: false,
             source: crate::types::ability::DigSource::default(),
         },
         Effect::ExileHaunting {

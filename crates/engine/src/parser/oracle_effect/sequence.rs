@@ -10056,6 +10056,7 @@ mod tests {
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                enters_attacking: false,
                 reveal_verb: false,
             })
         );
@@ -10081,6 +10082,7 @@ mod tests {
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                enters_attacking: false,
                 reveal_verb: false,
             })
         );
@@ -10111,6 +10113,7 @@ mod tests {
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                enters_attacking: false,
                 reveal_verb: false,
             })
         );
@@ -10135,6 +10138,7 @@ mod tests {
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                enters_attacking: false,
                 reveal_verb: false,
             })
         );
@@ -10159,6 +10163,7 @@ mod tests {
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                enters_attacking: false,
                 reveal_verb: false,
             })
         );
@@ -10185,6 +10190,7 @@ mod tests {
                     enters_under: None,
                     face_down_profile: None,
                     enter_tapped: false,
+                    enters_attacking: false,
                     reveal_verb: false,
                 }),
                 "{text}"
@@ -10459,6 +10465,7 @@ mod tests {
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                enters_attacking: false,
                 reveal_verb: false,
             },
             AbilityKind::Spell,
@@ -10732,6 +10739,7 @@ mod tests {
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                enters_attacking: false,
                 reveal_verb: false,
             },
             AbilityKind::Spell,
@@ -10781,6 +10789,7 @@ mod tests {
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                enters_attacking: false,
                 reveal_verb: false,
             },
             AbilityKind::Spell,
@@ -10848,6 +10857,7 @@ mod tests {
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                enters_attacking: false,
                 reveal_verb: false,
             },
             AbilityKind::Spell,
@@ -11811,6 +11821,7 @@ mod tests {
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                enters_attacking: false,
                 reveal_verb: false,
             })
         );
