@@ -1193,6 +1193,32 @@ pub fn choose_blockers_with_profile(
                 }
                 set.push(bid);
             }
+
+            // The walk above adds by *static* absorption, which cannot see what a
+            // blocker contributes beyond soaking damage — a first-striking
+            // deathtouch blocker can kill the attacker outright in the first step
+            // (CR 702.7b + CR 702.2c) and cancel its regular-step damage entirely.
+            // So once the set survives, drop any member the rest has made redundant,
+            // judged through the same whole-combat authority rather than the
+            // ordering heuristic. One bounded pass over the gang, never below the
+            // CR 509.1b floor.
+            //
+            // Concretely: a 10/10 menace double-strike trampler against two 0/6
+            // walls and a 1/1 first-strike deathtouch blocker. Absorption order
+            // takes both walls (8 still gets through) and then the 1/1 to survive —
+            // but one wall plus the 1/1 holds it to 3, because the attacker dies
+            // before the regular step. Three creatures spent where two suffice.
+            let mut index = 0;
+            while index < set.len() && set.len() > needed_blockers {
+                let mut trial = set.clone();
+                trial.remove(index);
+                if averts_lethal(&trial) {
+                    set = trial;
+                } else {
+                    index += 1;
+                }
+            }
+
             (set.len() >= needed_blockers && averts_lethal(&set)).then_some(set)
         } else {
             None
@@ -4848,6 +4874,65 @@ mod tests {
             on_attacker, 2,
             "10 unblocked at 7 life is lethal; the legal pair cuts it to 6 and the \
              player lives. Got {assignments:?}"
+        );
+    }
+
+    /// A blocker can contribute something absorption cannot express: a first-strike
+    /// deathtouch body kills the attacker in the first damage step (CR 702.7b +
+    /// CR 702.2c), cancelling its regular-step damage outright.
+    ///
+    /// 10/10 menace double-strike trampler at 4 life, against two 0/6 walls and a
+    /// 1/1 first-strike deathtoucher. By absorption the walls come first, and they
+    /// still let 8 through, so the walk then adds the 1/1 — three creatures. But one
+    /// wall plus the 1/1 holds it to 3: the attacker takes lethal deathtouch damage
+    /// in the first step and never reaches the second. Two creatures, same result.
+    ///
+    /// Guards the shrink pass; without it the AI sacrifices a blocker it did not need.
+    #[test]
+    fn survival_gang_drops_blockers_the_rest_of_the_gang_makes_redundant() {
+        let mut state = setup();
+        state.players[1].life = 4;
+        let attacker = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Attacker",
+            10,
+            10,
+            vec![Keyword::Menace, Keyword::DoubleStrike, Keyword::Trample],
+        );
+        add_creature(&mut state, PlayerId(1), "Wall 1", 0, 6, vec![]);
+        add_creature(&mut state, PlayerId(1), "Wall 2", 0, 6, vec![]);
+        add_creature(
+            &mut state,
+            PlayerId(1),
+            "Deathtouch Skirmisher",
+            1,
+            1,
+            vec![Keyword::FirstStrike, Keyword::Deathtouch],
+        );
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[attacker]);
+
+        let on_attacker: Vec<_> = assignments
+            .iter()
+            .filter(|&&(_, a)| a == attacker)
+            .map(|&(b, _)| b)
+            .collect();
+        assert_eq!(
+            on_attacker.len(),
+            2,
+            "one wall plus the first-strike deathtoucher already holds this to 3 \
+             against 4 life — the third blocker is spent for nothing. Got \
+             {assignments:?}"
+        );
+        // Still a legal declaration against the CR 702.111b menace floor.
+        assert_eq!(
+            engine::game::combat::complete_blocker_proposal(&state, PlayerId(1), &assignments),
+            engine::types::actions::GameAction::DeclareBlockers {
+                assignments: assignments.clone()
+            },
+            "the shrunk declaration must still survive the CR 509.1c completion \
+             authority"
         );
     }
 
