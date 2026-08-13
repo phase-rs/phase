@@ -2462,6 +2462,7 @@ mod tests {
             ),
             crate::game::replacement::ReplacementResult::NeedsChoice(PlayerId(2))
         ));
+        crate::game::replacement::park_waiting_for(&mut state, PlayerId(2));
         assert!(matches!(
             state.waiting_for,
             WaitingFor::ReplacementChoice {
