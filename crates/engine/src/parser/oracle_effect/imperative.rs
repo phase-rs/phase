@@ -2697,6 +2697,13 @@ fn parse_zone_word(input: &str) -> nom::IResult<&str, Zone, OracleError<'_>> {
 /// `clippy::type_complexity`.
 type MultiZonePlayerExileParse<'a> = (&'a str, (Vec<TypeFilter>, ControllerRef, Vec<Zone>));
 
+/// CR 508.1d + CR 506.3: result of the defender-bound "attack(s) `<defender>`
+/// [window] if able" parse — the required defender plus the window it states for
+/// itself. `None` is the WINDOWLESS form ("attack ~ if able" — Gideon Jura),
+/// whose span comes from an enclosing clause instead.
+type DefenderBoundAttackParse<'a> =
+    Result<(&'a str, (TargetFilter, Option<Duration>)), nom::Err<OracleError<'a>>>;
+
 /// CR 400.3 + CR 404.1 + CR 406.2 + CR 108.2 + CR 205.2a: "exile all `[<types>]`
 /// cards from `<possessive>` `<zone>` and `<zone>`" — mass exile of the cards a
 /// player owns across a *union* of zones. Two forms:
@@ -5999,12 +6006,12 @@ fn attach_neuter_recipient_resolves_via_subject(ctx: &ParseContext) -> bool {
     }
 }
 
+/// CR 608.2c + CR 109.5: the attach path's whole-phrase form of the shared
+/// source-anaphoric gendered pronoun recognizer. Delegates to the single
+/// authority (`oracle_target::parse_source_anaphoric_pronoun`) under
+/// `all_consuming` — an attach recipient is the pronoun and nothing else.
 fn parse_gendered_attach_self_recipient(input: &str) -> OracleResult<'_, ()> {
-    all_consuming(alt((
-        |i| parse_word_bounded(i, "her"),
-        |i| parse_word_bounded(i, "him"),
-    )))
-    .parse(input)
+    all_consuming(crate::parser::oracle_target::parse_source_anaphoric_pronoun).parse(input)
 }
 
 fn parse_neuter_attach_self_recipient(input: &str) -> OracleResult<'_, ()> {
@@ -6202,6 +6209,16 @@ pub(super) fn parse_prevention_amount(rest: &str) -> PreventionAmount {
 /// dealt by those creatures") so both prevent-recipient parsers agree.
 ///
 /// Tries, in priority order:
+/// 0. A source-anaphoric gendered pronoun ("him"/"her"/"himself"/"herself") →
+///    `SelfRef`, UNGATED (CR 608.2c + CR 109.5). Magic templating uses a
+///    gendered pronoun only as the printed-name self-reference, so unlike the
+///    neuter "it" it needs no `parent_target_available` gate. This tier must
+///    run FIRST: with the gate closed, tier 1 declines and tier 2's
+///    `is_broadcast_population_filter` check rejects `SelfRef`, so without it
+///    "prevent all damage that would be dealt to him this turn" (Gideon Jura,
+///    Gideon of the Trials) fell through to the `Any` default — a shield with
+///    NO recipient constraint, i.e. a turn-long Fog over every damage event in
+///    the game rather than a shield on the Gideon.
 /// 1. A singular chosen-target anaphor ("that creature"/"it"/"the creature"),
 ///    gated on `parent_target_available` (CR 608.2c, issue #1094).
 /// 2. Any other recipient phrase `parse_target` recognizes as a real filter —
@@ -6225,6 +6242,12 @@ pub(super) fn resolve_prevent_recipient(
     recipient: TextPair<'_>,
     parent_target_available: bool,
 ) -> Option<TargetFilter> {
+    // CR 608.2c + CR 109.5: tier 0 — the ungated printed-name self-reference.
+    if let Some((filter, _)) =
+        crate::parser::oracle_target::parse_source_anaphoric_pronoun_ref(recipient.original)
+    {
+        return Some(filter);
+    }
     if let Some((filter, _)) =
         parse_anaphoric_target_ref(recipient.original, parent_target_available)
     {
@@ -12894,11 +12917,20 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         },
         ImperativeFamilyAst::ForceAttack {
             duration,
-            required_player,
+            required_defender,
         } => Effect::ForceAttack {
             target: TargetFilter::Any,
-            required_player,
-            duration,
+            required_defender,
+            // CR 115.1: the imperative path is the TARGETED form ("Target
+            // creature attacks you this combat if able"); subject injection
+            // fills `target` from the declared target phrase.
+            scope: EffectScope::Single,
+            // CR 611.2a: a windowless predicate ("attack ~ if able") states no
+            // span of its own — its window comes from the enclosing clause, which
+            // the clause machinery re-stamps onto this effect. The `UntilEndOfTurn`
+            // fallback is the pre-existing default for a stated-window-free grant
+            // and is never the value a windowless Gideon-Jura-class clause keeps.
+            duration: duration.unwrap_or(Duration::UntilEndOfTurn),
         },
         // CR 701.15a: Goad target creature. Subject injection fills target from parsed text.
         ImperativeFamilyAst::Goad => Effect::Goad {
@@ -13729,11 +13761,16 @@ fn try_parse_adapt(lower: &str) -> Option<Effect> {
     Some(Effect::Adapt { count })
 }
 
-/// CR 508.1d: Parse "attacks/attack [player] this turn/combat if able" requirements.
+/// CR 508.1d: Parse "attacks/attack [defender] [window] if able" requirements.
 ///
 /// Bare forms ("attacks this turn if able") emit a temporary `MustAttack`.
-/// Player-bound "attacks you ..." forms emit `ForceAttack`, whose resolver binds
-/// "you" to the resolving ability controller and grants `MustAttackPlayer`.
+/// Defender-bound forms ("attacks you …", "attack ~ if able") emit
+/// `ForceAttack`, whose resolver binds the referent and grants
+/// `MustAttackDefender`.
+///
+/// CR 506.3 makes the defender axis one category — "a player, a planeswalker, or
+/// a battle" — so the player arms and the source-permanent arm are alternatives
+/// on a single `alt()`, not separate parsers.
 pub(super) fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
     let trimmed = lower.trim_end_matches('.');
 
@@ -13778,7 +13815,7 @@ pub(super) fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAs
         }));
     }
 
-    let targeted: Result<(&str, (TargetFilter, Duration)), nom::Err<OracleError<'_>>> = (
+    let targeted: DefenderBoundAttackParse<'_> = (
         alt((tag("attacks"), tag("attack"))),
         preceded(
             tag(" "),
@@ -13791,6 +13828,12 @@ pub(super) fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAs
             // (read from chosen_players) is the correct reference, not the
             // durable SourceChosenPlayer. The opponent choice is the single
             // preceding choice in every card of this class, so index 0.
+            // CR 506.3: one defender axis covering both permitted referent
+            // kinds. The player arms bind a player; the `~` arm binds the
+            // ability's own source permanent (Gideon Jura: "creatures that
+            // player controls attack Gideon Jura if able", where the printed
+            // name has already been normalized to `~`). `force_attack::resolve`
+            // is the single place that classifies which kind a filter denotes.
             alt((
                 value(TargetFilter::Controller, tag("you")),
                 value(
@@ -13799,31 +13842,38 @@ pub(super) fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAs
                     ),
                     tag("that player"),
                 ),
+                value(TargetFilter::SelfRef, tag("~")),
             )),
         ),
+        // CR 508.1d + CR 611.2a: the window axis. `None` is the WINDOWLESS form
+        // ("attack ~ if able"), whose span is stated by an enclosing clause
+        // instead — Gideon Jura's leading "During target opponent's next turn,".
+        // The enclosing duration reaches this effect through the clause
+        // machinery, so a windowless match must not invent one here.
         preceded(
             tag(" "),
             alt((
-                value(Duration::UntilEndOfTurn, tag("this turn if able")),
+                value(Some(Duration::UntilEndOfTurn), tag("this turn if able")),
                 value(
-                    Duration::UntilEndOfCombat,
+                    Some(Duration::UntilEndOfCombat),
                     alt((
                         tag("this combat if able"),
                         tag("that combat if able"),
                         tag("each combat if able"),
                     )),
                 ),
+                value(None, tag("if able")),
             )),
         ),
     )
-        .map(|(_, required_player, duration)| (required_player, duration))
+        .map(|(_, required_defender, duration)| (required_defender, duration))
         .parse(trimmed);
 
-    if let Ok((rest, (required_player, duration))) = targeted {
+    if let Ok((rest, (required_defender, duration))) = targeted {
         if rest.is_empty() {
             return Some(ImperativeFamilyAst::ForceAttack {
                 duration,
-                required_player,
+                required_defender,
             });
         }
     }
@@ -19416,10 +19466,10 @@ mod tests {
         match result.unwrap() {
             ImperativeFamilyAst::ForceAttack {
                 duration,
-                required_player,
+                required_defender,
             } => {
-                assert_eq!(duration, Duration::UntilEndOfCombat);
-                assert_eq!(required_player, TargetFilter::Controller);
+                assert_eq!(duration, Some(Duration::UntilEndOfCombat));
+                assert_eq!(required_defender, TargetFilter::Controller);
             }
             other => panic!("Expected ForceAttack, got {other:?}"),
         }
@@ -19435,13 +19485,13 @@ mod tests {
         match result {
             ImperativeFamilyAst::ForceAttack {
                 duration,
-                required_player,
+                required_defender,
             } => {
-                assert_eq!(duration, Duration::UntilEndOfCombat);
+                assert_eq!(duration, Some(Duration::UntilEndOfCombat));
                 assert_eq!(
-                    required_player.chosen_player_index(),
+                    required_defender.chosen_player_index(),
                     Some(0),
-                    "that player must reference the chosen player at index 0, got {required_player:?}"
+                    "that player must reference the chosen player at index 0, got {required_defender:?}"
                 );
             }
             other => panic!("Expected ForceAttack, got {other:?}"),
@@ -19489,18 +19539,23 @@ mod tests {
         // resolution-scoped chosen opponent (chosen_players[0]).
         let Effect::ForceAttack {
             target,
-            required_player,
+            required_defender,
             duration,
+            scope,
         } = &*sub.effect
         else {
             panic!("sub-ability must be a ForceAttack, got {:?}", sub.effect);
         };
         assert_eq!(*target, TargetFilter::SelfRef);
         assert_eq!(*duration, Duration::UntilEndOfCombat);
+        // CR 115.1: `~` names ONE object, so this subject is not a broadcast
+        // population — the scope must stay `Single` (only Gideon-Jura-class
+        // "creatures that player controls" subjects reach `All`).
+        assert_eq!(*scope, EffectScope::Single);
         assert_eq!(
-            required_player.chosen_player_index(),
+            required_defender.chosen_player_index(),
             Some(0),
-            "must force attacking the chosen player, got {required_player:?}"
+            "must force attacking the chosen player, got {required_defender:?}"
         );
     }
 

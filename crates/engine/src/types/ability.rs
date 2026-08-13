@@ -4052,6 +4052,28 @@ pub enum ControllerRef {
     /// player (Siren's Call, Maddening Imp), cast/activated only during an
     /// opponent's turn.
     ActivePlayer,
+    /// CR 109.4 + CR 611.2c: a player id SNAPSHOTTED at resolution — the lowered
+    /// form the dynamic siblings above collapse to once the resolving ability is
+    /// gone. Never produced by the parser; produced only by resolvers that
+    /// install a durable continuous effect whose *object set* must stay dynamic
+    /// while its *player reference* must not.
+    ///
+    /// Gideon Jura's "+2: During target opponent's next turn, creatures that
+    /// player controls attack Gideon Jura if able" is the canonical member. Per
+    /// CR 611.2c the requirement modifies no characteristics and changes no
+    /// controller, so the affected creature set is re-derived every
+    /// declare-attackers step (official ruling: the ability "doesn't lock in what
+    /// it applies to … includes creatures that come under that player's control
+    /// after the ability has resolved"). The *player*, by contrast, is fixed when
+    /// the ability resolves — and `ControllerRef::TargetPlayer` resolves by
+    /// reading `ability.targets`, which no longer exists at layer-evaluation
+    /// time, so `force_attack::resolve` lowers it to this arm on install.
+    ///
+    /// Mirrors the identical lower-at-resolution contract already documented on
+    /// [`RestrictionPlayerScope::SpecificPlayer`] and [`TargetFilter::SpecificPlayer`].
+    SpecificPlayer {
+        id: PlayerId,
+    },
 }
 
 /// CR 301 / CR 303: Kinds of attachments to permanents.
@@ -5667,6 +5689,28 @@ pub enum PlayerScope {
     /// `Duration::UntilNextStepOf` — never from a value/quantity/player-selection
     /// position.
     AnyTurn,
+    /// CR 109.4 + CR 611.2 + CR 514.2: a player id SNAPSHOTTED at resolution —
+    /// the player-scalar-axis analogue of [`ControllerRef::SpecificPlayer`] and
+    /// [`RestrictionPlayerScope::SpecificPlayer`], and the lowered form the
+    /// dynamic siblings above collapse to once the resolving ability is gone.
+    ///
+    /// DURATION-TIMING-ONLY, like [`AnyTurn`](Self::AnyTurn): never produced by
+    /// the parser and never read from a value/quantity/player-selection
+    /// position. It is constructed solely by resolvers that install a durational
+    /// continuous effect whose expiry keys on a player OTHER than the effect's
+    /// controller.
+    ///
+    /// Gideon Jura's "+2: During target opponent's next turn, …" is the
+    /// canonical member: the parser emits
+    /// `UntilEndOfNextTurnOf { player: PlayerScope::Target }`, and
+    /// `force_attack::resolve` lowers `Target` to this arm. Without the
+    /// lowering, the prune in `layers.rs::prune_until_next_turn_effects` — which
+    /// arms `UntilEndOfNextTurnOf` by comparing the ACTIVE player against the
+    /// effect's own `controller` — could never see the targeted opponent, and
+    /// the requirement would never arm nor expire. Overloading the effect's
+    /// `controller` field with the target instead would break CR 109.5's meaning
+    /// of "you" for every other consumer of that field.
+    SpecificPlayer { id: PlayerId },
 }
 
 /// Scope selector for object-axis quantities (Round Π-5). Picks WHICH object
@@ -12565,14 +12609,44 @@ pub enum Effect {
         #[serde(default = "default_duration_until_end_of_turn")]
         duration: Duration,
     },
-    /// CR 508.1d: Target creature must attack the required player this turn/combat if able.
+    /// CR 508.1d + CR 506.3: The creatures matching `target` must attack the
+    /// required defender this turn/combat if able.
+    ///
+    /// `required_defender` is a `TargetFilter` because CR 506.3's defender
+    /// category ("a player, a planeswalker, or a battle") is already spanned by
+    /// that type — no second reference vocabulary is introduced. A filter that
+    /// denotes a PLAYER (`Controller`, a `ChosenPlayer` ref) grafts
+    /// `RequiredDefender::Fixed`; one that denotes an OBJECT (`SelfRef` — Gideon
+    /// Jura's "attack Gideon Jura if able") grafts `RequiredDefender::Permanent`.
+    /// `force_attack::resolve` is the single place that classifies it.
+    ///
+    /// `serde(alias)`: pre-widening payloads named this field `required_defender`.
+    /// `scope` is the single-vs-mass axis, exactly as on [`Effect::Transform`]
+    /// and [`Effect::SetTapState`] — parameterized rather than split into a
+    /// sibling `ForceAttackAll`. `Single` (the default, and every pre-Gideon-Jura
+    /// card) makes `target` a SELECTABLE target filter that surfaces a slot
+    /// ("Target creature attacks you this combat if able"). `All` makes it a
+    /// non-targeting POPULATION filter enumerated at resolution — Gideon Jura's
+    /// "creatures that player controls", which per CR 115.1 targets only the
+    /// opponent and never the creatures. `target_filter()` is `None` under `All`,
+    /// so no creature slot is built; the companion PLAYER slot still surfaces via
+    /// `mass_all_target_filter`.
+    ///
+    /// `serde(alias)`: pre-widening payloads named `required_defender`
+    /// `required_player`; `scope` defaults to `Single`, which is what every such
+    /// payload meant.
     ForceAttack {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
-        #[serde(default = "default_target_filter_controller")]
-        required_player: TargetFilter,
+        #[serde(
+            default = "default_target_filter_controller",
+            alias = "required_player"
+        )]
+        required_defender: TargetFilter,
         #[serde(default = "default_duration_until_end_of_turn")]
         duration: Duration,
+        #[serde(default = "default_effect_scope_single")]
+        scope: EffectScope,
     },
     /// CR 719.2: Solve the source Case — it becomes solved.
     SolveCase,
@@ -15340,7 +15414,6 @@ impl Effect {
             | Effect::PhaseOut { target, .. }
             | Effect::PhaseIn { target, .. }
             | Effect::ForceBlock { target, .. }
-            | Effect::ForceAttack { target, .. }
             | Effect::BecomePrepared { target, .. }
             | Effect::BecomeUnprepared { target, .. }
             | Effect::BecomeSaddled { target, .. }
@@ -15560,6 +15633,23 @@ impl Effect {
                 ..
             } => Some(target),
             Effect::Transform {
+                scope: EffectScope::All,
+                ..
+            } => None,
+
+            // CR 508.1d + CR 115.1: `ForceAttack` exposes its target only for the
+            // single-creature scope ("Target creature attacks you this combat if
+            // able"). The `All` scope is a non-targeting population enumerated at
+            // resolution — Gideon Jura's "creatures that player controls", whose
+            // only target is the opponent — so, like `Transform`/`SetTapState`
+            // above, its `target_filter()` is `None` and no creature slot or
+            // prompt is built.
+            Effect::ForceAttack {
+                scope: EffectScope::Single,
+                target,
+                ..
+            } => Some(target),
+            Effect::ForceAttack {
                 scope: EffectScope::All,
                 ..
             } => None,

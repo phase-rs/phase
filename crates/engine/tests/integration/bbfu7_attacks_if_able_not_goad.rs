@@ -845,7 +845,7 @@ fn grafted_must_attack_half_reaches_the_combat_authority() {
     );
 
     let constraints = attacker_constraints_for_active_player(runner.state(), &valid);
-    let Some(CombatRequirement::MustAttack { players, sources }) = constraints.get(&ox) else {
+    let Some(CombatRequirement::MustAttack { defenders, sources }) = constraints.get(&ox) else {
         panic!(
             "expected a MustAttack requirement for the bound creature, got {:?}",
             constraints.get(&ox)
@@ -854,11 +854,11 @@ fn grafted_must_attack_half_reaches_the_combat_authority() {
     // Exclude the other two `sources` contributors, each by the thing that
     // actually feeds it.
     //
-    // (a) `MustAttackPlayer`: `players` and the carrier list are built from the
-    //     same filtered directive iterator, so empty players ⟺ no carriers.
+    // (a) `MustAttackDefender`: `defenders` and the carrier list are built from
+    //     the same filtered directive iterator, so empty defenders ⟺ no carriers.
     assert!(
-        players.is_empty(),
-        "no MustAttackPlayer directive exists in this fixture, got {players:?}"
+        defenders.is_empty(),
+        "no MustAttackDefender directive exists in this fixture, got {defenders:?}"
     );
     // (b) `StaticMode::Goaded`: fed by `goad_static_hits_for_creature`, which
     //     supplies the CARRIER's id — so it could only yield `ox` if `ox` itself

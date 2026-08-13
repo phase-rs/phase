@@ -21854,8 +21854,11 @@ fn force_attack_you_this_combat_targets_creature() {
             e,
             Effect::ForceAttack {
                 target: TargetFilter::Typed(_),
-                required_player: TargetFilter::Controller,
+                required_defender: TargetFilter::Controller,
                 duration: Duration::UntilEndOfCombat,
+                // CR 115.1: "TARGET creature" declares a target slot, so the
+                // subject is a single chosen object, not a broadcast population.
+                scope: EffectScope::Single,
             }
         ),
         "Expected ForceAttack with typed target and controller requirement, got {:?}",

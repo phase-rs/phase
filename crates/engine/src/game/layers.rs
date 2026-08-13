@@ -660,13 +660,22 @@ pub fn prune_until_next_turn_effects(state: &mut GameState, active_player: Playe
     // turn's own cleanup because that turn's untap step already passed before
     // the effect was created, so this is the controller's *next* turn.
     for e in state.transient_continuous_effects.iter_mut() {
-        if matches!(
-            e.duration,
+        // CR 514.2 + CR 109.4: the player whose next turn ends this effect. The
+        // `Controller` scope reads the effect's own controller ("until the end of
+        // YOUR next turn"); `SpecificPlayer` is the resolution-time snapshot a
+        // resolver installs when the window belongs to someone else — Gideon
+        // Jura's "During target opponent's next turn". Both arm identically once
+        // that player becomes the active player.
+        let armed_for = match e.duration {
             Duration::UntilEndOfNextTurnOf {
-                player: PlayerScope::Controller
-            }
-        ) && e.controller == active_player
-        {
+                player: PlayerScope::Controller,
+            } => Some(e.controller),
+            Duration::UntilEndOfNextTurnOf {
+                player: PlayerScope::SpecificPlayer { id },
+            } => Some(id),
+            _ => None,
+        };
+        if armed_for == Some(active_player) {
             e.duration = Duration::UntilEndOfTurn;
         }
     }
@@ -6811,7 +6820,7 @@ fn static_mode_needs_source_controller_anchor(mode: &crate::types::statics::Stat
 /// match arm when a new consumer needs another mode's directing source.
 fn static_mode_carries_directing_source(mode: &crate::types::statics::StaticMode) -> bool {
     use crate::types::statics::StaticMode;
-    matches!(mode, StaticMode::MustAttackPlayer { .. })
+    matches!(mode, StaticMode::MustAttackDefender { .. })
 }
 
 /// CR 109.5: True when a `TargetFilter` constrains the controller of matched

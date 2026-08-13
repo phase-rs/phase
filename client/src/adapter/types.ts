@@ -331,7 +331,10 @@ export interface MeldSelection {
 // engine surfaces on the declare-attackers/blockers waiting payloads for
 // display-only badges + Confirm gating. `#[serde(tag = "kind")]` in the engine.
 export type CombatRequirement =
-  | { kind: "MustAttack"; players: PlayerId[]; sources?: ObjectId[] }
+  // CR 506.3: `defenders` spans the whole defender category — players,
+  // planeswalkers, and battles — so a planeswalker-directed lure (Gideon Jura's
+  // "+2") surfaces the same way a player-directed one does.
+  | { kind: "MustAttack"; defenders: AttackTarget[]; sources?: ObjectId[] }
   | { kind: "MustBlock"; sources?: ObjectId[]; attackers?: ObjectId[] }
   | { kind: "CantAttack"; sources?: ObjectId[] }
   | { kind: "CantBlock"; sources?: ObjectId[] };

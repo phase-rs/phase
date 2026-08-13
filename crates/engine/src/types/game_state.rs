@@ -26419,8 +26419,8 @@ mod tests {
             Zone::Battlefield,
         );
         object.static_definitions.push(
-            StaticDefinition::new(StaticMode::MustAttackPlayer {
-                player: PlayerId(1).into(),
+            StaticDefinition::new(StaticMode::MustAttackDefender {
+                defender: PlayerId(1).into(),
             })
             .affected(TargetFilter::SelfRef)
             .source_object(ObjectId(800)),
@@ -26434,8 +26434,8 @@ mod tests {
         b.objects
             .get_mut(&ObjectId(500))
             .unwrap()
-            .static_definitions = vec![StaticDefinition::new(StaticMode::MustAttackPlayer {
-            player: PlayerId(1).into(),
+            .static_definitions = vec![StaticDefinition::new(StaticMode::MustAttackDefender {
+            defender: PlayerId(1).into(),
         })
         .affected(TargetFilter::SelfRef)
         .source_object(ObjectId(801))]

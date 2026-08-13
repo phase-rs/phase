@@ -2529,8 +2529,8 @@ fn parse_forced_attack_defender_static_body(text: &str) -> Option<StaticDefiniti
         nom_primitives::scan_preceded(&lower, parse_attacks_required_defender_nom)?;
     let subject = text[..subject_lower.len()].trim();
     let affected = parse_rule_static_subject_filter(subject)?;
-    let mut def = StaticDefinition::new(StaticMode::MustAttackPlayer {
-        player: RequiredDefender::Matching { filter },
+    let mut def = StaticDefinition::new(StaticMode::MustAttackDefender {
+        defender: RequiredDefender::Matching { filter },
     })
     .affected(affected)
     .description(text.to_string());

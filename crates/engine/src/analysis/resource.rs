@@ -4030,7 +4030,7 @@ fn static_mode_references_growing_class(mode: &crate::types::statics::StaticMode
         | StaticMode::CantLoseLife
         | StaticMode::PlayerProtection(..)
         | StaticMode::MustAttack
-        | StaticMode::MustAttackPlayer { .. }
+        | StaticMode::MustAttackDefender { .. }
         | StaticMode::MustBlock
         | StaticMode::MustBlockAttacker { .. }
         | StaticMode::CantDraw { .. }

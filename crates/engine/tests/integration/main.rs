@@ -248,6 +248,7 @@ mod gemstone_mine_depletion_sacrifice_6507;
 mod gev_scaled_scorch_enter_counters;
 mod giada_angel_counters;
 mod giant_ox_crew_toughness;
+mod gideon_jura_forced_attack_planeswalker;
 mod gideon_trials_emblem;
 mod gift_delivery_draw_sequence_migration;
 mod gift_recipient_phased_out_opponent;

@@ -1,14 +1,138 @@
 use super::resolve_player_for_context_ref;
 use crate::game::targeting::resolved_object_ids_for_filter;
 use crate::types::ability::{
-    ContinuousModification, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter,
+    ContinuousModification, ControllerRef, Duration, Effect, EffectError, EffectKind, EffectScope,
+    PlayerScope, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::identifiers::ObjectIncarnationRef;
 use crate::types::statics::{RequiredDefender, StaticMode};
 
-/// CR 508.1d: Force attack — the target creature must attack the required player
-/// this turn/combat if able.
+/// CR 506.3 + CR 611.2: Classify the `required_defender` filter and snapshot it
+/// into the durable [`RequiredDefender`] combat enforcement reads.
+///
+/// A filter naming an OBJECT lowers to `Permanent` (pinned by incarnation — CR
+/// 400.7, so a defender that leaves and re-enters does not inherit a requirement
+/// aimed at the old object); every other filter is a player reference and lowers
+/// to `Fixed` via the shared context-ref resolver. `SelfRef` is the only object
+/// arm a printed card reaches today (Gideon Jura's "attack Gideon Jura if
+/// able"), but the classification is by REFERENT KIND rather than by that one
+/// filter, so a future "attacks target planeswalker if able" needs no new
+/// branch.
+///
+/// Returns `None` when an object referent names no live object, so the caller
+/// grafts nothing rather than a requirement aimed at a vanished defender.
+fn snapshot_required_defender(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> Option<RequiredDefender> {
+    if !filter_denotes_object(filter) {
+        return Some(RequiredDefender::Fixed {
+            player: resolve_player_for_context_ref(state, ability, filter),
+        });
+    }
+    let defender_id = resolved_object_ids_for_filter(state, ability, filter)
+        .into_iter()
+        .next()?;
+    let obj = state.objects.get(&defender_id)?;
+    Some(RequiredDefender::Permanent {
+        permanent: ObjectIncarnationRef::from_object(obj),
+    })
+}
+
+/// CR 506.3: whether `filter` denotes an OBJECT defender rather than a player.
+/// An explicit allow-list, never a catch-all: a filter whose referent kind is
+/// unclear keeps the pre-existing player reading, which is the conservative
+/// direction — every card using this effect before Gideon Jura named a player.
+fn filter_denotes_object(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::SelfRef
+            | TargetFilter::SpecificObject { .. }
+            | TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetSlot { .. }
+    )
+}
+
+/// CR 611.2c: For a BROADCAST subject ("creatures that player controls") return
+/// the affected filter to install INTACT, with its player reference lowered to a
+/// resolution-time snapshot. Returns `None` for a chosen-target subject ("target
+/// creature attacks you this combat if able"), which keeps the pre-existing
+/// per-object `SpecificObject` graft — CR 611.2c's dynamic-population concern
+/// does not arise when the effect names specific objects.
+///
+/// Gideon Jura's official ruling is the reason the broadcast form cannot freeze
+/// its set: the "+2" "doesn't lock in what it applies to … whatever creatures
+/// the targeted opponent controls during the declare attackers step of their
+/// next turn must attack Gideon Jura if able. This includes creatures that come
+/// under that player's control after the ability has resolved."
+///
+/// Only `ControllerRef::TargetPlayer` / `TargetOpponent` need lowering:
+/// `ControllerRef::You` / `Opponent` are resolved by `layers.rs` against the
+/// continuous effect's own snapshotted `controller` (the Kardur path), and no
+/// other controller ref reaches a broadcast force-attack subject today.
+fn lower_dynamic_affected(
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+    scope: EffectScope,
+) -> Option<TargetFilter> {
+    // CR 115.1: the scope is the authority for which form this is — a `Single`
+    // subject is a chosen target no matter what filter shape it happens to
+    // carry, so it must never take the population path.
+    if scope != EffectScope::All {
+        return None;
+    }
+    let TargetFilter::Typed(typed) = target else {
+        return None;
+    };
+    let mut typed = typed.clone();
+    if matches!(
+        typed.controller,
+        Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent)
+    ) {
+        // CR 109.4 + CR 611.2: "that player" is fixed when the ability resolves.
+        // `ability.targets` no longer exists when the layer pass re-derives the
+        // affected set, so bind the id now.
+        let id = ability.targets.iter().find_map(|t| match t {
+            TargetRef::Player(pid) => Some(*pid),
+            TargetRef::Object(_) => None,
+        })?;
+        typed.controller = Some(ControllerRef::SpecificPlayer { id });
+    }
+    Some(TargetFilter::Typed(typed))
+}
+
+/// CR 611.2 + CR 514.2: Lower a target-scoped duration to a resolution-time
+/// snapshot, so the installed continuous effect's expiry still names a concrete
+/// player after the resolving ability (and its `targets`) is gone.
+///
+/// `PlayerScope::Target` is the only scope needing this: `Controller` is already
+/// carried by the continuous effect's own `controller` field, which
+/// `layers.rs::prune_until_next_turn_effects` reads directly. A duration whose
+/// target cannot be resolved is left untouched rather than guessed at — an
+/// unarmable expiry is a visible bug, a silently wrong player is not.
+fn lower_target_scoped_duration(ability: &ResolvedAbility, duration: Duration) -> Duration {
+    let Duration::UntilEndOfNextTurnOf {
+        player: PlayerScope::Target,
+    } = duration
+    else {
+        return duration;
+    };
+    let Some(id) = ability.targets.iter().find_map(|t| match t {
+        TargetRef::Player(pid) => Some(*pid),
+        TargetRef::Object(_) => None,
+    }) else {
+        return duration;
+    };
+    Duration::UntilEndOfNextTurnOf {
+        player: PlayerScope::SpecificPlayer { id },
+    }
+}
+
+/// CR 508.1d: Force attack — the creatures matching `target` must attack the
+/// required defender this turn/combat if able.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -16,32 +140,71 @@ pub fn resolve(
 ) -> Result<(), EffectError> {
     let Effect::ForceAttack {
         target,
-        required_player,
+        required_defender,
         duration,
+        scope,
     } = &ability.effect
     else {
         return Ok(());
     };
 
-    let player = resolve_player_for_context_ref(state, ability, required_player);
-    for obj_id in resolved_object_ids_for_filter(state, ability, target) {
-        if !state.objects.contains_key(&obj_id) {
-            continue;
-        }
+    // CR 611.2a: "lasts as long as stated by the spell or ability creating it."
+    // A stated duration written as a leading CLAUSE rather than inside the
+    // predicate — Gideon Jura's "During target opponent's next turn, creatures
+    // that player controls attack ~ if able" — is stamped by the parser onto
+    // `ability.duration`, so it must win over the effect's own field. Same
+    // precedence the `GenericEffect` arm of `effects/effect.rs::resolve` applies,
+    // for the same reason.
+    let duration = ability.duration.clone().unwrap_or_else(|| duration.clone());
 
-        state.add_transient_continuous_effect(
-            ability.source_id,
-            ability.controller,
-            duration.clone(),
-            TargetFilter::SpecificObject { id: obj_id },
-            vec![ContinuousModification::AddStaticMode {
-                // CR 611.2: the required defender is snapshotted at resolution.
-                mode: StaticMode::MustAttackPlayer {
-                    player: RequiredDefender::Fixed { player },
-                },
-            }],
-            None,
-        );
+    // CR 611.2 + CR 109.4: "during TARGET opponent's next turn" is scoped to the
+    // player this ability targeted. `PlayerScope::Target` resolves by reading
+    // `ability.targets`, which no longer exists once the continuous effect is
+    // installed and the ability is gone — so snapshot it now, exactly as the
+    // affected filter's controller ref is snapshotted below.
+    let duration = lower_target_scoped_duration(ability, duration);
+
+    let resolved = snapshot_required_defender(state, ability, required_defender);
+
+    if let Some(defender) = resolved {
+        // CR 611.2c: a broadcast subject keeps ONE continuous effect carrying the
+        // live filter, so the affected creature set is re-derived every
+        // declare-attackers step. `register_transient_effect` routes
+        // `MustAttackAwayFromSource` grants down the same path for the same
+        // reason (Kardur, Maximum Carnage); this resolver installs directly, so
+        // it makes the same call here.
+        if let Some(affected) = lower_dynamic_affected(ability, target, *scope) {
+            state.add_transient_continuous_effect(
+                ability.source_id,
+                ability.controller,
+                duration.clone(),
+                affected,
+                vec![ContinuousModification::AddStaticMode {
+                    mode: StaticMode::MustAttackDefender { defender },
+                }],
+                None,
+            );
+        } else {
+            for obj_id in resolved_object_ids_for_filter(state, ability, target) {
+                if !state.objects.contains_key(&obj_id) {
+                    continue;
+                }
+
+                state.add_transient_continuous_effect(
+                    ability.source_id,
+                    ability.controller,
+                    duration.clone(),
+                    TargetFilter::SpecificObject { id: obj_id },
+                    vec![ContinuousModification::AddStaticMode {
+                        // CR 611.2: the required defender is snapshotted at resolution.
+                        mode: StaticMode::MustAttackDefender {
+                            defender: defender.clone(),
+                        },
+                    }],
+                    None,
+                );
+            }
+        }
     }
 
     events.push(GameEvent::EffectResolved {
@@ -70,8 +233,9 @@ mod tests {
         ResolvedAbility::new(
             Effect::ForceAttack {
                 target: TargetFilter::Any,
-                required_player: TargetFilter::Controller,
+                required_defender: TargetFilter::Controller,
                 duration,
+                scope: EffectScope::Single,
             },
             vec![TargetRef::Object(target)],
             source,
@@ -113,8 +277,8 @@ mod tests {
             matches!(
                 m,
                 ContinuousModification::AddStaticMode {
-                    mode: StaticMode::MustAttackPlayer {
-                        player: RequiredDefender::Fixed { player },
+                    mode: StaticMode::MustAttackDefender {
+                        defender: RequiredDefender::Fixed { player },
                     },
                 } if *player == PlayerId(0)
             )
@@ -142,10 +306,11 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::ForceAttack {
                 target: TargetFilter::SelfRef,
-                required_player: TargetFilter::Typed(
+                required_defender: TargetFilter::Typed(
                     TypedFilter::default().controller(ControllerRef::ChosenPlayer { index: 0 }),
                 ),
                 duration: Duration::UntilEndOfCombat,
+                scope: EffectScope::Single,
             },
             vec![],
             source,
@@ -166,8 +331,8 @@ mod tests {
             matches!(
                 m,
                 ContinuousModification::AddStaticMode {
-                    mode: StaticMode::MustAttackPlayer {
-                        player: RequiredDefender::Fixed { player },
+                    mode: StaticMode::MustAttackDefender {
+                        defender: RequiredDefender::Fixed { player },
                     },
                 } if *player == PlayerId(1)
             )

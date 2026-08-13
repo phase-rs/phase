@@ -260,6 +260,8 @@ fn find_legal_targets_with_context(
                     // player and is a valid candidate for an active-player-scoped
                     // target filter (read live).
                     Some(ControllerRef::ActivePlayer) => player.id == state.active_player,
+                    // CR 109.4 + CR 611.2: a snapshotted id, compared directly.
+                    Some(ControllerRef::SpecificPlayer { id }) => player.id == *id,
                     None => true,
                 };
                 if include {

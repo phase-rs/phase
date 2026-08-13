@@ -630,6 +630,8 @@ fn static_affects_player(
             // CR 102.1: this matcher has no `GameState` to read
             // `active_player` from. Fail closed (mirrors the siblings above).
             Some(ControllerRef::ActivePlayer) => false,
+            // CR 109.4 + CR 611.2: a snapshotted id IS resolvable here.
+            Some(ControllerRef::SpecificPlayer { id }) => *id == player_id,
             None => true,
         },
         Some(TargetFilter::Player) => true,

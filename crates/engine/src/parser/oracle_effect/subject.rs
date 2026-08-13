@@ -17,7 +17,7 @@ use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_ir::ast::*;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChosenSubtypeKind, ColorChangeMode, ContinuousModification,
-    ControllerRef, Duration, EachDamageRecipient, Effect, FilterProp, MultiTargetSpec,
+    ControllerRef, Duration, EachDamageRecipient, Effect, EffectScope, FilterProp, MultiTargetSpec,
     PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, StaticCondition,
     StaticDefinition, TargetFilter, TypedFilter,
 };
@@ -1819,10 +1819,70 @@ fn try_parse_subject_restriction_clause(
                 unless_pay: None,
             });
         }
+        // CR 508.1d + CR 506.3 + CR 611.2c: the defender-bound `ForceAttack` form
+        // with a BROADCAST subject — "creatures that player controls attack ~ if
+        // able" (Gideon Jura).
+        //
+        // ONLY the broadcast form is captured here. A chosen-target subject
+        // ("Target creature attacks you this combat if able") keeps its existing
+        // route through the imperative path's own target injection, which binds
+        // the declared target rather than the subject filter; capturing it here
+        // would rewrite that target to `ParentTarget` and change what the
+        // pre-existing lure cards resolve against. The `else` below re-runs the
+        // recognizer for the bare `MustAttack` form, exactly as before.
+        //
+        // Binding the subject as the effect's `target` filter — rather than
+        // freezing it to the objects matching it right now — is what keeps the
+        // affected set dynamic per CR 611.2c; `force_attack::resolve` installs
+        // the filter intact. Gideon Jura's ruling requires exactly that: the
+        // "+2" "doesn't lock in what it applies to."
+        if let Some(ImperativeFamilyAst::ForceAttack {
+            duration,
+            required_defender,
+        }) = imperative::try_parse_attack_if_able(&predicate)
+        {
+            // CR 115.1: a genuine broadcast POPULATION is enumerated at
+            // resolution and never targeted, so `EffectScope::All` keeps
+            // `collect_target_slots` from building a spurious creature slot —
+            // which would both over-target the ability and make it fizzle when
+            // that creature became an illegal target.
+            //
+            // A subject that names ONE specific object is NOT this form, whether
+            // it was declared as a target or is a self/inherited reference
+            // (`~ attacks that player this combat if able` — Knight Rampager).
+            // `is_broadcast_population_filter` is the single authority for that
+            // distinction; re-deriving it as "did a target get declared" would
+            // misclassify every `SelfRef` subject.
+            let broadcast = parse_subject_application(subject, ctx).filter(|application| {
+                application.target.is_none()
+                    && !application.inherits_parent
+                    && super::is_broadcast_population_filter(&static_affected_for_application(
+                        application,
+                    ))
+            });
+            if let Some(application) = broadcast {
+                return Some(ParsedEffectClause {
+                    effect: Effect::ForceAttack {
+                        target: static_affected_for_application(&application),
+                        required_defender,
+                        scope: EffectScope::All,
+                        // CR 611.2a: a windowless predicate states no span of its
+                        // own; the enclosing clause's duration is applied by
+                        // `with_clause_duration` and arrives on `duration` below.
+                        duration: duration.clone().unwrap_or(Duration::UntilEndOfTurn),
+                    },
+                    distribute: None,
+                    multi_target: application.multi_target,
+                    duration,
+                    sub_ability: None,
+                    condition: None,
+                    optional: application.is_optional,
+                    unless_pay: None,
+                });
+            }
+        }
         // Classify via the existing recognizer. Only the bare GenericEffect form
-        // (MustAttack) is re-bound here; the player-bound `ForceAttack` form
-        // ("attacks you/that player …") has its own targeted handling and must
-        // NOT be captured.
+        // (MustAttack) is re-bound here.
         if let Some(ImperativeFamilyAst::GainKeyword(Effect::GenericEffect { duration, .. })) =
             imperative::try_parse_attack_if_able(&predicate)
         {
@@ -2591,7 +2651,15 @@ pub(super) fn parse_subject_application(
     .is_err()
     {
         let normalized = format!("all {noun_subject}");
-        let (filter, rest) = parse_target(&normalized);
+        // CR 109.4 + CR 608.2c: thread the parse context for the same reason the
+        // "target " arm above does — controller-suffix resolution inside
+        // `parse_target` needs the enclosing relative-player scope to bind a
+        // "that player controls" anaphor. A bare-plural subject takes that
+        // anaphor just as readily as a targeted one ("creatures that player
+        // controls attack ~ if able" — Gideon Jura); without `ctx` it silently
+        // fell back to `ControllerRef::You`, scoping the clause to the WRONG
+        // player's creatures.
+        let (filter, rest) = parse_target_with_ctx(&normalized, ctx);
         if rest.trim().is_empty() {
             let filter = if had_other {
                 add_another_property(filter)

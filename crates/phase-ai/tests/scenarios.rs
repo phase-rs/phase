@@ -1626,8 +1626,8 @@ fn ai_declare_attackers_completion_returns_apply_accepted_legal_action() {
         let mut scenario = GameScenario::new();
         let attacker = {
             let mut b = scenario.add_creature(P0, "Lured Bear", 2, 2);
-            b.with_static_definition(StaticDefinition::new(StaticMode::MustAttackPlayer {
-                player: P1.into(),
+            b.with_static_definition(StaticDefinition::new(StaticMode::MustAttackDefender {
+                defender: P1.into(),
             }));
             b.id()
         };

@@ -156,7 +156,7 @@ pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // CR 508.1d: MustAttackPlayer carries the `PlayerId` that must be
             // attacked (Alluring Siren). Enforced by direct match in combat.rs
             // declare-attackers validation.
-            | StaticMode::MustAttackPlayer { .. }
+            | StaticMode::MustAttackDefender { .. }
             // CR 509.1b: CantBeBlockedByMoreThan carries the blocker maximum
             // (Stalking Tiger). Enforced in combat.rs declare-blockers validation.
             | StaticMode::CantBeBlockedByMoreThan { .. }
@@ -890,6 +890,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     ControllerRef::EnchantedPlayer => "enchanted player's",
                     // CR 102.1: Display label for active-player controller scope.
                     ControllerRef::ActivePlayer => "the active player's",
+                    // CR 109.4 + CR 611.2: snapshotted controller scope.
+                    ControllerRef::SpecificPlayer { .. } => "that player's",
                 };
                 let zone_str = format!("{zone:?}").to_lowercase();
                 parts.push(format!(
@@ -1062,6 +1064,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ControllerRef::EnchantedPlayer => "enchanted player",
                 // CR 102.1: Display label for active-player controller scope.
                 ControllerRef::ActivePlayer => "the active player",
+                // CR 109.4 + CR 611.2: Display label for a snapshotted controller scope.
+                ControllerRef::SpecificPlayer { .. } => "that player",
             };
             parts.push(label.into());
         } else {
@@ -1137,6 +1141,8 @@ fn fmt_controller(ctrl: &ControllerRef) -> String {
         ControllerRef::EnchantedPlayer => "enchanted player controls",
         // CR 102.1: Display label for active-player controller scope.
         ControllerRef::ActivePlayer => "the active player controls",
+        // CR 109.4 + CR 611.2: Display label for a snapshotted controller scope.
+        ControllerRef::SpecificPlayer { .. } => "that player controls",
     }
     .into()
 }
@@ -1267,6 +1273,8 @@ fn fmt_player_scope(scope: &PlayerScope) -> String {
         PlayerScope::DefendingPlayer => "defending player".to_string(),
         PlayerScope::SourceChosenPlayer => "the chosen player".to_string(),
         PlayerScope::AnyTurn => "any turn".to_string(),
+        // CR 109.4 + CR 611.2: display label for a snapshotted duration scope.
+        PlayerScope::SpecificPlayer { .. } => "that player".to_string(),
         PlayerScope::ParentObjectTargetController => "parent target's controller".to_string(),
         PlayerScope::Opponent { aggregate } => {
             format!("{} of opponents", fmt_aggregate_function(*aggregate))
@@ -2418,7 +2426,15 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         | Effect::PhaseIn { target }
-        | Effect::ForceAttack { target, .. }
+        // CR 508.1d: single-scope ForceAttack reports its chosen `target`
+        // ("Target creature attacks you this combat if able"); the mass scope
+        // (Gideon Jura's "creatures that player controls") reports a `filter`
+        // below, since CR 115.1 makes that population a non-target.
+        | Effect::ForceAttack {
+            scope: EffectScope::Single,
+            target,
+            ..
+        }
         // CR 701.27a: single-scope Transform reports its `target` like other
         // single-target effects; mass Transform (scope:All) reports a `filter` below.
         | Effect::Transform {
@@ -2467,6 +2483,13 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         // CR 701.27a + CR 115.10a: mass Transform ("Transform all Humans") reports its
         // non-targeting population `filter`, like the other mass effects.
         | Effect::Transform {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
+        // CR 508.1d + CR 115.1: the mass forced-attack population (Gideon Jura's
+        // "creatures that player controls") is a `filter`, not a target.
+        | Effect::ForceAttack {
             scope: EffectScope::All,
             target,
             ..

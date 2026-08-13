@@ -5539,6 +5539,9 @@ fn replacement_active_player_matches(
         Some(ControllerRef::TriggeringPlayer) => false,
         Some(ControllerRef::EnchantedPlayer) => false,
         Some(ControllerRef::ActivePlayer) => false,
+        // CR 109.4 + CR 611.2: a snapshot id IS resolvable — the active player
+        // satisfies the requirement exactly when they are that player.
+        Some(ControllerRef::SpecificPlayer { id }) => state.active_player == id,
         None => true,
     }
 }
@@ -5677,6 +5680,10 @@ fn evaluate_replacement_condition(
                 // controller-relative role (You/Opponent); `ActivePlayer` is not
                 // one, and the parser does not emit it here. Fail closed.
                 Some(ControllerRef::ActivePlayer) => false,
+                // CR 109.4 + CR 611.2: the turn gate expects a controller-relative
+                // role (You/Opponent); a snapshot id is not one, and the parser
+                // never emits it here. Fail closed (mirrors ActivePlayer).
+                Some(ControllerRef::SpecificPlayer { .. }) => false,
                 None => true,
             };
             if !turn_ok {
@@ -5727,6 +5734,10 @@ fn evaluate_replacement_condition(
                 // controller-relative role (You/Opponent); `ActivePlayer` is not
                 // one, and the parser does not emit it here. Fail closed.
                 Some(ControllerRef::ActivePlayer) => false,
+                // CR 109.4 + CR 611.2: the turn gate expects a controller-relative
+                // role (You/Opponent); a snapshot id is not one, and the parser
+                // never emits it here. Fail closed (mirrors ActivePlayer).
+                Some(ControllerRef::SpecificPlayer { .. }) => false,
                 None => true,
             };
             if !turn_ok {
@@ -5908,6 +5919,7 @@ fn evaluate_replacement_condition(
                 // CR 102.1: no replacement condition scopes its event source to the
                 // active player here. Fail closed (mirrors the siblings above).
                 | ControllerRef::ActivePlayer => false,
+                | ControllerRef::SpecificPlayer { .. } => false,
             }
         }
         ReplacementCondition::EffectCausedDiscard => matches!(
@@ -6132,6 +6144,7 @@ fn apply_state_level_gates(
                 | crate::types::ability::ControllerRef::TriggeringPlayer
                 | crate::types::ability::ControllerRef::EnchantedPlayer
                 | crate::types::ability::ControllerRef::ActivePlayer => false,
+                crate::types::ability::ControllerRef::SpecificPlayer { .. } => false,
             };
             if !matches {
                 return false;
@@ -6546,6 +6559,7 @@ fn object_replacement_candidate_applies(
                 // CR 102.1: token-owner scope is not scoped to the active player
                 // here; fail closed (mirrors the siblings above).
                 | crate::types::ability::ControllerRef::ActivePlayer => false,
+                | crate::types::ability::ControllerRef::SpecificPlayer { .. } => false,
             };
             if !matches {
                 return false;

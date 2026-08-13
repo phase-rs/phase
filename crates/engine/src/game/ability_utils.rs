@@ -3436,7 +3436,16 @@ fn mass_all_target_filter(effect: &Effect) -> Option<&TargetFilter> {
             target,
             ..
         }
-        | Effect::DoublePTAll { target, .. } => Some(target),
+        | Effect::DoublePTAll { target, .. }
+        // CR 508.1d + CR 109.4: the mass forced-attack population (Gideon Jura's
+        // "creatures that player controls"). Listed here — not just excluded from
+        // `target_filter()` — so its `ControllerRef::TargetOpponent` still
+        // surfaces the COMPANION PLAYER slot the ability genuinely targets.
+        | Effect::ForceAttack {
+            scope: EffectScope::All,
+            target,
+            ..
+        } => Some(target),
         _ => None,
     }
 }
@@ -3984,6 +3993,8 @@ pub(crate) fn collect_player_targets(
                 // CR 102.1 + CR 109.4: the active player, resolvable directly
                 // (unlike the fail-closed DefendingPlayer arm above).
                 Some(ControllerRef::ActivePlayer) => p.id == state.active_player,
+                // CR 109.4 + CR 611.2: a snapshotted id, resolvable directly.
+                Some(ControllerRef::SpecificPlayer { id }) => p.id == *id,
                 None => true,
             })
             .map(|p| p.id)

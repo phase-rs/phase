@@ -95,15 +95,15 @@ fn galactus_requirement_surfaces_most_life_opponent() {
         "reach-guard: Galactus is a valid attacker (the requirement is non-vacuous)"
     );
     let constraints = attacker_constraints_for_active_player(runner.state(), &valid);
-    let Some(CombatRequirement::MustAttack { players, .. }) = constraints.get(&galactus) else {
+    let Some(CombatRequirement::MustAttack { defenders, .. }) = constraints.get(&galactus) else {
         panic!(
             "expected a MustAttack requirement for Galactus, got {:?}",
             constraints.get(&galactus)
         );
     };
     assert_eq!(
-        players,
-        &vec![P1],
+        defenders,
+        &vec![AttackTarget::Player(P1)],
         "the live-evaluated required defender is the single most-life opponent"
     );
 }

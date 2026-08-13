@@ -1983,6 +1983,11 @@ pub(crate) fn static_filter_matches(
                         crate::types::ability::ControllerRef::ActivePlayer => {
                             state.active_player == player_id
                         }
+                        // CR 109.4 + CR 611.2: a snapshotted id, resolvable
+                        // directly (mirrors the ActivePlayer arm above).
+                        crate::types::ability::ControllerRef::SpecificPlayer { id } => {
+                            *id == player_id
+                        }
                     };
                 }
                 return true;

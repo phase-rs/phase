@@ -1193,12 +1193,16 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
         }
         Effect::ForceAttack {
             target,
-            required_player,
+            required_defender,
             duration,
+            // A static single-vs-mass discriminant (CR 115.1) — no event, sibling,
+            // or projected-resource axis; the filters it selects between are
+            // classified below.
+            scope: _,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
-            acc = acc.or(scan_target_filter(required_player, target_ctx, mode));
+            acc = acc.or(scan_target_filter(required_defender, target_ctx, mode));
             acc = acc.or(scan_duration(duration, mode));
             acc
         }
@@ -4189,6 +4193,9 @@ fn scan_player_scope(x: &PlayerScope) -> Axes {
         // CR 513.1: turn-agnostic end-step deadline reached via the
         // `UntilNextStepOf` duration walk — a pure timing referent, no axes.
         PlayerScope::AnyTurn => Axes::NONE,
+        // CR 611.2: a frozen literal id — reads no event, sibling, or projected
+        // resource.
+        PlayerScope::SpecificPlayer { .. } => Axes::NONE,
     }
 }
 
@@ -4223,6 +4230,9 @@ fn scan_controller_ref(x: &ControllerRef) -> Axes {
         ControllerRef::EnchantedPlayer => Axes::NONE,
         // CR 102.1: a live read of `state.active_player` — no event/sibling axis.
         ControllerRef::ActivePlayer => Axes::NONE,
+        // CR 109.4 + CR 611.2: a frozen literal id — reads no event, sibling, or
+        // projected resource.
+        ControllerRef::SpecificPlayer { .. } => Axes::NONE,
     }
 }
 

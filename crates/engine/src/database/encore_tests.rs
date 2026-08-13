@@ -207,8 +207,8 @@ fn encore_activation_creates_attacking_haste_copy_per_opponent() {
         must_attack.modifications.iter().any(|m| matches!(
             m,
             ContinuousModification::AddStaticMode {
-                mode: StaticMode::MustAttackPlayer {
-                    player: RequiredDefender::Fixed { player },
+                mode: StaticMode::MustAttackDefender {
+                    defender: RequiredDefender::Fixed { player },
                 },
             } if *player == PlayerId(1)
         )),
@@ -308,8 +308,8 @@ fn encore_three_player_one_token_per_opponent_then_sacrificed_at_end_step() {
                 ce.modifications.iter().find_map(|m| match m {
                     ContinuousModification::AddStaticMode {
                         mode:
-                            StaticMode::MustAttackPlayer {
-                                player: RequiredDefender::Fixed { player },
+                            StaticMode::MustAttackDefender {
+                                defender: RequiredDefender::Fixed { player },
                             },
                     } => Some(*player),
                     _ => None,

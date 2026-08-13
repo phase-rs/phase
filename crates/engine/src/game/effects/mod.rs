@@ -5163,7 +5163,7 @@ fn affected_objects_from_events(
                 matches!(
                     sd.mode,
                     crate::types::statics::StaticMode::MustAttack
-                        | crate::types::statics::StaticMode::MustAttackPlayer { .. }
+                        | crate::types::statics::StaticMode::MustAttackDefender { .. }
                         | crate::types::statics::StaticMode::Continuous
                 )
             }) else {
@@ -12785,6 +12785,9 @@ fn resolve_grant_next_spell_ability(
         | PlayerScope::AllPlayers { .. }
         | PlayerScope::RecipientController
         | PlayerScope::AnyTurn
+        // CR 611.2 + CR 514.2: duration-timing-only, like `AnyTurn` — never reached
+        // from a value/quantity/player-selection position.
+        | PlayerScope::SpecificPlayer { .. }
         | PlayerScope::DefendingPlayer
         | PlayerScope::ParentObjectTargetController
         | PlayerScope::SourceChosenPlayer => ability.controller,

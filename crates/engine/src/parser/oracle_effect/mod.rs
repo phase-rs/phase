@@ -26557,7 +26557,7 @@ fn is_mass_coerce_static(effect: &Effect) -> bool {
     static_abilities.iter().any(|static_def| {
         matches!(
             static_def.mode,
-            StaticMode::MustAttack | StaticMode::MustAttackPlayer { .. }
+            StaticMode::MustAttack | StaticMode::MustAttackDefender { .. }
         ) && target
             .as_ref()
             .or(static_def.affected.as_ref())
@@ -29164,6 +29164,37 @@ pub(crate) fn parse_ability_ir(
     mode: ChainLoweringMode,
     ctx: &mut ParseContext,
 ) -> AbilityIr {
+    // CR 608.2c + CR 109.4: a leading "During target opponent's next turn, …"
+    // window DECLARES a player target, and that player is in scope for the whole
+    // ability body — so a "that player" anaphor anywhere in it refers to the
+    // window's target (Gideon Jura's "+2": "creatures that player controls").
+    //
+    // Published HERE, at the body entry point, rather than at any one
+    // leading-duration strip site: the body is re-entered by several recognizers
+    // (the subject path strips the same leading duration itself), so a per-strip
+    // hook would bind the anaphor only on whichever path happened to run first.
+    // Without it, `parse_controller_suffix`'s documented fallback binds "that
+    // player controls" to `ControllerRef::You` and the requirement lands on the
+    // ACTIVATING player's creatures instead of the targeted opponent's.
+    //
+    // `None` (no such window) leaves whatever scope the caller already supplied.
+    //
+    // The `starts_with` guard keeps this off the hot path: `parse_ability_ir`
+    // runs for every ability of every card, and only a line that literally opens
+    // with "during " can match, so the lowercase allocation is paid by that
+    // handful of lines instead of all ~30k cards' worth.
+    if text
+        .get(.."during ".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("during "))
+    {
+        if let Some(possessor) =
+            crate::parser::oracle_nom::duration::leading_next_turn_window_possessor(
+                text.to_lowercase().as_str(),
+            )
+        {
+            ctx.relative_player_scope = Some(possessor.controller_ref());
+        }
+    }
     // The conditional protection recognizer may mutate `ParseContext` before
     // declining. Preserve the two legacy entry-point semantics exactly: the
     // standalone bypass context was fresh and discarded on decline, while the

@@ -148,6 +148,55 @@ pub(crate) fn parse_anaphoric_target_ref(
     matches!(filter, TargetFilter::ParentTarget).then_some((filter, rest))
 }
 
+/// CR 608.2c + CR 109.5: Recognize a leading **source-anaphoric gendered
+/// pronoun** ("him" / "himself" / "her" / "herself") and bind it to
+/// [`TargetFilter::SelfRef`] — the ability's own source object.
+///
+/// Unlike the neuter "it" (which may anaphor an earlier clause's chosen target
+/// and therefore needs the `parent_target_available` gate in
+/// [`parse_anaphoric_target_ref`]), a gendered pronoun on a Magic card is
+/// UNAMBIGUOUSLY the printed-name self-reference: the templating uses it only
+/// where the card's own name would otherwise repeat (Gideon Jura, "Prevent all
+/// damage that would be dealt to **him** this turn"; Gideon of the Trials;
+/// Winter Soldier, "Equipment attached to **him**"). No printed card uses a
+/// gendered pronoun for a chosen target, so the binding needs no gate.
+///
+/// The singular-they "them" is DELIBERATELY excluded: it is recipient-anaphoric
+/// for player-enchanting Auras (Curse of Thirst's "Curses attached to them" =
+/// the enchanted player, not the Aura source), so accepting it here would bind
+/// the wrong object. This mirrors the identical carve-out documented on
+/// `oracle_nom::quantity`'s `AttachedToSource` arm.
+///
+/// Returns the bound filter and the remainder of the ORIGINAL-case `text`
+/// following the matched pronoun, so callers can keep parsing trailing
+/// duration/qualifier phrases.
+pub(crate) fn parse_source_anaphoric_pronoun_ref(text: &str) -> Option<(TargetFilter, &str)> {
+    let trimmed = text.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    let (rest, ()) = parse_source_anaphoric_pronoun(lower.as_str()).ok()?;
+    // `parse_word_bounded` never splits a char boundary (ASCII pronouns only),
+    // so the consumed byte count maps 1:1 onto the original-case slice.
+    Some((
+        TargetFilter::SelfRef,
+        &trimmed[trimmed.len() - rest.len()..],
+    ))
+}
+
+/// The raw combinator behind [`parse_source_anaphoric_pronoun_ref`], for callers
+/// that need to compose it (e.g. under `all_consuming` when the pronoun must be
+/// the WHOLE phrase). Input must already be lowercase. Reflexive forms are tried
+/// before their bare stems so "himself" is never truncated to "him" plus a
+/// dangling "self".
+pub(crate) fn parse_source_anaphoric_pronoun(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        |i| parse_word_bounded(i, "himself"),
+        |i| parse_word_bounded(i, "herself"),
+        |i| parse_word_bounded(i, "him"),
+        |i| parse_word_bounded(i, "her"),
+    ))
+    .parse(input)
+}
+
 /// Parse a word with a word boundary check: the next char after the word must be
 /// non-alphanumeric (whitespace, comma, period, etc.) or end-of-input.
 /// Prevents "it" from matching "item", "you" from matching "your", etc.
