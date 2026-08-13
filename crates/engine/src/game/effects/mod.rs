@@ -12,10 +12,10 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityKind, CardPlayMode, CardTypeSetSource, ControllerRef,
     CopyRetargetPermission, CostPaidObjectSnapshot, EachDamageRecipient, Effect, EffectError,
     EffectKind, EffectOutcomeSignal, EffectResolutionResult, EffectScope, FilterProp,
-    OpponentMayScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation,
-    ResolvedAbility, RevealUntilDisposition, SacrificeCost, SacrificeRequirement, SharedQuality,
-    SharedQualityRelation, SiblingCondition, SubAbilityLink, TapStateChange, TargetChoiceTiming,
-    TargetFilter, TargetRef, ThisWayCause,
+    ManaProduction, OpponentMayScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
+    RepeatContinuation, ResolvedAbility, RevealUntilDisposition, SacrificeCost,
+    SacrificeRequirement, SharedQuality, SharedQualityRelation, SiblingCondition, SubAbilityLink,
+    TapStateChange, TargetChoiceTiming, TargetFilter, TargetRef, ThisWayCause,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -13105,6 +13105,28 @@ fn expand_per_counter(base: &AbilityCost, n: u32) -> AbilityCost {
                     target: TargetFilter::SelfRef,
                 }),
             },
+            // CR 702.24a: Every age counter requires a separate instance of
+            // the fixed mana-producing cost. Combining its fixed color vector
+            // keeps the result a single deterministic EffectCost while adding
+            // the same number of mana units as N separate resolutions.
+            Effect::Mana {
+                produced: ManaProduction::Fixed { .. },
+                target: None,
+                ..
+            } => {
+                let mut scaled_effect = effect.as_ref().clone();
+                let Effect::Mana {
+                    produced: ManaProduction::Fixed { colors, .. },
+                    ..
+                } = &mut scaled_effect
+                else {
+                    unreachable!("matched fixed mana effect cost")
+                };
+                *colors = colors.repeat(n as usize);
+                AbilityCost::EffectCost {
+                    effect: Box::new(scaled_effect),
+                }
+            }
             _ => AbilityCost::Composite {
                 costs: vec![base.clone(); n as usize],
             },

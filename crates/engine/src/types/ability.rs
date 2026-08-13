@@ -9492,22 +9492,7 @@ impl AbilityCost {
                 filter: None,
                 ..
             } => true,
-            // CR 702.24a + CR 122.1: The existing resolution payment
-            // authority can place a counter on the source through the
-            // replacement pipeline. This covers cumulative-upkeep costs such
-            // as Aboroth's "put a -1/-1 counter on this creature" without
-            // admitting arbitrary effect-as-cost shapes.
-            AbilityCost::EffectCost { effect }
-                if matches!(
-                    effect.as_ref(),
-                    Effect::PutCounter {
-                        target: TargetFilter::SelfRef,
-                        ..
-                    }
-                ) =>
-            {
-                true
-            }
+            AbilityCost::EffectCost { .. } if self.supports_effect_cost_payment() => true,
             // CR 118.12a: OneOf at the base must be a disjunction of mana
             // costs; mixed-shape disjunctions are not yet expanded into a
             // payable per-counter form.
@@ -9522,6 +9507,28 @@ impl AbilityCost {
             }
             _ => false,
         }
+    }
+
+    /// CR 118.3: Effect-as-cost forms the payment authority can resolve without
+    /// a player choice. This is shared by cumulative-upkeep synthesis and the
+    /// resolution-time payment gate so supported cards never install a trigger
+    /// whose cost will later be rejected.
+    pub fn supports_effect_cost_payment(&self) -> bool {
+        matches!(
+            self,
+            AbilityCost::EffectCost { effect }
+                if matches!(
+                    effect.as_ref(),
+                    Effect::PutCounter {
+                        target: TargetFilter::SelfRef,
+                        ..
+                    } | Effect::Mana {
+                        produced: ManaProduction::Fixed { .. },
+                        target: None,
+                        ..
+                    }
+                )
+        )
     }
 
     /// CR 118: Classify this cost into one or more `CostCategory` buckets.
