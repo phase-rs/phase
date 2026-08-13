@@ -397,6 +397,11 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
             player,
             valid_targets,
             ..
+        }
+        | WaitingFor::EntryAttackTargetChoice {
+            player,
+            valid_targets,
+            ..
         } => valid_targets
             .iter()
             .map(|target| {
@@ -840,9 +845,9 @@ pub fn candidate_actions_broad_with_probe(
     probe: Option<&casting::PriorityCastProbe>,
 ) -> Vec<CandidateAction> {
     let actions = match &state.waiting_for {
-        WaitingFor::MeldPairChoice { .. } | WaitingFor::MeldAttackTargetChoice { .. } => {
-            candidate_actions_exact(state)
-        }
+        WaitingFor::MeldPairChoice { .. }
+        | WaitingFor::MeldAttackTargetChoice { .. }
+        | WaitingFor::EntryAttackTargetChoice { .. } => candidate_actions_exact(state),
         WaitingFor::Priority { player } => priority_actions_with_probe(state, *player, probe),
         WaitingFor::ChooseAnnouncingOpponent {
             player, candidates, ..

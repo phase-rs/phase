@@ -783,6 +783,7 @@ pub fn route_debug_create_to_battlefield(
         cause: None,
         attach_to: None,
         enter_tapped: Default::default(),
+        enters_attacking: false,
         enter_with_counters: vec![],
         controller_override: None,
         enter_transformed: false,

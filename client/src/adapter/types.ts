@@ -1667,6 +1667,7 @@ export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }
   | { type: "MeldPairChoice"; data: { player: PlayerId; choices: MeldSelection[] } }
   | { type: "MeldAttackTargetChoice"; data: { player: PlayerId; context: MeldSelection; valid_targets: AttackTarget[] } }
+  | { type: "EntryAttackTargetChoice"; data: { player: PlayerId; object_id: ObjectId; valid_targets: AttackTarget[] } }
   | { type: "ActivationCostOneOfChoice"; data: { player: PlayerId; costs: SerializedAbilityCost[]; pending_cast: PendingCast } }
   | {
       type: "MulliganDecision";
@@ -2436,7 +2437,9 @@ export type PlayerActionKind =
   | "CollectEvidence"
   | "ShuffledLibrary"
   | "Proliferate"
-  | "Investigate";
+  | "Investigate"
+  | "Draw"
+  | "Forage";
 
 export type GameEvent =
   | { type: "GameStarted" }

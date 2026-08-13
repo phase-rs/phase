@@ -18126,6 +18126,41 @@ fn blossombind_compound_splits_into_untap_and_counter_replacements() {
     );
 }
 
+/// CR 303.4b + CR 111.2 + CR 608.2c (issue #5271): Overencumbered's ETB
+/// trigger names the attached opponent as the creator of every token in its
+/// shared-verb list. The full Oracle parse is the export-facing regression;
+/// the subject-parser test covers the grammar building block separately.
+#[test]
+fn overencumbered_etb_assigns_each_token_to_the_enchanted_opponent() {
+    let oracle = "Enchant opponent\nWhen this Aura enters, enchanted opponent creates a Clue token, a Food token, and a Junk token.\nAt the beginning of combat on enchanted opponent's turn, that player may pay {1} for each artifact they control. If they don't, creatures can't attack this combat.";
+    let parsed = parse(oracle, "Overencumbered", &[], &["Enchantment"], &["Aura"]);
+
+    let mut node = Some(
+        parsed
+            .triggers
+            .iter()
+            .filter_map(|trigger| trigger.execute.as_deref())
+            .find(
+                |execute| matches!(&*execute.effect, Effect::Token { name, .. } if name == "Clue"),
+            )
+            .expect("the ETB trigger must begin with the Clue token"),
+    );
+
+    for expected_name in ["Clue", "Food", "Junk"] {
+        let current = node.expect("expected another token in the shared ETB chain");
+        let Effect::Token { name, owner, .. } = &*current.effect else {
+            panic!(
+                "expected {expected_name} token in ETB chain, got {:?}",
+                current.effect
+            );
+        };
+        assert_eq!(name, expected_name);
+        assert_eq!(owner, &TargetFilter::AttachedTo);
+        node = current.sub_ability.as_deref();
+    }
+    assert!(node.is_none(), "no extra token should follow Junk");
+}
+
 /// CR 701.26b + CR 613.1f: Frozen in Ice — "Enchanted creature loses all
 /// abilities and can't become untapped." must decompose into BOTH the
 /// loses-all-abilities static AND an unconditional Untap-prevention

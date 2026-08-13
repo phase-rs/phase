@@ -5817,6 +5817,18 @@ pub enum ObjectScope {
     /// Mana-value-only referent today. NOTE: a THIRD set-member ObjectScope should
     /// trigger a `SetMember { set, selector }` parameterization round.
     OwnedLinkedExileCard,
+    /// CR 120.1: The per-iteration damage SOURCE of an
+    /// [`Effect::EachSourceDealsDamage`] batch — "each <filter> you control
+    /// deals damage equal to its power to …". Each matching object is the
+    /// source of its own damage; "its power" reads THAT object, not the ability
+    /// source (which is exempted by the "other" FilterProp). Bound per batch
+    /// member at resolution by a per-source resolver (`damage_source` field on
+    /// `QuantityContext`). Distinct from [`ObjectScope::Source`] (the ability
+    /// source) and `EventTarget` (the damage RECIPIENT); the filter-evaluated
+    /// source set is unrelated to any trigger event. No runtime fallback: when
+    /// the per-iteration id is absent (a condition/layer read) it reads null →
+    /// 0, mirroring [`ObjectScope::Target`]'s fail-closed null read.
+    BatchSource,
 }
 
 /// Source set for counting distinct card types.
@@ -10959,7 +10971,10 @@ pub enum Effect {
         /// subjects route to `DamageEachPlayer`.
         sources: TargetFilter,
         /// CR 120.1: Damage dealt by every source. Uniform across the batch
-        /// (resolved once, CR 608.2).
+        /// (resolved once, CR 608.2) UNLESS the amount reads the per-source
+        /// `ObjectScope::BatchSource` scope ("deals damage equal to its power"),
+        /// in which case it is resolved per batch member (each source is the
+        /// source of its own damage, CR 120.1).
         amount: QuantityExpr,
         /// CR 120.3: The recipient resolution strategy (shared target vs
         /// per-source controller).
@@ -11323,6 +11338,10 @@ pub enum Effect {
             skip_serializing_if = "EtbTapState::is_unspecified"
         )]
         enter_tapped: EtbTapState,
+        /// CR 508.4: Creatures enter combat during the mass move without being
+        /// declared as attackers.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        enters_attacking: bool,
         /// CR 122.1 + CR 122.1h: Counters placed on each object as it enters the
         /// battlefield during the mass move. Each entry is `(counter_type,
         /// count)`. Mirrors `Effect::ChangeZone.enter_with_counters` for the mass
@@ -11397,6 +11416,9 @@ pub enum Effect {
         /// tapped when true (Planar Genesis — "onto the battlefield tapped").
         #[serde(default)]
         enter_tapped: bool,
+        /// CR 508.4: Kept cards routed to the battlefield enter attacking.
+        #[serde(default)]
+        enters_attacking: bool,
         /// Determines where the resolver reads the card set from. See [`DigSource`].
         #[serde(default, skip_serializing_if = "DigSource::is_library")]
         source: DigSource,
@@ -13980,6 +14002,14 @@ pub enum Effect {
     Learn,
     /// CR 701.61a: Forage — exile three cards from your graveyard or sacrifice a Food.
     Forage,
+    /// CR 608.2c + CR 603.2: Publish a player action only when the immediately
+    /// preceding operation completed the required typed result. This is a
+    /// parameterized completion seam, not a Forage-specific special case.
+    CompletePlayerAction {
+        parent_kind: EffectKind,
+        action: PlayerActionKind,
+        required_result: EffectResolutionResult,
+    },
     /// CR 701.64a: Harness [this permanent] — if the source permanent isn't
     /// harnessed, it becomes harnessed. A unit keyword action (no parameters):
     /// it always designates the source permanent, mirroring `Forage`'s
@@ -15837,6 +15867,7 @@ impl Effect {
             | Effect::Adapt { .. }
             | Effect::Learn
             | Effect::Forage
+            | Effect::CompletePlayerAction { .. }
             | Effect::Harness
             | Effect::CollectEvidence { .. }
             | Effect::Endure { .. }
@@ -16306,7 +16337,7 @@ impl Effect {
             Effect::Behold { .. } => false,
 
             // CR 701.61a: forage exiles from a graveyard or sacrifices a Food.
-            Effect::Forage => false,
+            Effect::Forage | Effect::CompletePlayerAction { .. } => false,
 
             // CR 701.59a: "To 'collect evidence N' means to exile any number of
             // cards from your GRAVEYARD with total mana value N or greater."
@@ -17208,6 +17239,7 @@ impl Effect {
             | Effect::Specialize
             | Effect::Learn
             | Effect::Forage
+            | Effect::CompletePlayerAction { .. }
             | Effect::Harness
             | Effect::CollectEvidence { .. }
             | Effect::BlightEffect { .. }
@@ -17445,6 +17477,7 @@ impl Effect {
             | Effect::FlipCoin { .. }
             | Effect::FlipCoinUntilLose { .. }
             | Effect::Forage
+            | Effect::CompletePlayerAction { .. }
             | Effect::Harness
             | Effect::FreeCastFromZones { .. }
             | Effect::GiftDelivery { .. }
@@ -17706,6 +17739,7 @@ impl Effect {
             | Effect::FlipCoin { .. }
             | Effect::FlipCoinUntilLose { .. }
             | Effect::Forage
+            | Effect::CompletePlayerAction { .. }
             | Effect::Harness
             | Effect::FreeCastFromZones { .. }
             | Effect::GiftDelivery { .. }
@@ -17985,6 +18019,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         },
         Effect::Learn => "Learn",
         Effect::Forage => "Forage",
+        Effect::CompletePlayerAction { .. } => "CompletePlayerAction",
         Effect::Harness => "Harness",
         Effect::CollectEvidence { .. } => "CollectEvidence",
         Effect::Endure { .. } => "Endure",
@@ -18231,6 +18266,7 @@ pub enum EffectKind {
     RuntimeHandled,
     Learn,
     Forage,
+    CompletePlayerAction,
     Harness,
     CollectEvidence,
     Endure,
@@ -18515,6 +18551,7 @@ impl From<&Effect> for EffectKind {
             Effect::RuntimeHandled { .. } => EffectKind::RuntimeHandled,
             Effect::Learn => EffectKind::Learn,
             Effect::Forage => EffectKind::Forage,
+            Effect::CompletePlayerAction { .. } => EffectKind::CompletePlayerAction,
             Effect::Harness => EffectKind::Harness,
             Effect::CollectEvidence { .. } => EffectKind::CollectEvidence,
             Effect::Endure { .. } => EffectKind::Endure,
@@ -20642,6 +20679,15 @@ pub struct DiscardedCardResult {
     pub final_zone: Zone,
 }
 
+/// CR 608.2c: The typed result of one immediately preceding effect, retained
+/// only for its direct continuation. `cause` identifies the producer action;
+/// `count` is the number of members for which that action completed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectResolutionResult {
+    pub cause: ThisWayCause,
+    pub count: usize,
+}
+
 /// Casting-time facts that flow with a spell from casting through resolution.
 /// Conditions in the sub_ability chain are evaluated against this context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -20662,6 +20708,11 @@ pub struct SpellContext {
     /// iteration universe instead of an unqualified battlefield census.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_target_iteration_members: Option<Vec<ObjectId>>,
+    /// CR 608.2c: Result of the immediately preceding effect. Ordinary
+    /// parent-to-child handoffs clear this field; only the producer's direct
+    /// completion node may consume it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prior_effect_result: Option<EffectResolutionResult>,
     /// CR 601.2c + CR 115.1: For a target slot announced by "an opponent's
     /// choice", the opponent the spell's controller chose to make that choice.
     /// In a multiplayer game the controller picks which opponent announces;
@@ -25484,6 +25535,29 @@ impl ResolvedAbility {
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.clear_direct_discard_result_recursive();
+        }
+    }
+
+    /// CR 608.2c: Stamp one completed effect result onto exactly the deferred
+    /// direct child. Descendants and alternate branches are cleared so the
+    /// result cannot leak beyond its typed completion node.
+    pub fn set_prior_effect_result_for_immediate_node(&mut self, result: EffectResolutionResult) {
+        self.context.prior_effect_result = Some(result);
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.clear_prior_effect_result_recursive();
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.clear_prior_effect_result_recursive();
+        }
+    }
+
+    pub(crate) fn clear_prior_effect_result_recursive(&mut self) {
+        self.context.prior_effect_result = None;
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.clear_prior_effect_result_recursive();
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.clear_prior_effect_result_recursive();
         }
     }
 

@@ -371,10 +371,10 @@ pub(crate) fn resolve_keyword_mana_cost(
     }
 }
 
-/// CR 602.1a + CR 702.141a: Resolve `SelfManaCost` / `SelfManaValue` placeholders
-/// anywhere in an activated ability's cost tree before legality or payment.
-/// The mana payment path treats those placeholders as free, so every activation
-/// fetch must concretize them against the source object (Sliver Gravemother class).
+/// CR 601.2f + CR 602.1a: Resolve `SelfManaCost` / `SelfManaValue` placeholders
+/// anywhere in an `AbilityCost` tree before affordability or payment. The mana
+/// payment path treats those placeholders as free, so every payable cost must
+/// concretize them against its source object (Kentaro and Sliver Gravemother classes).
 pub(crate) fn resolve_self_mana_in_ability_cost(
     state: &GameState,
     source_id: ObjectId,

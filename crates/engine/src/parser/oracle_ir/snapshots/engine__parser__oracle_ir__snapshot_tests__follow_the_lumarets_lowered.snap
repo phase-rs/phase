@@ -42,7 +42,8 @@ expression: "&lowered"
         "rest_destination": "Library",
         "rest_order": "random",
         "reveal": false,
-        "enter_tapped": false
+        "enter_tapped": false,
+        "enters_attacking": false
       },
       "cost": null,
       "sub_ability": null,
@@ -84,7 +85,8 @@ expression: "&lowered"
           "rest_destination": "Library",
           "rest_order": "random",
           "reveal": true,
-          "enter_tapped": false
+          "enter_tapped": false,
+          "enters_attacking": false
         },
         "cost": null,
         "sub_ability": null,

@@ -26,6 +26,7 @@ pub fn resolve(
         rest_order,
         is_reveal,
         enter_tapped,
+        enters_attacking,
         dig_source,
     ) = match &ability.effect {
         Effect::Dig {
@@ -40,6 +41,7 @@ pub fn resolve(
             rest_order,
             reveal,
             enter_tapped,
+            enters_attacking,
             source,
         } => {
             let resolved_count =
@@ -68,6 +70,7 @@ pub fn resolve(
                 *rest_order,
                 *reveal,
                 *enter_tapped,
+                *enters_attacking,
                 *source,
             )
         }
@@ -80,6 +83,7 @@ pub fn resolve(
             None,
             None,
             DigRestOrder::Preserve,
+            false,
             false,
             false,
             DigSource::Library,
@@ -113,6 +117,7 @@ pub fn resolve(
             rest_dest,
             rest_order,
             enter_tapped,
+            enters_attacking,
         );
     }
 
@@ -248,6 +253,7 @@ pub fn resolve(
                 rest_dest,
                 rest_order,
                 enter_tapped,
+                enters_attacking,
                 events,
             );
             return Ok(());
@@ -272,6 +278,7 @@ pub fn resolve(
         rest_order,
         source_id: Some(ability.source_id),
         enter_tapped,
+        enters_attacking,
     };
 
     events.push(GameEvent::EffectResolved {
@@ -309,6 +316,7 @@ fn resolve_from_prior_look(
     rest_dest: Option<Zone>,
     rest_order: DigRestOrder,
     enter_tapped: bool,
+    enters_attacking: bool,
 ) -> Result<(), EffectError> {
     let cards = state.private_look_ids.clone();
     if cards.is_empty() {
@@ -430,6 +438,7 @@ fn resolve_from_prior_look(
         rest_order,
         source_id: Some(ability.source_id),
         enter_tapped,
+        enters_attacking,
     };
 
     events.push(GameEvent::EffectResolved {
@@ -463,6 +472,7 @@ fn resolve_mass_put_all(
     rest_destination: Option<Zone>,
     rest_order: DigRestOrder,
     enter_tapped: bool,
+    enters_attacking: bool,
     events: &mut Vec<GameEvent>,
 ) {
     let rest: Vec<_> = cards
@@ -488,6 +498,7 @@ fn resolve_mass_put_all(
             selectable.to_vec(),
             dest,
             EtbTapState::from_legacy_bool(enter_tapped),
+            enters_attacking,
             events,
         ),
         crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
@@ -499,6 +510,7 @@ fn resolve_mass_put_all(
                     selected: selectable.to_vec(),
                     destination: dest,
                     enter_tapped: EtbTapState::from_legacy_bool(enter_tapped),
+                    enters_attacking,
                 },
             );
         }
@@ -509,6 +521,7 @@ fn resolve_mass_put_all(
 /// mass Dig. The typed batch completion is the single authority for publication
 /// and the parent result, so a replacement pause cannot expose a pre-redirect
 /// selected set to a chained instruction.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn move_mass_put_all_selected(
     state: &mut GameState,
     player: crate::types::player::PlayerId,
@@ -516,6 +529,7 @@ pub(crate) fn move_mass_put_all_selected(
     selected: Vec<crate::types::identifiers::ObjectId>,
     destination: Zone,
     enter_tapped: EtbTapState,
+    enters_attacking: bool,
     events: &mut Vec<GameEvent>,
 ) {
     let requests = selected
@@ -527,6 +541,7 @@ pub(crate) fn move_mass_put_all_selected(
                 source_id,
             );
             request.mods.enter_tapped = enter_tapped;
+            request.mods.enters_attacking = enters_attacking;
             request
         })
         .collect();
@@ -581,6 +596,7 @@ mod tests {
                 rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             },
             vec![],
@@ -676,6 +692,7 @@ mod tests {
                 rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             },
             vec![crate::types::ability::TargetRef::Player(PlayerId(1))],
@@ -730,6 +747,7 @@ mod tests {
                 rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             },
             vec![],
@@ -784,6 +802,7 @@ mod tests {
                 rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             },
             vec![],
@@ -855,6 +874,7 @@ mod tests {
             rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
+            enters_attacking: false,
         };
         let action = GameAction::SelectCards {
             cards: kept.clone(),
@@ -937,6 +957,7 @@ mod tests {
             rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
+            enters_attacking: false,
         };
         let mut events = Vec::new();
 
@@ -998,6 +1019,7 @@ mod tests {
             rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
+            enters_attacking: false,
         };
         state.park_ability_continuation(PendingContinuation::new(
             Box::new(ResolvedAbility::new(
@@ -1070,6 +1092,7 @@ mod tests {
             rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
+            enters_attacking: false,
         };
 
         let mut events = Vec::new();
@@ -1134,6 +1157,7 @@ mod tests {
             rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
+            enters_attacking: false,
         };
 
         let mut events = Vec::new();
@@ -1195,6 +1219,7 @@ mod tests {
             rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
+            enters_attacking: false,
         };
 
         let mut events = Vec::new();
@@ -1265,6 +1290,7 @@ mod tests {
             rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
+            enters_attacking: false,
         };
         let mut gain_life = ResolvedAbility::new(
             Effect::GainLife {
@@ -1338,6 +1364,7 @@ mod tests {
             rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
+            enters_attacking: false,
         };
         let mut gain_life = ResolvedAbility::new(
             Effect::GainLife {
@@ -1405,6 +1432,7 @@ mod tests {
             rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
+            enters_attacking: false,
         };
         let mut gain_life = ResolvedAbility::new(
             Effect::GainLife {
@@ -1483,6 +1511,7 @@ mod tests {
                 rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             },
             vec![],
@@ -1560,6 +1589,7 @@ mod tests {
                 rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             },
             vec![],
@@ -1866,6 +1896,7 @@ mod tests {
                 rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             },
             vec![],
@@ -1923,6 +1954,7 @@ mod tests {
                 rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             },
             vec![],
@@ -1991,6 +2023,7 @@ mod tests {
             rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
+            enters_attacking: false,
         };
         let action = GameAction::SelectCards {
             cards: kept.clone(),

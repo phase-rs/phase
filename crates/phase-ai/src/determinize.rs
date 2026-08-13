@@ -419,6 +419,7 @@ mod tests {
                 rest_order: engine::types::ability::DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             },
             vec![TargetRef::Player(PlayerId(1))],

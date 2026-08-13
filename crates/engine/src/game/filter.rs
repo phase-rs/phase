@@ -13,8 +13,9 @@ use crate::game::quantity::{
 };
 use crate::types::ability::{
     ChoiceValue, ChosenAttribute, CombatRelation, CombatRelationSubject, ControllerRef, CountScope,
-    FilterProp, Parity, ParitySource, PtStat, PtValueScope, QuantityExpr, ResolvedAbility,
-    SharedQuality, SharedQualityRelation, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    FilterProp, Parity, ParitySource, PlayerFilter, PtStat, PtValueScope, QuantityExpr,
+    ResolvedAbility, SharedQuality, SharedQualityRelation, TargetFilter, TargetRef, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, Supertype};
@@ -1493,20 +1494,282 @@ pub(crate) fn controller_ref_player(
         ControllerRef::SpecificPlayer { id } => Some(*id),
     }
 }
+/// Whether `filter`, or any filter nested anywhere inside it, satisfies `leaf`.
+///
+/// The single authority for `TargetFilter`'s recursive shape. Every predicate
+/// that asks "does this filter mention X anywhere" routes here instead of
+/// re-listing the nesting variants, because a predicate that lists them itself
+/// lists them from memory: `filter_contains_last_zone_changed` and its
+/// `last_created` twin both omitted `ChosenDamageSource`'s optional inner filter,
+/// so a `LastCreated` nested one level inside it read as absent.
+///
+/// The match is EXHAUSTIVE on purpose — no `_` arm. A `_ => false` silently
+/// classifies every future variant as a leaf, which is how that omission
+/// survived; with the wildcard gone, a new nesting variant does not compile until
+/// someone decides which side of this match it belongs on. The same discipline
+/// applies to the two enums this traversal descends into,
+/// [`filter_prop_contains`] and [`player_filter_contains`].
+///
+/// SCOPE, stated rather than left implicit: this traverses every nested
+/// `TargetFilter`. It deliberately does NOT descend into the `QuantityExpr`
+/// magnitudes some `FilterProp`s carry (`Cmc { value }`, `Counters { count }`,
+/// `PtComparison { value }`). A filter reached through a quantity is a
+/// *population being counted*, not a quality this filter mentions, and it has its
+/// own authority with its own semantics —
+/// `effects::quantity_ref_counts_population_matching`, which the anaphor gates
+/// call alongside this function rather than through it.
+pub(crate) fn filter_contains(filter: &TargetFilter, leaf: &dyn Fn(&TargetFilter) -> bool) -> bool {
+    if leaf(filter) {
+        return true;
+    }
+    let recurse = |inner: &TargetFilter| filter_contains(inner, leaf);
+    match filter {
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters.iter().any(recurse),
+        TargetFilter::Not { filter } => recurse(filter),
+        TargetFilter::TrackedSetFiltered { filter, .. } => recurse(filter),
+        // CR 609.7a: the source a "source of your choice" effect chose. CR 609.7b:
+        // the optional inner filter is the "red source"-style quality the shield
+        // rechecks, so it is a real nested filter. The `None` case ("a source of
+        // your choice", unqualified) is a leaf.
+        TargetFilter::ChosenDamageSource { filter } => filter.as_deref().is_some_and(recurse),
+        // `Typed` is NOT a leaf: six of its `FilterProp`s box a `TargetFilter`
+        // (`CanEnchant`, `DifferentNameFrom`, `DistinctFrom`, `SharesQuality`,
+        // `Targets`, `TargetsOnly`), `Not`/`AnyOf` recurse through more props, and
+        // `ControllerMatches` crosses into `PlayerFilter`, which boxes filters of
+        // its own.
+        TargetFilter::Typed(typed) => typed
+            .properties
+            .iter()
+            .any(|prop| filter_prop_contains(prop, leaf)),
+        // Leaves: no nested `TargetFilter` to descend into.
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
+    }
+}
+
+/// [`filter_contains`] across the `TargetFilter`s a single `FilterProp` nests.
+///
+/// Exhaustive for the same reason `filter_contains` is: a `_ => false` here would
+/// silently reclassify every future prop as anaphor-free, which is the defect
+/// class this pair exists to make uncompilable.
+pub(crate) fn filter_prop_contains(
+    prop: &FilterProp,
+    leaf: &dyn Fn(&TargetFilter) -> bool,
+) -> bool {
+    let recurse = |inner: &TargetFilter| filter_contains(inner, leaf);
+    match prop {
+        // CR 303.4 + CR 702.5: the referenced host an Aura "could enchant".
+        FilterProp::CanEnchant { target } => recurse(target),
+        FilterProp::DifferentNameFrom { filter } => recurse(filter),
+        // CR 109.1 + CR 120.3: the object-identity reference.
+        FilterProp::DistinctFrom { reference } => recurse(reference),
+        FilterProp::SharesQuality { reference, .. } => reference.as_deref().is_some_and(recurse),
+        // CR 115.9b/9c: the stack entry's target-side filters.
+        FilterProp::Targets { filter } | FilterProp::TargetsOnly { filter } => recurse(filter),
+        // CR 608.2c: prop-level combinators.
+        FilterProp::Not { prop } => filter_prop_contains(prop, leaf),
+        FilterProp::AnyOf { props } => props.iter().any(|p| filter_prop_contains(p, leaf)),
+        // CR 109.4: the object-axis crossing into the player axis.
+        FilterProp::ControllerMatches { player } => player_filter_contains(player, leaf),
+        // Leaves: no nested `TargetFilter`. (Props carrying only a `QuantityExpr`
+        // magnitude are leaves HERE by the scope rule documented on
+        // `filter_contains` — the quantity authority classifies those.)
+        FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
+        | FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::WasPlayed
+        | FilterProp::Attacking { .. }
+        | FilterProp::Blocking
+        | FilterProp::BlockingSource
+        | FilterProp::CombatRelation { .. }
+        | FilterProp::Unblocked
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::IsSaddled
+        | FilterProp::SaddledSource
+        | FilterProp::ConvokedSource
+        | FilterProp::ProtectorMatches { .. }
+        | FilterProp::HasHasteOrControlledSinceTurnBegan
+        | FilterProp::WithKeyword { .. }
+        | FilterProp::HasKeywordKind { .. }
+        | FilterProp::WithoutKeyword { .. }
+        | FilterProp::WithoutKeywordKind { .. }
+        | FilterProp::Counters { .. }
+        | FilterProp::Cmc { .. }
+        | FilterProp::ManaValueParity { .. }
+        | FilterProp::ManaCostIn { .. }
+        | FilterProp::InZone { .. }
+        | FilterProp::Owned { .. }
+        | FilterProp::Foretold
+        | FilterProp::HasAdventure
+        | FilterProp::EnchantedBy
+        | FilterProp::EquippedBy
+        | FilterProp::AttachedToSource
+        | FilterProp::AttachedToRecipient
+        | FilterProp::HasAttachment { .. }
+        | FilterProp::HasAnyAttachmentOf { .. }
+        | FilterProp::Another
+        | FilterProp::Unpaired
+        | FilterProp::OtherThanTriggerObject
+        | FilterProp::HasColor { .. }
+        | FilterProp::PtComparison { .. }
+        | FilterProp::PowerGTSource
+        | FilterProp::ColorCount { .. }
+        | FilterProp::ManaSymbolCount { .. }
+        | FilterProp::HasSupertype { .. }
+        | FilterProp::IsChosenCreatureType
+        | FilterProp::MostPrevalentCreatureTypeIn { .. }
+        | FilterProp::IsChosenColor
+        | FilterProp::IsChosenCardType
+        | FilterProp::MatchesLastChosenCardPredicate
+        | FilterProp::HasSingleTarget
+        | FilterProp::Modal
+        | FilterProp::NotColor { .. }
+        | FilterProp::NotSupertype { .. }
+        | FilterProp::Suspected
+        | FilterProp::Renowned
+        | FilterProp::Goaded
+        | FilterProp::ToughnessGTPower
+        | FilterProp::PowerExceedsBase
+        | FilterProp::InTrackedSet { .. }
+        | FilterProp::Modified
+        | FilterProp::Historic
+        | FilterProp::NotHistoric
+        | FilterProp::InAnyZone { .. }
+        | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn
+        | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
+        | FilterProp::ZoneChangedThisTurn { .. }
+        | FilterProp::AttackedThisTurn { .. }
+        | FilterProp::BlockedThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::CountersPutOnThisTurn { .. }
+        | FilterProp::FaceDown
+        | FilterProp::Transformed
+        | FilterProp::CouldBeTargetedByTriggeringSpell
+        | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
+        | FilterProp::WasKicked
+        | FilterProp::HasManaAbility
+        | FilterProp::HasNoAbilities
+        | FilterProp::Named { .. }
+        | FilterProp::SameName
+        | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource
+        | FilterProp::NameMatchesAnyPermanent { .. }
+        | FilterProp::IsCommander
+        | FilterProp::SharesCreatureTypeWithCommander
+        | FilterProp::Other { .. } => false,
+    }
+}
+
+/// [`filter_contains`] across the `TargetFilter`s a single `PlayerFilter` nests.
+/// Player-axis third of the same exhaustive traversal; see [`filter_contains`].
+pub(crate) fn player_filter_contains(
+    filter: &PlayerFilter,
+    leaf: &dyn Fn(&TargetFilter) -> bool,
+) -> bool {
+    let recurse = |inner: &TargetFilter| filter_contains(inner, leaf);
+    match filter {
+        // CR 120.3: the "dealt damage by a <source>" quality.
+        PlayerFilter::OpponentDealtDamage { source, .. } => source.as_deref().is_some_and(recurse),
+        PlayerFilter::ControlsCount { filter, .. } => recurse(filter),
+        PlayerFilter::TrackedSetPossessor { filter, .. } => recurse(filter),
+        // Leaves: no nested `TargetFilter`. `PlayerAttribute`'s `QuantityRef` /
+        // `QuantityExpr` are quantities, which the scope rule on
+        // `filter_contains` assigns to the quantity authority.
+        PlayerFilter::Controller
+        | PlayerFilter::Opponent
+        | PlayerFilter::DefendingPlayer
+        | PlayerFilter::OpponentLostLife
+        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::HasLostTheGame
+        | PlayerFilter::OpponentAttacked { .. }
+        | PlayerFilter::OpponentAttackingEnchantedPlayer
+        | PlayerFilter::All
+        | PlayerFilter::AllExcept { .. }
+        | PlayerFilter::HighestSpeed
+        | PlayerFilter::ZoneChangedThisWay
+        | PlayerFilter::PerformedActionThisWay { .. }
+        | PlayerFilter::OwnersOfCardsExiledBySource
+        | PlayerFilter::TriggeringPlayer
+        | PlayerFilter::OpponentOtherThanTriggering
+        | PlayerFilter::OpponentOfTriggeringPlayer
+        | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+        | PlayerFilter::VotedFor { .. }
+        | PlayerFilter::ParentObjectTargetController
+        | PlayerFilter::PlayerAttribute { .. }
+        | PlayerFilter::ChosenPlayer { .. }
+        | PlayerFilter::ParentObjectTargetOwner => false,
+    }
+}
+
 /// Whether `filter` references the resolution-local `last_zone_changed_ids`
 /// ledger population (bare or nested inside compound filters).
 pub(crate) fn filter_contains_last_zone_changed(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::LastZoneChanged => true,
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-            filters.iter().any(filter_contains_last_zone_changed)
-        }
-        TargetFilter::Not { filter } => filter_contains_last_zone_changed(filter),
-        TargetFilter::TrackedSetFiltered { filter, .. } => {
-            filter_contains_last_zone_changed(filter)
-        }
-        _ => false,
-    }
+    filter_contains(filter, &|inner| {
+        matches!(inner, TargetFilter::LastZoneChanged)
+    })
+}
+
+/// Whether `filter` references the resolution-local `last_created_token_ids`
+/// ledger population — "the token created this way" / "it" (bare or nested
+/// inside compound filters).
+///
+/// Structural twin of [`filter_contains_last_zone_changed`]: same anaphor class,
+/// same recursion set, different published ledger. Kept beside it so the two
+/// resolution-local anaphors stay discoverable as one pair.
+pub(crate) fn filter_contains_last_created(filter: &TargetFilter) -> bool {
+    filter_contains(filter, &|inner| matches!(inner, TargetFilter::LastCreated))
 }
 
 /// Check if an object matches a typed TargetFilter against the given context.
@@ -2136,7 +2399,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                 let Some(mut obj) = state
                     .liminal_entries
                     .get(object_id)
-                    .map(|entry| entry.object.clone())
+                    .map(|entry| entry.object.projected().clone())
                     .or_else(|| state.objects.get(object_id).cloned())
                 else {
                     return false;
@@ -2164,7 +2427,7 @@ pub fn matches_target_filter_on_battlefield_entry(
             } else if let Some(entry) = state.liminal_entries.get(object_id) {
                 filter_inner_for_object(
                     state,
-                    &entry.object,
+                    entry.object.projected(),
                     *object_id,
                     filter,
                     ctx.source_id,
@@ -2183,7 +2446,7 @@ pub fn matches_target_filter_on_battlefield_entry(
             state.liminal_entries.get(entry_ref).is_some_and(|entry| {
                 filter_inner_for_object(
                     state,
-                    &entry.object,
+                    entry.object.projected(),
                     *entry_ref,
                     filter,
                     ctx.source_id,
@@ -10512,6 +10775,125 @@ mod tests {
         assert!(!matches_target_filter(&state, attacker, &filter, attacker));
         assert!(!matches_target_filter(&state, newcomer, &filter, attacker));
         assert!(matches_target_filter(&state, veteran, &filter, attacker));
+    }
+
+    /// `filter_contains` must reach every `TargetFilter` nested anywhere inside a
+    /// filter, or a nested anaphor reads as absent and the CR 608.2c deferral
+    /// gate it feeds lets a prompt-suspended sub-ability evaluate against a stale
+    /// ledger. `ChosenDamageSource`'s optional inner filter was exactly that gap:
+    /// invisible to both `filter_contains_*` predicates, so a `LastCreated` one
+    /// level inside it read as absent.
+    ///
+    /// The recursion set stands on the shape of `TargetFilter` alone. An earlier
+    /// revision of this comment justified it as "the same five
+    /// `normalize_contextual_filter` recurses through"; that premise was simply
+    /// false — that function (CR 608.2c parent-target exclusion) recurses through
+    /// `Not`, `Or` and `And` only and ends in a `_ => filter.clone()` wildcard, so
+    /// it reaches neither `TrackedSetFiltered` nor `ChosenDamageSource`. The two
+    /// functions answer different questions and their sets are not required to
+    /// agree.
+    #[test]
+    fn filter_contains_recurses_through_a_chosen_damage_sources_inner_filter() {
+        let nested = |inner: TargetFilter| TargetFilter::ChosenDamageSource {
+            filter: Some(Box::new(inner)),
+        };
+
+        assert!(
+            filter_contains_last_created(&nested(TargetFilter::LastCreated)),
+            "a LastCreated nested inside ChosenDamageSource must be seen"
+        );
+        assert!(
+            filter_contains_last_zone_changed(&nested(TargetFilter::LastZoneChanged)),
+            "the LastZoneChanged twin has the same nesting set"
+        );
+        // Two levels down, through an intervening compound.
+        assert!(filter_contains_last_created(&nested(TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::creature()),
+                TargetFilter::Not {
+                    filter: Box::new(TargetFilter::LastCreated),
+                },
+            ],
+        })));
+        // Negative: the same shape without the anaphor, and the bare `None` form
+        // (which is a leaf, not a missed recursion).
+        assert!(!filter_contains_last_created(&nested(TargetFilter::Typed(
+            TypedFilter::creature()
+        ))));
+        assert!(!filter_contains_last_created(
+            &TargetFilter::ChosenDamageSource { filter: None }
+        ));
+    }
+
+    /// `TargetFilter::Typed` is not a leaf: six `FilterProp`s box a
+    /// `TargetFilter`, two more recurse through further props, and
+    /// `ControllerMatches` crosses into `PlayerFilter`, which boxes filters of its
+    /// own. Treating `Typed` as a leaf hid every one of those from the anaphor
+    /// predicates — the same gap `ChosenDamageSource` had, one level down.
+    ///
+    /// Each assertion here flips to `false` if its arm is removed from
+    /// `filter_prop_contains` / `player_filter_contains`.
+    #[test]
+    fn filter_contains_recurses_into_a_typed_filters_properties() {
+        let typed =
+            |props: Vec<FilterProp>| TargetFilter::Typed(TypedFilter::creature().properties(props));
+        let anaphor = || Box::new(TargetFilter::LastCreated);
+
+        for props in [
+            vec![FilterProp::CanEnchant { target: anaphor() }],
+            vec![FilterProp::DifferentNameFrom { filter: anaphor() }],
+            vec![FilterProp::DistinctFrom {
+                reference: anaphor(),
+            }],
+            vec![FilterProp::SharesQuality {
+                quality: SharedQuality::Color,
+                reference: Some(anaphor()),
+                relation: SharedQualityRelation::default(),
+            }],
+            vec![FilterProp::Targets { filter: anaphor() }],
+            vec![FilterProp::TargetsOnly { filter: anaphor() }],
+            // Prop-level combinators.
+            vec![FilterProp::Not {
+                prop: Box::new(FilterProp::Targets { filter: anaphor() }),
+            }],
+            vec![FilterProp::AnyOf {
+                props: vec![FilterProp::Token, FilterProp::Targets { filter: anaphor() }],
+            }],
+            // Object axis -> player axis -> back to a filter.
+            vec![FilterProp::ControllerMatches {
+                player: Box::new(PlayerFilter::ControlsCount {
+                    relation: crate::types::ability::PlayerRelation::Controller,
+                    filter: TargetFilter::LastCreated,
+                    comparator: crate::types::ability::Comparator::GE,
+                    count: Box::new(QuantityExpr::Fixed { value: 1 }),
+                }),
+            }],
+        ] {
+            assert!(
+                filter_contains_last_created(&typed(props.clone())),
+                "a LastCreated nested in {props:?} must be seen"
+            );
+        }
+
+        // Negative: the same shapes without the anaphor, and a prop-free typed
+        // filter, so the positives above are not passing vacuously.
+        assert!(!filter_contains_last_created(&typed(vec![
+            FilterProp::Targets {
+                filter: Box::new(TargetFilter::Any),
+            },
+            FilterProp::Token,
+        ])));
+        assert!(!filter_contains_last_created(&typed(Vec::new())));
+        // The `LastZoneChanged` twin shares the traversal, so it must see the
+        // same nesting and not confuse the two ledgers.
+        assert!(filter_contains_last_zone_changed(&typed(vec![
+            FilterProp::Targets {
+                filter: Box::new(TargetFilter::LastZoneChanged),
+            },
+        ])));
+        assert!(!filter_contains_last_zone_changed(&typed(vec![
+            FilterProp::Targets { filter: anaphor() },
+        ])));
     }
 
     #[test]

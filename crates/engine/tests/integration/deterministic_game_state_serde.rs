@@ -12,8 +12,9 @@ use engine::types::card_type::CardType;
 use engine::types::definitions::Definitions;
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{
-    AutoPassMode, LandPlayRecord, LiminalEntry, LinkedExileSnapshot, PendingConniveReentry,
-    PersistedGameState, PriorityPassingMode, SpellCastRecord, StackPaidSnapshot, WaitingFor,
+    AutoPassMode, LandPlayRecord, LiminalEntrant, LiminalEntry, LinkedExileSnapshot,
+    PendingConniveReentry, PersistedGameState, PriorityPassingMode, SpellCastRecord,
+    StackPaidSnapshot, TokenProjection, WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId, TrackedSetId};
 use engine::types::keywords::ProtectionTarget;
@@ -1419,7 +1420,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
         (
             ObjectId(1),
             LiminalEntry {
-                object: first.clone(),
+                object: LiminalEntrant::Token(TokenProjection::materialize(first.clone())),
                 name: "First liminal".to_string(),
                 source_id: ObjectId(11),
                 controller: PlayerId(0),
@@ -1439,7 +1440,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
         (
             ObjectId(2),
             LiminalEntry {
-                object: second.clone(),
+                object: LiminalEntrant::Token(TokenProjection::materialize(second.clone())),
                 name: "Second liminal".to_string(),
                 source_id: ObjectId(22),
                 controller: PlayerId(1),

@@ -209,7 +209,7 @@ fn quantity_offers_up_to_choice(q: &QuantityExpr) -> bool {
 fn effect_offers_choice(e: &Effect) -> bool {
     match e {
         // Engine-set from the activation-payment snapshot, never a player prompt.
-        Effect::NoteManaSpent => false,
+        Effect::NoteManaSpent | Effect::CompletePlayerAction { .. } => false,
         // ---- SCOPE FILTER. DESTRUCTURED WITHOUT `..` on every arm, exactly as
         //      HEAD's three allow arms are, so a new field on any of them forces
         //      a re-audit of whether the class is still in scope.

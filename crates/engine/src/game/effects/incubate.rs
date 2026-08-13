@@ -216,6 +216,7 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
