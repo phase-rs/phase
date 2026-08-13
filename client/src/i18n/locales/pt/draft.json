@@ -59,7 +59,8 @@
     "passingLeft": "→ Passando para a Esquerda →",
     "passingRight": "← Passando para a Direita ←",
     "connected": "Connected",
-    "disconnected": "Disconnected"
+    "disconnected": "Disconnected",
+    "faceUpDraftCards": "Virada para cima: {{cards}}"
   },
   "setSelector": {
     "botDifficulty": "Dificuldade dos Bots",

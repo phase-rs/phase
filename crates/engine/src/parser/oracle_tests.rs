@@ -5759,6 +5759,9 @@ fn draft_matters_sentence_positive_cases() {
              and must draft cards at random."
     ));
     assert!(is_draft_matters_sentence(
+        "If you do, put this card into that booster pack."
+    ));
+    assert!(is_draft_matters_sentence(
         "Each player passes the last card from each booster pack to a player who drafted a \
              card named Canal Dredger."
     ));
@@ -5806,6 +5809,12 @@ fn draft_effect_from_oracle_text_recognizes_additional_pick() {
     assert_eq!(
         draft_effect_from_oracle_text(
             "As you draft a card, you may draft an additional card from that booster pack."
+        ),
+        None
+    );
+    assert_eq!(
+        draft_effect_from_oracle_text(
+            "As you draft a card, you may draft an additional card from that booster pack. If you do, put this card into that booster pack."
         ),
         None
     );

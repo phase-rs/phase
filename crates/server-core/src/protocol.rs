@@ -2138,7 +2138,7 @@ mod tests {
             pass_direction: PassDirection::Left,
             current_pack: None,
             pool,
-            draft_effects: Vec::new(),
+            draft_effects: vec![first_pull.clone()],
             pool_groups,
             sealed_packs: Some(vec![vec![first_pull], vec![second_pull]]),
             seats: Vec::new(),
@@ -2163,6 +2163,7 @@ mod tests {
                 assert_eq!(v.pick_number, 2);
                 assert_eq!(v.timer_remaining_ms, Some(5000));
                 assert_eq!(v.pool_groups, view.pool_groups);
+                assert_eq!(v.draft_effects, view.draft_effects);
                 assert_eq!(
                     v.sealed_packs
                         .as_ref()

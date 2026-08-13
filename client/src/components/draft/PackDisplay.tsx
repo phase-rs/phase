@@ -246,7 +246,7 @@ export function PackDisplay({
             {draftEffects.map((card) => (
               <label
                 key={card.instance_id}
-                className="flex cursor-pointer items-center gap-2 text-xs text-white/75"
+                className="flex min-h-11 cursor-pointer items-center gap-2 text-xs text-white/75"
               >
                 <input
                   type="checkbox"

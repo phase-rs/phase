@@ -40,6 +40,7 @@ const view: DraftPlayerView = {
     },
   ],
   pool: [],
+  draft_effects: [],
   pool_groups: {
     color_groups: [],
     type_groups: [],

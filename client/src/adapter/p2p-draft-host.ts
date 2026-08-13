@@ -2001,6 +2001,7 @@ export class P2PDraftHost {
         connected: i === 0 || this.guestSessions.has(i),
         has_submitted_deck: false,
         pick_status: "NotDrafting",
+        face_up_draft_cards: [],
       });
     }
     return seats;
@@ -2015,6 +2016,7 @@ export class P2PDraftHost {
       pass_direction: "Left",
       current_pack: null,
       pool: [],
+      draft_effects: [],
       pool_groups: EMPTY_DRAFT_POOL_GROUPS,
       seats: this.buildSeatPublicViews(),
       cards_per_pack: 14,

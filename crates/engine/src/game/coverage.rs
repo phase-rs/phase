@@ -13562,7 +13562,7 @@ mod tests {
     #[test]
     fn test_audit_skips_draft_procedure_lines() {
         let face = make_face();
-        let oracle = "Draft this card face up.\nAs you draft a card, you may draft an additional card from that booster pack. If you do, put this card into that booster pack.";
+        let oracle = "Draft this card face up.\nAs you draft a card, you may draft an additional card from that booster pack.\nIf you do, put this card into that booster pack.";
 
         let findings = audit_card_lines(oracle, &face);
 

@@ -401,6 +401,7 @@ pub(crate) fn is_draft_matters_sentence(line: &str) -> bool {
     let lower = line.trim().to_ascii_lowercase();
     lower_starts_with(&lower, "draft this card face up")
         || lower_starts_with(&lower, "as you draft ")
+        || lower_starts_with(&lower, "if you do, put this card into that booster pack")
         || lower_starts_with(&lower, "during the draft")
         || lower_starts_with(&lower, "immediately after the draft")
         || lower_starts_with(&lower, "instead of drafting ")
@@ -408,24 +409,35 @@ pub(crate) fn is_draft_matters_sentence(line: &str) -> bool {
         || lower_starts_with(&lower, "each player passes the last card")
 }
 
-/// Recognize a draft effect whose optional action drafts one more card and
-/// returns the effect card to that booster pack.
 /// CR 905.1a + CR 905.2: Identify a draft-time ability that changes the
 /// booster-draft procedure rather than constructed-game resolution.
 pub fn draft_effect_from_oracle_text(oracle_text: &str) -> Option<DraftEffect> {
-    let has_additional_pick = oracle_text.lines().any(|line| {
-        let lower = line.to_ascii_lowercase();
-        scan_contains(
-            &lower,
-            "as you draft a card, you may draft an additional card from that booster pack",
-        )
-    });
-    let returns_to_pack = oracle_text.lines().any(|line| {
-        let lower = line.to_ascii_lowercase();
-        scan_contains(&lower, "if you do, put this card into that booster pack")
-    });
-
-    (has_additional_pick && returns_to_pack).then_some(DraftEffect::AdditionalPick)
+    let lower = oracle_text.to_ascii_lowercase();
+    let parsed = all_consuming(terminated(
+        (
+            terminated(
+                tag::<_, _, OracleError<'_>>("draft this card face up"),
+                tag("."),
+            ),
+            preceded(
+                multispace0,
+                terminated(
+                    tag("as you draft a card, you may draft an additional card from that booster pack"),
+                    tag("."),
+                ),
+            ),
+            preceded(
+                multispace0,
+                terminated(
+                    tag("if you do, put this card into that booster pack"),
+                    opt(tag(".")),
+                ),
+            ),
+        ),
+        multispace0,
+    ))
+    .parse(lower.as_str());
+    parsed.is_ok().then_some(DraftEffect::AdditionalPick)
 }
 
 /// Whether Oracle text explicitly permits this card to be a commander.

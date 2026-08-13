@@ -80,6 +80,7 @@ function mockView(status: string): DraftPlayerView {
     pass_direction: "Left",
     current_pack: null,
     pool: [],
+    draft_effects: [],
     pool_groups: {
       color_groups: [],
       type_groups: [],

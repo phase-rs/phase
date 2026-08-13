@@ -81,6 +81,7 @@ export interface SeatPublicView {
   connected: boolean;
   has_submitted_deck: boolean;
   pick_status: "Pending" | "Picked" | "TimedOut" | "NotDrafting";
+  face_up_draft_cards: DraftCardInstance[];
 }
 
 export type DraftStatus =
@@ -170,7 +171,7 @@ export interface DraftPlayerView {
   pass_direction: "Left" | "Right";
   current_pack: DraftCardInstance[] | null;
   pool: DraftCardInstance[];
-  draft_effects?: DraftCardInstance[];
+  draft_effects: DraftCardInstance[];
   /** Engine-owned grouping, ordering, and duplicate counts for the pool. */
   pool_groups: DraftPoolGroups;
   /** Engine-provided sealed packs in opening order. Absent for draft events. */

@@ -662,7 +662,7 @@ function DraftingPhaseContent() {
           ⚠ {t(`podPhaseView.pauseReason.${pauseKey}`)}
         </div>
       )}
-      <div className="flex gap-4">
+      <div className="flex flex-col gap-4 lg:flex-row">
         <div className="flex min-w-0 flex-1 flex-col">
           <SeatStatusRing />
           <PickTimer />

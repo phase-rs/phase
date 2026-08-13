@@ -59,7 +59,8 @@
     "passingLeft": "→ Passaggio a sinistra →",
     "passingRight": "← Passaggio a destra ←",
     "connected": "Connected",
-    "disconnected": "Disconnected"
+    "disconnected": "Disconnected",
+    "faceUpDraftCards": "A faccia in su: {{cards}}"
   },
   "setSelector": {
     "botDifficulty": "Difficoltà bot",
