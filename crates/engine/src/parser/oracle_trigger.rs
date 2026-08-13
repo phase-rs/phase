@@ -1410,7 +1410,8 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         .strip_prefix("if ") // allow-noncombinator: structural if-clause skip when condition is unrecognized
         .and_then(|rest| rest.split_once(", "))
         .map(|(_cond, body)| body);
-    let mut optional = starts_with_you_may(effect_lower.as_str())
+    let mut optional = optional_player.is_some()
+        || starts_with_you_may(effect_lower.as_str())
         || starts_with_you_may(effect_without_if.trim_start())
         || after_structural_if.is_some_and(starts_with_you_may);
 
