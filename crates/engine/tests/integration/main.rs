@@ -41,6 +41,7 @@ mod awaken_runtime;
 mod azors_gateway_transform_condition;
 mod backup_becomes_target_trigger;
 mod balance_equalization;
+mod balduvian_horde_random_discard;
 mod baleful_mastery_regression;
 mod banding_combat;
 mod bards_company_recruit;
