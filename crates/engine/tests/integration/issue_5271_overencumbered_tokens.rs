@@ -13,16 +13,12 @@ fn issue_5271_overencumbered_etb_gives_every_token_to_enchanted_opponent() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let aura = {
-        let mut builder = scenario.add_spell_to_hand_from_oracle(
-            P0,
-            "Overencumbered",
-            false,
-            OVERENCUMBERED_ORACLE,
-        );
+        let mut builder = scenario.add_creature_to_hand(P0, "Overencumbered", 0, 0);
         builder
             .as_enchantment()
             .with_subtypes(vec!["Aura", "Curse"])
-            .with_mana_cost(ManaCost::zero());
+            .with_mana_cost(ManaCost::zero())
+            .from_oracle_text(OVERENCUMBERED_ORACLE);
         builder.id()
     };
 
