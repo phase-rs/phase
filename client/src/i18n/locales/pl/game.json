@@ -1809,6 +1809,10 @@
     "title": "Wybierz odbiorcę prezentu",
     "subtitle": "Wybierz przeciwnika, który otrzyma obiecany prezent."
   },
+  "entryController": {
+    "title": "Wybierz kontrolującego przy wejściu",
+    "subtitle": "Wybierz przeciwnika, który kontroluje ten permanent, gdy wchodzi na pole bitwy."
+  },
   "optionalCost": {
     "gift": {
       "title": "Obiecać prezent?",

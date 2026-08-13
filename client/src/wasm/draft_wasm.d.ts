@@ -36,7 +36,7 @@ export function auto_pick(): any;
  * - `pool_input_json`: serialized `PoolInput` discriminated union
  *   (`{ "type": "Set" | "Cube", "data": { ... } }`)
  * - `seats_json`: JSON array of SeatDescriptors
- * - `kind`: 0=Quick, 1=Premier, 2=Traditional, 3=Sealed. The user-selected DraftKind
+ * - `kind`: 0=Quick, 1=Premier, 2=Traditional, 3=Sealed.
  *   flows through to `DraftConfig.kind` unchanged. Tournament match format
  *   (Bo1 for Premier and Sealed, Bo3 for Traditional) is identical to set drafts.
  * - `seed`: RNG seed for deterministic pack generation
@@ -139,7 +139,7 @@ export function start_quick_draft(set_pool_json: string, difficulty: number, see
 
 /**
  * Start a local Sealed event: one human and seven bots each open six packs,
- * then deckbuilding begins immediately.
+ * then the human proceeds directly to deckbuilding.
  */
 export function start_sealed_draft(set_pool_json: string, difficulty: number, seed: number): any;
 

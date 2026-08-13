@@ -1092,7 +1092,16 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                     // attach tail is the sole exception: split at " and attach an
                     // Equipment that was attached …" even inside quote mode.
                     let allow_single_quote_attach_split = in_single_quote
-                        && starts_attach_equipment_was_attached_clause(remainder_trimmed);
+                        && (starts_attach_equipment_was_attached_clause(remainder_trimmed)
+                            // CR 608.2c + CR 113.7a: `~'s controller` is a
+                            // complete player predicate, so its chained action
+                            // must reach the regular clause lowerer. Restrict
+                            // this escape hatch to the exact typed source-owner
+                            // subject; other possessives remain one clause.
+                            || source_controller_predicate_has_action_tail(
+                                &current,
+                                remainder_trimmed,
+                            ));
                     if !in_single_quote || allow_single_quote_attach_split {
                         // Suppress split when "and put" follows "from among" — the
                         // "put into hand / onto battlefield" is part of the same
@@ -2426,6 +2435,24 @@ fn current_ends_with_bare_and(current: &str) -> bool {
 pub(crate) fn starts_bare_and_clause(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     starts_bare_and_clause_lower(&lower)
+}
+
+/// CR 608.2c + CR 113.7a: `~'s controller loses 2 life and you draw a card`
+/// contains two actions. Card-name possessives otherwise keep quote mode to
+/// protect object predicates such as "~'s controller sacrifices it and draws a
+/// card"; admit only the self-source player predicate followed by a normal
+/// imperative clause start.
+fn source_controller_predicate_has_action_tail(current: &str, tail: &str) -> bool {
+    let lower = current.to_ascii_lowercase();
+    let parsed = preceded(
+        take_until::<_, _, OracleError<'_>>("~'s controller "),
+        tag::<_, _, OracleError<'_>>("~'s controller "),
+    )
+    .parse(lower.as_str());
+    parsed.is_ok_and(|(rest, _)| {
+        tag::<_, _, OracleError<'_>>("loses ").parse(rest).is_ok()
+            && starts_bare_and_clause(tail)
+    })
 }
 
 fn starts_they_continuous_clause_lower(input: &str) -> OracleResult<'_, ()> {

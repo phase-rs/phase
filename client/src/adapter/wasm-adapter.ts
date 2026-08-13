@@ -721,7 +721,9 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
    * Toggle the engine's multiplayer enforcement flag. When enabled, the
    * Rust side refuses `restore_game_state` with a descriptive error —
    * defense against any caller trying to rewind a multiplayer game.
-   * Called by multiplayer adapters (P2P host/guest) after WASM init.
+   * Called by the P2P host immediately before `initializeGame` — not at
+   * lobby open. A pregame lobby owns no game state, so enabling enforcement
+   * there only leaves the flag set on the worker for the lobby's lifetime.
    */
   async setMultiplayerMode(enabled: boolean): Promise<void> {
     this.assertInitialized();
@@ -735,7 +737,15 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
 
   async applySeatMutation(stateJson: string, mutationJson: string): Promise<unknown> {
     this.assertInitialized();
-    await this.ensureCardDb();
+    // No `ensureCardDb()` here: `apply_seat_mutation` never reads CARD_DB. Its
+    // `WasmDeckResolver` resolves only against the static `STARTER_DECKS` table
+    // (crates/engine/src/starter_decks.rs) and otherwise clones the passed-in
+    // name list, staying at the name-only layer — `initialize_game` re-resolves
+    // against CARD_DB when the game actually starts. (The Rust doc comment on
+    // `apply_seat_mutation` claiming it uses "the TLS card database" is stale;
+    // read the resolver, not the doc comment.) Warming a ~100 MB DB for every
+    // lobby seat change is pure cost, and on a host lobby it is a second
+    // resident copy alongside the shared worker's.
     if (this.engine) {
       const result = await this.engine.applySeatMutation(stateJson, mutationJson);
       this.invalidateAiDecisionDiagnostics();

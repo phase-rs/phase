@@ -5145,6 +5145,16 @@ pub enum TargetFilter {
     Any,
     Player,
     Controller,
+    /// CR 608.2h + CR 113.7a: The controller of this ability's source object.
+    ///
+    /// Unlike [`Self::Controller`], which is the controller of the resolving
+    /// ability (and therefore the activator for an activated ability), this
+    /// follows the source's exact incarnation. Triggered abilities use their
+    /// [`TriggerSourceContext`] live-or-LKI authority; other stack abilities
+    /// use their captured `source_incarnation` and the incarnation-keyed LKI
+    /// history. This keeps "~'s controller" from rebinding to a later object
+    /// that reuses the same storage id.
+    SourceController,
     /// CR 615 + CR 614.1a: Compound damage recipient "you and [type] permanents
     /// you control" (Comeuppance's "you and planeswalkers you control"; Channel
     /// Harm's "you and permanents you control"). A PARSE-LAYER recipient
@@ -15099,6 +15109,10 @@ impl TargetFilter {
                 | TargetFilter::SelfRef
                 | TargetFilter::SourceOrPaired
                 | TargetFilter::Controller
+                // CR 608.2h + CR 113.7a: "~'s controller" is resolved from
+                // the source's live-or-LKI incarnation, never chosen while
+                // announcing the ability.
+                | TargetFilter::SourceController
                 | TargetFilter::OriginalController
                 // CR 608.2c: the reanimator-Aura's pre-rebind source identity is
                 // resolved (concretized to SpecificObject) during resolution, never

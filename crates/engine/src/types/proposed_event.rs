@@ -84,6 +84,14 @@ pub enum AppliedReplacementKey {
     Object { source: ObjectId, index: usize },
     Floating { index: usize },
     StepEndMana { index: usize },
+    /// CR 614.12a: The selected controller for an as-enters replacement.
+    /// This rides the event's existing replacement provenance so the selected
+    /// answer remains distinguishable from an originating controller override.
+    EntryControllerChoice {
+        source: ObjectId,
+        index: usize,
+        controller: PlayerId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -92,6 +100,11 @@ enum TaggedAppliedReplacementKey {
     Object { source: ObjectId, index: usize },
     Floating { index: usize },
     StepEndMana { index: usize },
+    EntryControllerChoice {
+        source: ObjectId,
+        index: usize,
+        controller: PlayerId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -120,6 +133,17 @@ impl AppliedReplacementKeyCompat {
             AppliedReplacementKeyCompat::Tagged(TaggedAppliedReplacementKey::StepEndMana {
                 index,
             }) => AppliedReplacementKey::StepEndMana { index },
+            AppliedReplacementKeyCompat::Tagged(
+                TaggedAppliedReplacementKey::EntryControllerChoice {
+                    source,
+                    index,
+                    controller,
+                },
+            ) => AppliedReplacementKey::EntryControllerChoice {
+                source,
+                index,
+                controller,
+            },
             AppliedReplacementKeyCompat::Legacy(ReplacementId {
                 source: ObjectId(0),
                 index,
@@ -159,7 +183,8 @@ impl AppliedReplacementKey {
 
     pub fn source(self) -> ObjectId {
         match self {
-            AppliedReplacementKey::Object { source, .. } => source,
+            AppliedReplacementKey::Object { source, .. }
+            | AppliedReplacementKey::EntryControllerChoice { source, .. } => source,
             AppliedReplacementKey::Floating { .. } | AppliedReplacementKey::StepEndMana { .. } => {
                 ObjectId(0)
             }
@@ -170,7 +195,8 @@ impl AppliedReplacementKey {
         match self {
             AppliedReplacementKey::Object { index, .. }
             | AppliedReplacementKey::Floating { index }
-            | AppliedReplacementKey::StepEndMana { index } => index,
+            | AppliedReplacementKey::StepEndMana { index }
+            | AppliedReplacementKey::EntryControllerChoice { index, .. } => index,
         }
     }
 

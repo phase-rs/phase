@@ -7069,6 +7069,13 @@ pub(crate) fn resolve_player_for_context_ref(
             return player;
         }
     }
+    // CR 608.2h + CR 113.7a: "~'s controller" reads the source's exact
+    // live-or-LKI incarnation. Do not fall through to `ability.controller`,
+    // which is the activating player for an activated ability.
+    if matches!(target_filter, TargetFilter::SourceController) {
+        return crate::game::targeting::resolve_effect_player_ref(state, ability, target_filter)
+            .unwrap_or(ability.controller);
+    }
     if let Some(target_ref) = crate::game::targeting::resolve_event_context_target(
         state,
         target_filter,

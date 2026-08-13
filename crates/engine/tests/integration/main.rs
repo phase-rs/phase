@@ -701,6 +701,7 @@ mod issue_688_mind_into_matter;
 mod issue_689_resonating_lute_hand_size;
 mod issue_6908_kozilek_discard_mana_value;
 mod issue_6913_eagle_vision_freerunning;
+mod issue_6916_xantcha_entry_controller;
 mod issue_691_sheoldred_saga_lore;
 mod issue_6943_faerie_slumber_party;
 mod issue_6979_land_mana_amplification;

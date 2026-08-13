@@ -581,17 +581,34 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     ).toThrow("P2P supports 2-6 players");
   });
 
-  it("enables multiplayer-mode enforcement on the engine at init time", async () => {
-    // P2PHostAdapter owns an authoritative WASM engine locally; flipping
-    // the engine's multiplayer flag during initialize() ensures any stray
-    // restore_game_state call is refused in the Rust layer.
+  it("enables multiplayer-mode enforcement at game start, not at lobby open", async () => {
+    // The engine's multiplayer flag is process-wide and nothing ever clears it,
+    // so an open host lobby must not set it — it is claimed only when the host
+    // actually takes the engine, on the line before `initializeGame`, which is
+    // where `initialize_debug_permissions` reads it.
     const { adapter } = makeHost(2);
     expect(mockSetMultiplayerMode).not.toHaveBeenCalled();
 
     await adapter.initialize();
 
+    expect(mockSetMultiplayerMode).not.toHaveBeenCalled();
+
+    await adapter.applySeatMutation({
+      type: "SetKind",
+      data: {
+        seatIndex: 1,
+        kind: {
+          type: "Ai",
+          data: { difficulty: "Medium", deck: { type: "Random" } },
+        },
+      },
+    });
+    await adapter.initializeGame();
+
     expect(mockSetMultiplayerMode).toHaveBeenCalledTimes(1);
     expect(mockSetMultiplayerMode).toHaveBeenCalledWith(true);
+    expect(mockSetMultiplayerMode.mock.invocationCallOrder[0])
+      .toBeLessThan(mockInitializeGame.mock.invocationCallOrder[0]);
   });
 
   it("does not reinitialize the host during the lobby-to-game handoff", async () => {
@@ -601,7 +618,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     await adapter.initialize();
 
     expect(mockInitialize).toHaveBeenCalledTimes(1);
-    expect(mockSetMultiplayerMode).toHaveBeenCalledTimes(1);
+    expect(mockSetMultiplayerMode).not.toHaveBeenCalled();
   });
 
   it("fences a stale host when a same-session resume claims a new incarnation", async () => {

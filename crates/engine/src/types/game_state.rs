@@ -10109,6 +10109,14 @@ pub enum WaitingFor {
         #[serde(default)]
         candidates: Vec<ReplacementCandidateSummary>,
     },
+    /// CR 614.12a: choose the opponent that a permanent enters under before
+    /// the zone change is delivered. `candidates` is captured at replacement
+    /// application time; the pending replacement retains the exact proposed
+    /// event and replacement-applied set for the shared pipeline resume.
+    EntryControllerChoice {
+        player: PlayerId,
+        candidates: Vec<PlayerId>,
+    },
     /// CR 603.3b: When a player controls 2+ triggered abilities placed on the
     /// stack in the same pass, that player chooses the order. The variant is
     /// emitted in **choice order** (APNAP per CR 101.4 — active player chooses
@@ -12125,6 +12133,7 @@ impl WaitingFor {
             WaitingFor::EnlistChoice { .. } => "EnlistChoice",
             WaitingFor::GameOver { .. } => "GameOver",
             WaitingFor::ReplacementChoice { .. } => "ReplacementChoice",
+            WaitingFor::EntryControllerChoice { .. } => "EntryControllerChoice",
             WaitingFor::OrderTriggers { .. } => "OrderTriggers",
             WaitingFor::CopyTargetChoice { .. } => "CopyTargetChoice",
             WaitingFor::ExploreChoice { .. } => "ExploreChoice",
@@ -12276,6 +12285,7 @@ impl WaitingFor {
             | WaitingFor::ExertChoice { player, .. }
             | WaitingFor::EnlistChoice { player, .. }
             | WaitingFor::ReplacementChoice { player, .. }
+            | WaitingFor::EntryControllerChoice { player, .. }
             | WaitingFor::OrderTriggers { player, .. }
             | WaitingFor::CopyTargetChoice { player, .. }
             | WaitingFor::ExploreChoice { player, .. }

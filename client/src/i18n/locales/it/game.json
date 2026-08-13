@@ -1809,6 +1809,10 @@
     "title": "Scegli il destinatario del dono",
     "subtitle": "Scegli quale avversario riceve il dono promesso."
   },
+  "entryController": {
+    "title": "Scegli il controllore all'entrata",
+    "subtitle": "Scegli quale avversario controlla questo permanente mentre entra."
+  },
   "optionalCost": {
     "gift": {
       "title": "Promettere un dono?",

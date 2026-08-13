@@ -3871,6 +3871,7 @@ pub(crate) fn deliver_replaced_zone_change(
 fn replacement_pause_delivery_result(state: &GameState) -> ZoneDeliveryResult {
     match &state.waiting_for {
         WaitingFor::ReplacementChoice { player, .. }
+        | WaitingFor::EntryControllerChoice { player, .. }
         // CR 614.12a: a Devour as-enters sacrifice surfaced its own
         // `EffectZoneChoice`; carry its chooser so the caller's `park_waiting_for`
         // doesn't clobber the already-surfaced prompt.
