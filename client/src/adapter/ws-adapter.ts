@@ -381,6 +381,8 @@ export class WebSocketAdapter implements EngineAdapter {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private disposed = false;
+  /** A rejected Full identity is terminal for this socket. */
+  private sessionIdentityRejected = false;
   private gameEnded = false;
   /**
    * Populated once the server's `ServerHello` arrives. `null` between the
@@ -693,6 +695,7 @@ export class WebSocketAdapter implements EngineAdapter {
         clearInterval(this.pingInterval);
         this.pingInterval = null;
       }
+      if (this.sessionIdentityRejected) return;
       // Clear the "host waiting for opponent" latch on socket close —
       // otherwise a host who received GameCreated, disconnected before
       // GameStarted, and then reconnected through a different path would
@@ -1211,6 +1214,8 @@ export class WebSocketAdapter implements EngineAdapter {
   }
 
   private handleMessage(msg: { type: string; data?: unknown }): void {
+    if (this.sessionIdentityRejected) return;
+
     switch (msg.type) {
       // ServerHello is no longer observed here — the shared
       // `openPhaseSocket` helper consumes it during `attachSocket`, and
@@ -1771,9 +1776,7 @@ export class WebSocketAdapter implements EngineAdapter {
   private acceptFullSessionKey(key: FullSessionKey | undefined): boolean {
     if (!key || key.game_code !== this._gameCode || key.generation < 1) {
       const error = new AdapterError("WS_ERROR", "Server omitted a valid Full session identity", false);
-      this.rejectInitialization(error);
-      this.emit({ type: "error", message: error.message });
-      return false;
+      return this.rejectSessionIdentity(error);
     }
     if (
       this.fullSessionKey
@@ -1781,9 +1784,7 @@ export class WebSocketAdapter implements EngineAdapter {
         || this.fullSessionKey.generation !== key.generation)
     ) {
       const error = new AdapterError("WS_ERROR", "Server changed the Full session identity", false);
-      this.rejectInitialization(error);
-      this.emit({ type: "error", message: error.message });
-      return false;
+      return this.rejectSessionIdentity(error);
     }
     this.fullSessionKey = key;
     return true;
@@ -1815,9 +1816,21 @@ export class WebSocketAdapter implements EngineAdapter {
               : null;
     if (!errorMessage) return true;
 
-    const error = new AdapterError("WS_ERROR", errorMessage, false);
+    return this.rejectSessionIdentity(new AdapterError("WS_ERROR", errorMessage, false));
+  }
+
+  /** Latches an invalid Full identity before later frames can mutate session state. */
+  private rejectSessionIdentity(error: AdapterError): false {
+    if (this.sessionIdentityRejected) return false;
+
+    this.sessionIdentityRejected = true;
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
     this.rejectInitialization(error);
     this.emit({ type: "error", message: error.message });
+    this.ws?.close();
     return false;
   }
 }

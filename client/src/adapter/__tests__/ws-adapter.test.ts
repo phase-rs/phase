@@ -760,6 +760,18 @@ describe("WebSocketAdapter", () => {
 
       await expect(attached).rejects.toThrow("Native reconnect attached game ATTACK, expected NATIVE");
       await expect(nativeAdapter.getSnapshot()).rejects.toThrow("No game state available");
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "StateUpdate",
+          data: {
+            state_revision: 8,
+            state: createMockState(),
+            events: [],
+          },
+        }),
+      );
+      await expect(nativeAdapter.getSnapshot()).rejects.toThrow("No game state available");
       expect(nativeAdapter.nativeSession).toEqual({
         gameCode: "NATIVE",
         playerId: 1,
@@ -768,6 +780,7 @@ describe("WebSocketAdapter", () => {
       });
       expect(listener).toHaveBeenCalledTimes(1);
       expect(listener).toHaveBeenCalledWith(expect.objectContaining({ type: "error" }));
+      expect(nativeSocket.close).toHaveBeenCalledTimes(1);
     });
 
     it("rejects a hostile SessionAttached before it can settle native reconnect", async () => {
