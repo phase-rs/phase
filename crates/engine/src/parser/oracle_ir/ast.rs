@@ -402,6 +402,10 @@ pub(crate) enum ContinuationAst {
     PutRest {
         destination: Zone,
         reorder_all: bool,
+        /// CR 400.5 + CR 608.2c: Only exact "in a random order" text
+        /// randomizes the unchosen library remainder.
+        #[serde(default, skip_serializing_if = "DigRestOrder::is_preserve")]
+        rest_order: DigRestOrder,
     },
     /// CR 701.20e + CR 608.2c: "Put up to N [filter] from among them onto the battlefield/into
     /// your hand" after Dig — patches the Dig's keep_count, filter, destination, and rest_destination.

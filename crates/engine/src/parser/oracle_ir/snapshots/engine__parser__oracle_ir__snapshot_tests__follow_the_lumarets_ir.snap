@@ -350,7 +350,8 @@ expression: "&ir"
                     "continuation": {
                       "PutRest": {
                         "destination": "Library",
-                        "reorder_all": false
+                        "reorder_all": false,
+                        "rest_order": "random"
                       }
                     }
                   }
