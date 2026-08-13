@@ -11,8 +11,9 @@ use crate::types::ability::{
     Comparator, ContinuousModification, ControllerRef, CopyChooseScope, CopyRetargetPermission,
     CountScope, DamageChannel, DamageModification, DamageSource, DelayedTriggerCondition,
     DiscardSelfScope, Duration, Effect, EffectScope, FilterProp, ManaContribution, ManaProduction,
-    ManaSpendPermission, ObjectScope, PerpetualModification, PlayerFilter, PlayerScope, PtStat,
-    PtValue, PtValueScope, QuantityExpr, QuantityRef, SeatDirection, SharedQuality,
+    ManaSpendPermission, ModalChoice, ObjectScope, PerpetualModification, PlayerFilter,
+    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, SeatDirection,
+    SharedQuality,
     SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter, TriggerCondition, TypeFilter,
     TypedFilter, ZoneRef,
 };
@@ -28965,4 +28966,45 @@ fn synthetic_sentence_separated_mass_move_damage_keeps_event_context_amount() {
         } => {}
         other => panic!("expected DamageEachPlayer(EventContextAmount, Opponent), got {other:?}"),
     }
+}
+
+/// SHAPE — inline modal roots are independent of `sub_ability`, but a
+/// targetless top-level tap in each mode still refers to the zone-change event
+/// source. This pins the parser's event-source rewrite without widening it
+/// through an explicitly chosen target.
+#[test]
+fn event_source_lift_rewrites_inline_modal_tap_mode_roots() {
+    let mode = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::SetTapState {
+            target: TargetFilter::ParentTarget,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        },
+    );
+    let mut root = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::unimplemented("modal marker", "Choose one"),
+    )
+    .with_modal(
+        ModalChoice {
+            min_choices: 1,
+            max_choices: 1,
+            mode_count: 1,
+            mode_descriptions: vec!["Tap that permanent.".to_string()],
+            ..Default::default()
+        },
+        vec![mode],
+    );
+
+    lift_parent_target_to_triggering_source_in_ability(&mut root);
+
+    assert!(matches!(
+        root.mode_abilities[0].effect.as_ref(),
+        Effect::SetTapState {
+            target: TargetFilter::TriggeringSource,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        }
+    ));
 }
