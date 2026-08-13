@@ -13,9 +13,8 @@ use crate::types::ability::{
     DiscardSelfScope, Duration, Effect, EffectScope, FilterProp, ManaContribution, ManaProduction,
     ManaSpendPermission, ModalChoice, ObjectScope, PerpetualModification, PlayerFilter,
     PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, SeatDirection,
-    SharedQuality,
-    SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter, TriggerCondition, TypeFilter,
-    TypedFilter, ZoneRef,
+    SharedQuality, SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter,
+    TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
