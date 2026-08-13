@@ -3337,6 +3337,7 @@ pub(super) fn handle_resolution_choice(
                 rest_destination,
                 rest_order,
                 enter_tapped,
+                enters_attacking,
                 source_id: dig_source_id,
                 ..
             },
@@ -3543,6 +3544,7 @@ pub(super) fn handle_resolution_choice(
                     );
                     req.mods.enter_tapped =
                         crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped);
+                    req.mods.enters_attacking = enters_attacking;
                     match crate::game::zone_pipeline::move_object(state, req, events) {
                         crate::game::zone_pipeline::ZoneMoveResult::Done => {}
                         // CR 303.4f / CR 616.1: the kept card's battlefield
@@ -8031,6 +8033,7 @@ pub(crate) fn run_batch_completion(
             selected,
             destination,
             enter_tapped,
+            enters_attacking,
         } => {
             crate::game::effects::dig::move_mass_put_all_selected(
                 state,
@@ -8039,6 +8042,7 @@ pub(crate) fn run_batch_completion(
                 selected,
                 destination,
                 enter_tapped,
+                enters_attacking,
                 events,
             );
             crate::game::zone_pipeline::BatchMoveResult::Done
@@ -9912,6 +9916,7 @@ mod tests {
                 rest_order: DigRestOrder::Preserve,
                 source_id: None,
                 enter_tapped: false,
+                enters_attacking: false,
             },
             GameAction::SelectCards { cards: vec![white] },
             &mut events,
@@ -9994,6 +9999,7 @@ mod tests {
                 rest_order: DigRestOrder::Random,
                 source_id: None,
                 enter_tapped: false,
+                enters_attacking: false,
             },
             GameAction::SelectCards { cards: vec![keep] },
             &mut events,
@@ -10033,6 +10039,7 @@ mod tests {
                 rest_order: DigRestOrder::Preserve,
                 source_id: None,
                 enter_tapped: false,
+                enters_attacking: false,
             },
             GameAction::SelectCards { cards: vec![keep] },
             &mut events,

@@ -89,6 +89,7 @@ fn hideaway_trigger(n: u32) -> TriggerDefinition {
             // CR 701.20e: the cards are looked at privately, not revealed.
             reveal: false,
             enter_tapped: false,
+            enters_attacking: false,
             source: DigSource::Library,
         },
     )

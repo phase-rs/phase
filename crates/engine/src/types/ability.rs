@@ -11368,6 +11368,9 @@ pub enum Effect {
         /// tapped when true (Planar Genesis — "onto the battlefield tapped").
         #[serde(default)]
         enter_tapped: bool,
+        /// CR 508.4: Kept cards routed to the battlefield enter attacking.
+        #[serde(default)]
+        enters_attacking: bool,
         /// Determines where the resolver reads the card set from. See [`DigSource`].
         #[serde(default, skip_serializing_if = "DigSource::is_library")]
         source: DigSource,

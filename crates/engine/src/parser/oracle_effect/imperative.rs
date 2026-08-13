@@ -3385,6 +3385,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             rest_order: crate::types::ability::DigRestOrder::Preserve,
             reveal,
             enter_tapped: false,
+            enters_attacking: false,
             source: DigSource::Library,
         },
         SearchCreationImperativeAst::ExileTopLookedAt {

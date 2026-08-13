@@ -34336,7 +34336,7 @@ fn parse_battlefield_transformed_qualifier(tail_lower: &str) -> bool {
 /// `tail_lower` is the lowercase slice starting *immediately after* the
 /// destination needle (e.g. `" tapped and attacking that opponent."`); the
 /// leading space is part of the needle's word-boundary contract.
-fn parse_battlefield_entry_qualifiers(tail_lower: &str) -> (bool, bool) {
+pub(super) fn parse_battlefield_entry_qualifiers(tail_lower: &str) -> (bool, bool) {
     // Word-boundary anchor for the qualifier clause: the qualifier must end at
     // a real boundary so " tapped" doesn't accidentally consume " tappedly".
     // EOF, whitespace, or sentence punctuation all qualify.

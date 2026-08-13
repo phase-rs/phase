@@ -4809,6 +4809,8 @@ pub struct PendingBatchZoneMoveRequest {
     pub cause: PendingBatchZoneChangeCause,
     #[serde(default, skip_serializing_if = "EtbTapState::is_unspecified")]
     pub enter_tapped: EtbTapState,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub enters_attacking: bool,
     #[serde(default)]
     pub enter_transformed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -5085,6 +5087,8 @@ pub enum BatchCompletion {
         selected: Vec<ObjectId>,
         destination: Zone,
         enter_tapped: EtbTapState,
+        #[serde(default)]
+        enters_attacking: bool,
     },
     /// CR 608.2c + CR 616.1: Every selected card of a deterministic mass Dig
     /// has settled. Publish only cards that actually reached `destination`, then
@@ -5502,6 +5506,10 @@ pub enum PendingCounterPostAction {
         source_id: Option<ObjectId>,
         duration: Option<Duration>,
         exile_tracking: ZoneDeliveryExileTracking,
+        /// CR 508.4: The completed battlefield entry joins combat after any
+        /// as-enters replacement choice has settled.
+        #[serde(default)]
+        enters_attacking: bool,
         /// Who drains `post_replacement_continuation` when this deferred tail
         /// finally runs (CR 614.12a). `#[serde(default)]` = `DeliveryTail`,
         /// matching every record minted before the field existed.
@@ -10268,6 +10276,10 @@ pub enum WaitingFor {
         /// dig are tapped.
         #[serde(default)]
         enter_tapped: bool,
+        /// CR 508.4: Kept cards entering the battlefield via this dig enter
+        /// attacking rather than being declared as attackers.
+        #[serde(default)]
+        enters_attacking: bool,
     },
     SurveilChoice {
         player: PlayerId,

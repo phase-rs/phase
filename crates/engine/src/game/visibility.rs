@@ -859,6 +859,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         rest_order,
         source_id,
         enter_tapped,
+        enters_attacking,
     } = state.waiting_for
     {
         if !can_view_private_for_player(player) {
@@ -874,6 +875,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 rest_order,
                 source_id,
                 enter_tapped,
+                enters_attacking,
             };
         }
     }

@@ -24,6 +24,7 @@ use crate::types::resolved_commands::{
     ResolvedObjectCounterCommand, ResolvedObjectCounterEdit,
     ResolvedObjectCounterReplayInvariantError,
 };
+use crate::types::zones::Zone;
 
 /// CR 306.5c + CR 310.4c: After mutating the counter map, re-derive the
 /// `obj.loyalty` / `obj.defense` field so the counter count and the cached
@@ -792,6 +793,7 @@ fn apply_pending_counter_post_action(
             source_id,
             duration,
             exile_tracking,
+            enters_attacking,
             drain,
         } => {
             // CR 614.12a: the delivery tail may surface a Devour as-enters
@@ -818,7 +820,24 @@ fn apply_pending_counter_post_action(
                 None,
                 events,
             ) {
-                super::change_zone::ZoneDeliveryResult::Done => true,
+                super::change_zone::ZoneDeliveryResult::Done => {
+                    if enters_attacking && to == Zone::Battlefield {
+                        let controller = state
+                            .objects
+                            .get(&object_id)
+                            .map(|object| object.controller)
+                            .unwrap_or(PlayerId(0));
+                        // CR 508.4: an entrant joins combat only after its
+                        // replacement-modified entry has fully settled.
+                        crate::game::combat::enter_attacking(
+                            state,
+                            object_id,
+                            cause.or(source_id).unwrap_or(object_id),
+                            controller,
+                        );
+                    }
+                    true
+                }
                 super::change_zone::ZoneDeliveryResult::NeedsChoice(_) => false,
             }
         }

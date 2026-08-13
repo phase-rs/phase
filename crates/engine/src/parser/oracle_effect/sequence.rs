@@ -4220,6 +4220,7 @@ pub(super) fn apply_clause_continuation(
             enters_under,
             face_down_profile,
             enter_tapped,
+            enters_attacking,
             reveal_verb,
         } => {
             // CR 608.2c: the "from among those cards" continuation patches the
@@ -4314,6 +4315,7 @@ pub(super) fn apply_clause_continuation(
                                 rest_order: DigRestOrder::Preserve,
                                 reveal: false,
                                 enter_tapped: false,
+                                enters_attacking: false,
                                 source: DigSource::PriorLook,
                             },
                         );
@@ -4336,6 +4338,7 @@ pub(super) fn apply_clause_continuation(
                                 rest_order: continuation_rest_order,
                                 reveal: false,
                                 enter_tapped,
+                                enters_attacking,
                                 source: DigSource::PriorLook,
                             },
                         );
@@ -4379,6 +4382,7 @@ pub(super) fn apply_clause_continuation(
                 rest_order,
                 reveal,
                 enter_tapped: dig_enter_tapped,
+                enters_attacking: dig_enters_attacking,
                 ..
             } = &mut *previous.effect
             {
@@ -4429,6 +4433,7 @@ pub(super) fn apply_clause_continuation(
                 }
                 *rest_order = continuation_rest_order;
                 *dig_enter_tapped = enter_tapped;
+                *dig_enters_attacking = enters_attacking;
             } else if let Effect::Mill {
                 destination: mill_destination,
                 ..
@@ -4801,6 +4806,14 @@ pub(super) fn apply_clause_continuation(
                     // object's type at ChangeZone resolution instead of
                     // applying them unconditionally.
                     *enters_modified_if = moved_filter;
+                }
+                Effect::Dig {
+                    enters_attacking,
+                    enter_tapped,
+                    ..
+                } => {
+                    *enters_attacking = true;
+                    *enter_tapped = true;
                 }
                 Effect::Meld { entry, .. } => {
                     *entry = crate::types::ability::PermanentEntryMode::TappedAndAttacking {
@@ -5492,7 +5505,7 @@ pub(super) fn parse_dig_from_among(
     // Experiment): "reveal up to N <filter> cards from among them, then put the
     // rest on the bottom" — the kept cards are NOT auto-routed; subsequent
     // sub_abilities route them by type via `TargetFilter::TrackedSetFiltered`.
-    let (destination, enter_tapped) = parse_dig_kept_destination(lower);
+    let (destination, enter_tapped, enters_attacking) = parse_dig_kept_destination(lower);
 
     // CR 701.17c + CR 608.2c: "return a card milled this way to your hand"
     // is the same tracked-set continuation as "from among the milled cards",
@@ -5609,6 +5622,7 @@ pub(super) fn parse_dig_from_among(
             enters_under,
             face_down_profile,
             enter_tapped,
+            enters_attacking,
             reveal_verb,
         });
     }
@@ -5713,6 +5727,7 @@ pub(super) fn parse_dig_from_among(
             enters_under,
             face_down_profile,
             enter_tapped,
+            enters_attacking,
             reveal_verb,
         });
     }
@@ -5776,6 +5791,7 @@ pub(super) fn parse_dig_from_among(
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped,
+                enters_attacking,
                 reveal_verb: false,
             });
         }
@@ -5784,7 +5800,7 @@ pub(super) fn parse_dig_from_among(
     None
 }
 
-fn parse_dig_kept_destination(lower: &str) -> (Option<Zone>, bool) {
+fn parse_dig_kept_destination(lower: &str) -> (Option<Zone>, bool, bool) {
     if let Some(parsed) = parse_dig_from_among_destination(lower) {
         return parsed;
     }
@@ -5804,10 +5820,10 @@ fn parse_dig_kept_destination(lower: &str) -> (Option<Zone>, bool) {
     } else {
         None
     };
-    (destination, false)
+    (destination, false, false)
 }
 
-fn parse_milled_this_way_destination(lower: &str) -> Option<(Option<Zone>, bool)> {
+fn parse_milled_this_way_destination(lower: &str) -> Option<(Option<Zone>, bool, bool)> {
     let (tail, _) = preceded(
         take_until::<_, _, OracleError<'_>>("milled this way"),
         tag::<_, _, OracleError<'_>>("milled this way"),
@@ -5817,7 +5833,7 @@ fn parse_milled_this_way_destination(lower: &str) -> Option<(Option<Zone>, bool)
     parse_dig_destination_tail(tail)
 }
 
-fn parse_dig_from_among_destination(lower: &str) -> Option<(Option<Zone>, bool)> {
+fn parse_dig_from_among_destination(lower: &str) -> Option<(Option<Zone>, bool, bool)> {
     let (tail, _) = preceded(
         take_until::<_, _, OracleError<'_>>("from among"),
         (
@@ -5830,7 +5846,7 @@ fn parse_dig_from_among_destination(lower: &str) -> Option<(Option<Zone>, bool)>
     parse_dig_destination_tail(tail)
 }
 
-fn parse_dig_destination_tail(input: &str) -> Option<(Option<Zone>, bool)> {
+fn parse_dig_destination_tail(input: &str) -> Option<(Option<Zone>, bool, bool)> {
     // Strip a leading clause separator: "from among them, then put that card on
     // top ..." (Fertile Thicket) leaves a ", " before the "then put" verb.
     let input = input.trim_start();
@@ -5860,10 +5876,8 @@ fn parse_dig_destination_tail(input: &str) -> Option<(Option<Zone>, bool)> {
     ))
     .parse(input)
     {
-        let (_, tapped) = opt(tag::<_, _, OracleError<'_>>(" tapped"))
-            .parse(rest)
-            .ok()?;
-        return Some((Some(Zone::Battlefield), tapped.is_some()));
+        let (tapped, attacking) = super::parse_battlefield_entry_qualifiers(rest);
+        return Some((Some(Zone::Battlefield), tapped, attacking));
     }
 
     if alt((
@@ -5875,7 +5889,7 @@ fn parse_dig_destination_tail(input: &str) -> Option<(Option<Zone>, bool)> {
     .parse(input)
     .is_ok()
     {
-        return Some((Some(Zone::Hand), false));
+        return Some((Some(Zone::Hand), false, false));
     }
 
     // CR 401.4: cards put at a specific library position (top) are arranged by
@@ -5891,7 +5905,7 @@ fn parse_dig_destination_tail(input: &str) -> Option<(Option<Zone>, bool)> {
     .parse(input)
     .is_ok()
     {
-        return Some((Some(Zone::Library), false));
+        return Some((Some(Zone::Library), false, false));
     }
 
     None
@@ -9849,6 +9863,7 @@ mod tests {
             rest_order: crate::types::ability::DigRestOrder::Preserve,
             reveal: false,
             enter_tapped: false,
+            enters_attacking: false,
             source: DigSource::Library,
         }
     }
@@ -10240,13 +10255,29 @@ mod tests {
             parse_dig_kept_destination(
                 "put a land card from among them onto the battlefield tapped. put the rest on the bottom of your library.",
             ),
-            (Some(Zone::Battlefield), true)
+            (Some(Zone::Battlefield), true, false)
         );
         assert_eq!(
             parse_dig_kept_destination(
                 "put a land card from among them onto the battlefield. put the rest onto the battlefield tapped.",
             ),
-            (Some(Zone::Battlefield), false)
+            (Some(Zone::Battlefield), false, false)
+        );
+    }
+
+    #[test]
+    fn from_among_battlefield_qualifiers_preserve_attacking() {
+        assert_eq!(
+            parse_dig_kept_destination(
+                "put a human creature card from among them onto the battlefield tapped and attacking. put the rest on the bottom of your library in a random order.",
+            ),
+            (Some(Zone::Battlefield), true, true)
+        );
+        assert_eq!(
+            parse_dig_kept_destination(
+                "put a creature card from among them onto the battlefield attacking.",
+            ),
+            (Some(Zone::Battlefield), false, true)
         );
     }
 
@@ -13078,6 +13109,7 @@ mod tests {
             rest_order: DigRestOrder::Preserve,
             reveal: false,
             enter_tapped: false,
+            enters_attacking: false,
             source: DigSource::Library,
         }
     }
