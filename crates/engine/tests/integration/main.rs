@@ -740,6 +740,7 @@ mod issue_735_amalia_power_threshold;
 mod issue_735_cost_paid_object_non_regression;
 mod issue_735_lily_bowen_power_double;
 mod issue_7384_proliferate_counter_replacement_frame;
+mod issue_7386_ozolith_combat_counter_move;
 mod issue_787_once_upon_a_time;
 mod issue_788_unexpectedly_absent;
 mod issue_822_erode_path_to_exile_search_controller;
