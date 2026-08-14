@@ -674,7 +674,7 @@ pub fn unsupported_protocol_capabilities() -> &'static [UnsupportedCapability] {
 /// `upstream.` = the protocol has no primitive for something the engine can do.
 /// `local.` = the protocol has the primitive but this engine cannot source it,
 /// or a documented adapter-local extension is intentionally in use.
-static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 87] = [
+static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 88] = [
     UnsupportedCapability {
         code: "upstream.object-selection-missing",
         area: "prompts",
@@ -776,6 +776,12 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 87] = [
         area: "combat",
         reason: "The pinned protocol has no response shape for choosing the player, planeswalker, or battle attacked by an entering creature.",
         suggested_protocol_extension: "Add an entry-attack destination choice using the existing attack-target reference shape.",
+    },
+    UnsupportedCapability {
+        code: "local.entry-controller-choice-unsupported",
+        area: "prompts",
+        reason: "CR 614.12a requires an as-enters controller choice before battlefield delivery. The pinned protocol has no non-target opponent-picker prompt for that pre-entry decision.",
+        suggested_protocol_extension: "Add a non-target entry-controller choice carrying eligible opponent player ids.",
     },
     UnsupportedCapability {
         code: "local.zone-opponent-chooser-unsupported",
@@ -2587,6 +2593,9 @@ pub fn convert_available_action(
         }
         GameAction::ChooseEntryAttackTarget { .. } => {
             AvailableActionConversion::Unsupported("local.entry-attack-target-choice-unsupported")
+        }
+        GameAction::ChooseEntryController { .. } => {
+            AvailableActionConversion::Unsupported("local.entry-controller-choice-unsupported")
         }
         GameAction::ChooseClashOpponent { .. } => {
             AvailableActionConversion::Unsupported("local.clash-unsupported")
@@ -8090,6 +8099,16 @@ mod tests {
             ),
             AvailableActionConversion::Unsupported("local.announcing-opponent-unsupported")
         ));
+        assert!(matches!(
+            convert_available_action(
+                &empty_state(),
+                &GameAction::ChooseEntryController {
+                    opponent: PlayerId(1),
+                },
+                "action-2".to_string(),
+            ),
+            AvailableActionConversion::Unsupported("local.entry-controller-choice-unsupported")
+        ));
     }
 
     #[test]
@@ -8138,13 +8157,13 @@ mod tests {
     #[test]
     fn unsupported_capability_registry_is_well_formed() {
         let capabilities = unsupported_protocol_capabilities();
-        assert_eq!(capabilities.len(), 87);
+        assert_eq!(capabilities.len(), 88);
 
         let codes: HashSet<_> = capabilities
             .iter()
             .map(|capability| capability.code)
             .collect();
-        assert_eq!(codes.len(), 87, "capability codes must be unique");
+        assert_eq!(codes.len(), 88, "capability codes must be unique");
 
         for capability in capabilities {
             assert!(

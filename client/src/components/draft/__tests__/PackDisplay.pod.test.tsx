@@ -10,6 +10,7 @@ vi.mock("../../../stores/draftStore", () => ({
       selectedCard: null,
       selectCard: vi.fn(),
       confirmPick: vi.fn(),
+      pickCardWithDraftEffect: vi.fn(),
       autoPickCard: vi.fn(),
     }),
 }));
@@ -39,6 +40,7 @@ const view: DraftPlayerView = {
     },
   ],
   pool: [],
+  draft_effects: [],
   pool_groups: {
     color_groups: [],
     type_groups: [],
@@ -114,5 +116,97 @@ describe("PackDisplay pod state", () => {
     fireEvent.click(screen.getByRole("button", { name: "Auto-pick" }));
 
     expect(onAutoPick).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows draft effects only when the engine provides drafted effect cards", () => {
+    const effectView: DraftPlayerView = {
+      ...view,
+      current_pack: [
+        view.current_pack![0],
+        { ...view.current_pack![0], instance_id: "card-2", name: "Island" },
+      ],
+      draft_effects: [
+        {
+          instance_id: "cogwork-1",
+          name: "Cogwork Librarian",
+          set_code: "cns",
+          collector_number: "58",
+          rarity: "common",
+          colors: [],
+          cmc: 4,
+          type_line: "Artifact Creature — Construct",
+          draft_effect: "additional_pick",
+        },
+      ],
+    };
+
+    const { rerender } = render(
+      <PackDisplay
+        view={effectView}
+        enableDraftEffects
+        onCardHover={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Draft effects:")).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Cogwork Librarian" })).toBeInTheDocument();
+
+    rerender(
+      <PackDisplay
+        view={{ ...effectView, draft_effects: [] }}
+        enableDraftEffects
+        onCardHover={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText("Draft effects:")).not.toBeInTheDocument();
+  });
+
+  it("dispatches a pod draft-effect pick through its injected callback", () => {
+    const onPickWithDraftEffect = vi.fn();
+    const effectView: DraftPlayerView = {
+      ...view,
+      current_pack: [
+        view.current_pack![0],
+        { ...view.current_pack![0], instance_id: "card-2", name: "Island" },
+      ],
+      draft_effects: [
+        {
+          instance_id: "cogwork-1",
+          name: "Cogwork Librarian",
+          set_code: "cns",
+          collector_number: "58",
+          rarity: "common",
+          colors: [],
+          cmc: 4,
+          type_line: "Artifact Creature — Construct",
+          draft_effect: "additional_pick",
+        },
+      ],
+    };
+    const { rerender } = render(
+      <PackDisplay
+        view={effectView}
+        selectedCard={null}
+        enableDraftEffects
+        onPickWithDraftEffect={onPickWithDraftEffect}
+        onCardHover={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Cogwork Librarian" }));
+    rerender(
+      <PackDisplay
+        view={effectView}
+        selectedCard="card-1"
+        enableDraftEffects
+        onPickWithDraftEffect={onPickWithDraftEffect}
+        onCardHover={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Island" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Confirm Pick" })[0]);
+
+    expect(onPickWithDraftEffect).toHaveBeenCalledWith("cogwork-1", ["card-1", "card-2"]);
   });
 });

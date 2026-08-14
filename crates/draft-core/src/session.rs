@@ -134,6 +134,16 @@ pub fn apply(
             seat,
             card_instance_id,
         } => pick_pass::apply_pick(session, seat, card_instance_id),
+        DraftAction::PickWithDraftEffect {
+            seat,
+            effect_card_instance_id,
+            card_instance_ids,
+        } => pick_pass::apply_pick_with_draft_effect(
+            session,
+            seat,
+            effect_card_instance_id,
+            card_instance_ids,
+        ),
         DraftAction::SubmitDeck { seat, main_deck } => apply_submit_deck(session, seat, main_deck),
         DraftAction::GeneratePairings { round } => apply_generate_pairings(session, round),
         DraftAction::ReportMatchResult {
@@ -1062,6 +1072,7 @@ mod tests {
                 colors: Vec::new(),
                 cmc: 0,
                 type_line: String::new(),
+                draft_effect: None,
             })
             .collect();
 
@@ -1093,6 +1104,7 @@ mod tests {
                 colors: Vec::new(),
                 cmc: 0,
                 type_line: String::new(),
+                draft_effect: None,
             })
             .collect();
 
@@ -1146,6 +1158,7 @@ mod tests {
                 colors: Vec::new(),
                 cmc: 0,
                 type_line: String::new(),
+                draft_effect: None,
             })
             .collect();
 
@@ -1180,6 +1193,7 @@ mod tests {
                     colors: Vec::new(),
                     cmc: 0,
                     type_line: String::new(),
+                    draft_effect: None,
                 })
                 .collect();
         }

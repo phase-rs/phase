@@ -242,27 +242,28 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         context: _,                // SpellContext: cast-time fact snapshot, not a live read
         optional_targeting: _,     // bool
         optional: _,               // bool
-        optional_for: _,           // OpponentMayScope: AnyOpponent/AnyPlayer, no read
-        target_choice_timing: _,   // Stack/Resolution tag
-        description: _,            // display string
-        selected_mode_labels: _,   // display strings, no dynamic read
-        min_x_value: _,            // u32
-        cant_be_copied: _,         // bool
-        copy_count_status: _,      // status tag
-        forward_result: _,         // bool
-        distribution: _,           // concrete pre-assigned (TargetRef, u32) portions
-        chosen_x: _,               // concrete cast-time X
-        cost_paid_object: _,       // concrete captured-object snapshot
-        cost_paid_object_ids: _,   // concrete captured-object ids (issue #4948)
-        effect_context_object: _,  // concrete captured-object snapshot
-        amassed_army_object: _,    // concrete captured-object snapshot
-        ability_index: _,          // usize provenance
-        may_trigger_origin: _,     // provenance tag
-        target_selection_mode: _,  // Chosen/Random tag
-        chosen_players: _,         // concrete chosen player ids
-        replacement_applied: _,    // replacement provenance set, no dynamic read
-        sub_link: _,               // SubAbilityLink kind tag
-        sibling_condition: _,      // SiblingCondition replication marker, no dynamic read
+        optional_player,
+        optional_for: _,          // OpponentMayScope: AnyOpponent/AnyPlayer, no read
+        target_choice_timing: _,  // Stack/Resolution tag
+        description: _,           // display string
+        selected_mode_labels: _,  // display strings, no dynamic read
+        min_x_value: _,           // u32
+        cant_be_copied: _,        // bool
+        copy_count_status: _,     // status tag
+        forward_result: _,        // bool
+        distribution: _,          // concrete pre-assigned (TargetRef, u32) portions
+        chosen_x: _,              // concrete cast-time X
+        cost_paid_object: _,      // concrete captured-object snapshot
+        cost_paid_object_ids: _,  // concrete captured-object ids (issue #4948)
+        effect_context_object: _, // concrete captured-object snapshot
+        amassed_army_object: _,   // concrete captured-object snapshot
+        ability_index: _,         // usize provenance
+        may_trigger_origin: _,    // provenance tag
+        target_selection_mode: _, // Chosen/Random tag
+        chosen_players: _,        // concrete chosen player ids
+        replacement_applied: _,   // replacement provenance set, no dynamic read
+        sub_link: _,              // SubAbilityLink kind tag
+        sibling_condition: _,     // SiblingCondition replication marker, no dynamic read
         parent_target_missing_reason: _, // seam flag
     } = a;
 
@@ -320,6 +321,13 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
     if let Some(chooser) = target_chooser {
         acc = acc.or(scan_target_filter(
             chooser,
+            FilterReadContext::SnapshotOrEvent,
+            mode,
+        ));
+    }
+    if let Some(player) = optional_player {
+        acc = acc.or(scan_target_filter(
+            player,
             FilterReadContext::SnapshotOrEvent,
             mode,
         ));
@@ -2917,6 +2925,7 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
         TargetFilter::Any => Axes::NONE,
         TargetFilter::Player => Axes::NONE,
         TargetFilter::Controller => Axes::NONE,
+        TargetFilter::SourceController => Axes::NONE,
         TargetFilter::Opponent => Axes::NONE,
         TargetFilter::SelfRef => Axes::NONE,
         // CR 201.5a: a source-relative object ref (the granting object), like
@@ -4365,6 +4374,7 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
         ability_tag: _,
         optional_targeting: _,
         optional: _,
+        optional_player,
         optional_for: _,
         target_choice_timing: _,
         min_x_value: _,
@@ -4421,6 +4431,13 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
     if let Some(chooser) = target_chooser {
         acc = acc.or(scan_target_filter(
             chooser,
+            FilterReadContext::SnapshotOrEvent,
+            mode,
+        ));
+    }
+    if let Some(player) = optional_player {
+        acc = acc.or(scan_target_filter(
+            player,
             FilterReadContext::SnapshotOrEvent,
             mode,
         ));

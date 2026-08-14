@@ -196,6 +196,7 @@ fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondit
         // CR 402.1 + CR 602.5: existential "a player has <hand-size predicate>".
         parse_a_player_has_hand_predicate,
         parse_you_have_conditions,
+        parse_parent_target_controller_more_life_than_you,
         parse_that_player_has_conditions,
         // CR 205.3i + CR 404.1: additive two-term count threshold
         // ("the number of A plus the number of B is N or greater").
@@ -3588,6 +3589,83 @@ fn parse_that_player_has_conditions(input: &str) -> OracleResult<'_, StaticCondi
         input,
         nom::error::ErrorKind::Fail,
     )))
+}
+
+/// Parse a parent target's controller/player life comparison.
+///
+/// The target grammar combines two referent kinds in one phrase: a player is
+/// their own controller, while a planeswalker's controller is read from the
+/// targeted object. `ParentObjectTargetController` is the existing shared
+/// scope for that relation, so this one production covers both target arms.
+/// CR 120.3a + CR 119.3 + CR 608.2c: noninfect damage to a player causes life
+/// loss, while the later conditional reads a targeted planeswalker's
+/// controller's current life after the preceding damage instruction.
+fn parse_parent_target_controller_more_life_than_you(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = parse_player_or_planeswalker_controller_referent(input)?;
+    let (rest, _) = tag(" has ").parse(rest)?;
+    parse_more_life_than_you_comparison(rest)
+}
+
+/// Parse the compound target-referent axis shared by player-or-planeswalker
+/// effects. The sequence is deliberately ordered and fail-closed: reversing
+/// its referents changes the Oracle sentence rather than expressing a variant
+/// of the same target relation.
+fn parse_player_or_planeswalker_controller_referent(input: &str) -> OracleResult<'_, ()> {
+    let (rest, first) = parse_parent_target_referent(input)?;
+    if !matches!(first, ParentTargetReferent::Player) {
+        return Err(oracle_err(input));
+    }
+    let (rest, _) = tag(" or ").parse(rest)?;
+    let (rest, second) = parse_parent_target_referent(rest)?;
+    if !matches!(second, ParentTargetReferent::PlaneswalkerController) {
+        return Err(oracle_err(input));
+    }
+    Ok((rest, ()))
+}
+
+/// Parse the life-comparison axis after a target referent has been consumed.
+fn parse_more_life_than_you_comparison(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("more life than you").parse(input)?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::ParentObjectTargetController,
+                },
+            },
+            comparator: Comparator::GT,
+            rhs: QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::Controller,
+                },
+            },
+        },
+    ))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ParentTargetReferent {
+    Player,
+    PlaneswalkerController,
+}
+
+/// Parse one `that <referent>` axis from a player-or-planeswalker target
+/// phrase. The caller composes the two referents around the shared `or` token.
+fn parse_parent_target_referent(input: &str) -> OracleResult<'_, ParentTargetReferent> {
+    preceded(
+        tag("that "),
+        alt((
+            value(ParentTargetReferent::Player, tag("player")),
+            value(
+                ParentTargetReferent::PlaneswalkerController,
+                terminated(tag("planeswalker"), tag("'s controller")),
+            ),
+        )),
+    )
+    .parse(input)
 }
 
 /// Parse life-total predicates after a `<subject> has ` prefix has been
@@ -14763,6 +14841,64 @@ mod tests {
                 assert_eq!(rhs.controller, Some(ControllerRef::You));
             }
             other => panic!("expected ObjectCount GT ObjectCount, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parent_target_controller_life_comparison_parses_full_condition() {
+        let (rest, condition) = parse_inner_condition(
+            "that player or that planeswalker's controller has more life than you",
+        )
+        .expect("the player-or-planeswalker-controller condition must parse");
+        assert_eq!(
+            rest, "",
+            "the complete condition fragment must be consumed, not partially parsed"
+        );
+        assert_eq!(
+            condition,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::ParentObjectTargetController,
+                    },
+                },
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Controller,
+                    },
+                },
+            },
+            "positive reach guard: the combined referent must retain its parent-target-controller scope"
+        );
+    }
+
+    #[test]
+    fn parent_target_controller_life_comparison_rejects_reversed_or_malformed_referents() {
+        let (_, positive_reach_guard) = parse_inner_condition(
+            "that player or that planeswalker's controller has more life than you",
+        )
+        .expect("the valid combined referent must reach the new condition grammar");
+        assert!(
+            matches!(
+                positive_reach_guard,
+                StaticCondition::QuantityComparison {
+                    comparator: Comparator::GT,
+                    ..
+                }
+            ),
+            "positive reach guard must prove the rejection cases exercise this grammar family"
+        );
+
+        for malformed in [
+            "that planeswalker's controller or that player has more life than you",
+            "that player or that planeswalker has more life than you",
+            "that player or that planeswalker's controller has more life than them",
+        ] {
+            assert!(
+                parse_inner_condition(malformed).is_err(),
+                "malformed combined referent must fail closed: {malformed:?}"
+            );
         }
     }
 

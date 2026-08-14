@@ -67,16 +67,37 @@ fn filter_uses_scoped_player(filter: &TargetFilter) -> bool {
     }
 }
 
+/// Finds a spell's casting variant while it is on the stack or resolving.
+///
+/// Resolving spells leave `GameState::stack` before their chained instructions
+/// run, so the resolution carrier is also an authoritative source.
 fn stack_spell_casting_variant(
     state: &GameState,
     obj_id: crate::types::identifiers::ObjectId,
 ) -> Option<CastingVariant> {
-    state.stack.iter().find_map(|entry| match &entry.kind {
-        StackEntryKind::Spell {
-            casting_variant, ..
-        } if entry.id == obj_id => Some(*casting_variant),
-        _ => None,
-    })
+    state
+        .stack
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            StackEntryKind::Spell {
+                casting_variant, ..
+            } if entry.id == obj_id => Some(*casting_variant),
+            _ => None,
+        })
+        .or_else(|| {
+            // CR 608.2m + CR 608.2n: resolving spells are popped from the live
+            // stack before their effect chain runs, but their casting variant stays
+            // authoritative in the resolution carrier until the chain completes.
+            state
+                .resolving_stack_entry
+                .as_ref()
+                .and_then(|entry| match &entry.kind {
+                    StackEntryKind::Spell {
+                        casting_variant, ..
+                    } if entry.id == obj_id => Some(*casting_variant),
+                    _ => None,
+                })
+        })
 }
 
 /// CR 400.6: Zone change — return target object to the destination zone

@@ -10,8 +10,8 @@ import type { DraftP2PMessage } from "../draftProtocol";
 
 describe("draftProtocol", () => {
   describe("DRAFT_PROTOCOL_VERSION", () => {
-    it("is version 9", () => {
-      expect(DRAFT_PROTOCOL_VERSION).toBe(9);
+    it("is version 10", () => {
+      expect(DRAFT_PROTOCOL_VERSION).toBe(10);
     });
   });
 
@@ -26,6 +26,38 @@ describe("draftProtocol", () => {
       expect(msg.type).toBe("draft_pick");
     });
 
+    it("accepts a draft-effect pick message", () => {
+      const msg = validateDraftMessage({
+        type: "draft_pick_with_draft_effect",
+        effectCardInstanceId: "cogwork-1",
+        cardInstanceIds: ["card-001", "card-002"],
+      });
+      expect(msg).toMatchObject({
+        type: "draft_pick_with_draft_effect",
+        effectCardInstanceId: "cogwork-1",
+        cardInstanceIds: ["card-001", "card-002"],
+      });
+    });
+
+    it.each([
+      { effectCardInstanceId: null, cardInstanceIds: ["card-001", "card-002"] },
+      { effectCardInstanceId: {}, cardInstanceIds: ["card-001", "card-002"] },
+      { effectCardInstanceId: "", cardInstanceIds: ["card-001", "card-002"] },
+      { effectCardInstanceId: "x".repeat(257), cardInstanceIds: ["card-001", "card-002"] },
+      { effectCardInstanceId: "cogwork-1", cardInstanceIds: null },
+      { effectCardInstanceId: "cogwork-1", cardInstanceIds: {} },
+      { effectCardInstanceId: "cogwork-1", cardInstanceIds: ["card-001"] },
+      { effectCardInstanceId: "cogwork-1", cardInstanceIds: ["card-001", "card-002", "card-003"] },
+      { effectCardInstanceId: "cogwork-1", cardInstanceIds: ["card-001", "card-001"] },
+      { effectCardInstanceId: "cogwork-1", cardInstanceIds: [null, "card-002"] },
+      { effectCardInstanceId: "cogwork-1", cardInstanceIds: ["x".repeat(257), "card-002"] },
+    ])("rejects malformed draft-effect pick payloads", (payload) => {
+      expect(() => validateDraftMessage({
+        type: "draft_pick_with_draft_effect",
+        ...payload,
+      })).toThrow("Invalid draft-effect pick");
+    });
+
     it("accepts valid draft_welcome message", () => {
       const msg = validateDraftMessage({
         type: "draft_welcome",
@@ -36,6 +68,45 @@ describe("draftProtocol", () => {
         draftCode: "draft-abc",
       });
       expect(msg.type).toBe("draft_welcome");
+    });
+
+    it("normalizes missing face-up draft arrays in received player views", () => {
+      const msg = validateDraftMessage({
+        type: "draft_state_update",
+        view: {
+          seats: [{ seat_index: 1, display_name: "Alex" }],
+        },
+      });
+
+      expect(msg.type).toBe("draft_state_update");
+      if (msg.type === "draft_state_update") {
+        expect(msg.view.draft_effects).toEqual([]);
+        expect(msg.view.seats[0].face_up_draft_cards).toEqual([]);
+      }
+    });
+
+    it.each([null, {}])("rejects present non-array draft_effects values", (draftEffects) => {
+      expect(() => validateDraftMessage({
+        type: "draft_state_update",
+        view: { draft_effects: draftEffects, seats: [] },
+      })).toThrow("draft_effects must be an array");
+    });
+
+    it.each([null, {}])("rejects present non-array seats values", (seats) => {
+      expect(() => validateDraftMessage({
+        type: "draft_state_update",
+        view: { draft_effects: [], seats },
+      })).toThrow("seats must be an array");
+    });
+
+    it.each([null, {}])("rejects present non-array face-up draft cards", (faceUpCards) => {
+      expect(() => validateDraftMessage({
+        type: "draft_state_update",
+        view: {
+          draft_effects: [],
+          seats: [{ face_up_draft_cards: faceUpCards }],
+        },
+      })).toThrow("face_up_draft_cards must be an array");
     });
 
     it("rejects missing type field", () => {
@@ -58,6 +129,7 @@ describe("draftProtocol", () => {
       "draft_join",
       "draft_reconnect",
       "draft_pick",
+      "draft_pick_with_draft_effect",
       "draft_submit_deck",
       "draft_welcome",
       "draft_reconnect_ack",
@@ -89,7 +161,15 @@ describe("draftProtocol", () => {
       "draft_bo3_score_update",
       "draft_bo3_match_complete",
     ])("accepts message type '%s'", (msgType) => {
-      const msg = validateDraftMessage({ type: msgType });
+      const msg = validateDraftMessage(
+        msgType === "draft_pick_with_draft_effect"
+          ? {
+              type: msgType,
+              effectCardInstanceId: "cogwork-1",
+              cardInstanceIds: ["card-001", "card-002"],
+            }
+          : { type: msgType },
+      );
       expect(msg.type).toBe(msgType);
     });
   });
@@ -145,6 +225,7 @@ describe("draftProtocol", () => {
             type_line: "Instant",
           },
         ],
+        draft_effects: [],
         pool_groups: {
           color_groups: [
             { kind: "white", total: 1, cards: [{ card: {

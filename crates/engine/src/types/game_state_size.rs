@@ -34,11 +34,12 @@
 //!   | grep 'print-type-size type: `types::game_state::GameState`:'
 //! ```
 //!
-//! Measured on `nightly-2026-04-19`, aarch64-apple-darwin:
+//! Measured on `nightly-2026-04-19` — `GameState` on x86_64-unknown-linux-gnu,
+//! the other three rows on aarch64-apple-darwin (not re-measured):
 //!
 //! | Type | before boxing | after | ceiling |
 //! |---|---:|---:|---:|
-//! | `GameState` | 30,112 | 12,464 | 12,800 |
+//! | `GameState` | 30,112 | 12,816 | 13,312 |
 //! | `StackEntry` | 5,336 | 344 | 768 |
 //! | `PendingCast` | 6,632 | 1,376 | 1,792 |
 //! | `PendingTrigger` | 6,000 | 744 | 1,024 |
@@ -52,7 +53,7 @@
 const _: () = {
     use core::mem::size_of;
     assert!(
-        size_of::<crate::types::game_state::GameState>() <= 12_800,
+        size_of::<crate::types::game_state::GameState>() <= 13_312,
         "GameState grew past its stack budget. It is moved by value through the \
          phase-server action + AI path, so an overrun is an uncatchable \
          guard-page abort, not a panic. Re-run the -Zprint-type-sizes command in \

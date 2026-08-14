@@ -444,7 +444,10 @@ const UNBOUNDED_FAMILY_GLYPH: Record<UnboundedFamily, string> = {
   triggers: "✴",
 };
 
-const UNBOUNDED_FAMILY_LABEL_KEY: Record<UnboundedFamily, string> = {
+/** Exported for `LoopShortcutModal`'s preview lines: the engine's
+ *  `InteractionShortcutPreviewFamily` is the same 11 literals as `UnboundedFamily`, so the preview
+ *  reuses these labels instead of minting a parallel 11-key catalog in 7 locales. */
+export const UNBOUNDED_FAMILY_LABEL_KEY: Record<UnboundedFamily, string> = {
   mana: "badges.unboundedMana",
   life: "badges.unboundedLife",
   damage: "badges.unboundedDamage",

@@ -503,6 +503,7 @@ impl EventObjectSnapshot {
             // semantics for a nonsensical player-Connives subject rather than inventing one.
             TargetFilter::Player
             | TargetFilter::Controller
+            | TargetFilter::SourceController
             | TargetFilter::Opponent
             | TargetFilter::Owner
             | TargetFilter::AllPlayers

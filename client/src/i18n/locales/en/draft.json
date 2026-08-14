@@ -59,7 +59,8 @@
     "passingLeft": "→ Passing Left →",
     "passingRight": "← Passing Right ←",
     "connected": "Connected",
-    "disconnected": "Disconnected"
+    "disconnected": "Disconnected",
+    "faceUpDraftCards": "Face-up: {{cards}}"
   },
   "setSelector": {
     "botDifficulty": "Bot Difficulty",
@@ -77,6 +78,7 @@
   },
   "pack": {
     "confirmPick": "Confirm Pick",
+    "draftEffects": "Draft effects:",
     "waitingNext": "Waiting for next pack...",
     "cardsInPack": "{{count}} cards in pack",
     "picking": "Picking…",

@@ -33,9 +33,18 @@ pub type IterationIndex = u32;
 /// CR 603.3b (TriggerOrdering) / CR 732.2a (LoopChoice): which decision family a
 /// template captures. The `key` discriminant that lets one `decision_templates` Vec
 /// hold both the trigger-order templates B2 consults and the loop-choice templates
-/// B3/B5 will add, so the gate can filter to `TriggerOrdering` only. `LoopChoice` has
-/// no Phase-2 consumer (reserved), but the FILTER it enables is load-bearing now (the
-/// gate must ignore non-ordering templates).
+/// B3/B5 will add, so the gate can filter to `TriggerOrdering` only. The FILTER it
+/// enables is load-bearing now (the gate must ignore non-ordering templates), and
+/// `LoopChoice`'s own consumer is now known: it is the CROSS-EPISODE CARRIER. A
+/// `LoopChoice` entry in `GameState::decision_templates` survives the CR 603.3b batch
+/// boundary — `GameState::clear_ephemeral_trigger_order_templates`' retain predicate is
+/// scoped to `TriggerOrdering` — so it is the vehicle a later episode's declaration can
+/// ride, and it is still POPULATED BY PHASE 4 AND BY NOTHING TODAY. PINNED BY A SHIPPED
+/// ROW: `fantastic_four_bounded_loop::r3b_driven_a_loop_choice_carrier_survives_a_whole_
+/// accepted_f4_drive` plants the `(kind × ephemerality)` cells on the real 4-player board
+/// and drives a whole accepted CR 732.2a shortcut through `apply()` — the `LoopChoice`
+/// cell survives (`3 → 2`) while the `TriggerOrdering` ephemeral cell beside it does not.
+/// `loop_shortcut_ranking::r3b_*` is the seam-level statement of the same predicate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum DecisionKind {
     TriggerOrdering,
@@ -138,6 +147,39 @@ pub struct DecisionSlot {
     pub index: u8,
 }
 
+impl DecisionSlot {
+    /// CR 601.2c (reached for a triggered ability via CR 603.3d) + CR 115.2: the
+    /// ANNOUNCEMENT target slot a BOUNDED-CYCLE ENTRY publishes.
+    ///
+    /// SCOPE OF THE AUTHORITY, stated narrowly because the number 0 is not globally
+    /// reserved: these two constructors are the single authority for the SUB-INDEX SHARED
+    /// BY `game::engine::entry_publishes_pin_slots` AND `GameState::loop_answer_journal` —
+    /// the publisher and the journal writers must agree, the way
+    /// `game::engine::object_decision_source` already makes them agree on the source half.
+    /// The `record_loop_pin` recast-template producer runs its OWN sub-index namespace over
+    /// the same source (0 for its `Targets`/`ConvokeTaps` pin, 1 for its `ManaColor` pin)
+    /// and deliberately does NOT route through here — its indices answer a different
+    /// question and coincide numerically only by accident.
+    ///
+    /// `pub`, not `pub(crate)`: `crates/engine/tests/integration/` is a SEPARATE CRATE, and
+    /// a `pub(crate)` constructor is unnameable there, so the integration rows would
+    /// hand-roll the very literal this constructor exists to delete (the shape
+    /// `object_decision_source`'s `pub(crate)` already forces on `may_source_key` in
+    /// `fantastic_four_bounded_loop.rs` and on `decision_source` in `natural_balance.rs`).
+    /// Every field of this `pub` struct in this `pub` module is already `pub`, so this adds
+    /// no reachability the type does not already have — it only removes the literal.
+    pub fn target(source: DecisionSource) -> Self {
+        Self { source, index: 0 }
+    }
+
+    /// CR 603.5: the "may" gate on the SAME source — a second choice of one ability
+    /// instance, which is exactly what the sub-index exists to disambiguate. Same scoped
+    /// authority and same visibility rationale as [`DecisionSlot::target`].
+    pub fn may(source: DecisionSource) -> Self {
+        Self { source, index: 1 }
+    }
+}
+
 /// CR 603.5: whether a "may" pin takes the optional action or declines it. Typed (not `bool`)
 /// so both outcomes are self-documenting at every construction and match site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -151,6 +193,65 @@ pub enum MayChoiceOption {
 pub enum UnlessPaymentOption {
     Pay,
     Decline,
+}
+
+/// The observed answer to ONE published decision slot, from ONE seat, across the current
+/// loop-detection window. Journalled under the key `(DecisionSlot, PlayerId)`
+/// (`GameState::record_loop_answer`), so a seat can only ever answer for itself and the
+/// sub-index keeps the two slots one source can publish (CR 601.2c target, CR 603.5 "may")
+/// in two entries rather than collapsing them into one latched conflict.
+///
+/// CR 732.2a says a shortcut proposal describes "a sequence of game choices, for all
+/// players, that may be legally taken based on the current game state and the predictable
+/// results of the sequence of choices", and that this sequence "may be a non-repetitive
+/// series of choices, a loop that repeats a specified number of times, multiple loops, or
+/// nested loops, and may even cross multiple turns". A series whose answers DIFFER between
+/// iterations is therefore not, by itself, the conditional action the rule bars; what the
+/// rule actually bars is narrower — "It can't include conditional actions, where the
+/// outcome of a game event determines the next action a player takes."
+///
+/// This engine refuses on a differing answer anyway. That is an ENGINE-CAPABILITY LIMIT,
+/// DELIBERATELY MORE CONSERVATIVE THAN CR 732.2a REQUIRES — not a rule the CR states.
+/// [`DecisionTemplate`] pins exactly one `MayChoice` per published slot per cycle, so a
+/// non-uniform series has no representation here; it is the same "a choice a player could
+/// only make reactively is one they cannot pin" disposition [`predictability_gate`]'s
+/// CR 732.2a firewall doc already records. Failing to offer is the fail-closed direction:
+/// strictly fewer offers, never a wrong pin.
+// `Copy` is DROPPED here (and nowhere else): `LoopAnswerValue::Targets` carries a `Vec`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoopAnswer {
+    /// Every observed iteration answered this (slot, seat) pair identically.
+    Uniform(LoopAnswerValue),
+    /// Two observed iterations of the same (slot, seat) pair disagreed. Latched:
+    /// never returns to `Uniform`. See the type doc — the refusal this produces is this
+    /// engine's conservative policy, NOT a CR 732.2a mandate.
+    Conflicted,
+}
+
+/// The VALUE of one observed answer. Variants are distinct CR choice KINDS — the same axis
+/// [`PinnedDecision`] and [`DecisionPointKind`] already partition, and under the same
+/// CR 732.2a umbrella ("a sequence of game choices, for all players") that makes each of
+/// those ONE type rather than one type per rule section. It is therefore a PARTIAL
+/// observation-side projection of that kind space (2 of the 6 [`DecisionPointKind`]
+/// variants), TOTALIZED at the consumer's wildcard-free `(DecisionPointKind,
+/// LoopAnswerValue)` match — not an exhaustive peer of either.
+///
+/// Parameterizing [`LoopAnswer::Uniform`] rather than adding a `UniformTargets` sibling is
+/// deliberate: a `X`/`TargetX` sibling pair is CLAUDE.md's sibling-cluster smell, and it
+/// would put the KIND axis on the same enum level as the LATCH axis (`Uniform` vs
+/// `Conflicted`), which is the layer conflation CLAUDE.md's enum-design rule forbids.
+///
+/// DELIBERATELY DERIVES NO `Serialize`/`Deserialize`, exactly as [`LoopAnswer`] does: the
+/// `#[serde(skip)]` on `GameState::loop_answer_journal` is enforced AT COMPILE TIME by the
+/// absence of that derive, and adding one here would silently re-open persistence of a
+/// transient window. ([`TargetPin`] and [`MayChoiceOption`] do derive it; the bar lives on
+/// the two enums above them, which is where it was put.)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoopAnswerValue {
+    /// CR 603.5: take the optional action, or decline it.
+    May(MayChoiceOption),
+    /// CR 608.2b + CR 601.2c: the announced targets for one slot, in announcement order.
+    Targets(Vec<TargetPin>),
 }
 
 /// One pinned decision. Variants are distinct CR choice KINDS (ordering / targeting /
@@ -321,15 +422,139 @@ pub enum DecisionPointKind {
     ManaColor { color: ManaColor },
 }
 
+/// CR 115.2 + CR 601.2c: WHO one announcement names, stored in re-bindable form. The
+/// storable dual of [`ConcreteTarget`], which already draws exactly this two-way split at
+/// the RESOLVED end of the same pipeline — so this adds no categorical boundary, it gives
+/// the existing one a pre-resolution spelling.
+///
+/// PROVENANCE, and it is the whole point of the type: a `Seat` here is a TARGET
+/// (CR 601.2c), judged by `game::targeting::player_is_legal_target` — existence PLUS
+/// CR 702.11c hexproof / CR 702.18a shroud / CR 702.16b protection. A merely CHOSEN player
+/// (CR 115.10a — e.g. a CR 701.34a proliferate choice) is NOT this type; it stays
+/// [`TargetPin::Player`] and keeps its existence-only authority. Two questions, two
+/// spellings.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum AnnouncementSubject {
+    Object(DecisionSource),
+    Seat(PlayerId),
+}
+
+/// Why a subject list is not a legal [`Ranking`]. Both clauses are refused at CONSTRUCTION,
+/// which is what makes [`Ranking::head`] infallible — no `Option` leaks into the resolver,
+/// and a wire-supplied list fails the LOAD rather than the drive (the same disposition
+/// `reject_zero_bound_shortcut_offer` takes for a wire-sourced `max_iterations`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RankingError {
+    /// An empty ranking names nobody: there is no head to announce.
+    Empty,
+    /// CR 601.2c: an announcement names its choice per target. A repeated subject is not an
+    /// ordering — it is the same declaration twice, and it would make the tail unreachable.
+    DuplicateSubject,
+}
+
+impl std::fmt::Display for RankingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => f.write_str("a ranking must name at least one announcement subject"),
+            Self::DuplicateSubject => {
+                f.write_str("a ranking must not name the same announcement subject twice")
+            }
+        }
+    }
+}
+
+/// CR 732.1 + CR 732.2a: a DECLARED, ORDERED pre-commitment over announcement subjects for
+/// ONE slot. A one-element ranking IS the old constant pin; that is the parameterization,
+/// and it is why there is no `Ranked` sibling of [`TargetSchedule`].
+///
+/// CONSUMED AT AN EPISODE BOUNDARY, NEVER MID-DRIVE. Within one accepted drive only
+/// [`Ranking::head`] is ever resolved (see `evaluate_schedule`): advancing to a later entry
+/// because a game event removed the head would be the conditional action CR 732.2a bars, and
+/// CR 732.2a also requires the sequence to END at a place where a player has priority —
+/// which the drive-end handback already is. The tail is a pre-declaration for the NEXT
+/// episode, validated by THAT episode's `validate_pins` against THAT episode's published
+/// legal set.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "Vec<AnnouncementSubject>")]
+pub struct Ranking(Vec<AnnouncementSubject>);
+
+impl Ranking {
+    /// The invariant is expressed ONCE, here — and this is the `TryFrom` the
+    /// `#[serde(try_from)]` shim runs, so a wire-supplied empty or duplicated list is
+    /// refused before any resolver sees it.
+    pub fn new(subjects: Vec<AnnouncementSubject>) -> Result<Self, RankingError> {
+        if subjects.is_empty() {
+            return Err(RankingError::Empty);
+        }
+        // Sort a view, never the payload: the declared ORDER is the whole point of the type.
+        // `Ord` is derived (it has to be — `DecisionTemplate` derives it for deterministic AI
+        // action ordering), so this is n·log n on a wire-length-bounded list rather than the
+        // quadratic scan a non-`Hash` payload would otherwise force.
+        let mut seen: Vec<&AnnouncementSubject> = subjects.iter().collect();
+        seen.sort_unstable();
+        if seen.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(RankingError::DuplicateSubject);
+        }
+        Ok(Self(subjects))
+    }
+
+    /// The constant case; every mechanical migration site uses it. Infallible — one element
+    /// can violate neither clause.
+    pub fn one(subject: AnnouncementSubject) -> Self {
+        Self(vec![subject])
+    }
+
+    /// The ONLY reader inside `evaluate_schedule` (CR 732.2a: a drive resolves the head and
+    /// never advances past it). Infallible by the non-empty invariant `new`/`one` enforce.
+    pub fn head(&self) -> &AnnouncementSubject {
+        &self.0[0]
+    }
+
+    /// The whole list, for the callers that must see past the head without resolving it:
+    /// the hidden-source redaction walk (`game::visibility`) and the wire length bound.
+    pub fn iter(&self) -> impl Iterator<Item = &AnnouncementSubject> {
+        self.0.iter()
+    }
+}
+
+impl TryFrom<Vec<AnnouncementSubject>> for Ranking {
+    type Error = RankingError;
+
+    fn try_from(subjects: Vec<AnnouncementSubject>) -> Result<Self, Self::Error> {
+        Self::new(subjects)
+    }
+}
+
 /// A pinned target. `ByIdentity` re-resolves to a live legal ObjectId each iteration
 /// (CR 608.2b); `Scheduled` is an iteration-indexed pure function (CR 732.2a).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum TargetPin {
     ByIdentity(DecisionSource),
-    /// A CONSTANT target (CR 732.2a): this pin answers EVERY firing of its source within
-    /// the period with the declared player. A seat is state-independent by construction —
-    /// it can never denote "the newest copy" — so no iteration can turn the pin into the
-    /// conditional action CR 732.2a forbids.
+    /// A CONSTANT **CHOICE-class** seat (CR 115.10a): this pin answers EVERY firing of its
+    /// source within the period with the declared player. A seat is state-independent by
+    /// construction — it can never denote "the newest copy" — so no iteration can turn the
+    /// pin into the conditional action CR 732.2a forbids.
+    ///
+    /// # THE TWO CLASSES NOW HAVE TWO SPELLINGS, AND THIS ONE IS THE CHOICE CLASS
+    ///
+    /// CR 115.10a: "unless that object or player is identified by the word 'target' … it's
+    /// not a target". A seat this pin names was CHOSEN, not targeted, so [`resolve_target`]
+    /// judges it by `game::players::player_exists_for_choice` — EXISTENCE ONLY. Applying the
+    /// targeting-only exclusions (CR 702.11c hexproof / CR 702.18a shroud / CR 702.16b
+    /// protection) here would refuse legal CR 732.2a proposals; that over-veto is what
+    /// `game::engine`'s `a_shrouded_player_pin_is_still_published_by_the_offer_builder` and
+    /// `a_shrouded_seat_is_untargetable_yet_still_choosable_at_the_pin_recheck` (this
+    /// module) exist to keep out. Its live in-process producer is the CR 701.34a proliferate
+    /// arm (`game::engine::apply_action` → `record_loop_pin`).
+    ///
+    /// A CR 601.2c **TARGET**-class seat is a different question and takes the other
+    /// spelling: [`AnnouncementSubject::Seat`] inside a [`Ranking`] inside
+    /// [`TargetPin::Scheduled`], judged by `game::targeting::player_is_legal_target`. Both
+    /// TARGET-class producers emit that spelling —
+    /// `game::engine::record_trigger_target_answer` (the engine's own CR 601.2c
+    /// announcement journal) and `game::interaction::materialize_loop_shortcut_response`
+    /// (the human ingress of the same point kind). The spelling IS the provenance, so the
+    /// authority is selected by what the answer IS, never by who submitted it.
     Player(PlayerId),
     Scheduled(TargetSchedule),
 }
@@ -366,13 +591,21 @@ pub enum IterationCount {
 /// enforced BY CONSTRUCTION: no variant carries any prior-outcome/event input, so a
 /// "react to what happened" target is unrepresentable (this is what collapses the
 /// predictability gate's "no conditional" clause into "total coverage").
+///
+/// AND THE PURITY INVARIANT IS NARROWER THAN "consults the live set", now that each step
+/// carries a [`Ranking`] rather than a single subject: a variant consults the live legal set
+/// to **re-bind the declared subject** (CR 400.7); it never uses the live set to
+/// **substitute a different subject**. Selecting a different entry because a game event
+/// removed the first is exactly the conditional action CR 732.2a bars — which is why a
+/// `Ranking` is advanced only at an episode boundary, by a caller, never by
+/// `evaluate_schedule`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum TargetSchedule {
-    Constant(DecisionSource),
-    RoundRobin(Vec<DecisionSource>),
+    Constant(Ranking),
+    RoundRobin(Vec<Ranking>),
     /// Pre-declared switch-over: identity for [start, next-start). The switch point is
     /// FIXED IN ADVANCE (not triggered by an in-loop event), keeping it 732.2a-predictable.
-    Piecewise(Vec<(u32, DecisionSource)>),
+    Piecewise(Vec<(u32, Ranking)>),
     // NOTE (RULED Deferral 2): `IndexedClass { filter: TargetFilter, stride: i32 }` — an
     // iteration-indexed pick from an object class, evaluated via `matches_target_filter`
     // — is deferred to Phase 4/B3, where a live `FilterContext` source exists.
@@ -444,9 +677,12 @@ pub enum ReplayFailure {
     /// name neither. Parameterizing the existing variant keeps ONE "target went illegal"
     /// failure instead of growing a per-pin-kind sibling cluster.
     IllegalTarget { slot: DecisionSlot, pin: TargetPin },
-    /// CR 400.7: an ORDER pin's source (`Order`) is absent from the current battlefield
-    /// ⇒ the ordering template no longer matches ⇒ fall through to a normal manual
-    /// prompt. Raised ONLY for the `Order` pin kind, in any `ReplayMode`.
+    /// CR 400.7: an ORDER pin's source does not re-bind to a live ability instance —
+    /// [`resolve_ability_instance`] finds no object of that identity at that incarnation in a
+    /// zone it admits (`Battlefield`; also `Command` for a `ThisObject` source) ⇒ the ordering
+    /// template no longer matches
+    /// ⇒ fall through to a normal manual prompt. Raised ONLY for the `Order` pin kind, in any
+    /// `ReplayMode`.
     MissingSource { source: DecisionSource },
     /// A `RoundRobin`/`Piecewise` schedule has no entry covering this iteration index.
     ScheduleExhausted { slot: DecisionSlot },
@@ -486,12 +722,84 @@ fn resolve_pin(
     state: &GameState,
 ) -> Result<ConcreteDecision, ReplayFailure> {
     match pin {
-        // CR 603.3b: replay this source's trigger at its pinned ordering position. The
-        // source must still be on the battlefield or the ordering template no longer
-        // matches (CR 400.7).
+        // CR 603.3b: replay this source's trigger at its pinned ordering position. The pin
+        // re-binds to the SAME live ability instance (CR 400.7 incarnation) still present in
+        // a zone the accessor admits — `Battlefield`, plus `Command` for a `ThisObject`
+        // source — not merely to something still on the battlefield. `Command` is admitted
+        // because a whole CLASS of sources functions from there (emblems CR 114.4; plane /
+        // scheme / conspiracy cards CR 113.6p; face-up plane and phenomenon cards CR 901.7;
+        // Eminence commanders CR 113.6b), but the accessor tests zone presence and identity
+        // only — whether a given ability functions is `game::functioning_abilities`'
+        // question, not this accessor's.
+        //
+        // Resolving an `Order` pin GRANTS NO CAPABILITY, and the six points that consume
+        // `resolve`'s output split two ways. FIVE read the vec's ELEMENTS, and not one of them
+        // reads a `ConcreteDecision::Order`'s PAYLOAD: `inject_pinned_answer`'s two arms
+        // `find_map` for their own kind, `pinned_targets_for_source` and
+        // `pinned_mana_color_for_source` skip it in an `if let`, and the `ManaPayment` beat's
+        // exhaustive match aborts on its mere presence (`Order { .. }`, fields discarded). ONE
+        // — the per-cycle re-check in `materialize_fixed_shortcut` — reads only the `is_err()`
+        // VERDICT and discards the vec entirely. (LABELED CODE READ: the six consumption
+        // points, enumerated and read at both revisions.)
+        //
+        // At the five ELEMENT readers an ORDER-ONLY template still fails closed; what the
+        // re-bind changes is only WHERE: the abort moves out of `resolve()` and into the
+        // consumer — the trailing `Err(RecastAbort)` of the two `pinned_*` seams, the
+        // `find_map`'s `ok_or(RecastAbort)` in the injector, the match arm at the
+        // `ManaPayment` beat.
+        //
+        // At the VERDICT reader nothing moves downstream, because there is nothing downstream
+        // to move to: that gate consults only `resolve`'s `Result`. A pin that fails to
+        // re-bind breaks the cycle loop AT THAT ITERATION, committing only the cycles before
+        // it — and for a source the accessor never admits, that is iteration 0, so no cycle
+        // commits at all. Once every pin re-binds, the gate stops breaking; what happens after
+        // it is governed by the element readers above, not by this gate. That is true for
+        // every template shape, Order-only and mixed alike, because the gate never looks at an
+        // element.
+        //
+        // For a mixed template whose OTHER pins themselves resolve, the payoff lands at an
+        // element reader that has an element of its own kind. Two of the five answer from a
+        // `Targets` element — `pinned_targets_for_source` and the injector's
+        // `TriggerTargetSelection` arm — and the one measured here is
+        // `pinned_targets_for_source`: on the measured value `[Order @ command zone,
+        // Targets @ battlefield]`, with the `Order` pin re-binding and the `Targets` pin itself
+        // resolving, it now returns that `Targets` pin's own answer, where before the
+        // command-zone `Order` pin discarded it and the seam aborted. Where a pin does NOT
+        // resolve, the template still fails whole at every one of the six consumers, because
+        // `resolve` is a per-pin `Result` collect that each consumer gates on before reading
+        // anything: a mixed template carrying a `Targets` pin whose own target is not on the
+        // battlefield (CR 608.2b) aborts after this commit exactly as before it. It is NOT
+        // that every element reader succeeds on such a template: a reader that finds no
+        // element of its own kind (`pinned_mana_color_for_source`, the injector's `MayChoice`
+        // arm) still reaches its `Err(RecastAbort)`, and the `ManaPayment` beat still aborts on
+        // the `Order` element's mere presence — after this commit exactly as before it, for
+        // every mixed template.
+        //
+        // The bound that makes this capability-neutral at the `DeclareShortcut` wire is DRIVE
+        // EQUALITY, not submittability. When an `Order` element re-binds, resolving WITH it
+        // yields the identical answer to resolving without it at every one of the six
+        // consumers, EXCEPT at the `ManaPayment` beat, where its presence forces
+        // `Err(RecastAbort)` — strictly more fail-closed, never more permissive. When it does
+        // NOT re-bind, the `Result` collect fails the whole template at every consumer; this
+        // commit changes which sources re-bind, never that disposition. Where the same
+        // template minus its `Order` pins is itself submittable, that drive was therefore
+        // already expressible by omitting them. It is NOT always submittable: `pin_slot`
+        // addresses an `Order` pin to `{source, index 0}` and `validate_pins`' `Order` arm is
+        // the one arm that checks nothing, so an `Order` pin can be the sole cover of a
+        // required point, and dropping it then fails `predictability_gate`. That shape is
+        // pre-existing and zone-independent — this commit changes only which sources can be
+        // spelled into it, never the shape itself.
+        //
+        // No template's ACCEPTANCE changes here: `declaration_conforms` is
+        // `predictability_gate` + `validate_pins`, and neither reaches `resolve_pin`. What
+        // changes is what an already-accepted template does. (Pinned by
+        // `game::engine::stage2_injector_tests::a_command_zone_order_pin_stops_poisoning_the_template_without_gaining_capability`
+        // rows R/N/N2/P/P-minus; the structural clauses above are labeled code reads.)
         PinnedDecision::Order { source, pos } => {
-            let id = resolve_source(source, state).ok_or_else(|| ReplayFailure::MissingSource {
-                source: source.clone(),
+            let id = resolve_ability_instance(source, state).ok_or_else(|| {
+                ReplayFailure::MissingSource {
+                    source: source.clone(),
+                }
             })?;
             Ok(ConcreteDecision::Order {
                 source: id,
@@ -593,36 +901,58 @@ fn resolve_target(
         // `static_abilities::player_cannot_be_targeted_by`. It is NOT enforced here, and
         // does not need to be.
         //
-        // OPEN RESIDUAL — the object-growth route. Stated in full here, because no shipped
-        // file states it elsewhere. INVARIANT: a `TargetPin::Player` must never reach
+        // THE RESIDUAL'S DEFERRED FIX SHAPE HAS LANDED FOR THE IN-PROCESS SURFACE: the two
+        // classes now have TWO SPELLINGS, so they are distinguishable AT THIS SEAM by the
+        // variant alone. `TargetPin::Player` is the CHOICE class (this arm, existence only);
+        // a CR 601.2c TARGET-class seat is `AnnouncementSubject::Seat` inside a `Ranking`
+        // inside `TargetPin::Scheduled`, resolved by the arm below through
+        // `targeting::player_is_legal_target`. THE PREVIOUS TEXT WAS SCOPED TOO NARROWLY and
+        // is corrected rather than deleted: it named only `record_loop_pin` (three sites,
+        // one of which — the CR 701.34a proliferate-target arm — is a genuine CHOICE) and
+        // was SILENT about the `record_loop_answer` route, along which
+        // `game::engine::record_trigger_target_answer` did produce a TARGET-class
+        // `TargetPin::Player` from a `WaitingFor::TriggerTargetSelection` announcement. That
+        // producer, and the human ingress of the same point kind
+        // (`game::interaction::materialize_loop_shortcut_response`), now emit the ranked
+        // spelling. So no IN-PROCESS producer can reach this arm with a target any more, and
+        // "not live today" is now an enforced property rather than a census result — pinned
+        // by `tests/integration/loop_shortcut_seat_pin_census.rs`.
+        //
+        // OPEN RESIDUAL — the object-growth route, which is why this arm is still not a
+        // sufficient authority on its own. INVARIANT: a `TargetPin::Player` must never reach
         // materialization validated only against a legal set derived from the declared pins
         // themselves. `try_offer_object_growth_shortcut` builds its points through
         // `pinned_decisions_to_points`, whose legal sets come FROM the pins, so on that
         // route the offer would ratify its own pin — and CR 732.2a admits only a sequence
         // "that may be legally taken based on the current game state", which a self-derived
-        // set cannot establish. NOT live today FROM ANY IN-PROCESS PRODUCER — and the scope
-        // word is load-bearing: the one `record_loop_pin` arm that can push a
-        // `TargetPin::Player` is the CR 701.34a proliferate-target arm, and a proliferate
-        // choice is not a target, so THIS call is its correct authority.
+        // set cannot establish. That hazard is class-independent: it is about WHERE the
+        // legal set came from, not about which spelling the pin uses, so the split narrows
+        // this residual's producer surface without closing it.
         //
-        // PINS ALSO ARRIVE WIRE-SOURCED, and no in-process invariant covers that.
-        // `LoopActionContext` is `#[serde(from = "LoopActionContextRepr")]`, and that shim's
-        // `From` impl installs the deserialized vector verbatim (`pins: r.pins`), so a
-        // restored save can carry a Player pin of UNKNOWN class.
-        // `GameState::migrate_transient_loop_sequence` keeps a loaded sequence ONLY for a
-        // save captured in a `LoopShortcut` / `RespondToShortcut` window, and on that route
-        // the pins are replayed by the accept→materialize drive through
+        // WHAT REMAINS OPEN, PRECISELY — PINS ARRIVE WIRE-SOURCED, and no in-process
+        // invariant covers that. `LoopActionContext` is
+        // `#[serde(from = "LoopActionContextRepr")]`, and that shim's `From` impl installs
+        // the deserialized vector verbatim (`pins: r.pins`), so a restored save can still
+        // carry a `TargetPin::Player` a foreign writer MEANT as a target. The wire carries
+        // the spelling, not the writer's intent, so the split cannot adjudicate that case —
+        // it can only make the honest spelling available and make the in-process producers
+        // use it. `GameState::migrate_transient_loop_sequence` keeps a loaded sequence ONLY
+        // for a save captured in a `LoopShortcut` / `RespondToShortcut` window, and on that
+        // route the pins are replayed by the accept→materialize drive through
         // `build_recast_template` → `decision_template::resolve`, i.e. through THIS call —
         // so a wire pin's EXISTENCE half is authority-enforced here too. Same class as the
         // wire-sourced `max_iterations` defect `reject_zero_bound_shortcut_offer` closes: a
         // load-seam value the in-process producer census cannot see.
         //
-        // The residual opens the moment any producer — IN-PROCESS OR WIRE — puts a
-        // TARGET-class Player pin into `LoopActionContext.pins`. DAMAGE MODE then:
-        // `CycleOutcome::Abort` rolls back only the crossing cycle, so cycles `0..k` stay
-        // committed under a pin no authority ever validated. Deferred fix shape:
-        // provenance-type the pin so the two classes are distinguishable at this seam — a
-        // change to a serialized type, hence not this phase.
+        // DAMAGE MODE if a wire producer does that: `CycleOutcome::Abort` rolls back only
+        // the crossing cycle, so cycles `0..k` stay committed under a pin no authority ever
+        // validated. Note what is NOT the damage mode, because the two are easy to conflate:
+        // a correctly-spelled ranked seat that becomes an illegal target mid-drive is
+        // handled BY CONSTRUCTION and is not a residual at all — `evaluate_schedule`
+        // resolves `head()` only and never slides to a later entry, so the drive aborts at
+        // the boundary (CR 115.7a: "if a target can't be changed to another legal target,
+        // the original target is unchanged, even if the original target is itself illegal by
+        // then"; CR 732.2a bars the conditional action sliding would be).
         TargetPin::Player(p) => crate::game::players::player_exists_for_choice(state, *p)
             .then_some(ConcreteTarget::Player(*p))
             .ok_or_else(illegal),
@@ -633,8 +963,14 @@ fn resolve_target(
 /// Re-bind a stored `DecisionSource` to a live battlefield `ObjectId`. The battlefield
 /// analogue of `GameState::is_priority_yielded`'s matching arms. KIND-AGNOSTIC: returns
 /// `None` on no match, and the CALLER maps that to the pin-kind-appropriate
-/// `ReplayFailure` (`Order` ⇒ `MissingSource`, a target ⇒ `IllegalTarget`) — the single
-/// seam where G2's per-pin-kind failure selection is realized.
+/// `ReplayFailure` (`Order` ⇒ `MissingSource`, a target ⇒ `IllegalTarget`) — G2's
+/// per-pin-kind failure selection.
+///
+/// The `Order` pin and the two `game::engine` slot seams enter through
+/// [`resolve_ability_instance`] rather than here; this function is that accessor's
+/// BATTLEFIELD DISJUNCT, and it remains the whole answer for the TARGET path
+/// ([`resolve_target`]'s `Object` arm and `evaluate_schedule`'s `Object` head), where the
+/// battlefield filter IS the CR 608.2b legality re-check.
 pub(crate) fn resolve_source(src: &DecisionSource, state: &GameState) -> Option<ObjectId> {
     match src {
         // CR 400.7: bind ONE incarnation — a re-entered permanent bumps `incarnation`
@@ -663,19 +999,95 @@ pub(crate) fn resolve_source(src: &DecisionSource, state: &GameState) -> Option<
     }
 }
 
+/// CR 608.2b + CR 114.4 + CR 113.6p: re-bind a stored `DecisionSource` to the live ABILITY
+/// INSTANCE it identifies — a different question from [`resolve_source`]'s, and the reason
+/// this accessor exists rather than a second spelling at each caller.
+///
+/// THE ONLY SPELLING of that question, as of the commit that migrated the last two callers.
+/// Every production asker routes here: `resolve_pin`'s `Order` arm and `evaluate_schedule`'s
+/// `Seat` arm call it directly, and `game::engine::slot_source_prompted` is the `bool`-valued
+/// wrapper its four seams use — `inject_pinned_answer`'s `TriggerTargetSelection` and
+/// `MayChoice` `find_map` guards, `pinned_targets_for_source`, and
+/// `pinned_mana_color_for_source`. There is no bare `resolve_source` slot comparison left in
+/// `game::engine`.
+///
+/// A *pin's* source identifies a TARGET, so [`resolve_source`] is deliberately
+/// BATTLEFIELD-ONLY and that filter IS the CR 608.2b legality re-check: a pinned target that
+/// left the battlefield must stop matching, and it must not be widened. A *slot's* source
+/// only identifies WHICH ability instance prompts. CR 114.2 puts an EMBLEM — "both owned and
+/// controlled by that player" — into the COMMAND zone; that is PLACEMENT. Whether the thing
+/// placed there can prompt at all is a separate rule, and it is per ABILITY rather than per
+/// object: CR 113.6b, "an ability that states which zones it functions in functions only from
+/// those zones". So the command-zone disjunct lives here, scoped to object identity plus the
+/// pinned CR 400.7 incarnation, exactly as the battlefield arm is.
+///
+/// The class this disjunct serves is every command-zone-functioning ability source, not
+/// emblems alone — which is why the filter is NOT tightened to `obj.is_emblem`:
+///
+/// * **emblems** — CR 114.4, "abilities of emblems function in the command zone";
+/// * **planes, schemes, conspiracies** — CR 113.6p, whose enumeration is "emblems, plane
+///   cards, vanguard cards, scheme cards, and conspiracy cards"; `database::synthesis`'s
+///   `synthesize_planechase` / `synthesize_archenemy` / `synthesize_conspiracy` stamp
+///   `Zone::Command` onto each such face's triggers and statics;
+/// * **phenomena** — CR 901.7, "any abilities of a FACE-UP plane card or phenomenon card in
+///   the command zone function from that zone" (CR 113.6p's enumeration does not reach this
+///   card type; `synthesize_planechase` covers both faces);
+/// * **Eminence commanders** — an ordinary card whose own ability declares its zones, i.e.
+///   CR 113.6b again, opted in per definition rather than per card type.
+///
+/// `game::functioning_abilities` is where that opt-in is read (`active_zones` for a static,
+/// `trigger_zones` for a trigger), and it — not this accessor — decides whether an ability
+/// functions. A single object can carry a Command-functioning static and Battlefield-only
+/// triggers at once, so an object-level zone test could never be the functioning authority;
+/// identity is what this accessor selects on.
+///
+/// RESIDUAL, measured and disclosed rather than closed: the command disjunct is
+/// `ThisObject`-only. `AllCopies` matches by CARD identity and is battlefield-only, so a
+/// command-zone source spelled by card identity — a conspiracy, an Eminence commander — still
+/// resolves `None` and fails closed. Graveyard / exile / hand sources resolve `None` too ⇒
+/// every caller fails closed (`game::engine::slot_source_prompted` aborts the drive to manual
+/// play; `evaluate_schedule`'s `Seat` arm raises `IllegalTarget`).
+pub(crate) fn resolve_ability_instance(
+    src: &DecisionSource,
+    state: &GameState,
+) -> Option<ObjectId> {
+    if let Some(id) = resolve_source(src, state) {
+        return Some(id);
+    }
+    let YieldTarget::ThisObject {
+        source_id,
+        incarnation,
+        ..
+    } = src
+    else {
+        return None;
+    };
+    state
+        .objects
+        .get(source_id)
+        .filter(|o| o.zone == Zone::Command)
+        .filter(|o| incarnation.is_none() || *incarnation == Some(o.incarnation))
+        .map(|o| o.id)
+}
+
 /// CR 732.2a predictability firewall: EXHAUSTIVE `match` over [`TargetSchedule`] with NO
 /// wildcard arm — a future outcome-carrying variant breaks this build (mirrored by the
 /// `target_schedule_predictability_firewall_is_exhaustive` test). Every variant is a
-/// pure fn of (iteration index, live set); each selects a `DecisionSource`, then
-/// re-binds it to a live legal object (CR 608.2b, via `resolve_source`).
+/// pure fn of (iteration index, live set); each selects a [`Ranking`], whose HEAD is then
+/// re-bound against live state (CR 608.2b).
+///
+/// HEAD-ONLY, and that is the CR 732.2a clause rather than a simplification: skipping to a
+/// later entry because the head became illegal is a conditional action ("the outcome of a
+/// game event determines the next action a player takes"). The tail is the NEXT episode's
+/// pre-declaration; only an episode boundary may advance it.
 fn evaluate_schedule(
     sched: &TargetSchedule,
     slot: &DecisionSlot,
     iter: IterationIndex,
     state: &GameState,
 ) -> Result<ConcreteTarget, ReplayFailure> {
-    let source: &DecisionSource = match sched {
-        TargetSchedule::Constant(src) => src,
+    let ranking: &Ranking = match sched {
+        TargetSchedule::Constant(ranking) => ranking,
         TargetSchedule::RoundRobin(schedule) => {
             if schedule.is_empty() {
                 return Err(ReplayFailure::ScheduleExhausted { slot: slot.clone() });
@@ -686,15 +1098,42 @@ fn evaluate_schedule(
             .iter()
             .filter(|(start, _)| *start <= iter)
             .max_by_key(|(start, _)| *start)
-            .map(|(_, src)| src)
+            .map(|(_, ranking)| ranking)
             .ok_or_else(|| ReplayFailure::ScheduleExhausted { slot: slot.clone() })?,
     };
-    resolve_source(source, state)
-        .map(ConcreteTarget::Object)
-        .ok_or_else(|| ReplayFailure::IllegalTarget {
-            slot: slot.clone(),
-            pin: TargetPin::Scheduled(sched.clone()),
-        })
+    match ranking.head() {
+        // CR 608.2b: a pinned TARGET object must still be a live battlefield object — this
+        // is exactly the pre-parameterization `Constant` behaviour, unchanged.
+        AnnouncementSubject::Object(src) => resolve_source(src, state).map(ConcreteTarget::Object),
+        // CR 601.2c + CR 115.1: a ranked seat is a TARGET, so it is judged by
+        // `targeting::player_is_legal_target` (existence + CR 702.11c hexproof /
+        // CR 702.18a shroud / CR 702.16b protection) rather than by existence alone. Its two
+        // trailing arguments describe THE ABILITY INSTANCE that would name the seat, not a
+        // target object — hence `resolve_ability_instance` (which admits the command zone —
+        // CR 114.4 / CR 113.6p) and NOT `resolve_source` (battlefield-only, and correctly so
+        // for a pin).
+        //
+        // A `None` ANYWHERE in this chain falls through to the `ok_or_else` below: with no
+        // live ability instance the engine cannot certify that the object it would ask the
+        // CR 702.11c question about still IS that instance (CR 400.7 / CR 608.2b), and
+        // CR 732.1 + CR 732.2a make refusing a shortcut free — "the player with priority MAY
+        // suggest a shortcut" is a permission, not an obligation, so no declaration published
+        // just means the table plays the loop out manually. (CR 732.2b is the RESPONDER rule
+        // — each OTHER player accepting or shortening a proposal that already exists — so it
+        // cannot govern a proposer that publishes nothing.) Announcing a target we cannot
+        // certify is not
+        // free. This is the fail-closed branch, not an oversight.
+        AnnouncementSubject::Seat(p) => resolve_ability_instance(&slot.source, state)
+            .and_then(|src_id| state.objects.get(&src_id).map(|o| (src_id, o.controller)))
+            .filter(|(src_id, ctrl)| {
+                crate::game::targeting::player_is_legal_target(state, *p, *src_id, *ctrl)
+            })
+            .map(|_| ConcreteTarget::Player(*p)),
+    }
+    .ok_or_else(|| ReplayFailure::IllegalTarget {
+        slot: slot.clone(),
+        pin: TargetPin::Scheduled(sched.clone()),
+    })
 }
 
 /// CR 732.2a firewall: a `Scheduled` template may auto-drive a shortcut only if every
@@ -942,6 +1381,57 @@ pub fn validate_pins(
     Ok(())
 }
 
+/// CR 732.2a: THE SINGLE AUTHORITY for *"is this declaration a legal answer to this offer's
+/// schema?"* — [`predictability_gate`]'s COVERAGE half and [`validate_pins`]' VALUE half, run
+/// together against a `required` slot list derived HERE from `schema.points` rather than by
+/// each caller.
+///
+/// Three sites ask that question — `game::engine::handle_declare_shortcut` (the declare
+/// firewall), `game::interaction::materialize_loop_shortcut_response` (the human ingress) and
+/// `game::engine::build_bounded_declaration` (the engine's own publisher) — and a declaration
+/// PUBLISHED under one predicate but ACCEPTED under another is the divergence this exists to
+/// make unrepresentable: `declaration.is_some()` is read by `ai_support::candidates` as "the
+/// declare handler will take this", and only a shared predicate makes that true.
+///
+/// # `validated_range` STAYS A PARAMETER, and that is a measurement, not a hedge
+///
+/// The two pre-existing call sites did NOT pass the same range, so folding one in would adopt
+/// one site's semantics for the other:
+///
+/// * the declare firewall passes `game::engine::shortcut_validated_range(&count, template)` —
+///   the range the ACCEPTED COUNT will drive;
+/// * the interaction decoder passes `1`, correct by construction there because it emits only
+///   ITERATION-INVARIANT pins. That is the property, stated as a property because the variant
+///   list has already moved once: the decoder emits [`TargetPin::ByIdentity`] (which
+///   [`resolve_target`] resolves without reading `iteration` at all) and
+///   [`TargetPin::Scheduled`] carrying [`TargetSchedule::Constant`], whose arm of
+///   [`evaluate_schedule`] selects its [`Ranking`] without consulting the index — unlike the
+///   `RoundRobin` / `Piecewise` arms beside it, which that decoder does not emit. Its verdict
+///   is therefore identical at any range ≥ 1.
+///
+/// Ranges are nested rather than contradictory — `0..n` re-checks are a superset of `0..m` for
+/// `m <= n`, so a wider range is strictly stricter — which is why a PUBLISHER must validate at
+/// the widest range it could be declared with: passing there implies passing at every count a
+/// declarer may name.
+///
+/// # Returns `bool`, deliberately
+///
+/// All three callers discard the failure KIND (they already spelled `.is_err() || .is_err()`)
+/// and their dispositions have nothing in common: manual-play handback via
+/// `reject_shortcut_declaration`, `InteractionReasonCode::ConstraintUnsatisfied`, and "publish
+/// no declaration". A union error type would have no reader. [`predictability_gate`] and
+/// [`validate_pins`] stay public and typed for the rows that assert on the specific violation.
+pub fn declaration_conforms(
+    schema: &ShortcutDecisionSchema,
+    template: &DecisionTemplate,
+    validated_range: IterationIndex,
+    state: &GameState,
+) -> bool {
+    let required: Vec<DecisionSlot> = schema.points.iter().map(|p| p.slot.clone()).collect();
+    predictability_gate(template, &required).is_ok()
+        && validate_pins(schema, template, validated_range, state).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -961,6 +1451,16 @@ mod tests {
             card_id: CardId(card_id),
             trigger_description: None,
         }
+    }
+
+    /// The one-element ranking every pre-parameterization schedule site now spells: a
+    /// `Ranking::one(Object(src))` IS the old `Constant(src)`, which is the migration.
+    fn obj_rank(src: DecisionSource) -> Ranking {
+        Ranking::one(AnnouncementSubject::Object(src))
+    }
+
+    fn seat_rank(player: PlayerId) -> Ranking {
+        Ranking::one(AnnouncementSubject::Seat(player))
     }
 
     /// T6: `DecisionPointKind` serializes externally tagged (`{"ConvokeTaps":{...}}`) — the
@@ -1174,8 +1674,8 @@ mod tests {
             decisions: vec![PinnedDecision::Targets {
                 slot,
                 targets: vec![TargetPin::Scheduled(TargetSchedule::RoundRobin(vec![
-                    this_obj(20, None),
-                    this_obj(21, None),
+                    obj_rank(this_obj(20, None)),
+                    obj_rank(this_obj(21, None)),
                 ]))],
             }],
             replay: ReplayMode::Scheduled {
@@ -1247,8 +1747,8 @@ mod tests {
             decisions: vec![PinnedDecision::Targets {
                 slot: slot.clone(),
                 targets: vec![TargetPin::Scheduled(TargetSchedule::Piecewise(vec![
-                    (0, this_obj(20, None)),
-                    (2, this_obj(21, None)),
+                    (0, obj_rank(this_obj(20, None))),
+                    (2, obj_rank(this_obj(21, None))),
                 ]))],
             }],
             replay: ReplayMode::Scheduled {
@@ -1269,7 +1769,7 @@ mod tests {
                 slot,
                 targets: vec![TargetPin::Scheduled(TargetSchedule::Piecewise(vec![(
                     1,
-                    this_obj(20, None),
+                    obj_rank(this_obj(20, None)),
                 )]))],
             }],
             replay: ReplayMode::Scheduled {
@@ -1695,9 +2195,9 @@ mod tests {
     #[test]
     fn target_schedule_predictability_firewall_is_exhaustive() {
         let variants = [
-            TargetSchedule::Constant(this_obj(1, None)),
-            TargetSchedule::RoundRobin(vec![this_obj(1, None)]),
-            TargetSchedule::Piecewise(vec![(0, this_obj(1, None))]),
+            TargetSchedule::Constant(obj_rank(this_obj(1, None))),
+            TargetSchedule::RoundRobin(vec![obj_rank(this_obj(1, None))]),
+            TargetSchedule::Piecewise(vec![(0, obj_rank(this_obj(1, None)))]),
         ];
         for sched in &variants {
             // NO wildcard arm: each variant is a pure fn of (iteration index, live set),
@@ -1792,6 +2292,643 @@ mod tests {
                 Err(ReplayFailure::UnpayableConvoke { .. })
             ),
             "no live ManaPayment/pending_cast ⇒ UnpayableConvoke (never fabricate taps)"
+        );
+    }
+
+    // ── item-4 R1 — the parameterized announcement subject (`Ranking`) ──
+
+    /// Insert an object into an arbitrary zone. `bf_object` above is battlefield-only, and
+    /// rows R1-h/i need the CR 114.4 command zone and the graveyard.
+    fn zoned_object(state: &mut GameState, id: u64, zone: Zone) -> ObjectId {
+        let oid = ObjectId(id);
+        let mut o = GameObject::new(
+            oid,
+            CardId(id),
+            PlayerId(0),
+            "Ability Source".to_string(),
+            zone,
+        );
+        o.incarnation = 3;
+        state.objects.insert(oid, o);
+        oid
+    }
+
+    /// CR 702.11c: give `player` hexproof through the transient-grant path
+    /// `static_abilities::player_has_hexproof` already reads
+    /// (`transient_grants_static_mode_to_player`). No layer pass is needed — that reader
+    /// scans `transient_continuous_effects` directly.
+    fn grant_player_hexproof(state: &mut GameState, player: PlayerId) {
+        use crate::types::ability::{ContinuousModification, Duration, TargetFilter};
+        use crate::types::statics::StaticMode;
+        state.add_transient_continuous_effect(
+            ObjectId(9001),
+            player,
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificPlayer { id: player },
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::Hexproof,
+            }],
+            None,
+        );
+    }
+
+    /// One `Targets` pin carrying one `Scheduled` pin, slotted on `slot_source`.
+    fn ranked_template(slot_source: DecisionSource, sched: TargetSchedule) -> DecisionTemplate {
+        DecisionTemplate {
+            owner: PlayerId(0),
+            decisions: vec![PinnedDecision::Targets {
+                slot: DecisionSlot {
+                    source: slot_source,
+                    index: 0,
+                },
+                targets: vec![TargetPin::Scheduled(sched)],
+            }],
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::Fixed(1),
+            },
+            key: tri_key(),
+        }
+    }
+
+    fn sole_target(out: &[ConcreteDecision]) -> ConcreteTarget {
+        match &out[0] {
+            ConcreteDecision::Targets { targets, .. } => targets[0],
+            other => panic!("expected Targets, got {other:?}"),
+        }
+    }
+
+    /// **Row R1-a — the maintained-invariant equality row.** A one-element
+    /// `Constant(Ranking::one(Object(src)))` is behaviour-identical to the pre-parameterization
+    /// `Constant(src)`, and the HEAD is what every variant resolves.
+    ///
+    /// # Non-vacuity / discrimination
+    ///
+    /// The one-element half alone is satisfied by ANY entry-selection rule — first, last,
+    /// random — because on a one-element list they coincide. The paired reach-guard is
+    /// therefore a TWO-entry ranking whose head and tail are BOTH legal live objects: only a
+    /// head-selecting reader answers the head there.
+    ///
+    /// REVERT-PROBE: make `Ranking::head` return the LAST entry (`self.0.last().unwrap()`) ⇒
+    /// every two-entry assertion below flips to ObjectId(21) ⇒ FAILS, on all three
+    /// `TargetSchedule` variants. The one-element assertions stay green under that mutation,
+    /// which is exactly why they are not the discriminator.
+    #[test]
+    fn r1a_a_one_element_ranking_is_the_old_constant_and_every_variant_resolves_its_head() {
+        let mut state = GameState::new_two_player(7);
+        bf_object(&mut state, 20, 20, 0);
+        bf_object(&mut state, 21, 21, 0);
+        let (a, b) = (this_obj(20, None), this_obj(21, None));
+        let slot_src = this_obj(99, None);
+
+        // ── the equality half: one element behaves as the old constant subject ──
+        let one = ranked_template(
+            slot_src.clone(),
+            TargetSchedule::Constant(obj_rank(a.clone())),
+        );
+        assert_eq!(
+            sole_target(&resolve(&one, 0, &state).expect("a live battlefield head resolves")),
+            ConcreteTarget::Object(ObjectId(20)),
+            "a one-element ranking resolves exactly what `Constant(src)` resolved"
+        );
+
+        // ── the reach-guard: BOTH entries live, so only head-selection answers 20 ──
+        let two = Ranking::new(vec![
+            AnnouncementSubject::Object(a.clone()),
+            AnnouncementSubject::Object(b.clone()),
+        ])
+        .expect("two distinct subjects are a legal ranking");
+        for (label, sched) in [
+            ("Constant", TargetSchedule::Constant(two.clone())),
+            ("RoundRobin", TargetSchedule::RoundRobin(vec![two.clone()])),
+            (
+                "Piecewise",
+                TargetSchedule::Piecewise(vec![(0, two.clone())]),
+            ),
+        ] {
+            let template = ranked_template(slot_src.clone(), sched);
+            let out = resolve(&template, 0, &state).expect("the head is a live object");
+            assert_eq!(
+                sole_target(&out),
+                ConcreteTarget::Object(ObjectId(20)),
+                "{label}: with BOTH entries legal, the step resolves its ranking's HEAD — a \
+                 last-entry (or any-entry) reader answers 21 here"
+            );
+        }
+
+        // Attribution control: the tail IS reachable as a head, so 21 is not simply
+        // unresolvable on this board.
+        let tail_first = ranked_template(slot_src, TargetSchedule::Constant(obj_rank(b)));
+        assert_eq!(
+            sole_target(&resolve(&tail_first, 0, &state).expect("21 is live too")),
+            ConcreteTarget::Object(ObjectId(21)),
+            "the tail entry resolves fine when it IS the head — the row measures POSITION, not \
+             a dead object"
+        );
+    }
+
+    /// **Row R1-b — the head-only discriminator (CR 732.2a).** An illegal head is
+    /// `IllegalTarget` even when a later entry is perfectly legal. Skipping to that later
+    /// entry would be the conditional action CR 732.2a bars ("the outcome of a game event
+    /// determines the next action a player takes"), and it is the load-bearing guard for the
+    /// whole cross-episode consumption model: a ranking advances only at an episode boundary.
+    ///
+    /// Both subject arms are exercised, because they fail through DIFFERENT predicates:
+    /// `Object` through `resolve_source`'s `None`, `Seat` through `player_is_legal_target`'s
+    /// `false` (CR 702.11c hexproof — an existence-only check would let it through).
+    ///
+    /// # Non-vacuity / discrimination
+    ///
+    /// An `IllegalTarget` is also what a wholly broken resolver returns, so each arm pairs
+    /// with the SAME ranking reordered to put the legal entry first, which must RESOLVE.
+    ///
+    /// REVERT-PROBE: implement first-legal-wins in `evaluate_schedule`
+    /// (`ranking.iter().find_map(..)` instead of `head()`) ⇒ both refusals below resolve to
+    /// the second entry ⇒ FAILS twice, while both positives stay green.
+    #[test]
+    fn r1b_an_illegal_head_refuses_even_when_a_later_entry_is_legal() {
+        let mut state = GameState::new_two_player(7);
+        bf_object(&mut state, 20, 20, 0); // the live object
+        let live_src = this_obj(20, None);
+        let absent_src = this_obj(u64::MAX, None); // never inserted ⇒ resolve_source None
+        let slot_src = this_obj(20, None); // a live battlefield ability instance
+
+        // ── the OBJECT arm ──
+        let head_dead = Ranking::new(vec![
+            AnnouncementSubject::Object(absent_src.clone()),
+            AnnouncementSubject::Object(live_src.clone()),
+        ])
+        .expect("legal ranking");
+        assert!(
+            matches!(
+                resolve(
+                    &ranked_template(slot_src.clone(), TargetSchedule::Constant(head_dead)),
+                    0,
+                    &state
+                ),
+                Err(ReplayFailure::IllegalTarget { .. })
+            ),
+            "CR 732.2a: a dead HEAD refuses — it must NOT skip to the live tail"
+        );
+        let head_live = Ranking::new(vec![
+            AnnouncementSubject::Object(live_src),
+            AnnouncementSubject::Object(absent_src.clone()),
+        ])
+        .expect("legal ranking");
+        assert_eq!(
+            sole_target(
+                &resolve(
+                    &ranked_template(slot_src.clone(), TargetSchedule::Constant(head_live)),
+                    0,
+                    &state
+                )
+                .expect("the SAME two subjects, legal one first, resolve")
+            ),
+            ConcreteTarget::Object(ObjectId(20)),
+            "paired positive: the identical pair with the LIVE entry first resolves — the \
+             refusal above is caused by POSITION, not by the resolver being broken"
+        );
+
+        // ── the SEAT arm: hexproof, so the head is illegal as a TARGET while existing ──
+        grant_player_hexproof(&mut state, PlayerId(1));
+        let head_hexproofed = Ranking::new(vec![
+            AnnouncementSubject::Seat(PlayerId(1)),
+            AnnouncementSubject::Seat(PlayerId(0)),
+        ])
+        .expect("legal ranking");
+        assert!(
+            matches!(
+                resolve(
+                    &ranked_template(slot_src.clone(), TargetSchedule::Constant(head_hexproofed)),
+                    0,
+                    &state
+                ),
+                Err(ReplayFailure::IllegalTarget { .. })
+            ),
+            "CR 702.11c: a hexproofed HEAD refuses — and it EXISTS, so an existence-only \
+             authority (`player_exists_for_choice`) would have resolved it"
+        );
+        let head_legal_seat = Ranking::new(vec![
+            AnnouncementSubject::Seat(PlayerId(0)),
+            AnnouncementSubject::Seat(PlayerId(1)),
+        ])
+        .expect("legal ranking");
+        assert_eq!(
+            sole_target(
+                &resolve(
+                    &ranked_template(slot_src, TargetSchedule::Constant(head_legal_seat)),
+                    0,
+                    &state
+                )
+                .expect("the SAME two seats, legal one first, resolve")
+            ),
+            ConcreteTarget::Player(PlayerId(0)),
+            "paired positive: seats DO resolve on this board (the source's own controller is \
+             not an opponent, so CR 702.11c does not bite) — so the refusal above is the \
+             hexproof, not a seat arm that never resolves"
+        );
+    }
+
+    /// **Row R1-d — multi-authority.** Two ranked slots on ONE source are resolved
+    /// INDEPENDENTLY; neither inherits the other's answer.
+    ///
+    /// # Non-vacuity / discrimination
+    ///
+    /// Arm A gives the two slots DIFFERENT legal seats, so a resolver that answered once and
+    /// reused the answer produces two identical targets and fails the vector comparison. Arm B
+    /// makes slot 1's seat hexproofed while slot 0's stays legal: the whole-template resolve
+    /// must fail NAMING SLOT 1, and slot 0 alone must still resolve — a copied answer would
+    /// have made slot 1 succeed.
+    ///
+    /// REVERT-PROBE: resolve once and reuse across slots ⇒ arm A's two answers agree ⇒ FAILS,
+    /// and arm B stops refusing ⇒ FAILS.
+    #[test]
+    fn r1d_two_ranked_slots_on_one_source_do_not_inherit_each_others_answer() {
+        // A 3-seat board so slot 0 and slot 1 name two DIFFERENT seats, neither of them the
+        // source's own controller — the shape the plan's fixture specifies.
+        let mut state = crate::game::scenario::GameScenario::new_n_player(3, 7)
+            .build()
+            .state()
+            .clone();
+        bf_object(&mut state, 20, 20, 0);
+        let src = this_obj(20, None);
+        let slot_at = |index: u8| DecisionSlot {
+            source: src.clone(),
+            index,
+        };
+        let pin_at = |index: u8, seat: PlayerId| PinnedDecision::Targets {
+            slot: slot_at(index),
+            targets: vec![TargetPin::Scheduled(TargetSchedule::Constant(seat_rank(
+                seat,
+            )))],
+        };
+        let template_of = |pins: Vec<PinnedDecision>| DecisionTemplate {
+            owner: PlayerId(0),
+            decisions: pins,
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::Fixed(1),
+            },
+            key: tri_key(),
+        };
+
+        // ── arm A: two DIFFERENT legal seats ⇒ two DIFFERENT answers ──
+        let both = template_of(vec![pin_at(0, PlayerId(1)), pin_at(1, PlayerId(2))]);
+        let out = resolve(&both, 0, &state).expect("both seats are legal targets here");
+        let answers: Vec<ConcreteTarget> = out
+            .iter()
+            .map(|d| match d {
+                ConcreteDecision::Targets { targets, .. } => targets[0],
+                other => panic!("expected Targets, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            answers,
+            vec![
+                ConcreteTarget::Player(PlayerId(1)),
+                ConcreteTarget::Player(PlayerId(2))
+            ],
+            "each slot resolves its OWN ranking's head — a resolve-once-and-reuse \
+             implementation answers PlayerId(1) twice"
+        );
+
+        // ── arm B: slot 1's seat is hexproofed; slot 0's stays legal ──
+        grant_player_hexproof(&mut state, PlayerId(2));
+        let err = resolve(&both, 0, &state)
+            .expect_err("slot 1's seat is now an illegal TARGET (CR 702.11c)");
+        match err {
+            ReplayFailure::IllegalTarget { slot, .. } => assert_eq!(
+                slot,
+                slot_at(1),
+                "the failure names SLOT 1 — slot 0's success was not copied onto it"
+            ),
+            other => panic!("expected IllegalTarget, got {other:?}"),
+        }
+        // Paired positives: each slot ALONE answers the way the combined run says it does.
+        assert_eq!(
+            sole_target(
+                &resolve(&template_of(vec![pin_at(0, PlayerId(1))]), 0, &state)
+                    .expect("slot 0 alone still resolves")
+            ),
+            ConcreteTarget::Player(PlayerId(1)),
+            "slot 0 is unaffected by slot 1's refusal"
+        );
+        assert!(
+            matches!(
+                resolve(&template_of(vec![pin_at(1, PlayerId(2))]), 0, &state),
+                Err(ReplayFailure::IllegalTarget { .. })
+            ),
+            "slot 1 alone refuses — so the combined refusal is slot 1's own verdict"
+        );
+    }
+
+    /// **Row R1-f — the LOAD-seam invariant.** A wire-supplied empty or duplicated ranking
+    /// fails deserialization, which is what makes [`Ranking::head`] infallible: no `Option`
+    /// and no panic path leak into the resolver. Same class as the wire-sourced
+    /// `max_iterations` defect `reject_zero_bound_shortcut_offer` closes.
+    ///
+    /// # Non-vacuity / discrimination
+    ///
+    /// The paired positive is a VALID two-entry ranking round-tripping equal — without it a
+    /// `Deserialize` impl that rejected everything would satisfy both negatives.
+    ///
+    /// REVERT-PROBE: drop `#[serde(try_from = "Vec<AnnouncementSubject>")]` from `Ranking` ⇒
+    /// `[]` deserializes into `Ranking(vec![])` ⇒ this row's `is_err()` FAILS (and `head()`
+    /// on that value would panic in production rather than refuse).
+    #[test]
+    fn r1f_an_empty_or_duplicated_ranking_fails_the_load() {
+        let seat = |p: u8| AnnouncementSubject::Seat(PlayerId(p));
+
+        assert!(
+            serde_json::from_str::<Ranking>("[]").is_err(),
+            "an empty ranking names nobody — it must not survive the load seam"
+        );
+
+        let duplicated =
+            serde_json::to_string(&vec![seat(1), seat(1)]).expect("the raw list serializes");
+        assert!(
+            serde_json::from_str::<Ranking>(&duplicated).is_err(),
+            "CR 601.2c: a repeated subject is the same declaration twice, not an ordering"
+        );
+
+        // Paired positive: a legal ranking round-trips equal, so the refusals above are the
+        // invariant and not a broken codec.
+        let valid = Ranking::new(vec![seat(1), seat(0)]).expect("distinct subjects");
+        let json = serde_json::to_string(&valid).expect("serialize");
+        assert_eq!(
+            serde_json::from_str::<Ranking>(&json).expect("a legal ranking round-trips"),
+            valid,
+            "the newtype serializes as its inner list and reloads through the checked TryFrom"
+        );
+        assert_eq!(
+            json, r#"[{"Seat":1},{"Seat":0}]"#,
+            "and the wire shape IS the bare list — the `try_from` shim adds no envelope"
+        );
+
+        // The constructor's own two clauses, named (the `TryFrom` above delegates here).
+        assert_eq!(Ranking::new(vec![]).unwrap_err(), RankingError::Empty);
+        assert_eq!(
+            Ranking::new(vec![seat(1), seat(1)]).unwrap_err(),
+            RankingError::DuplicateSubject
+        );
+    }
+
+    /// **Rows R1-g / R1-h / R1-i — the `Seat` arm's SOURCE, one instrument, three zones.**
+    ///
+    /// A ranked `Seat` is a TARGET (CR 601.2c), so `player_is_legal_target` needs the ABILITY
+    /// INSTANCE that would name it (CR 702.11c is source-controller-relative; CR 702.16b reads
+    /// the source's characteristics). That is `resolve_ability_instance`, NOT `resolve_source`:
+    ///
+    /// * **R1-g, battlefield** — resolves. The control arm; the only one of the three that can
+    ///   fail for a boring reason (a dead harness).
+    /// * **R1-h, command zone** — resolves. CR 114.2 puts an emblem — "both owned and
+    ///   controlled by that player" — there, and CR 114.4 is why its abilities function from
+    ///   there (CR 113.6p for the plane / scheme / conspiracy members of the same class).
+    ///   `crates/engine/tests/fixtures/dellian_emblem_conqueror_4p.json.gz` is a real board
+    ///   whose published `Targets` point names exactly such a source.
+    /// * **R1-i, graveyard** — refuses. With no live ability instance the engine cannot certify
+    ///   that the object it would ask the CR 702.11c question about still IS that instance
+    ///   (CR 400.7 / CR 608.2b). The seat still EXISTS and a graveyard object still carries a
+    ///   `controller`, so the question is answerable — what is missing is the certification,
+    ///   and CR 732.1 + CR 732.2a make refusing free — "may suggest" is a permission, not an
+    ///   obligation (no declaration ⇒ the table plays it out manually).
+    ///
+    /// # Non-vacuity / discrimination
+    ///
+    /// R1-g and R1-i must come out the OTHER way on the SAME instrument in the same run: one
+    /// resolving and one refusing is what proves the harness reports both values. R1-h is the
+    /// row that discriminates this specification from plain fail-closed-on-`resolve_source`.
+    ///
+    /// REVERT-PROBES: (a) derive the arm from `resolve_source` alone ⇒ the command-zone case
+    /// resolves `None` ⇒ **R1-h FAILS**; (b) break the battlefield disjunct ⇒ R1-g FAILS;
+    /// (c) fall back to `player_exists_for_choice` when the accessor is `None` ⇒ the graveyard
+    /// seat resolves ⇒ **R1-i FAILS**.
+    ///
+    /// These three SAMPLE the zone space; they do not enumerate it. Exile, a stale CR 400.7
+    /// incarnation and a different object are pinned on one board by the shipped row
+    /// `game::engine::command_zone_sourced_slot_matches_and_graveyard_still_aborts` (row R1-l),
+    /// whose subject `slot_source_prompted` now delegates to `resolve_ability_instance` — so
+    /// that coverage transfers to this accessor rather than being skipped.
+    #[test]
+    fn r1ghi_a_ranked_seat_resolves_from_battlefield_and_command_but_fails_closed_elsewhere() {
+        let mut state = GameState::new_two_player(7);
+        let battlefield = zoned_object(&mut state, 900, Zone::Battlefield);
+        let emblem = zoned_object(&mut state, 901, Zone::Command);
+        let graveyard = zoned_object(&mut state, 902, Zone::Graveyard);
+
+        let seat = PlayerId(1);
+        let resolve_from = |src: DecisionSource, state: &GameState| {
+            resolve(
+                &ranked_template(src, TargetSchedule::Constant(seat_rank(seat))),
+                0,
+                state,
+            )
+        };
+
+        // R1-g: battlefield ⇒ resolves.
+        assert_eq!(
+            sole_target(
+                &resolve_from(this_obj(battlefield.0, Some(3)), &state)
+                    .expect("a live battlefield ability instance certifies the seat")
+            ),
+            ConcreteTarget::Player(seat),
+            "R1-g: the control arm resolves — the instrument can return a target"
+        );
+
+        // R1-h: CR 114.4 / CR 113.6p command zone ⇒ resolves.
+        assert_eq!(
+            sole_target(
+                &resolve_from(this_obj(emblem.0, Some(3)), &state)
+                    .expect("CR 114.4: an emblem's abilities function in the command zone")
+            ),
+            ConcreteTarget::Player(seat),
+            "R1-h: a `resolve_source`-derived arm answers None here and would refuse the \
+             emblem loop the drive built a CR 114.4 / CR 113.6p disjunct FOR"
+        );
+
+        // R1-i: graveyard ⇒ fails closed.
+        assert!(
+            matches!(
+                resolve_from(this_obj(graveyard.0, Some(3)), &state),
+                Err(ReplayFailure::IllegalTarget { .. })
+            ),
+            "R1-i: no live ability instance ⇒ refuse. The SEAT is fine — R1-g resolved it one \
+             assertion ago on this same board — so the refusal is caused by the ZONE"
+        );
+
+        // Sibling agreement: an OBJECT head on that same dead source refuses too, so the two
+        // subject arms say the same thing about a source that is gone.
+        assert!(
+            matches!(
+                resolve(
+                    &ranked_template(
+                        this_obj(graveyard.0, Some(3)),
+                        TargetSchedule::Constant(obj_rank(this_obj(graveyard.0, Some(3))))
+                    ),
+                    0,
+                    &state
+                ),
+                Err(ReplayFailure::IllegalTarget { .. })
+            ),
+            "the `Object` arm refuses a graveyard subject too (CR 608.2b) — the two arms agree"
+        );
+
+        // CR 400.7, so the command disjunct is not a blanket zone exemption: a stale
+        // incarnation on the SAME emblem refuses.
+        assert!(
+            matches!(
+                resolve_from(this_obj(emblem.0, Some(2)), &state),
+                Err(ReplayFailure::IllegalTarget { .. })
+            ),
+            "CR 400.7: the command arm re-binds ONE incarnation, exactly like the battlefield \
+             arm — a re-created emblem does not certify the old pin"
+        );
+    }
+
+    /// **T4 — an `Order` pin resolves from the command zone through the PUBLIC [`resolve`],
+    /// and still fails closed everywhere else.**
+    ///
+    /// CR 603.3b is the pin's framing (replay this source's trigger at its pinned ordering
+    /// position); what changed is that "this source" is now re-bound by
+    /// [`resolve_ability_instance`] — same identity, same CR 400.7 incarnation, present in a
+    /// zone it admits (`Battlefield`, plus `Command` for a `ThisObject` source) — rather than
+    /// by `resolve_source`'s battlefield-only filter.
+    ///
+    /// **Resolving an `Order` pin grants NO capability.** No production consumer of
+    /// `resolve`'s output reads an `Order` element's payload: four element readers
+    /// discriminate on the variant and skip it, the `ManaPayment` beat aborts on its mere
+    /// presence, and the per-cycle re-check reads only the `is_err()` verdict. What the
+    /// re-bind buys is that a command-zone `Order` pin stops discarding every OTHER pin's
+    /// answer in the same template — `resolve` is a per-pin `Result` collect. That payoff and
+    /// its bound are pinned by
+    /// `game::engine::stage2_injector_tests::a_command_zone_order_pin_stops_poisoning_the_template_without_gaining_capability`,
+    /// whose five rows are the measurement; this row measures only the re-bind itself.
+    ///
+    /// # Non-vacuity / discrimination
+    ///
+    /// Rows a and b are one field apart (the zone) and both `Ok`; rows b/c and b/d are one
+    /// field apart and OPPOSITE; rows e and f are one field apart — the SAME object, moved —
+    /// and OPPOSITE. Each negative row asserts its subject exists in the intended state
+    /// before the negative assertion.
+    ///
+    /// REVERT-PROBES: revert the `Order` arm to `resolve_source` ⇒ row **b** fails alone;
+    /// widen the accessor's command disjunct to any zone ⇒ row **c** fails; drop the CR 400.7
+    /// incarnation conjunct ⇒ row **d** fails; widen the `AllCopies` arm to the command zone
+    /// ⇒ row **f** fails.
+    #[test]
+    fn an_order_pin_resolves_from_the_command_zone_and_still_fails_closed_elsewhere() {
+        let mut state = GameState::new_two_player(7);
+        let battlefield = zoned_object(&mut state, 900, Zone::Battlefield);
+        let command = zoned_object(&mut state, 901, Zone::Command);
+        let graveyard = zoned_object(&mut state, 902, Zone::Graveyard);
+        let copy = zoned_object(&mut state, 910, Zone::Battlefield);
+
+        let template = |source: DecisionSource| DecisionTemplate {
+            owner: PlayerId(0),
+            decisions: vec![PinnedDecision::Order { source, pos: 0 }],
+            replay: ReplayMode::Static,
+            key: tri_key(),
+        };
+        let order_source = |out: &[ConcreteDecision]| match out {
+            [ConcreteDecision::Order { source, .. }] => *source,
+            other => panic!("expected exactly one Order decision, got {other:?}"),
+        };
+
+        // row a — the shipped battlefield arm, and the control that `resolve` can answer Ok.
+        assert_eq!(
+            order_source(
+                &resolve(&template(this_obj(battlefield.0, Some(3))), 0, &state)
+                    .expect("row a: a live battlefield source still re-binds")
+            ),
+            battlefield,
+            "row a: control"
+        );
+
+        // row b — THE FIX. One field from a: the source's zone.
+        assert_eq!(
+            order_source(
+                &resolve(&template(this_obj(command.0, Some(3))), 0, &state).expect(
+                    "row b: CR 114.4 — an ability functioning in the command zone \
+                             re-binds there"
+                )
+            ),
+            command,
+            "row b: the CR 603.3b ordering pin no longer needs its source on the battlefield"
+        );
+
+        // row c — one field from b: the zone again, the other way.
+        assert_eq!(
+            state
+                .objects
+                .get(&graveyard)
+                .expect("reach-guard: row c's source object was built")
+                .zone,
+            Zone::Graveyard,
+            "reach-guard: row c's source exists and is in the graveyard, so its failure is \
+             about the ZONE and not about an absent object"
+        );
+        assert!(
+            matches!(
+                resolve(&template(this_obj(graveyard.0, Some(3))), 0, &state),
+                Err(ReplayFailure::MissingSource { .. })
+            ),
+            "row c: the zone set is {{Battlefield, Command}} and nothing else"
+        );
+
+        // row d — one field from b: the pinned CR 400.7 incarnation.
+        assert_ne!(
+            state
+                .objects
+                .get(&command)
+                .expect("reach-guard: row d's source object was built")
+                .incarnation,
+            2,
+            "reach-guard: the LIVE incarnation differs from the pinned one"
+        );
+        assert!(
+            matches!(
+                resolve(&template(this_obj(command.0, Some(2))), 0, &state),
+                Err(ReplayFailure::MissingSource { .. })
+            ),
+            "row d: CR 400.7 — a re-created source is a new object with no relation to the \
+             pinned one, in the command zone exactly as on the battlefield"
+        );
+
+        // rows e/f — ONE object, moved. The widening is `ThisObject`-only, so a
+        // card-identity-spelled command-zone source still fails closed: the disclosed
+        // residual, in executable form.
+        let by_card = YieldTarget::AllCopies {
+            card_id: CardId(910),
+            trigger_description: None,
+        };
+        assert_eq!(
+            order_source(
+                &resolve(&template(by_card.clone()), 0, &state)
+                    .expect("row e: the card's only copy is on the battlefield")
+            ),
+            copy,
+            "row e: the `AllCopies` arm's control positive"
+        );
+        state
+            .objects
+            .get_mut(&copy)
+            .expect("reach-guard: row f moves the SAME object row e just resolved")
+            .zone = Zone::Command;
+        assert_eq!(
+            state
+                .objects
+                .get(&copy)
+                .expect("reach-guard: the object still exists after the move")
+                .card_id,
+            CardId(910),
+            "reach-guard: row f differs from row e in ZONE ONLY — same object, same card id"
+        );
+        assert!(
+            matches!(
+                resolve(&template(by_card), 0, &state),
+                Err(ReplayFailure::MissingSource { .. })
+            ),
+            "row f: DISCLOSED RESIDUAL — the command disjunct is `ThisObject`-only, so a \
+             command-zone source named by CARD identity (a conspiracy, an Eminence \
+             commander) still fails closed. Disclosed, not closed."
         );
     }
 }

@@ -639,6 +639,7 @@ function DraftingPhaseContent() {
   const selectedCard = useMultiplayerDraftStore((s) => s.selectedCard);
   const selectCard = useMultiplayerDraftStore((s) => s.selectCard);
   const confirmPick = useMultiplayerDraftStore((s) => s.confirmPick);
+  const submitPickWithDraftEffect = useMultiplayerDraftStore((s) => s.submitPickWithDraftEffect);
   const autoPickCard = useMultiplayerDraftStore((s) => s.autoPickCard);
   const paused = useMultiplayerDraftStore((s) => s.paused);
   const pauseReason = useMultiplayerDraftStore((s) => s.pauseReason);
@@ -662,7 +663,7 @@ function DraftingPhaseContent() {
           ⚠ {t(`podPhaseView.pauseReason.${pauseKey}`)}
         </div>
       )}
-      <div className="flex gap-4">
+      <div className="flex flex-col gap-4 lg:flex-row">
         <div className="flex min-w-0 flex-1 flex-col">
           <SeatStatusRing />
           <PickTimer />
@@ -672,6 +673,8 @@ function DraftingPhaseContent() {
             selectedCard={selectedCard}
             onSelectCard={selectCard}
             onConfirmPick={confirmPick}
+            onPickWithDraftEffect={submitPickWithDraftEffect}
+            enableDraftEffects
             showAutoPick
             onAutoPick={autoPickCard}
             onCardHover={setHoveredCard}

@@ -2,10 +2,10 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::validation::{LimitedDeckError, STANDARD_BASIC_LANDS};
+use engine::types::card::DraftEffect;
 use engine::types::match_config::{MatchConfig, MatchType};
 use engine::types::player::PlayerId;
-
-use crate::validation::{LimitedDeckError, STANDARD_BASIC_LANDS};
 
 /// Tournament pairing format for the draft event.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -231,6 +231,9 @@ pub struct DraftCardInstance {
     /// Full type line, e.g. "Creature — Human Wizard". Populated at pack generation from set pool data.
     #[serde(default)]
     pub type_line: String,
+    /// Draft-time effect parsed from the card's Oracle text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_effect: Option<DraftEffect>,
 }
 
 /// A pack of cards, newtype wrapper over Vec<DraftCardInstance>.
@@ -344,6 +347,11 @@ pub enum DraftAction {
         seat: u8,
         card_instance_id: String,
     },
+    PickWithDraftEffect {
+        seat: u8,
+        effect_card_instance_id: String,
+        card_instance_ids: Vec<String>,
+    },
     SubmitDeck {
         seat: u8,
         main_deck: Vec<String>,
@@ -418,6 +426,13 @@ pub enum DraftError {
     SeatOutOfRange { seat: u8, pod_size: u8 },
     #[error("card '{card_instance_id}' not found in pack")]
     CardNotInPack { card_instance_id: String },
+    #[error("draft effect card '{card_instance_id}' is not in the player's pool")]
+    DraftEffectCardNotInPool { card_instance_id: String },
+    #[error("draft effect requires {expected_cards} cards, got {actual_cards}")]
+    InvalidDraftEffectSelection {
+        expected_cards: usize,
+        actual_cards: usize,
+    },
     #[error("seat {seat} has no pending pack")]
     NoPendingPack { seat: u8 },
     #[error("deck validation failed")]

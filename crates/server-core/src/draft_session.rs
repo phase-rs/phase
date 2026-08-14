@@ -768,6 +768,15 @@ fn authorize_client_draft_action(seat: usize, action: DraftAction) -> Result<Dra
             seat: seat as u8,
             card_instance_id,
         }),
+        DraftAction::PickWithDraftEffect {
+            effect_card_instance_id,
+            card_instance_ids,
+            ..
+        } => Ok(DraftAction::PickWithDraftEffect {
+            seat: seat as u8,
+            effect_card_instance_id,
+            card_instance_ids,
+        }),
         DraftAction::SubmitDeck { main_deck, .. } => Ok(DraftAction::SubmitDeck {
             seat: seat as u8,
             main_deck,
@@ -1346,6 +1355,27 @@ mod tests {
             DraftAction::Pick {
                 seat: 2,
                 card_instance_id: "abc".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn authorize_rebinds_draft_effect_pick_seat_to_authenticated_seat() {
+        let action = authorize_client_draft_action(
+            2,
+            DraftAction::PickWithDraftEffect {
+                seat: 0,
+                effect_card_instance_id: "cogwork-1".to_string(),
+                card_instance_ids: vec!["card-1".to_string(), "card-2".to_string()],
+            },
+        )
+        .expect("seat-scoped action is allowed for any seat");
+        assert_eq!(
+            action,
+            DraftAction::PickWithDraftEffect {
+                seat: 2,
+                effect_card_instance_id: "cogwork-1".to_string(),
+                card_instance_ids: vec!["card-1".to_string(), "card-2".to_string()],
             }
         );
     }

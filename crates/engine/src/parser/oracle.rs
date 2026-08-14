@@ -20,6 +20,7 @@ use crate::types::ability::{
     TapStateChange, TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
 };
 use crate::types::ability_visit::{visit_ability_def_scoped, ResolutionScope};
+use crate::types::card::DraftEffect;
 use crate::types::format::DeckCopyLimit;
 use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::ManaCost;
@@ -400,11 +401,49 @@ pub(crate) fn is_draft_matters_sentence(line: &str) -> bool {
     let lower = line.trim().to_ascii_lowercase();
     lower_starts_with(&lower, "draft this card face up")
         || lower_starts_with(&lower, "as you draft ")
+        || lower_starts_with(&lower, "if you do, put this card into that booster pack")
         || lower_starts_with(&lower, "during the draft")
         || lower_starts_with(&lower, "immediately after the draft")
         || lower_starts_with(&lower, "instead of drafting ")
         || lower_starts_with(&lower, "as long as this card is face up during the draft")
         || lower_starts_with(&lower, "each player passes the last card")
+}
+
+/// CR 905.1a + CR 905.2: Identify a draft-time ability that changes the
+/// booster-draft procedure rather than constructed-game resolution.
+pub fn draft_effect_from_oracle_text(oracle_text: &str) -> Option<DraftEffect> {
+    let lower = oracle_text.to_lowercase();
+    let pair = TextPair::new(oracle_text, &lower);
+    let parsed = nom_on_lower(pair.original, pair.lower, |input| {
+        all_consuming(terminated(
+            (
+                terminated(
+                    value((), tag("draft this card face up")),
+                    tag("."),
+                ),
+                preceded(
+                    multispace0,
+                    terminated(
+                        value(
+                            (),
+                            tag("as you draft a card, you may draft an additional card from that booster pack"),
+                        ),
+                        tag("."),
+                    ),
+                ),
+                preceded(
+                    multispace0,
+                    terminated(
+                        value((), tag("if you do, put this card into that booster pack")),
+                        opt(tag(".")),
+                    ),
+                ),
+            ),
+            multispace0,
+        ))
+        .parse(input)
+    });
+    parsed.is_some().then_some(DraftEffect::AdditionalPick)
 }
 
 /// Whether Oracle text explicitly permits this card to be a commander.

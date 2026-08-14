@@ -10,7 +10,7 @@ import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImage
 import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { COUNTER_COLORS, computePTDisplay, hasOtherPrintedFace, toRoman } from "../../viewmodel/cardProps.ts";
+import { COUNTER_COLORS, computePTDisplay, hasOtherPrintedFace, shouldRenderCardBack, toRoman } from "../../viewmodel/cardProps.ts";
 import { CounterTooltip } from "../ui/CounterTooltip.tsx";
 import { LoyaltyBadge } from "../ui/LoyaltyBadge.tsx";
 import { CardArtFallback } from "./CardArtFallback.tsx";
@@ -37,19 +37,20 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
     (s) => obj && s.gameState?.players?.find((p) => p.id === obj.controller)?.commander_color_identity,
   );
 
-  const cardName = obj?.face_down ? t("card.faceDownName") : (obj?.name ?? "");
+  const renderCardBack = shouldRenderCardBack(obj);
+  const cardName = renderCardBack ? t("card.faceDownName") : (obj?.name ?? "");
   const imageLookup = obj
     ? cardImageLookup(obj)
     : { name: "", faceIndex: 0, oracleId: undefined, faceName: undefined };
   const isToken = obj?.display_source === "Token";
-  const { src: cardSrc, isLoading: cardLoading } = useCardImage(obj?.face_down ? "" : imageLookup.name, {
+  const { src: cardSrc, isLoading: cardLoading } = useCardImage(renderCardBack ? "" : imageLookup.name, {
     size: "art_crop",
     faceIndex: imageLookup.faceIndex,
-    isToken: obj?.face_down ? false : isToken,
-    tokenFilters: !obj?.face_down && isToken && obj ? tokenFiltersForObject(obj) : undefined,
-    tokenImageRef: !obj?.face_down && isToken && obj ? obj.token_image_ref : undefined,
-    oracleId: obj?.face_down ? undefined : imageLookup.oracleId,
-    faceName: obj?.face_down ? undefined : imageLookup.faceName,
+    isToken: renderCardBack ? false : isToken,
+    tokenFilters: !renderCardBack && isToken && obj ? tokenFiltersForObject(obj) : undefined,
+    tokenImageRef: !renderCardBack && isToken && obj ? obj.token_image_ref : undefined,
+    oracleId: renderCardBack ? undefined : imageLookup.oracleId,
+    faceName: renderCardBack ? undefined : imageLookup.faceName,
   });
 
   // A resolved URL can still 404 (future-dated sets not yet on the CDN, stale
@@ -73,12 +74,12 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
 
   if (!obj) return null;
 
-  const src = obj.face_down ? CARD_BACK_URL : cardSrc;
-  const isLoading = obj.face_down ? false : cardLoading;
+  const src = renderCardBack ? CARD_BACK_URL : cardSrc;
+  const isLoading = renderCardBack ? false : cardLoading;
   // CR 712 vs CR 710: `back_face != null` is NOT "has a second face" — a
   // Kamigawa flip card stores its alternative half in the same slot and has no
   // face 1 to inspect. Use the engine-provided layout discriminant.
-  const hasDfc = !obj.face_down && hasOtherPrintedFace(obj);
+  const hasDfc = !renderCardBack && hasOtherPrintedFace(obj);
   // CR 306.5c: the engine already split the loyalty TOTAL out of the pill strip, so this site
   // classifies nothing — it renders the rows it is given, in the order it is given them.
   const counters = pillsOf(counterDisplay);
@@ -99,7 +100,7 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
   }
 
   // Genuinely still resolving art — pulse until the async lookup settles.
-  if (!obj.face_down && isLoading) {
+  if (!renderCardBack && isLoading) {
     return (
       <div className="relative" style={{ width: "var(--art-crop-w)", height: "var(--art-crop-h)" }}>
         <div className="absolute inset-0 rounded-[6px] bg-[#151515] p-[3px] shadow-md">
@@ -109,7 +110,7 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
     );
   }
 
-  const renderedSrc = obj.face_down ? CARD_BACK_URL : (src ?? "");
+  const renderedSrc = renderCardBack ? CARD_BACK_URL : (src ?? "");
   const headerHeight = isCompactHeight
     ? "clamp(8px, calc(var(--art-crop-h) * 0.16), 12px)"
     : "clamp(8px, calc(var(--art-crop-h) * 0.18), 20px)";

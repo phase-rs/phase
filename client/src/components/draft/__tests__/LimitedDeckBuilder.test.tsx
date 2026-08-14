@@ -48,6 +48,7 @@ const TEST_VIEW: BuilderView = {
       type_line: "Creature - Drake",
     },
   ],
+  draft_effects: [],
   pool_groups: {
     color_groups: [],
     type_groups: [],

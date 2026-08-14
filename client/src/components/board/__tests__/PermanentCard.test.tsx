@@ -1763,6 +1763,38 @@ describe("PermanentCard", () => {
     expect(getByLabelText("Face-down card")).toHaveAttribute("data-face-down", "true");
   });
 
+  it("renders a face-down permanent's identity when the engine projects it to this viewer", () => {
+    const gameState = makeState();
+    gameState.objects[1].face_down = true;
+    gameState.objects[1].display_visible_to_viewer = true;
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    renderPermanent();
+
+    expect(screen.getByLabelText("Test Creature")).toHaveAttribute("data-face-down", "false");
+  });
+
+  it("dispatches the engine-provided turn-face-up action", () => {
+    const gameState = makeState();
+    gameState.objects[1].face_down = true;
+    gameState.objects[1].display_visible_to_viewer = true;
+    gameState.objects[1].attachments = [];
+    const turnFaceUpAction = { type: "TurnFaceUp", data: { object_id: 1 } } as const;
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      legalActions: [turnFaceUpAction],
+      legalActionsByObject: { 1: [turnFaceUpAction] },
+      viewerInteraction: null,
+    });
+
+    const { container } = renderPermanent(new Set(), new Set(), new Set(), new Set([1]));
+
+    fireEvent.click(container.querySelector('[data-object-id="1"]') as HTMLElement);
+
+    expect(dispatchAction).toHaveBeenCalledWith(turnFaceUpAction);
+  });
+
   it("forwards engine-provided token rules text and subtypes to the card image", () => {
     const lander = makeObject({
       id: 70,
