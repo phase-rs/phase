@@ -20,7 +20,8 @@ use crate::types::ability::{
     CastManaSpentMetric, ContinuousModification, ControllerRef, CountScope, DamageChannel,
     FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PossessionAxis,
     QuantityExpr, QuantityRef, ResolvedAbility, RoundingMode, StaticCondition, SubtypeExclusion,
-    TargetFilter, TargetRef, ThisWayCause, TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
+    TargetFilter, TargetRef, ThisWayCause, TrackedAnaphorSource, TurnJournalKind, TypeFilter,
+    TypedFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_types, CounterType};
@@ -137,6 +138,200 @@ fn cards_exiled_this_turn_for_context(state: &GameState, ctx: &QuantityContext) 
                 .cloned()
                 .unwrap_or_default()
         })
+}
+
+/// CR 109.2 + CR 400.1: A characteristic-bearing member of a scanned population.
+///
+/// A [`SpellCastRecord`](crate::types::game_state::SpellCastRecord) is not a
+/// `GameObject` — per CR 400.7 a spell that has left the stack is a new object
+/// with no relation to its previous existence, so a resolved spell cannot be
+/// re-inspected. Its characteristics are therefore read from the cast-time
+/// snapshot instead. This borrow is the single abstraction that lets a
+/// non-object population feed characteristic extraction without smuggling
+/// history into `TargetFilter` (which is object/zone-oriented and is consumed by
+/// targeting legality, the layer system, and combat).
+enum CharacteristicView<'a> {
+    Object(&'a crate::game::game_object::GameObject),
+    SpellRecord(&'a crate::types::game_state::SpellCastRecord),
+}
+
+impl<'a> CharacteristicView<'a> {
+    /// CR 205.2a: the member's card types.
+    fn core_types(&self) -> &'a [CoreType] {
+        match self {
+            CharacteristicView::Object(obj) => &obj.card_types.core_types,
+            CharacteristicView::SpellRecord(record) => &record.core_types,
+        }
+    }
+
+    /// CR 205.3: the member's subtypes.
+    fn subtypes(&self) -> &'a [String] {
+        match self {
+            CharacteristicView::Object(obj) => &obj.card_types.subtypes,
+            CharacteristicView::SpellRecord(record) => &record.subtypes,
+        }
+    }
+
+    /// CR 105.2: the member's colors. An object with no color contributes none.
+    fn colors(&self) -> &'a [ManaColor] {
+        match self {
+            CharacteristicView::Object(obj) => &obj.color,
+            CharacteristicView::SpellRecord(record) => &record.colors,
+        }
+    }
+}
+
+/// CR 109.2 + CR 400.1: Walk the population a [`CardTypeSetSource`] names,
+/// yielding one [`CharacteristicView`] per member.
+///
+/// The single authority for the population axis shared by
+/// `QuantityRef::DistinctCardTypes` (CR 205.2), `QuantityRef::DistinctSubtypes`
+/// (CR 205.3) and `QuantityRef::DistinctColorsAmong` (CR 105.1) — each supplies
+/// only its own characteristic extractor. Callers tally into a `HashSet`, so
+/// `AnyOf`'s recursion yields a genuine set UNION: a member present in two
+/// sources contributes its characteristics once.
+fn visit_characteristic_source<'s>(
+    state: &'s GameState,
+    source: &CardTypeSetSource,
+    ctx: QuantityContext,
+    filter_ctx: &FilterContext<'_>,
+    controller: PlayerId,
+    visit: &mut impl FnMut(CharacteristicView<'s>),
+) {
+    match source {
+        CardTypeSetSource::Zone { zone, scope } => match zone {
+            ZoneRef::Exile => {
+                for &obj_id in &state.exile {
+                    if let Some(obj) = state.objects.get(&obj_id) {
+                        let owner_matches = count_scope_owner_matches(
+                            state,
+                            scope,
+                            ctx.clone(),
+                            controller,
+                            obj.owner,
+                        );
+                        if owner_matches {
+                            visit(CharacteristicView::Object(obj));
+                        }
+                    }
+                }
+            }
+            ZoneRef::Graveyard | ZoneRef::Library | ZoneRef::Hand => {
+                for player in scoped_players(state, scope, ctx, controller) {
+                    let zone_ids = match zone {
+                        ZoneRef::Graveyard => &player.graveyard,
+                        ZoneRef::Library => &player.library,
+                        ZoneRef::Hand => &player.hand,
+                        ZoneRef::Exile => unreachable!(),
+                    };
+                    for &obj_id in zone_ids {
+                        if let Some(obj) = state.objects.get(&obj_id) {
+                            visit(CharacteristicView::Object(obj));
+                        }
+                    }
+                }
+            }
+        },
+        CardTypeSetSource::ExiledBySource => {
+            for linked in linked_exile_for_context(state, &ctx) {
+                if let Some(obj) = state.objects.get(&linked.exiled_id) {
+                    visit(CharacteristicView::Object(obj));
+                }
+            }
+        }
+        CardTypeSetSource::Objects { filter } => {
+            let zone = filter
+                .extract_in_zone()
+                .unwrap_or(crate::types::zones::Zone::Battlefield);
+            for obj_id in crate::game::targeting::zone_object_ids(state, zone) {
+                if !matches_target_filter(state, obj_id, filter, filter_ctx) {
+                    continue;
+                }
+                if let Some(obj) = state.objects.get(&obj_id) {
+                    visit(CharacteristicView::Object(obj));
+                }
+            }
+        }
+        // CR 608.2c + CR 205.2a/205.2b: the most recent chain tracked set. A
+        // merged Draw->Discard set is disambiguated by CAUSE: `Some(cause)`
+        // (e.g. Discarded) admits only members whose recorded producer action
+        // equals the bound cause; drawn members are unstamped and excluded.
+        // `None` admits every member. Mirrors `FilteredTrackedSetSize`'s set
+        // selection (highest set id) and cause filter.
+        CardTypeSetSource::TrackedSet { caused_by } => {
+            if let Some((set_id, ids)) = state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)
+            {
+                for &oid in ids {
+                    let cause_ok = match caused_by {
+                        None => true,
+                        Some(cause) => state
+                            .tracked_set_member_causes
+                            .get(set_id)
+                            .and_then(|causes| causes.get(&oid))
+                            .is_some_and(|member_cause| member_cause == cause),
+                    };
+                    if cause_ok {
+                        if let Some(obj) = state.objects.get(&oid) {
+                            visit(CharacteristicView::Object(obj));
+                        }
+                    }
+                }
+            }
+        }
+        // CR 601.2a + CR 112.1: the per-turn action journal for the scoped
+        // players. Characteristics come from the cast-time snapshot because a
+        // resolved spell is no longer an object (CR 400.7).
+        //
+        // Deliberately does NOT replicate `QuantityRef::SpellsCastThisTurn`'s
+        // `FilterProp::Another` own-cast exclusion: this population is reached
+        // from "spells you've cast", never "OTHER spells you've cast", so a
+        // card's own cast is a member (First Family counts itself, CR 112.1 +
+        // CR 608.2m).
+        CardTypeSetSource::TurnJournal {
+            journal,
+            scope,
+            filter,
+        } => match journal {
+            TurnJournalKind::SpellsCast => {
+                for player in scoped_players(state, scope, ctx, controller) {
+                    let Some(records) = state.spells_cast_this_turn_by_player.get(&player.id)
+                    else {
+                        continue;
+                    };
+                    for record in records.iter() {
+                        let matches = match filter {
+                            None => true,
+                            Some(filter) => spell_record_matches_filter(
+                                record,
+                                filter,
+                                controller,
+                                &state.all_creature_types,
+                            ),
+                        };
+                        if matches {
+                            visit(CharacteristicView::SpellRecord(record));
+                        }
+                    }
+                }
+            }
+        },
+        // CR 109.2: set union of two or more populations. Deduplication is
+        // automatic because every caller tallies into one `HashSet` — which is
+        // exactly why the union must live HERE and not above the leaf:
+        // `|A ∪ B| != |A| + |B|`.
+        CardTypeSetSource::AnyOf { sources } => {
+            for member in sources {
+                visit_characteristic_source(
+                    state,
+                    member,
+                    ctx.clone(),
+                    filter_ctx,
+                    controller,
+                    visit,
+                );
+            }
+        }
+    }
 }
 
 fn source_chosen_player_for_context(state: &GameState, ctx: &QuantityContext) -> Option<PlayerId> {
@@ -760,7 +955,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::ManaSpentToCast { .. }
         | QuantityRef::ColorsInCommandersColorIdentity
         | QuantityRef::VoteCount { .. }
-        | QuantityRef::DistinctColorsAmongPermanents { .. }
+        | QuantityRef::DistinctColorsAmong { .. }
         | QuantityRef::DistinctCounterKindsAmong { .. }
         | QuantityRef::EnteredThisTurn { .. }
         | QuantityRef::CommanderManaValue { .. }
@@ -941,6 +1136,25 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
 /// a per-turn journal that every battlefield entry appends to (CR 608.2i
 /// look-back tallies) is population-sensitive in the sense this classifier means,
 /// even though it is a history record rather than a board scan.
+/// CR 611.3a + CR 109.2: Does a [`CardTypeSetSource`] population read the live
+/// battlefield object census?
+///
+/// Only the object-filter arm does. A turn journal (CR 601.2a) is player state
+/// appended at cast time and is unaffected by an object entering or leaving the
+/// battlefield. `AnyOf` reads the census iff any member does.
+fn characteristic_source_reads_object_count(source: &CardTypeSetSource) -> bool {
+    match source {
+        CardTypeSetSource::Objects { .. } => true,
+        CardTypeSetSource::AnyOf { sources } => {
+            sources.iter().any(characteristic_source_reads_object_count)
+        }
+        CardTypeSetSource::Zone { .. }
+        | CardTypeSetSource::ExiledBySource
+        | CardTypeSetSource::TrackedSet { .. }
+        | CardTypeSetSource::TurnJournal { .. } => false,
+    }
+}
+
 fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
     match qty {
         // Read battlefield object population directly.
@@ -953,7 +1167,6 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::Devotion { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::PartySize { .. }
-        | QuantityRef::DistinctColorsAmongPermanents { .. }
         | QuantityRef::DistinctCounterKindsAmong { .. }
         | QuantityRef::EnteredThisTurn { .. }
         // CR 611.3a + CR 608.2i: a continuous effect from a static ability is
@@ -968,23 +1181,18 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         // leaves PRE-EXISTING recipients stale.
         | QuantityRef::BattlefieldEntriesThisTurn { .. }
         | QuantityRef::CommanderManaValue { .. } => true,
-        // Distinct card types reads battlefield population ONLY when its source
-        // is the object-filter variant; zone / linked-exile sources do not.
-        QuantityRef::DistinctCardTypes { source } => match source {
-            CardTypeSetSource::Objects { .. } => true,
-            CardTypeSetSource::Zone { .. }
-            | CardTypeSetSource::ExiledBySource
-            | CardTypeSetSource::TrackedSet { .. } => false,
-        },
-        // Distinct subtypes mirrors distinct card types: only the object-filter
-        // source reads battlefield population; zone / linked-exile / tracked-set
-        // sources do not.
-        QuantityRef::DistinctSubtypes { source, .. } => match source {
-            CardTypeSetSource::Objects { .. } => true,
-            CardTypeSetSource::Zone { .. }
-            | CardTypeSetSource::ExiledBySource
-            | CardTypeSetSource::TrackedSet { .. } => false,
-        },
+        // A distinct-characteristic count reads battlefield population ONLY when
+        // its source names a live object census; zone / linked-exile /
+        // tracked-set / turn-journal sources do not. All three characteristics
+        // share the population axis, so they share this classification — and
+        // `entered_object_perturbs_quantity_ref` narrows the SAME predicate to
+        // "does this entered object join the population?", which is what keeps
+        // the two functions' `false` arms aligned.
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => {
+            characteristic_source_reads_object_count(source)
+        }
         // Player-level, single-object, history-record, payment, and choice
         // references: unaffected by another object's battlefield entry/exit.
         QuantityRef::HandSize { .. }
@@ -1121,6 +1329,33 @@ pub(crate) fn quantity_expr_characteristic_reads_at(
 /// those records store the object's characteristics as of the recorded event, so
 /// no later layer write can change the tally. They classify EMPTY, and their
 /// embedded filters are deliberately NOT recursed.
+/// CR 109.2 + CR 601.2a: Which live characteristics a [`CardTypeSetSource`]
+/// population reads through its own filters.
+///
+/// Only the object filter and the journal's optional narrowing filter are live
+/// filter reads; the zone / linked-exile / tracked-set arms select by membership
+/// alone. `AnyOf` unions its members.
+fn characteristic_source_reads_at(source: &CardTypeSetSource, depth: u32) -> CharacteristicKinds {
+    match source {
+        CardTypeSetSource::Objects { filter } => {
+            target_filter_characteristic_reads_at(filter, depth)
+        }
+        CardTypeSetSource::TurnJournal { filter, .. } => filter
+            .as_ref()
+            .map_or(CharacteristicKinds::EMPTY, |filter| {
+                target_filter_characteristic_reads_at(filter, depth)
+            }),
+        CardTypeSetSource::AnyOf { sources } => sources
+            .iter()
+            .fold(CharacteristicKinds::EMPTY, |acc, member| {
+                acc.union(characteristic_source_reads_at(member, depth))
+            }),
+        CardTypeSetSource::Zone { .. }
+        | CardTypeSetSource::ExiledBySource
+        | CardTypeSetSource::TrackedSet { .. } => CharacteristicKinds::EMPTY,
+    }
+}
+
 fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> CharacteristicKinds {
     match qty {
         // ---- Live object censuses: recurse the counted filter. ----
@@ -1158,21 +1393,14 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         // CR 109.5 + CR 613.1b: per-player partition of a live census.
         QuantityRef::ControlledByEachPlayer { filter, .. } => CharacteristicKinds::CONTROLLER
             .union(target_filter_characteristic_reads_at(filter, depth)),
-        // CR 106.1 + CR 109.1: distinct colors over a live census.
-        QuantityRef::DistinctColorsAmongPermanents { filter } => CharacteristicKinds::COLOR
-            .union(target_filter_characteristic_reads_at(filter, depth)),
-        // CR 205.2a / CR 205.3: the object-filter source scans live objects; the
-        // zone / linked-exile / tracked-set sources do not read a live filter.
+        // CR 105.1 + CR 105.2: distinct colors over the source population.
+        QuantityRef::DistinctColorsAmong { source } => CharacteristicKinds::COLOR
+            .union(characteristic_source_reads_at(source, depth)),
+        // CR 205.2a / CR 205.3: the object-filter and journal-filter sources read
+        // a live filter; the zone / linked-exile / tracked-set sources do not.
         QuantityRef::DistinctCardTypes { source }
         | QuantityRef::DistinctSubtypes { source, .. } => {
-            CharacteristicKinds::CARD_TYPES.union(match source {
-                CardTypeSetSource::Objects { filter, .. } => {
-                    target_filter_characteristic_reads_at(filter, depth)
-                }
-                CardTypeSetSource::Zone { .. }
-                | CardTypeSetSource::ExiledBySource
-                | CardTypeSetSource::TrackedSet { .. } => CharacteristicKinds::EMPTY,
-            })
+            CharacteristicKinds::CARD_TYPES.union(characteristic_source_reads_at(source, depth))
         }
         // CR 604.3: a zone census, filtered by typeline and by an optional
         // filter, scoped by controller.
@@ -1373,6 +1601,36 @@ pub(crate) fn entered_object_perturbs_quantity_expr(
     }
 }
 
+/// CR 611.3a + CR 109.2: Would `entered`'s battlefield entry join the population
+/// a [`CardTypeSetSource`] names?
+///
+/// Only a live object census can gain a member from a battlefield entry. The
+/// zone / linked-exile / tracked-set arms are not battlefield populations, and a
+/// turn journal (CR 601.2a) records CASTS, which a battlefield entry is not —
+/// the entry of a permanent that was cast was already journaled at cast time
+/// (`finalize_cast`, CR 601.2a), so its entry adds nothing, and a permanent put
+/// onto the battlefield without being cast is never journaled at all. `AnyOf`
+/// is perturbed iff any member is.
+fn characteristic_source_perturbed_by_entry(
+    state: &GameState,
+    entered: &crate::game::game_object::GameObject,
+    ctx: &FilterContext<'_>,
+    source: &CardTypeSetSource,
+) -> bool {
+    match source {
+        CardTypeSetSource::Objects { filter } => {
+            matches_target_filter(state, entered.id, filter, ctx)
+        }
+        CardTypeSetSource::AnyOf { sources } => sources
+            .iter()
+            .any(|member| characteristic_source_perturbed_by_entry(state, entered, ctx, member)),
+        CardTypeSetSource::Zone { .. }
+        | CardTypeSetSource::ExiledBySource
+        | CardTypeSetSource::TrackedSet { .. }
+        | CardTypeSetSource::TurnJournal { .. } => false,
+    }
+}
+
 /// CR 611.3a + CR 700.5: entry-membership leaf for
 /// `entered_object_perturbs_quantity_expr`. EXHAUSTIVE and wildcard-free — the
 /// classification mirrors `quantity_ref_uses_object_count`: every `false` arm
@@ -1394,7 +1652,6 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::CountersOnObjects { filter, .. }
         | QuantityRef::Aggregate { filter, .. }
         | QuantityRef::ControlledByEachPlayer { filter, .. }
-        | QuantityRef::DistinctColorsAmongPermanents { filter }
         | QuantityRef::DistinctCounterKindsAmong { filter }
         | QuantityRef::EnteredThisTurn { filter }
         // CR 611.3a + CR 608.2i: narrowed to "would THIS object's entry join the
@@ -1418,25 +1675,11 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => {
             matches_target_filter(state, entered.id, filter, ctx)
         }
-        QuantityRef::DistinctCardTypes { source } => match source {
-            CardTypeSetSource::Objects { filter } => {
-                matches_target_filter(state, entered.id, filter, ctx)
-            }
-            // Zone / linked-exile / tracked-set sources are not battlefield
-            // population — the classifier returns false for them, so they cannot
-            // be perturbed.
-            CardTypeSetSource::Zone { .. }
-            | CardTypeSetSource::ExiledBySource
-            | CardTypeSetSource::TrackedSet { .. } => false,
-        },
-        QuantityRef::DistinctSubtypes { source, .. } => match source {
-            CardTypeSetSource::Objects { filter } => {
-                matches_target_filter(state, entered.id, filter, ctx)
-            }
-            CardTypeSetSource::Zone { .. }
-            | CardTypeSetSource::ExiledBySource
-            | CardTypeSetSource::TrackedSet { .. } => false,
-        },
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => {
+            characteristic_source_perturbed_by_entry(state, entered, ctx, source)
+        }
         // CR 700.5: devotion is perturbed iff the entered object's mana cost
         // contributes a symbol for one of the fixed colors. `ChosenColor`'s
         // color isn't statically known, so conservatively perturb (over-
@@ -3377,99 +3620,18 @@ fn resolve_ref(
         // CR 205.2a: Count distinct card types (CoreType) across a source set.
         QuantityRef::DistinctCardTypes { source } => {
             let mut seen = HashSet::new();
-            match source {
-                CardTypeSetSource::Zone { zone, scope } => match zone {
-                    ZoneRef::Exile => {
-                        for &obj_id in &state.exile {
-                            if let Some(obj) = state.objects.get(&obj_id) {
-                                let owner_matches = count_scope_owner_matches(
-                                    state,
-                                    scope,
-                                    ctx.clone(),
-                                    controller,
-                                    obj.owner,
-                                );
-                                if owner_matches {
-                                    for ct in &obj.card_types.core_types {
-                                        seen.insert(*ct);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    ZoneRef::Graveyard | ZoneRef::Library | ZoneRef::Hand => {
-                        for player in scoped_players(state, scope, ctx, controller) {
-                            let zone_ids = match zone {
-                                ZoneRef::Graveyard => &player.graveyard,
-                                ZoneRef::Library => &player.library,
-                                ZoneRef::Hand => &player.hand,
-                                ZoneRef::Exile => unreachable!(),
-                            };
-                            for &obj_id in zone_ids {
-                                if let Some(obj) = state.objects.get(&obj_id) {
-                                    for ct in &obj.card_types.core_types {
-                                        seen.insert(*ct);
-                                    }
-                                }
-                            }
-                        }
+            visit_characteristic_source(
+                state,
+                source,
+                ctx.clone(),
+                &filter_ctx,
+                controller,
+                &mut |view| {
+                    for ct in view.core_types() {
+                        seen.insert(*ct);
                     }
                 },
-                CardTypeSetSource::ExiledBySource => {
-                    for linked in linked_exile_for_context(state, &ctx) {
-                        if let Some(obj) = state.objects.get(&linked.exiled_id) {
-                            for ct in &obj.card_types.core_types {
-                                seen.insert(*ct);
-                            }
-                        }
-                    }
-                }
-                CardTypeSetSource::Objects { filter } => {
-                    let zone = filter
-                        .extract_in_zone()
-                        .unwrap_or(crate::types::zones::Zone::Battlefield);
-                    for obj_id in crate::game::targeting::zone_object_ids(state, zone) {
-                        if !matches_target_filter(state, obj_id, filter, &filter_ctx) {
-                            continue;
-                        }
-                        if let Some(obj) = state.objects.get(&obj_id) {
-                            for ct in &obj.card_types.core_types {
-                                seen.insert(*ct);
-                            }
-                        }
-                    }
-                }
-                // CR 608.2c + CR 205.2a/205.2b: distinct card types among the most
-                // recent chain tracked set. A merged Draw->Discard set is
-                // disambiguated by CAUSE: `Some(cause)` (e.g. Discarded) tallies
-                // only members whose recorded producer action equals the bound
-                // cause; drawn members are unstamped and excluded. `None` counts
-                // every member. Mirrors `FilteredTrackedSetSize`'s set selection
-                // (highest set id) and cause filter (`tracked_set_member_causes`).
-                CardTypeSetSource::TrackedSet { caused_by } => {
-                    if let Some((set_id, ids)) =
-                        state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)
-                    {
-                        for &oid in ids {
-                            let cause_ok = match caused_by {
-                                None => true,
-                                Some(cause) => state
-                                    .tracked_set_member_causes
-                                    .get(set_id)
-                                    .and_then(|causes| causes.get(&oid))
-                                    .is_some_and(|member_cause| member_cause == cause),
-                            };
-                            if cause_ok {
-                                if let Some(obj) = state.objects.get(&oid) {
-                                    for ct in &obj.card_types.core_types {
-                                        seen.insert(*ct);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            );
             usize_to_i32_saturating(seen.len())
         }
         // CR 205.3 + CR 604.3: Count distinct subtype VALUES across the same
@@ -3482,75 +3644,6 @@ fn resolve_ref(
         // other than creature types"). Subtype values are stored capitalized
         // (e.g. "Goblin"); inserted as-is to preserve consistent casing.
         QuantityRef::DistinctSubtypes { source, exclude } => {
-            // Gather the source object set first (same scan axis as
-            // `DistinctCardTypes`), then tally distinct subtype values across it.
-            // Collecting ids up front keeps the `&str` subtype borrows tied to
-            // `state.objects` for the lifetime of `seen`.
-            let mut obj_ids: Vec<ObjectId> = Vec::new();
-            match source {
-                CardTypeSetSource::Zone { zone, scope } => match zone {
-                    ZoneRef::Exile => {
-                        for &obj_id in &state.exile {
-                            if let Some(obj) = state.objects.get(&obj_id) {
-                                if count_scope_owner_matches(
-                                    state,
-                                    scope,
-                                    ctx.clone(),
-                                    controller,
-                                    obj.owner,
-                                ) {
-                                    obj_ids.push(obj_id);
-                                }
-                            }
-                        }
-                    }
-                    ZoneRef::Graveyard | ZoneRef::Library | ZoneRef::Hand => {
-                        for player in scoped_players(state, scope, ctx, controller) {
-                            let zone_ids = match zone {
-                                ZoneRef::Graveyard => &player.graveyard,
-                                ZoneRef::Library => &player.library,
-                                ZoneRef::Hand => &player.hand,
-                                ZoneRef::Exile => unreachable!(),
-                            };
-                            obj_ids.extend(zone_ids.iter().copied());
-                        }
-                    }
-                },
-                CardTypeSetSource::ExiledBySource => {
-                    for linked in linked_exile_for_context(state, &ctx) {
-                        obj_ids.push(linked.exiled_id);
-                    }
-                }
-                CardTypeSetSource::Objects { filter } => {
-                    let zone = filter
-                        .extract_in_zone()
-                        .unwrap_or(crate::types::zones::Zone::Battlefield);
-                    for obj_id in crate::game::targeting::zone_object_ids(state, zone) {
-                        if matches_target_filter(state, obj_id, filter, &filter_ctx) {
-                            obj_ids.push(obj_id);
-                        }
-                    }
-                }
-                CardTypeSetSource::TrackedSet { caused_by } => {
-                    if let Some((set_id, ids)) =
-                        state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)
-                    {
-                        for &oid in ids {
-                            let cause_ok = match caused_by {
-                                None => true,
-                                Some(cause) => state
-                                    .tracked_set_member_causes
-                                    .get(set_id)
-                                    .and_then(|causes| causes.get(&oid))
-                                    .is_some_and(|member_cause| member_cause == cause),
-                            };
-                            if cause_ok {
-                                obj_ids.push(oid);
-                            }
-                        }
-                    }
-                }
-            }
             // CR 205.3m: skip subtypes that are creature types when excluding
             // creature types. Subtype values are stored capitalized ("Goblin")
             // and inserted as-is; a card with three subtypes contributes three.
@@ -3568,17 +3661,25 @@ fn resolve_ref(
             } else {
                 HashSet::new()
             };
+            // The `&str` subtype borrows stay tied to `state` for the lifetime of
+            // `seen` because `visit_characteristic_source` yields views borrowed
+            // from `state`, not from a transient buffer.
             let mut seen: HashSet<&str> = HashSet::new();
-            for obj_id in &obj_ids {
-                if let Some(obj) = state.objects.get(obj_id) {
-                    for sub in &obj.card_types.subtypes {
+            visit_characteristic_source(
+                state,
+                source,
+                ctx.clone(),
+                &filter_ctx,
+                controller,
+                &mut |view| {
+                    for sub in view.subtypes() {
                         if exclude_creature && creature_types.contains(sub.as_str()) {
                             continue;
                         }
                         seen.insert(sub.as_str());
                     }
-                }
-            }
+                },
+            );
             usize_to_i32_saturating(seen.len())
         }
         // CR 603.10a + CR 607.2a: Count cards linked as "exiled with" the
@@ -3979,29 +4080,31 @@ fn resolve_ref(
                 .map(|obj| u32_to_i32_saturating(obj.effective_mana_value()))
                 .unwrap_or(0)
         }
-        // CR 106.1 + CR 109.1: Count distinct colors (W/U/B/R/G) among permanents
-        // matching the filter. "Gold"/"multicolor"/"colorless" are not colors, so
-        // each ManaColor contributes at most once per colored permanent.
-        QuantityRef::DistinctColorsAmongPermanents { filter } => {
-            let zone = filter
-                .extract_in_zone()
-                .unwrap_or(crate::types::zones::Zone::Battlefield);
+        // CR 105.1 + CR 105.2: Count distinct colors (W/U/B/R/G) among the members
+        // of the source population. "Gold"/"multicolor"/"colorless" are not colors
+        // (CR 105.2), so each `ManaColor` contributes at most once per colored
+        // member and a colorless member contributes nothing. Because every member
+        // tallies into one `HashSet`, an `AnyOf` union counts a color shared by two
+        // populations once — `|A ∪ B| != |A| + |B|`.
+        QuantityRef::DistinctColorsAmong { source } => {
             let mut seen: HashSet<ManaColor> = HashSet::new();
-            for &id in crate::game::targeting::zone_object_ids(state, zone).iter() {
-                if !matches_target_filter(state, id, filter, &filter_ctx) {
-                    continue;
-                }
-                if let Some(obj) = state.objects.get(&id) {
-                    for color in &obj.color {
+            visit_characteristic_source(
+                state,
+                source,
+                ctx.clone(),
+                &filter_ctx,
+                controller,
+                &mut |view| {
+                    for color in view.colors() {
                         seen.insert(*color);
                     }
-                }
-            }
+                },
+            );
             usize_to_i32_saturating(seen.len())
         }
         // CR 122.1: Count distinct counter kinds among permanents matching the
         // filter (controller-relative, CR 109.4). Counter-side dual of
-        // `DistinctColorsAmongPermanents`. Each `CounterType` present on at
+        // `DistinctColorsAmong`. Each `CounterType` present on at
         // least one matching permanent contributes once.
         QuantityRef::DistinctCounterKindsAmong { filter } => {
             usize_to_i32_saturating(distinct_counter_kinds_among(state, filter, &filter_ctx).len())
@@ -5243,7 +5346,7 @@ fn object_id_for_scope(
 }
 
 /// CR 122.1: Distinct counter kinds present on objects matching `filter`
-/// (controller-relative, CR 109.4). Mirrors `DistinctColorsAmongPermanents`'s
+/// (controller-relative, CR 109.4). Mirrors `DistinctColorsAmong`'s
 /// resolver (zones from `filter.extract_zones()`, `zone_object_ids`,
 /// `matches_target_filter`), enumerating only positive-count counter kinds the
 /// same way proliferate does. Returns a `Vec<CounterType>` SORTED by
@@ -7135,6 +7238,166 @@ mod tests {
             .unwrap()
             .mana_spent_source_snapshots
             .push(ManaSpentSourceSnapshot { source_id, lki });
+    }
+
+    /// Row 18, resolver half. CR 400.1 + CR 109.2: `visit_characteristic_source`'s
+    /// `Objects` arm derives ONE zone via `TargetFilter::extract_in_zone`, which
+    /// for a composite returns the FIRST member's zone. A cross-zone `Or` is
+    /// therefore scanned in one zone and the other leg is DROPPED with no
+    /// diagnostic — which is why the parser refuses to emit one
+    /// (`objects_filter_zone_is_unambiguous`).
+    ///
+    /// The same cross-zone meaning IS expressible, as `AnyOf`, where each member
+    /// carries its own zone. The two halves together are the justification for
+    /// the refusal: the wrong shape silently under-counts; the right shape is
+    /// available.
+    #[test]
+    fn a_cross_zone_or_drops_a_leg_while_any_of_reads_both_zones() {
+        let mut state = GameState::new_two_player(7);
+        let controller = PlayerId(0);
+
+        // A green creature on the battlefield.
+        let bear = create_object(
+            &mut state,
+            CardId(900),
+            controller,
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&bear).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.color = vec![ManaColor::Green];
+        }
+        // A blue card in the graveyard.
+        let ghost = create_object(
+            &mut state,
+            CardId(901),
+            controller,
+            "Ghost".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&ghost).unwrap();
+            obj.card_types.core_types = vec![CoreType::Instant];
+            obj.color = vec![ManaColor::Blue];
+        }
+        state
+            .players
+            .iter_mut()
+            .find(|p| p.id == controller)
+            .unwrap()
+            .graveyard
+            .push_back(ghost);
+
+        let battlefield_creatures = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
+        );
+        let graveyard_cards = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Card)
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                }]),
+        );
+
+        // WRONG SHAPE: one `Objects` population over a cross-zone `Or`. The
+        // first member has no `InZone`, so `extract_in_zone` yields `None` and
+        // the scan defaults to the battlefield — the graveyard leg is dropped.
+        let folded = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctColorsAmong {
+                source: CardTypeSetSource::Objects {
+                    filter: TargetFilter::Or {
+                        filters: vec![battlefield_creatures.clone(), graveyard_cards.clone()],
+                    },
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &folded, controller, bear),
+            1,
+            "a folded cross-zone Or silently scans ONE zone — this is the shape \
+             the parser must never emit"
+        );
+
+        // RIGHT SHAPE: a union whose members each carry their own zone.
+        let union = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctColorsAmong {
+                source: CardTypeSetSource::AnyOf {
+                    sources: vec![
+                        CardTypeSetSource::Objects {
+                            filter: battlefield_creatures,
+                        },
+                        CardTypeSetSource::Objects {
+                            filter: graveyard_cards,
+                        },
+                    ],
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &union, controller, bear),
+            2,
+            "AnyOf reads both zones: green (battlefield) + blue (graveyard)"
+        );
+    }
+
+    /// CR 109.2: the union is a SET union, not an arithmetic sum. A colour
+    /// present in both populations contributes once — the property that makes
+    /// `Sum { [DistinctColors(A), DistinctColors(B)] }` an incorrect
+    /// decomposition and forces the union into the population layer.
+    #[test]
+    fn any_of_deduplicates_a_characteristic_shared_by_two_populations() {
+        let mut state = GameState::new_two_player(7);
+        let controller = PlayerId(0);
+
+        let bear = create_object(
+            &mut state,
+            CardId(910),
+            controller,
+            "Green Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&bear).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.color = vec![ManaColor::Green];
+        }
+
+        // A GREEN cast record — the overlap with the battlefield population.
+        let record = SpellCastRecord {
+            colors: vec![ManaColor::Green],
+            core_types: vec![CoreType::Instant],
+            ..Default::default()
+        };
+        state
+            .spells_cast_this_turn_by_player
+            .insert(controller, im::Vector::from(vec![record]));
+
+        let union = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctColorsAmong {
+                source: CardTypeSetSource::AnyOf {
+                    sources: vec![
+                        CardTypeSetSource::Objects {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::new(TypeFilter::Permanent)
+                                    .controller(ControllerRef::You),
+                            ),
+                        },
+                        CardTypeSetSource::TurnJournal {
+                            journal: TurnJournalKind::SpellsCast,
+                            scope: CountScope::Controller,
+                            filter: None,
+                        },
+                    ],
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &union, controller, bear),
+            1,
+            "green is in BOTH populations and must contribute once (|A ∪ B| != |A| + |B|)"
+        );
     }
 
     #[test]

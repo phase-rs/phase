@@ -11589,6 +11589,25 @@ fn quantity_expr_refs_cost_paid_object(expr: &QuantityExpr) -> bool {
     }
 }
 
+/// CR 109.2: Does a [`CardTypeSetSource`] population route a filter that
+/// references the cost-paid object? Only the object filter and the journal's
+/// optional narrowing filter can; `AnyOf` recurses so a union member's reference
+/// is not dropped.
+fn characteristic_source_references_cost_paid_object(source: &CardTypeSetSource) -> bool {
+    match source {
+        CardTypeSetSource::Objects { filter } => filter.references_cost_paid_object(),
+        CardTypeSetSource::TurnJournal { filter, .. } => filter
+            .as_ref()
+            .is_some_and(TargetFilter::references_cost_paid_object),
+        CardTypeSetSource::AnyOf { sources } => sources
+            .iter()
+            .any(characteristic_source_references_cost_paid_object),
+        CardTypeSetSource::Zone { .. }
+        | CardTypeSetSource::ExiledBySource
+        | CardTypeSetSource::TrackedSet { .. } => false,
+    }
+}
+
 /// CR 400.7d + CR 608.2k: True when this `QuantityRef` reads the cost-paid
 /// object, by either of the two structural axes a ref can carry it on:
 ///
@@ -11629,7 +11648,6 @@ fn quantity_ref_refs_cost_paid_object(qty: &QuantityRef) -> bool {
         | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
         | QuantityRef::CounterAddedThisTurn { target: filter, .. }
         | QuantityRef::TokensCreatedThisTurn { filter, .. }
-        | QuantityRef::DistinctColorsAmongPermanents { filter }
         | QuantityRef::DistinctCounterKindsAmong { filter } => filter.references_cost_paid_object(),
 
         // Filter-bearing refs (boxed `TargetFilter`): recurse (auto-deref).
@@ -11652,21 +11670,13 @@ fn quantity_ref_refs_cost_paid_object(qty: &QuantityRef) -> bool {
             source.references_cost_paid_object() || target.references_cost_paid_object()
         }
 
-        // Card-type counting embeds a `TargetFilter` through its source enum.
-        QuantityRef::DistinctCardTypes { source } => match source {
-            CardTypeSetSource::Objects { filter } => filter.references_cost_paid_object(),
-            CardTypeSetSource::Zone { .. }
-            | CardTypeSetSource::ExiledBySource
-            | CardTypeSetSource::TrackedSet { .. } => false,
-        },
-
-        // Subtype counting embeds a `TargetFilter` through its source enum too.
-        QuantityRef::DistinctSubtypes { source, .. } => match source {
-            CardTypeSetSource::Objects { filter } => filter.references_cost_paid_object(),
-            CardTypeSetSource::Zone { .. }
-            | CardTypeSetSource::ExiledBySource
-            | CardTypeSetSource::TrackedSet { .. } => false,
-        },
+        // Card-type / subtype / colour counting all embed their `TargetFilter`s
+        // through the shared population enum.
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => {
+            characteristic_source_references_cost_paid_object(source)
+        }
 
         // Mana-spent metering embeds a `TargetFilter` through its metric enum.
         QuantityRef::ManaSpentToCast { metric, .. } => match metric {

@@ -3854,13 +3854,14 @@ pub(crate) fn strip_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String
             terminated(take_until(", "), tag::<_, _, OracleError<'_>>(", ")).parse(rest_lower)
         {
             if let Some(qty) = parse_for_each_clause(clause) {
-                // CR 106.1: "for each color among [X], add one mana of that color"
+                // CR 105.1: "for each color among [X], add one mana of that color"
                 // must NOT be split into (repeat_for, "add one mana of that color").
                 // The "that color" anaphors the per-iteration color, not the
                 // source's `ChosenAttribute::Color`. Let the full text flow
-                // through to `try_parse_for_each_color_mana_public` which emits
-                // a single `DistinctColorsAmongPermanents` mana ability.
-                if matches!(qty, QuantityRef::DistinctColorsAmongPermanents { .. })
+                // through to `try_parse_for_each_color_mana_public` which emits a
+                // single `ManaProduction::DistinctColorsAmongPermanents` mana
+                // ability (a DIFFERENT enum from the `QuantityRef` matched here).
+                if matches!(qty, QuantityRef::DistinctColorsAmong { .. })
                     && remainder
                         .trim_end_matches('.')
                         .trim()

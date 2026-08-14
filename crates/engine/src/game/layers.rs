@@ -28,10 +28,10 @@ use crate::game::quantity::{
 use crate::game::speed::{effective_speed, has_max_speed};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, BasicLandType,
-    CastingPermission, ChosenSubtypeKind, CommanderOwnership, ContinuousModification,
-    CopiableValues, Duration, Effect, FilterProp, ManaContribution, ManaProduction, PlayerFilter,
-    PlayerScope, QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter,
-    TriggerGrantProducerKey, TriggerProducerOrigin, TypedFilter,
+    CardTypeSetSource, CastingPermission, ChosenSubtypeKind, CommanderOwnership,
+    ContinuousModification, CopiableValues, Duration, Effect, FilterProp, ManaContribution,
+    ManaProduction, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, StaticCondition,
+    StaticDefinition, TargetFilter, TriggerGrantProducerKey, TriggerProducerOrigin, TypedFilter,
 };
 use crate::types::attribution::EffectRef;
 use crate::types::card_type::{
@@ -2697,6 +2697,44 @@ fn zone_ref_denotes_zone(zone_ref: &crate::types::ability::ZoneRef, zone: Zone) 
     )
 }
 
+/// CR 613.4a + CR 400.1: Does a [`CardTypeSetSource`] population read `zone`?
+///
+/// Only the explicit `Zone` source names one. `Objects` keeps the pre-existing
+/// classification (its `InZone` prop is not consulted here, matching the
+/// behavior every characteristic head had before they shared this axis), the
+/// journal is player state rather than a zone (CR 601.2a), and `AnyOf` reads a
+/// zone iff any member does.
+fn characteristic_source_reads_zone(source: &CardTypeSetSource, zone: Zone) -> bool {
+    match source {
+        CardTypeSetSource::Zone { zone: zone_ref, .. } => zone_ref_denotes_zone(zone_ref, zone),
+        CardTypeSetSource::AnyOf { sources } => sources
+            .iter()
+            .any(|member| characteristic_source_reads_zone(member, zone)),
+        CardTypeSetSource::ExiledBySource
+        | CardTypeSetSource::Objects { .. }
+        | CardTypeSetSource::TrackedSet { .. }
+        | CardTypeSetSource::TurnJournal { .. } => false,
+    }
+}
+
+/// CR 119 + CR 613.4a: Does a [`CardTypeSetSource`] population route a filter
+/// that reads a life total? Mirrors [`characteristic_source_reads_zone`]'s
+/// recursion over the same axis.
+fn characteristic_source_reads_life_total(source: &CardTypeSetSource) -> bool {
+    match source {
+        CardTypeSetSource::Objects { filter } => target_filter_reads_life_total(filter),
+        CardTypeSetSource::TurnJournal { filter, .. } => {
+            filter.as_ref().is_some_and(target_filter_reads_life_total)
+        }
+        CardTypeSetSource::AnyOf { sources } => {
+            sources.iter().any(characteristic_source_reads_life_total)
+        }
+        CardTypeSetSource::Zone { .. }
+        | CardTypeSetSource::ExiledBySource
+        | CardTypeSetSource::TrackedSet { .. } => false,
+    }
+}
+
 /// CR 404 + CR 611.3a: Does a `QuantityExpr` read the card count / object
 /// population of `zone`? Mirrors the structural recursion of
 /// `crate::game::quantity::quantity_expr_uses_object_count` so composite/nested
@@ -2726,7 +2764,6 @@ fn quantity_expr_reads_zone(expr: &QuantityExpr, zone: Zone) -> bool {
 /// quantity reference that reads a zone must be classified intentionally rather
 /// than silently under-escalating a zone-membership gate.
 fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
-    use crate::types::ability::CardTypeSetSource;
     match qty {
         // Direct graveyard card count (CR 404). `player` scope is irrelevant to
         // the zone identity — any player's graveyard is still the graveyard.
@@ -2751,23 +2788,17 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::ObjectCountDistinct { filter, .. }
         | QuantityRef::ObjectCountBySharedQuality { filter, .. }
         | QuantityRef::Aggregate { filter, .. } => target_filter_reads_zone(filter, zone),
-        // Distinct card types read `zone` only when sourced from that zone's cards
-        // (Tarmogoyf: card types among cards in all graveyards).
-        QuantityRef::DistinctCardTypes { source } => match source {
-            CardTypeSetSource::Zone { zone: zone_ref, .. } => zone_ref_denotes_zone(zone_ref, zone),
-            CardTypeSetSource::ExiledBySource
-            | CardTypeSetSource::Objects { .. }
-            | CardTypeSetSource::TrackedSet { .. } => false,
-        },
-        // CR 613.4a: Distinct subtypes read `zone` when sourced from that zone's
-        // cards (Subgoyf: different subtypes among cards in all graveyards) — layer
-        // 7a CDA P/T must re-derive when that zone changes.
-        QuantityRef::DistinctSubtypes { source, .. } => match source {
-            CardTypeSetSource::Zone { zone: zone_ref, .. } => zone_ref_denotes_zone(zone_ref, zone),
-            CardTypeSetSource::ExiledBySource
-            | CardTypeSetSource::Objects { .. }
-            | CardTypeSetSource::TrackedSet { .. } => false,
-        },
+        // CR 613.4a: A distinct-characteristic count reads `zone` only when its
+        // population is sourced from that zone's cards (Tarmogoyf: card types
+        // among cards in all graveyards; Subgoyf: different subtypes among the
+        // same) — layer 7a CDA P/T must re-derive when that zone changes. All
+        // three characteristics share the population axis, so they share this
+        // classification.
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => {
+            characteristic_source_reads_zone(source, zone)
+        }
         // Everything else reads player-level state, single-object state, battle-
         // field-only population, history records, choices, or tracked sets — none
         // depend on `zone` membership. Enumerated explicitly (no wildcard) so a
@@ -2785,7 +2816,6 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::Devotion { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::PartySize { .. }
-        | QuantityRef::DistinctColorsAmongPermanents { .. }
         | QuantityRef::DistinctCounterKindsAmong { .. }
         | QuantityRef::EnteredThisTurn { .. }
         | QuantityRef::CommanderManaValue { .. }
@@ -3014,7 +3044,7 @@ fn quantity_expr_reads_life(expr: &QuantityExpr) -> bool {
 /// and every filter-bearing variant ROUTES its nested payload (universal
 /// routing rule). EXHAUSTIVE and wildcard-free.
 fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
-    use crate::types::ability::{CardTypeSetSource, CastManaSpentMetric};
+    use crate::types::ability::CastManaSpentMetric;
     match qty {
         // CR 119.3 + CR 119.9: the direct-leaf life-family readers — the exact
         // quantities a guarded life-mutation site changes (119.3: gain/loss
@@ -3040,7 +3070,6 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         | QuantityRef::CountersOnObjects { filter, .. }
         | QuantityRef::Aggregate { filter, .. }
         | QuantityRef::ControlledByEachPlayer { filter, .. }
-        | QuantityRef::DistinctColorsAmongPermanents { filter }
         | QuantityRef::DistinctCounterKindsAmong { filter }
         | QuantityRef::EnteredThisTurn { filter }
         | QuantityRef::SacrificedThisTurn { filter, .. }
@@ -3077,15 +3106,14 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         // reads `life_lost_this_turn` per candidate.
         QuantityRef::PlayerCount { filter } => player_filter_reads_life(filter),
 
-        // Distinct card-type / subtype counts route an `Objects { filter }`
-        // set-source; the other set-sources carry no `TargetFilter`.
+        // Distinct card-type / subtype / colour counts route the filters their
+        // population carries (`Objects { filter }` and the journal's optional
+        // narrowing filter); the fixed-vocabulary set-sources carry none.
         QuantityRef::DistinctCardTypes { source }
-        | QuantityRef::DistinctSubtypes { source, .. } => match source {
-            CardTypeSetSource::Objects { filter } => target_filter_reads_life_total(filter),
-            CardTypeSetSource::Zone { .. }
-            | CardTypeSetSource::ExiledBySource
-            | CardTypeSetSource::TrackedSet { .. } => false,
-        },
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => {
+            characteristic_source_reads_life_total(source)
+        }
 
         // CR 601.2h: `ManaSpentToCast` carries no direct `TargetFilter`, but its
         // `metric` can nest a mana-source filter one level deeper

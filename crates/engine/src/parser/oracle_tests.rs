@@ -17907,8 +17907,11 @@ fn vivid_spell_cost_reduction_uses_distinct_colors_quantity() {
         mode: CostModifyMode::Reduce,
         amount: ManaCost::Cost { generic: 1, .. },
         dynamic_count:
-            Some(QuantityRef::DistinctColorsAmongPermanents {
-                filter: TargetFilter::Typed(tf),
+            Some(QuantityRef::DistinctColorsAmong {
+                source:
+                    crate::types::ability::CardTypeSetSource::Objects {
+                        filter: TargetFilter::Typed(tf),
+                    },
             }),
         ..
     } = &r.statics[0].mode
@@ -21314,8 +21317,11 @@ fn activated_draw_for_each_color_among_permanents_uses_distinct_colors_quantity(
         count:
             QuantityExpr::Ref {
                 qty:
-                    QuantityRef::DistinctColorsAmongPermanents {
-                        filter: TargetFilter::Typed(tf),
+                    QuantityRef::DistinctColorsAmong {
+                        source:
+                            crate::types::ability::CardTypeSetSource::Objects {
+                                filter: TargetFilter::Typed(tf),
+                            },
                     },
             },
         ..

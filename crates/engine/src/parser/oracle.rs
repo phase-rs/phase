@@ -1550,7 +1550,6 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
         | QuantityRef::CountersOnObjects { filter, .. }
         | QuantityRef::Aggregate { filter, .. }
         | QuantityRef::ControlledByEachPlayer { filter, .. }
-        | QuantityRef::DistinctColorsAmongPermanents { filter }
         | QuantityRef::DistinctCounterKindsAmong { filter }
         | QuantityRef::EnteredThisTurn { filter }
         // CR 608.2i: the look-back sibling carries a `TargetFilter` too, and this
@@ -1560,14 +1559,37 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
         | QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => {
             target_filter_uses_filter_prop(filter, pred)
         }
-        QuantityRef::DistinctCardTypes {
-            source: crate::types::ability::CardTypeSetSource::Objects { filter },
+        // CR 109.2: the three distinct-characteristic counts embed their filters
+        // through the shared population enum; recurse over it so a union member
+        // or a journal's narrowing filter is not dropped.
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => {
+            characteristic_source_uses_filter_prop(source, pred)
         }
-        | QuantityRef::DistinctSubtypes {
-            source: crate::types::ability::CardTypeSetSource::Objects { filter },
-            ..
-        } => target_filter_uses_filter_prop(filter, pred),
         _ => false,
+    }
+}
+
+/// CR 109.2: Does any `TargetFilter` reachable through a `CardTypeSetSource`
+/// population use `pred`? The fixed-vocabulary zone / linked-exile / tracked-set
+/// arms carry none.
+fn characteristic_source_uses_filter_prop(
+    source: &crate::types::ability::CardTypeSetSource,
+    pred: &impl Fn(&FilterProp) -> bool,
+) -> bool {
+    use crate::types::ability::CardTypeSetSource;
+    match source {
+        CardTypeSetSource::Objects { filter } => target_filter_uses_filter_prop(filter, pred),
+        CardTypeSetSource::TurnJournal { filter, .. } => filter
+            .as_ref()
+            .is_some_and(|filter| target_filter_uses_filter_prop(filter, pred)),
+        CardTypeSetSource::AnyOf { sources } => sources
+            .iter()
+            .any(|member| characteristic_source_uses_filter_prop(member, pred)),
+        CardTypeSetSource::Zone { .. }
+        | CardTypeSetSource::ExiledBySource
+        | CardTypeSetSource::TrackedSet { .. } => false,
     }
 }
 

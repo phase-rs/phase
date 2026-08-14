@@ -18190,9 +18190,9 @@ mod stage2_injector_tests {
                 // in the merged source, still in their named production functions.
                 // #7382's optional-player routing and pre-entry controller prompt move only
                 // the third and fifth coordinates; both named mints were re-read in place.
-                "game/effects/mod.rs:6640".to_string(),
-                "game/effects/mod.rs:6717".to_string(),
-                "game/effects/mod.rs:9939".to_string(),
+                "game/effects/mod.rs:6648".to_string(),
+                "game/effects/mod.rs:6725".to_string(),
+                "game/effects/mod.rs:9947".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.

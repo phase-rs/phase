@@ -102,11 +102,11 @@
 
 use crate::types::ability::FilterProp;
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, ContinuousModification, ControllerRef, Duration, Effect,
-    GuessSubject, ModalChoice, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope,
-    QuantityExpr, QuantityRef, RepeatContinuation, ReplacementDefinition, ResolvedAbility,
-    StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter, ZoneRef,
+    AbilityCondition, AbilityDefinition, CardTypeSetSource, ContinuousModification, ControllerRef,
+    Duration, Effect, GuessSubject, ModalChoice, MultiTargetSpec, ObjectScope, PlayerFilter,
+    PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ReplacementDefinition,
+    ResolvedAbility, StaticCondition, StaticDefinition, TargetFilter, TriggerCondition,
+    TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -565,7 +565,11 @@ fn is_opaque_forwarded_target(f: &TargetFilter) -> bool {
 // RwProfile (§2 D-profile).
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug)]
+// `PartialEq`/`Eq` are derived so a test can assert a profile is EXACTLY the
+// one a population declares, rather than spot-checking fields — an omitted read
+// is fail-open for the CR 603.3b ordering gate, so field-by-field assertions
+// would be the wrong shape of check. Every field type already derives both.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RwProfile {
     /// Source-scoped reads ONLY (live unless the structure freezes them, CR
     /// 603.10a). Recipient reads are NOT recorded — a Recipient read is the
@@ -2069,7 +2073,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::ObjectCountDistinct { .. }
         | QuantityRef::ObjectCountBySharedQuality { .. }
         | QuantityRef::ControlledByEachPlayer { .. }
-        | QuantityRef::DistinctColorsAmongPermanents { .. }
+        | QuantityRef::DistinctColorsAmong { .. }
         | QuantityRef::CountersOnObjects { .. }
         | QuantityRef::DistinctCounterKindsAmong { .. }
         | QuantityRef::Aggregate { .. }
@@ -3615,6 +3619,49 @@ fn journal_zone_change_read(filter: &TargetFilter, to: Option<&Zone>) -> RwProfi
         p.reads_membership_zones = ZoneSpan::one(*z);
     }
     p
+}
+
+/// CR 603.3b: the read profile of a [`CardTypeSetSource`] population.
+///
+/// The same-event ordering gate reads this profile, and an OMITTED read is
+/// FAIL-OPEN, so every source must map to the profile its own scan actually
+/// performs. The `DistinctCardTypes` / `DistinctSubtypes` / `DistinctColorsAmong`
+/// heads all share this authority — a wrapper-level `{ .. }` or-pattern would be
+/// compiler-blind to a new source variant and would silently keep claiming a
+/// board read for a population that is not on the board.
+fn characteristic_source_read(source: &CardTypeSetSource) -> RwProfile {
+    match source {
+        // CR 109.2: a live object census over the filter — the exact profile the
+        // colour head declared before it was parameterized onto this axis.
+        CardTypeSetSource::Objects { filter } => board_membership_read(filter),
+        // CR 400.1 + CR 607.2a + CR 608.2c: whole-zone / linked-exile /
+        // tracked-set membership reads, unextractable filter ⇒ fail-closed.
+        CardTypeSetSource::Zone { .. }
+        | CardTypeSetSource::ExiledBySource
+        | CardTypeSetSource::TrackedSet { .. } => reads_zone_membership(),
+        // CR 601.2a: a turn journal is turn-scoped PLAYER state, not board state.
+        // Mirrors `QuantityRef::SpellsCastThisTurn`'s own `JournalCast` read so
+        // the two readings of the same population agree.
+        CardTypeSetSource::TurnJournal { journal, .. } => match journal {
+            TurnJournalKind::SpellsCast => reads_player_of(StateKind::JournalCast),
+        },
+        // CR 109.2: the union reads everything its members read. Arity >= 2 is
+        // guaranteed by `CardTypeSetSource::any_of` at construction and by
+        // `deserialize_union_sources` on load, so this fold can never collapse to
+        // the fail-open `RwProfile::empty()`; the assert documents the dependency
+        // at the point that relies on it.
+        CardTypeSetSource::AnyOf { sources } => {
+            debug_assert!(
+                sources.len() >= 2,
+                "CardTypeSetSource::AnyOf arity invariant violated: {} member(s)",
+                sources.len()
+            );
+            sources.iter().fold(RwProfile::empty(), |mut acc, member| {
+                acc.merge(characteristic_source_read(member));
+                acc
+            })
+        }
+    }
 }
 
 /// A board VALUE aggregate (power/counter aggregate) over `filter`: records the
@@ -5855,8 +5902,7 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         QuantityRef::ObjectCount { filter }
         | QuantityRef::ObjectCountDistinct { filter, .. }
         | QuantityRef::ObjectCountBySharedQuality { filter, .. }
-        | QuantityRef::ControlledByEachPlayer { filter, .. }
-        | QuantityRef::DistinctColorsAmongPermanents { filter } => board_membership_read(filter),
+        | QuantityRef::ControlledByEachPlayer { filter, .. } => board_membership_read(filter),
         QuantityRef::CountersOnObjects {
             filter,
             counter_type: _,
@@ -5894,10 +5940,18 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         QuantityRef::Variable { name: _ } | QuantityRef::SelfManaValue => RwProfile::empty(),
         QuantityRef::TargetZoneCardCount { zone: _ } => reads_zone_membership(),
         QuantityRef::Devotion { .. }
-        | QuantityRef::DistinctCardTypes { .. }
-        | QuantityRef::DistinctSubtypes { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::PartySize { .. } => reads_zone_membership(),
+        // CR 205.2 / CR 205.3 / CR 105.1: the three distinct-characteristic
+        // counts share the population axis, so they share its read profile.
+        // Split out of the `reads_zone_membership()` group above because a
+        // wrapper-level `{ .. }` pattern is COMPILER-BLIND to new
+        // `CardTypeSetSource` variants: a `TurnJournal` source would keep
+        // claiming a board read and OMIT the `JournalCast` player read, which is
+        // fail-open for the CR 603.3b same-event ordering gate.
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => characteristic_source_read(source),
         // CR 603.10a (PR-6.75 c5): promoted out of the fail-closed group below to
         // its own arm so the next field addition is compiler-visible (a read-bearing
         // field must force a re-audit). `reads_member_bound = true` is the HONEST
@@ -6663,6 +6717,117 @@ mod tests {
     };
 
     use crate::game::test_fixtures::mana_fixture_roles;
+
+    /// Row 14. CR 603.3b: the same-event ordering gate reads this profile, and
+    /// an OMITTED read is FAIL-OPEN. Every `CardTypeSetSource` must therefore map
+    /// to the profile its own scan actually performs — which is why the three
+    /// distinct-characteristic heads were split out of the wrapper-level
+    /// `{ .. }` or-pattern that was compiler-blind to a new source variant.
+    ///
+    /// The `AnyOf` fixture's two members have DELIBERATELY DIFFERENT profiles, so
+    /// a fold that returns only the first, only the last, or `RwProfile::empty()`
+    /// fails here.
+    #[test]
+    fn characteristic_source_reads_are_exact_per_population() {
+        use crate::types::ability::{CardTypeSetSource, TurnJournalKind, TypeFilter, TypedFilter};
+
+        let board_filter = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Permanent).controller(ControllerRef::You),
+        );
+        let objects = CardTypeSetSource::Objects {
+            filter: board_filter.clone(),
+        };
+        let journal = CardTypeSetSource::TurnJournal {
+            journal: TurnJournalKind::SpellsCast,
+            scope: CountScope::Controller,
+            filter: None,
+        };
+        let zone = CardTypeSetSource::Zone {
+            zone: crate::types::ability::ZoneRef::Graveyard,
+            scope: CountScope::Controller,
+        };
+
+        // (b) The object census is EXACTLY today's board-membership read — same
+        // census, zone span, and controller span.
+        assert_eq!(
+            characteristic_source_read(&objects),
+            board_membership_read(&board_filter),
+            "an Objects population must keep the pre-parameterization profile"
+        );
+
+        // (a) CR 601.2a: a turn journal is turn-scoped PLAYER state. It must
+        // declare the same `JournalCast` read `QuantityRef::SpellsCastThisTurn`
+        // declares, and must NOT claim a board read.
+        let journal_profile = characteristic_source_read(&journal);
+        assert_eq!(
+            journal_profile,
+            reads_player_of(StateKind::JournalCast),
+            "a cast journal must read player journal state, not the board"
+        );
+        assert!(
+            !journal_profile.reads_member_bound,
+            "a journal read is not member-bound"
+        );
+
+        // (c) The zone population keeps the zone-membership profile.
+        assert_eq!(characteristic_source_read(&zone), reads_zone_membership());
+
+        // (d) CR 109.2: the union is the MERGE of its members' profiles.
+        let union = CardTypeSetSource::AnyOf {
+            sources: vec![objects.clone(), journal.clone()],
+        };
+        let mut expected = characteristic_source_read(&objects);
+        expected.merge(characteristic_source_read(&journal));
+        let union_profile = characteristic_source_read(&union);
+        assert_eq!(
+            union_profile, expected,
+            "AnyOf must union both members' reads"
+        );
+        assert_ne!(
+            union_profile,
+            characteristic_source_read(&objects),
+            "a fold that returns only the FIRST member must fail"
+        );
+        assert_ne!(
+            union_profile,
+            characteristic_source_read(&journal),
+            "a fold that returns only the LAST member must fail"
+        );
+        assert_ne!(
+            union_profile,
+            RwProfile::empty(),
+            "a fold that collapses to empty is FAIL-OPEN for CR 603.3b"
+        );
+
+        // Idempotence: a union of two identical members equals that member.
+        assert_eq!(
+            characteristic_source_read(&CardTypeSetSource::AnyOf {
+                sources: vec![journal.clone(), journal.clone()],
+            }),
+            characteristic_source_read(&journal)
+        );
+
+        // The three characteristic heads route through this single authority, so
+        // none of them can drift from the population's real read.
+        for qty in [
+            QuantityRef::DistinctCardTypes {
+                source: journal.clone(),
+            },
+            QuantityRef::DistinctSubtypes {
+                source: journal.clone(),
+                exclude: crate::types::ability::SubtypeExclusion::None,
+            },
+            QuantityRef::DistinctColorsAmong {
+                source: journal.clone(),
+            },
+        ] {
+            assert_eq!(
+                rw_quantity_ref(&qty),
+                journal_profile,
+                "every characteristic head must declare the population's own read: {qty:?}"
+            );
+        }
+    }
 
     /// Matrix rows 15b + 17 — zero delta for the D5 frozen-event-tag visitor,
     /// which reads `Effect::Mana`'s target DIRECTLY and bypasses

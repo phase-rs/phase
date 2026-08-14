@@ -2258,10 +2258,15 @@ fn detect_dynamic_qty(
     //   "For each color among permanents you control, add one mana of that color."
     //
     // This leg exists BECAUSE the probes above are anchored. Unanchored, they "saw" this
-    // carrier only by ACCIDENT: `DistinctColorsAmongPermanents` is also a `QuantityRef`
-    // variant name, so the `ManaProduction` node deserialized as a `QuantityRef` by cross-enum
-    // collision. Right answer, wrong reason — and the same collision suppressed Boing! and
-    // Siren's Call. Anchoring removed the accident; this restores the fact, typed.
+    // carrier only by ACCIDENT: `DistinctColorsAmongPermanents` USED TO BE a `QuantityRef`
+    // variant name too, so the `ManaProduction` node deserialized as a `QuantityRef` by
+    // cross-enum collision. Right answer, wrong reason — and the same collision suppressed
+    // Boing! and Siren's Call. Anchoring removed the accident; this restores the fact, typed.
+    //
+    // The collision itself is now GONE: the `QuantityRef` side was renamed to
+    // `DistinctColorsAmong` when it was parameterized onto `CardTypeSetSource`. That makes
+    // this leg strictly load-bearing rather than belt-and-braces — an unanchored probe could
+    // no longer reach this carrier even by accident.
     //
     // ONE variant, and that is a MEASURED bound, not a guess: over the full 35,396-face pool,
     // `DistinctColorsAmongPermanents` is the only `ManaProduction` on a face where the marker

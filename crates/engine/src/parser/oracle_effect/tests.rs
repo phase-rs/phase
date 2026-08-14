@@ -36839,10 +36839,10 @@ fn reveal_until_x_permanent_cards_choose_any_number_aurora() {
         matches!(
             count,
             QuantityExpr::Ref {
-                qty: QuantityRef::DistinctColorsAmongPermanents { .. }
+                qty: QuantityRef::DistinctColorsAmong { .. }
             }
         ),
-        "count must bind to DistinctColorsAmongPermanents via the where-X clause, got {count:?}"
+        "count must bind to DistinctColorsAmong via the where-X clause, got {count:?}"
     );
     assert_eq!(
         *matched_disposition,
@@ -36922,10 +36922,10 @@ fn reveal_until_x_nonland_cards_binds_dynamic_count_sanar_core() {
         matches!(
             count,
             QuantityExpr::Ref {
-                qty: QuantityRef::DistinctColorsAmongPermanents { .. }
+                qty: QuantityRef::DistinctColorsAmong { .. }
             }
         ),
-        "Sanar's count must bind to DistinctColorsAmongPermanents, got {count:?}"
+        "Sanar's count must bind to DistinctColorsAmong, got {count:?}"
     );
     assert!(
         matches!(&type_filters[..], [TypeFilter::Non(inner)] if matches!(**inner, TypeFilter::Land)),

@@ -1506,6 +1506,8 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             crate::types::ability::DevotionColors::ChosenColor => "devotion to chosen color".into(),
         },
         QuantityRef::DistinctCardTypes { source } => match source {
+            // Preserved surface form: the zone reading renders "card types in
+            // <zone>", not "card types among cards in <zone>".
             CardTypeSetSource::Zone { zone, scope } => {
                 format!(
                     "card types in {} {}",
@@ -1513,26 +1515,13 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                     fmt_zone_ref(zone)
                 )
             }
-            CardTypeSetSource::ExiledBySource => "card types among cards exiled with source".into(),
-            CardTypeSetSource::Objects { filter } => {
-                format!("card types among {}", fmt_target(filter))
+            CardTypeSetSource::ExiledBySource
+            | CardTypeSetSource::Objects { .. }
+            | CardTypeSetSource::TrackedSet { .. }
+            | CardTypeSetSource::TurnJournal { .. }
+            | CardTypeSetSource::AnyOf { .. } => {
+                format!("card types among {}", fmt_characteristic_population(source))
             }
-            CardTypeSetSource::TrackedSet { caused_by } => match caused_by {
-                Some(cause) => {
-                    use crate::types::ability::ThisWayCause;
-                    let verb = match cause {
-                        ThisWayCause::Discarded => "discarded",
-                        ThisWayCause::Exiled => "exiled",
-                        ThisWayCause::Milled => "milled",
-                        ThisWayCause::Destroyed => "destroyed",
-                        ThisWayCause::Sacrificed => "sacrificed",
-                        ThisWayCause::Returned => "returned",
-                        ThisWayCause::Bounced => "bounced",
-                    };
-                    format!("card types among cards {verb} this way")
-                }
-                None => "card types among tracked cards".into(),
-            },
         },
         QuantityRef::DistinctSubtypes { source, exclude } => {
             let suffix = match exclude {
@@ -1541,14 +1530,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 }
                 crate::types::ability::SubtypeExclusion::None => "",
             };
-            let scope_desc = match source {
-                CardTypeSetSource::Zone { zone, scope } => {
-                    format!("cards in {} {}", fmt_count_scope(scope), fmt_zone_ref(zone))
-                }
-                CardTypeSetSource::ExiledBySource => "cards exiled with source".into(),
-                CardTypeSetSource::Objects { filter } => fmt_target(filter),
-                CardTypeSetSource::TrackedSet { .. } => "tracked cards".into(),
-            };
+            let scope_desc = fmt_characteristic_population(source);
             format!("subtypes{suffix} among {scope_desc}")
         }
         QuantityRef::CardsExiledBySource => "cards exiled with source".into(),
@@ -1585,8 +1567,11 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 fmt_controller(controller)
             )
         }
-        QuantityRef::DistinctColorsAmongPermanents { filter } => {
-            format!("# of colors among {}", fmt_target(filter))
+        QuantityRef::DistinctColorsAmong { source } => {
+            format!(
+                "# of colors among {}",
+                fmt_characteristic_population(source)
+            )
         }
         QuantityRef::DistinctCounterKindsAmong { filter } => {
             format!("# of counter kinds among {}", fmt_target(filter))
@@ -2251,6 +2236,60 @@ fn fmt_core_type(ct: &CoreType) -> &'static str {
         CoreType::Phenomenon => "phenomenon",
         CoreType::Scheme => "scheme",
         CoreType::Conspiracy => "conspiracy",
+    }
+}
+
+/// CR 109.2 + CR 400.1 + CR 601.2a: Human-readable rendering of the population a
+/// [`CardTypeSetSource`] names, shared by every distinct-characteristic count
+/// (card types CR 205.2, subtypes CR 205.3, colors CR 105.1) so a new population
+/// renders once rather than in three drifting copies.
+fn fmt_characteristic_population(source: &CardTypeSetSource) -> String {
+    match source {
+        CardTypeSetSource::Zone { zone, scope } => {
+            format!("cards in {} {}", fmt_count_scope(scope), fmt_zone_ref(zone))
+        }
+        CardTypeSetSource::ExiledBySource => "cards exiled with source".into(),
+        CardTypeSetSource::Objects { filter } => fmt_target(filter),
+        CardTypeSetSource::TrackedSet { caused_by } => match caused_by {
+            Some(cause) => {
+                use crate::types::ability::ThisWayCause;
+                let verb = match cause {
+                    ThisWayCause::Discarded => "discarded",
+                    ThisWayCause::Exiled => "exiled",
+                    ThisWayCause::Milled => "milled",
+                    ThisWayCause::Destroyed => "destroyed",
+                    ThisWayCause::Sacrificed => "sacrificed",
+                    ThisWayCause::Returned => "returned",
+                    ThisWayCause::Bounced => "bounced",
+                };
+                format!("cards {verb} this way")
+            }
+            None => "tracked cards".into(),
+        },
+        // CR 601.2a: the per-turn cast journal, not a live board census.
+        CardTypeSetSource::TurnJournal {
+            journal,
+            scope,
+            filter,
+        } => {
+            let base = match journal {
+                crate::types::ability::TurnJournalKind::SpellsCast => {
+                    format!("spells {} cast this turn", fmt_count_scope(scope))
+                }
+            };
+            match filter {
+                Some(filter) => format!("{base} matching {}", fmt_target(filter)),
+                None => base,
+            }
+        }
+        // CR 109.2: a set union renders as its members joined by "and", mirroring
+        // the Oracle surface form ("permanents you control and spells you've cast
+        // this turn").
+        CardTypeSetSource::AnyOf { sources } => sources
+            .iter()
+            .map(fmt_characteristic_population)
+            .collect::<Vec<_>>()
+            .join(" and "),
     }
 }
 
@@ -8079,9 +8118,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::ExiledCardPower { .. } => ("ExiledCardPower", Handled),
         QuantityRef::ZoneCardCount { .. } => ("ZoneCardCount", Handled),
         QuantityRef::BasicLandTypeCount { .. } => ("BasicLandTypeCount", Handled),
-        QuantityRef::DistinctColorsAmongPermanents { .. } => {
-            ("DistinctColorsAmongPermanents", Handled)
-        }
+        QuantityRef::DistinctColorsAmong { .. } => ("DistinctColorsAmong", Handled),
         QuantityRef::DistinctCounterKindsAmong { .. } => ("DistinctCounterKindsAmong", Handled),
         QuantityRef::VoteCount { .. } => ("VoteCount", Handled),
         QuantityRef::PreviousEffectAmount { .. } => ("PreviousEffectAmount", Handled),

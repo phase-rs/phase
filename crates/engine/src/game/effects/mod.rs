@@ -2954,8 +2954,9 @@ fn filter_contains_last_created(filter: &TargetFilter) -> bool {
 /// Whether the object population a `CardTypeSetSource` reads is selected by a
 /// filter satisfying `filter_pred`.
 ///
-/// Exhaustive: the three non-`Objects` sources name a zone, the source's exile
-/// set, or a tracked set, none of which carries a `TargetFilter`.
+/// Exhaustive: the three fixed-vocabulary sources name a zone, the source's
+/// exile set, or a tracked set, none of which carries a `TargetFilter`. The
+/// journal carries an optional narrowing filter, and `AnyOf` recurses.
 fn card_type_set_source_counts_population_matching(
     source: &crate::types::ability::CardTypeSetSource,
     filter_pred: &dyn Fn(&TargetFilter) -> bool,
@@ -2963,6 +2964,13 @@ fn card_type_set_source_counts_population_matching(
     use crate::types::ability::CardTypeSetSource;
     match source {
         CardTypeSetSource::Objects { filter } => filter_pred(filter),
+        // CR 601.2a: the journal's optional narrowing filter is a population
+        // selector like any other, so an anaphor inside it must be reported.
+        CardTypeSetSource::TurnJournal { filter, .. } => filter.as_ref().is_some_and(filter_pred),
+        // CR 109.2: a union reads every member's population.
+        CardTypeSetSource::AnyOf { sources } => sources
+            .iter()
+            .any(|member| card_type_set_source_counts_population_matching(member, filter_pred)),
         CardTypeSetSource::Zone { .. }
         | CardTypeSetSource::ExiledBySource
         | CardTypeSetSource::TrackedSet { .. } => false,
@@ -3001,7 +3009,6 @@ fn quantity_ref_counts_population_matching(
         | QuantityRef::CountersOnObjects { filter, .. }
         | QuantityRef::Aggregate { filter, .. }
         | QuantityRef::ControlledByEachPlayer { filter, .. }
-        | QuantityRef::DistinctColorsAmongPermanents { filter }
         | QuantityRef::DistinctCounterKindsAmong { filter }
         | QuantityRef::EnteredThisTurn { filter }
         | QuantityRef::SacrificedThisTurn { filter, .. }
@@ -3028,7 +3035,8 @@ fn quantity_ref_counts_population_matching(
             filter_pred(source) || filter_pred(target)
         }
         QuantityRef::DistinctCardTypes { source }
-        | QuantityRef::DistinctSubtypes { source, .. } => {
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => {
             card_type_set_source_counts_population_matching(source, filter_pred)
         }
         // No `TargetFilter` anywhere: player-scoped totals, per-object scopes,

@@ -80,7 +80,10 @@
 //! QuantityRef ∩ ParsedCondition          = {BattlefieldEntriesThisTurn}
 //! QuantityRef ∩ ChooseFromZoneConstraint = {DistinctCardTypes}
 //! QuantityRef ∩ ManaCost                 = {SelfManaValue}
-//! QuantityRef ∩ ManaProduction           = {DistinctColorsAmongPermanents}
+//! QuantityRef ∩ ManaProduction           = {} (was {DistinctColorsAmongPermanents}
+//!                                          until the QuantityRef side was renamed
+//!                                          to DistinctColorsAmong; the two enums no
+//!                                          longer share a variant name)
 //! QuantityRef ∩ SolveCondition           = {ObjectCount}
 //! QuantityRef ∩ QuantityExpr             = {Power}
 //! ```
@@ -304,7 +307,9 @@ const STATIC_MODE_KEYS: &[&str] = &["mode"];
 ///     QuantityRef ∩ ParsedCondition          BattlefieldEntriesThisTurn
 ///     QuantityRef ∩ ChooseFromZoneConstraint DistinctCardTypes
 ///     QuantityRef ∩ ManaCost                 SelfManaValue
-///     QuantityRef ∩ ManaProduction           DistinctColorsAmongPermanents
+///     QuantityRef ∩ ManaProduction           (was DistinctColorsAmongPermanents;
+///                                             now empty — the QuantityRef side is
+///                                             DistinctColorsAmong)
 ///     QuantityRef ∩ SolveCondition           ObjectCount
 ///     QuantityRef ∩ QuantityExpr             Power
 ///     ```

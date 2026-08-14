@@ -15810,12 +15810,14 @@ fn equipped_creature_gets_dynamic_pt_for_each_color_among_permanents() {
     assert_eq!(def.mode, StaticMode::Continuous);
 
     let expected = QuantityExpr::Ref {
-        qty: QuantityRef::DistinctColorsAmongPermanents {
-            filter: TargetFilter::Typed(TypedFilter {
-                type_filters: vec![TypeFilter::Permanent],
-                controller: Some(ControllerRef::You),
-                properties: Vec::new(),
-            }),
+        qty: QuantityRef::DistinctColorsAmong {
+            source: CardTypeSetSource::Objects {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Permanent],
+                    controller: Some(ControllerRef::You),
+                    properties: Vec::new(),
+                }),
+            },
         },
     };
     assert!(

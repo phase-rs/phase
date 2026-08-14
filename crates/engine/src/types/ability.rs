@@ -2157,7 +2157,10 @@ pub enum ManaProduction {
     /// not colors (CR 105.1), so each of W/U/B/R/G contributes at most once.
     /// Used by Faeburrow Elder's "{T}: For each color among permanents you
     /// control, add one mana of that color." Mirrors the structure of
-    /// `QuantityRef::DistinctColorsAmongPermanents`.
+    /// [`QuantityRef::DistinctColorsAmong`], which is a DIFFERENT enum and
+    /// which is parameterized on [`CardTypeSetSource`] because a colour COUNT
+    /// can read a union or a non-object population (First Family). This mana
+    /// variant is deliberately NOT parameterized: no mana ability reads either.
     DistinctColorsAmongPermanents { filter: TargetFilter },
     /// CR 106.1 + CR 109.1: Produce N mana of one chosen color from the distinct
     /// colors present among permanents matching `filter`. Mox Amber class:
@@ -5797,7 +5800,36 @@ pub enum ObjectScope {
     BatchSource,
 }
 
-/// Source set for counting distinct card types.
+/// CR 601.2a: A per-turn action journal — a chronological record of a kind of
+/// action taken this turn, cleared at the turn boundary.
+///
+/// The parameterization axis for [`CardTypeSetSource::TurnJournal`]. Introduced
+/// already parameterized rather than as a bare `SpellsCastThisTurn` leaf so the
+/// journal axis cannot grow an X / X′ sibling cluster on
+/// `CardTypeSetSource` itself.
+///
+/// NEXT MEMBER, ALREADY IDENTIFIED: `PermanentsSacrificed` (Korvold, Gleeful
+/// Glutton — "for each card type among permanents you've sacrificed this turn").
+/// BLOCKER: `GameState` has no sacrifice journal. Verified absent — the only
+/// per-turn journals today are `spells_cast_this_turn_by_player` and its
+/// game-scoped mirror. Adding Korvold costs one variant here plus its state and
+/// write site; it costs NOTHING in `CardTypeSetSource`, whose shape absorbs it
+/// unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum TurnJournalKind {
+    /// CR 601.2a + CR 112.1: spells cast this turn, as recorded in
+    /// `GameState::spells_cast_this_turn_by_player` at `finalize_cast`.
+    SpellsCast,
+}
+
+/// Source set (population) whose members' characteristics are counted.
+///
+/// CR 109.2 + CR 400.1 + CR 601.2a: the population axis shared by every
+/// distinct-characteristic count — card types (CR 205.2), subtypes (CR 205.3),
+/// and colors (CR 105.1). The CHARACTERISTIC axis stays partitioned by CR
+/// section in `QuantityRef`; this axis names only "the set whose members are
+/// read".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum CardTypeSetSource {
@@ -5816,6 +5848,77 @@ pub enum CardTypeSetSource {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caused_by: Option<ThisWayCause>,
     },
+    /// CR 601.2a + CR 112.1: The members of a per-turn action journal for the
+    /// scoped players ("spells you've cast this turn").
+    ///
+    /// A resolved spell is no longer an object (CR 400.7), so characteristics
+    /// come from the snapshot captured when the action was journaled — not from
+    /// a live object scan. `scope` / `filter` mirror
+    /// `QuantityRef::SpellsCastThisTurn` so the two name the same population;
+    /// `filter: None` admits every member.
+    TurnJournal {
+        journal: TurnJournalKind,
+        scope: CountScope,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
+    },
+    /// CR 109.2: The union of two or more populations — "among \<A\> and \<B\>" /
+    /// "among \<A\> and/or \<B\>".
+    ///
+    /// Set union, not arithmetic sum: a member appearing in both contributes its
+    /// characteristics once (First Family). Contrast
+    /// `parse_greatest_among_conjunction`, which is allowed to decompose the same
+    /// surface form into `Max{[Aggregate, Aggregate]}` ONLY because max
+    /// distributes over union and a distinct-count does not. Named `AnyOf` to
+    /// match `FilterProp::AnyOf` / `TypeFilter::AnyOf` (set-union-of-alternatives),
+    /// not `Or` (reserved for boolean condition enums).
+    ///
+    /// INVARIANT: `sources.len() >= 2`. A 0- or 1-member union is not a union,
+    /// and an empty one is actively unsound: `characteristic_source_read`'s fold
+    /// would return `RwProfile::empty()`, which is FAIL-OPEN for the CR 603.3b
+    /// ordering gate, and the resolver would return 0 with no diagnostic.
+    /// Enforced by [`CardTypeSetSource::any_of`] at construction and by
+    /// `deserialize_union_sources` on load, so a saved game or hand-authored JSON
+    /// cannot smuggle one in.
+    AnyOf {
+        #[serde(deserialize_with = "deserialize_union_sources")]
+        sources: Vec<CardTypeSetSource>,
+    },
+}
+
+impl CardTypeSetSource {
+    /// CR 109.2: Arity-checked [`CardTypeSetSource::AnyOf`] constructor — the
+    /// only way a union is built.
+    ///
+    /// A single member collapses to itself rather than forming a degenerate
+    /// union; an empty list has no population and yields `None`.
+    pub fn any_of(mut sources: Vec<CardTypeSetSource>) -> Option<CardTypeSetSource> {
+        match sources.len() {
+            0 => None,
+            1 => sources.pop(),
+            _ => Some(CardTypeSetSource::AnyOf { sources }),
+        }
+    }
+}
+
+/// CR 109.2: Enforce [`CardTypeSetSource::AnyOf`]'s arity invariant on load.
+///
+/// A deserialized 0- or 1-member union would bypass [`CardTypeSetSource::any_of`]
+/// and reach `characteristic_source_read` as a fold over nothing —
+/// `RwProfile::empty()`, which is fail-open for the CR 603.3b same-event ordering
+/// gate. Rejecting loudly at the boundary keeps the invariant total.
+fn deserialize_union_sources<'de, D>(deserializer: D) -> Result<Vec<CardTypeSetSource>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let sources = Vec::<CardTypeSetSource>::deserialize(deserializer)?;
+    if sources.len() < 2 {
+        return Err(serde::de::Error::invalid_length(
+            sources.len(),
+            &"at least 2 union members",
+        ));
+    }
+    Ok(sources)
 }
 
 /// CR 205.3: Which subtypes are excluded when counting distinct subtypes.
@@ -6609,21 +6712,56 @@ pub enum QuantityRef {
     /// or in the command zone" pattern. The resolver selects the first matching commander
     /// (any one if multiple exist) and returns its mana value.
     CommanderManaValue { owner: ControllerRef },
-    /// CR 106.1 + CR 109.1: Number of distinct colors among permanents matching
-    /// a filter. "Gold", "multicolor", and "colorless" are not colors (CR 105.1),
-    /// so each of W/U/B/R/G is counted at most once. Used by Faeburrow Elder's
-    /// "+1/+1 for each color among permanents you control" CDA and its companion
-    /// mana ability. Composes with `ObjectCount`-style filter predicates and is
-    /// the dual to `ManaProduction::DistinctColorsAmongPermanents`.
-    DistinctColorsAmongPermanents { filter: TargetFilter },
+    /// CR 105.1 + CR 105.2: Number of distinct colors among the members of a
+    /// [`CardTypeSetSource`] population.
+    ///
+    /// There are exactly five colors (CR 105.1) and an object can be one or more
+    /// of them or none at all (CR 105.2) — "gold", "multicolor", and "colorless"
+    /// are not colors — so each of W/U/B/R/G is counted at most once and a
+    /// colorless member contributes nothing. Parameterized on the shared
+    /// population axis (rather than carrying a bare `TargetFilter`) so a union or
+    /// a non-object population is expressible: First Family's "the number of
+    /// colors among permanents you control **and spells you've cast this turn**"
+    /// is a set union over a live census and a cast journal, and `|A ∪ B|` is not
+    /// `|A| + |B|`. Faeburrow Elder's "+1/+1 for each color among permanents you
+    /// control" CDA is the single-source reading (`Objects { filter }`).
+    ///
+    /// Dual to `ManaProduction::DistinctColorsAmongPermanents`, which is a
+    /// DIFFERENT enum that happens to share the old variant name and is
+    /// deliberately left un-parameterized (no mana ability reads a union).
+    ///
+    /// SAVED-GAME MIGRATION: this variant was `DistinctColorsAmongPermanents
+    /// { filter: TargetFilter }`. Those nodes live in PERSISTED GAME STATE, not
+    /// only in regenerated card data — a battlefield token's continuous
+    /// modification, a mid-resolution stack object, an in-flight reconnect
+    /// payload, or an out-of-repo community scenario can all carry one. Both the
+    /// legacy tag (`#[serde(alias)]` on the variant, same precedent as
+    /// [`QuantityRef::ObjectCountDistinct`]) and the legacy payload key
+    /// (`#[serde(alias = "filter")]` + [`deserialize_distinct_colors_population`],
+    /// which lifts it to `Objects { filter }`) are accepted on load, so an old
+    /// snapshot rehydrates instead of failing with unknown-variant / missing-field.
+    /// Serialization is unmigrated-only: output always uses the new tag and key.
+    #[serde(alias = "DistinctColorsAmongPermanents")]
+    DistinctColorsAmong {
+        #[serde(
+            alias = "filter",
+            deserialize_with = "deserialize_distinct_colors_population"
+        )]
+        source: CardTypeSetSource,
+    },
     /// CR 122.1: distinct counter kinds among filter-matched permanents
     /// (controller-relative, CR 109.4). Counter-side dual of
-    /// `DistinctColorsAmongPermanents` — counts each distinct `CounterType`
+    /// [`QuantityRef::DistinctColorsAmong`] — counts each distinct `CounterType`
     /// appearing on at least one permanent matching `filter` exactly once.
     /// Used by Bribe Taker's "for each kind of counter on permanents you
     /// control" iteration source. Kept a separate variant from the color
-    /// dual because counters (CR 122.1) and colors (CR 105/106) are distinct
+    /// dual because counters (CR 122.1) and colors (CR 105) are distinct
     /// rule sections the engine resolves independently.
+    ///
+    /// ASYMMETRY, deliberate: unlike its colour dual this variant still carries a
+    /// bare `TargetFilter` rather than a `CardTypeSetSource`. No card demands a
+    /// non-object counter population, so folding it onto the shared axis is
+    /// deferred rather than speculative.
     DistinctCounterKindsAmong { filter: TargetFilter },
     /// CR 701.38 + CR 608.2c: Number of votes tallied for this choice index,
     /// summed from `state.last_vote_ballots`. Counts votes, not voters — a
@@ -14335,6 +14473,50 @@ fn default_most_prevalent_zone() -> crate::types::zones::Zone {
 /// `qualities` field; the count was always deduplicated by name.
 fn default_distinct_names() -> Vec<SharedQuality> {
     vec![SharedQuality::Name]
+}
+
+/// Backward-compat loader for the legacy
+/// `QuantityRef::DistinctColorsAmongPermanents { filter }` payload, reached via
+/// the `#[serde(alias = "filter")]` on
+/// [`QuantityRef::DistinctColorsAmong`]'s `source` field.
+///
+/// The legacy shape named exactly one population — the objects matching
+/// `filter` — so it lifts to `CardTypeSetSource::Objects { filter }` with no
+/// semantic change (this is a serialization shim, not rules logic; the rule
+/// citations live on the variant it feeds). A saved game, an in-flight reconnect payload, or a
+/// community scenario captured before the population axis was lifted therefore
+/// still deserializes (Faeburrow Elder / Conqueror's Flail / Sunbird Effigy /
+/// Aurora Awakener / Puca's Eye / Elemental Spectacle class).
+///
+/// ORDERING, load-bearing: the current [`CardTypeSetSource`] reading is tried
+/// FIRST, so a current payload is never re-read as a legacy one. Both types are
+/// internally tagged on `"type"` and share exactly two tag names
+/// (`ExiledBySource`, `TrackedSet` — verified against the two enum
+/// declarations), which is the only place the two readings could collide; with
+/// the current reading first, that collision can only ever mis-read a LEGACY
+/// payload, and no legacy writer emitted either shape here. The two legacy
+/// producers were `parse_number_of_distinct_colors_among_permanents_tail`
+/// (craft materials → `And { [ExiledBySource, Typed] }`, or a `parse_type_phrase`
+/// object filter) and `parse_for_each_distinct_colors_among_permanents`
+/// (`parse_type_phrase` only), plus the mtgish-import converter (`Typed`) —
+/// none of which can yield a BARE `ExiledBySource` / `TrackedSet` filter.
+fn deserialize_distinct_colors_population<'de, D>(
+    deserializer: D,
+) -> Result<CardTypeSetSource, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Repr {
+        Current(CardTypeSetSource),
+        LegacyObjects(TargetFilter),
+    }
+
+    Ok(match Repr::deserialize(deserializer)? {
+        Repr::Current(source) => source,
+        Repr::LegacyObjects(filter) => CardTypeSetSource::Objects { filter },
+    })
 }
 
 /// Backward-compat default for the legacy
@@ -25817,6 +25999,162 @@ mod tests {
     use super::*;
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
+
+    /// Row 14, degenerate `AnyOf` cases. CR 109.2: a 0- or 1-member union is not
+    /// a union, and an EMPTY one is actively unsound — `characteristic_source_read`
+    /// would fold it to `RwProfile::empty()`, which is FAIL-OPEN for the CR 603.3b
+    /// same-event ordering gate, and the resolver would return 0 with no
+    /// diagnostic. Both boundaries are closed: construction and deserialization.
+    #[test]
+    fn any_of_arity_invariant_is_enforced_at_both_boundaries() {
+        let member = || CardTypeSetSource::Zone {
+            zone: ZoneRef::Graveyard,
+            scope: CountScope::Controller,
+        };
+
+        // Construction: empty yields nothing; a single member COLLAPSES to
+        // itself rather than forming a degenerate union.
+        assert_eq!(CardTypeSetSource::any_of(vec![]), None);
+        assert_eq!(CardTypeSetSource::any_of(vec![member()]), Some(member()));
+        assert!(matches!(
+            CardTypeSetSource::any_of(vec![member(), CardTypeSetSource::ExiledBySource]),
+            Some(CardTypeSetSource::AnyOf { ref sources }) if sources.len() == 2
+        ));
+
+        // Deserialization: a hand-authored or saved-game payload cannot smuggle
+        // a degenerate union past the constructor.
+        for payload in [
+            r#"{"type":"AnyOf","sources":[]}"#,
+            r#"{"type":"AnyOf","sources":[{"type":"ExiledBySource"}]}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<CardTypeSetSource>(payload).is_err(),
+                "a degenerate union must be rejected on load: {payload}"
+            );
+        }
+        assert!(
+            serde_json::from_str::<CardTypeSetSource>(
+                r#"{"type":"AnyOf","sources":[{"type":"ExiledBySource"},{"type":"ExiledBySource"}]}"#
+            )
+            .is_ok(),
+            "a two-member union must still load"
+        );
+    }
+
+    /// SAVED-GAME MIGRATION, unit arm. The pre-lift shape
+    /// `{"type":"DistinctColorsAmongPermanents","filter":…}` must rehydrate as
+    /// the single-population reading. Both halves of the rename are load-bearing:
+    /// without the variant alias the tag is an unknown variant, and even with it
+    /// the renamed-and-retyped key would fail as a missing `source` field.
+    ///
+    /// The input is a VERBATIM node lifted out of the persisted 4p board in
+    /// `crates/engine/tests/fixtures/dina_noff_turn5_4p.json.gz`, so it is the
+    /// exact byte shape live snapshots carry rather than a hand-written
+    /// paraphrase.
+    #[test]
+    fn legacy_distinct_colors_among_permanents_payload_lifts_to_an_object_population() {
+        let expected = QuantityRef::DistinctColorsAmong {
+            source: CardTypeSetSource::Objects {
+                filter: TargetFilter::Typed(
+                    TypedFilter::permanent().controller(ControllerRef::You),
+                ),
+            },
+        };
+
+        let legacy = r#"{"filter":{"controller":"You","properties":[],"type":"Typed","type_filters":["Permanent"]},"type":"DistinctColorsAmongPermanents"}"#;
+        assert_eq!(
+            serde_json::from_str::<QuantityRef>(legacy)
+                .expect("a pre-lift persisted node must still deserialize"),
+            expected,
+            "the legacy tag + `filter` key must lift to `Objects {{ filter }}`",
+        );
+
+        // Reach-guard: the same payload under the CURRENT tag is still legacy on
+        // the key axis, and the current tag + key is unaffected.
+        let legacy_tag_only = r#"{"filter":{"controller":"You","properties":[],"type":"Typed","type_filters":["Permanent"]},"type":"DistinctColorsAmong"}"#;
+        assert_eq!(
+            serde_json::from_str::<QuantityRef>(legacy_tag_only)
+                .expect("the legacy key must be accepted under the current tag too"),
+            expected,
+        );
+
+        // Migration is load-only: a rehydrated node re-serializes in the CURRENT
+        // shape, so a save written by this build never re-emits the old names.
+        let round = serde_json::to_string(&expected).expect("serializes");
+        assert!(
+            round.contains(r#""type":"DistinctColorsAmong""#) && round.contains(r#""source""#),
+            "serialization must emit the current tag and key: {round}",
+        );
+        assert!(
+            !round.contains("DistinctColorsAmongPermanents"),
+            "serialization must not re-emit the legacy tag: {round}",
+        );
+        assert_eq!(
+            serde_json::from_str::<QuantityRef>(&round).expect("round-trips"),
+            expected,
+        );
+
+        // NON-VACUITY: neither acceptance above comes from a tolerant decoder.
+        // `QuantityRef` has no `#[serde(other)]` fallback, so a near-miss tag is
+        // still an unknown-variant error — the alias is what admits the legacy
+        // one. And the population key stays REQUIRED: aliasing it did not turn
+        // it into a silent default, so a payload carrying neither key errors
+        // instead of decoding as an empty population.
+        assert!(
+            serde_json::from_str::<QuantityRef>(
+                r#"{"filter":{"type":"Typed"},"type":"DistinctColorsAmongPermanentsX"}"#
+            )
+            .is_err(),
+            "an unaliased tag must still be rejected, or the row measures nothing",
+        );
+        assert!(
+            serde_json::from_str::<QuantityRef>(r#"{"type":"DistinctColorsAmong"}"#).is_err(),
+            "the population key must stay required under both tags",
+        );
+        assert!(
+            serde_json::from_str::<QuantityRef>(r#"{"type":"DistinctColorsAmongPermanents"}"#)
+                .is_err(),
+            "the population key must stay required under both tags",
+        );
+    }
+
+    /// The legacy lift must never capture a CURRENT payload. `TargetFilter` and
+    /// `CardTypeSetSource` are both internally tagged on `"type"` and share
+    /// exactly two tag names (`ExiledBySource`, `TrackedSet`), so those are the
+    /// only shapes where the two readings could collide — the shim tries the
+    /// current reading first, and this row pins that ordering. `Objects` and the
+    /// `AnyOf` union (First Family) are covered as the non-colliding controls.
+    #[test]
+    fn current_distinct_colors_population_payloads_are_never_read_as_legacy() {
+        let objects = CardTypeSetSource::Objects {
+            filter: TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+        };
+        for source in [
+            CardTypeSetSource::ExiledBySource,
+            CardTypeSetSource::TrackedSet { caused_by: None },
+            objects.clone(),
+            CardTypeSetSource::AnyOf {
+                sources: vec![
+                    objects,
+                    CardTypeSetSource::TurnJournal {
+                        journal: TurnJournalKind::SpellsCast,
+                        scope: CountScope::Controller,
+                        filter: None,
+                    },
+                ],
+            },
+        ] {
+            let node = QuantityRef::DistinctColorsAmong {
+                source: source.clone(),
+            };
+            let json = serde_json::to_string(&node).expect("serializes");
+            assert_eq!(
+                serde_json::from_str::<QuantityRef>(&json).expect("round-trips"),
+                node,
+                "the current reading must win for {json}",
+            );
+        }
+    }
 
     #[test]
     fn first_optional_effect_gate_does_not_latch_a_later_independent_gate() {
