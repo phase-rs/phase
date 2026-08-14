@@ -3163,27 +3163,43 @@ fn are_complementary_revealed_card_type_conditions(
     current: Option<&AbilityCondition>,
     next: Option<&AbilityCondition>,
 ) -> bool {
-    let Some(AbilityCondition::RevealedHasCardType {
-        card_types: current_types,
-        additional_filter: current_filter,
-        subtype_filter: current_subtype,
-    }) = current
+    match (current, next) {
+        (
+            Some(positive @ AbilityCondition::RevealedHasCardType { .. }),
+            Some(AbilityCondition::Not { condition }),
+        )
+        | (
+            Some(AbilityCondition::Not { condition }),
+            Some(positive @ AbilityCondition::RevealedHasCardType { .. }),
+        ) => same_revealed_card_type_condition(positive, condition.as_ref()),
+        _ => false,
+    }
+}
+
+fn same_revealed_card_type_condition(
+    positive: &AbilityCondition,
+    negated: &AbilityCondition,
+) -> bool {
+    let AbilityCondition::RevealedHasCardType {
+        card_types: positive_types,
+        additional_filter: positive_filter,
+        subtype_filter: positive_subtype,
+    } = positive
     else {
         return false;
     };
-    let Some(AbilityCondition::Not { condition }) = next else {
-        return false;
-    };
     let AbilityCondition::RevealedHasCardType {
-        card_types: next_types,
-        additional_filter: next_filter,
-        subtype_filter: next_subtype,
-    } = condition.as_ref()
+        card_types: negated_types,
+        additional_filter: negated_filter,
+        subtype_filter: negated_subtype,
+    } = negated
     else {
         return false;
     };
 
-    current_types == next_types && current_filter == next_filter && current_subtype == next_subtype
+    positive_types == negated_types
+        && positive_filter == negated_filter
+        && positive_subtype == negated_subtype
 }
 
 /// R2 — CR 608.2c + CR 401.4: linked-exile-cast bottom cleanup.

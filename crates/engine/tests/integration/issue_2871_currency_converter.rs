@@ -12,6 +12,7 @@ use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 const CURRENCY_CONVERTER_ABILITY: &str = "{T}: Put a card exiled with this artifact into its owner's graveyard. If it's a land card, create a Treasure token. If it's a nonland card, create a 2/2 black Rogue creature token.";
+const INVERSE_CARD_TYPE_RIDER_ABILITY: &str = "{T}: Put a card exiled with this artifact into its owner's graveyard. If it's a nonland card, create a 2/2 black Rogue creature token. If it's a land card, create a Treasure token.";
 
 #[test]
 fn issue_2871_currency_converter_tap_creates_no_token_without_exiled_card() {
@@ -137,6 +138,49 @@ fn issue_2871_currency_converter_nonland_creates_rogue_only() {
         count_battlefield_tokens(runner.state(), "Rogue"),
         rogue_before + 1,
         "a nonland exiled with Currency Converter creates one Rogue token"
+    );
+}
+
+#[test]
+fn issue_2871_inverse_card_type_riders_create_treasure_for_land() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let source = scenario
+        .add_creature(P0, "Inverse Card Type Riders", 0, 0)
+        .as_artifact()
+        .from_oracle_text(INVERSE_CARD_TYPE_RIDER_ABILITY)
+        .id();
+
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    let land = create_object(state, CardId(102), P0, "Forest".to_string(), Zone::Exile);
+    {
+        let object = state.objects.get_mut(&land).expect("land exists");
+        object.card_types.core_types.push(CoreType::Land);
+        object.base_card_types = object.card_types.clone();
+    }
+    state.exile_links.push(ExileLink {
+        source_id: source,
+        exiled_id: land,
+        kind: ExileLinkKind::TrackedBySource,
+    });
+
+    let treasure_before = count_battlefield_tokens(runner.state(), "Treasure");
+    let rogue_before = count_battlefield_tokens(runner.state(), "Rogue");
+
+    runner.activate(source, 0).resolve();
+
+    assert_eq!(runner.state().objects[&land].zone, Zone::Graveyard);
+    assert_eq!(
+        count_battlefield_tokens(runner.state(), "Treasure"),
+        treasure_before + 1,
+        "the positive second rider runs when the first negated rider is false"
+    );
+    assert_eq!(
+        count_battlefield_tokens(runner.state(), "Rogue"),
+        rogue_before,
+        "a land does not create the first nonland rider's Rogue token"
     );
 }
 
