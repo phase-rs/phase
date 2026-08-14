@@ -2086,7 +2086,7 @@
     "searchPlaceholder": "Search by name...",
     "noCardsFound": "No cards found",
     "buttonSubtitle": "Select one option",
-    "numberSubtitle": "Enter a number {{min}} or greater",
+    "numberSubtitle": "Enter a whole number {{min}} or greater",
     "filterPlaceholder": "Filter options...",
     "noOptionsMatch": "No options match"
   },
