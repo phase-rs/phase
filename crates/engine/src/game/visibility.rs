@@ -2687,6 +2687,7 @@ mod tests {
                 GameEvent::SpellCast {
                     card_id: CardId(702),
                     controller: PlayerId(0),
+                    object_id: own_object_id,
                     cast_mana_value: Some(4),
                 },
                 GameEvent::SpellCast {
@@ -2695,7 +2696,9 @@ mod tests {
                     object_id: face_up_object_id,
                     cast_mana_value: Some(4),
                 },
-            ] if *object_id == face_down_spell && *face_up_object_id == opponent_face_up_spell
+            ] if *object_id == face_down_spell
+                && *own_object_id == own_spell
+                && *face_up_object_id == opponent_face_up_spell
         ));
 
         let spectator = filter_events_for_viewer(&events, &state, PlayerId(u8::MAX));
