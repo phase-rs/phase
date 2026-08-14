@@ -71,6 +71,22 @@ fn journal_zone_change_record_mut(wire: &mut serde_json::Value) -> &mut serde_js
         .expect("fixture journal retains a zone-change command")
 }
 
+fn triggered_stack_event_record_mut(wire: &mut serde_json::Value) -> &mut serde_json::Value {
+    wire["stack"]
+        .as_array_mut()
+        .expect("stack serializes as an array")
+        .iter_mut()
+        .find_map(|entry| {
+            entry
+                .get_mut("kind")?
+                .get_mut("data")?
+                .get_mut("trigger_event")?
+                .get_mut("data")?
+                .get_mut("record")
+        })
+        .expect("fixture places the dies trigger on the stack")
+}
+
 #[test]
 fn dies_lki_trigger_restoration_keeps_game_state_serializable() {
     let mut scenario = GameScenario::new();
@@ -288,4 +304,114 @@ fn legacy_zone_change_trigger_records_restore_before_client_serialization() {
         restored_live_zone_change_events, 2,
         "both live zone-change event roots must survive restoration"
     );
+}
+
+#[test]
+fn legacy_ceased_token_trigger_payloads_restore_after_trigger_is_stacked() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+    let dying = scenario
+        .add_creature_from_oracle(P0, "Ephemeral Trigger Token", 1, 1, DIES_TRIGGER)
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&dying)
+        .expect("token source exists")
+        .is_token = true;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&dying)
+        .expect("token source exists")
+        .damage_marked = 99;
+    let mut events = Vec::new();
+    engine::game::sba::check_state_based_actions(runner.state_mut(), &mut events);
+    process_triggers(runner.state_mut(), &events);
+    assert!(
+        !runner.state().objects.contains_key(&dying),
+        "a token source ceases to exist after dying"
+    );
+    assert!(
+        !runner.state().stack.is_empty(),
+        "the dies trigger is already an independent ability on the stack"
+    );
+
+    let mut wire =
+        serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone()))
+            .expect("token fixture serializes as a resolution wire");
+    let state = wire.as_object_mut().expect("wire is a state object");
+    let mut legacy_record = state["zone_changes_this_turn"]
+        .as_array()
+        .expect("zone-change ledger serializes as an array")
+        .iter()
+        .find(|record| record["object_id"] == serde_json::Value::from(dying.0))
+        .expect("token death remains in the current-turn ledger")
+        .clone();
+    legacy_record
+        .as_object_mut()
+        .expect("ledger record is an object")
+        .remove("trigger_source_context");
+    erase_trigger_occurrences(&mut legacy_record);
+    state["zone_changes_this_turn"] = serde_json::Value::Array(vec![legacy_record.clone()]);
+    state.insert(
+        "created_tokens_this_turn".to_string(),
+        serde_json::Value::Array(vec![legacy_record.clone()]),
+    );
+    state.insert(
+        "sacrificed_permanents_this_turn".to_string(),
+        serde_json::Value::Array(vec![legacy_record]),
+    );
+    let stacked_record = triggered_stack_event_record_mut(&mut wire);
+    stacked_record
+        .as_object_mut()
+        .expect("stacked trigger event record is an object")
+        .remove("trigger_source_context");
+    erase_trigger_occurrences(stacked_record);
+
+    let mut active_event = wire.clone();
+    active_event["current_trigger_event"] =
+        active_event["stack"][0]["kind"]["data"]["trigger_event"].clone();
+    let error = serde_json::from_value::<ResolutionStateWire>(active_event)
+        .expect_err("an active legacy event must retain strict source provenance");
+    assert!(
+        error
+            .to_string()
+            .contains("legacy zone-change record has no same-id persisted object base set"),
+        "only historical ledgers and stacked triggers may prune a ceased source payload"
+    );
+
+    let restored = serde_json::from_value::<ResolutionStateWire>(wire)
+        .expect("ceased-source historical payloads no longer block reload")
+        .into_game_state();
+    for records in [
+        &restored.created_tokens_this_turn,
+        &restored.sacrificed_permanents_this_turn,
+        &restored.zone_changes_this_turn,
+    ] {
+        assert!(
+            records
+                .iter()
+                .all(|record| record.trigger_definitions.is_empty()),
+            "a ceased token source keeps no fabricated trigger occurrence"
+        );
+    }
+    let stacked_event = restored
+        .stack
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            engine::types::game_state::StackEntryKind::TriggeredAbility {
+                trigger_event: Some(GameEvent::ZoneChanged { record, .. }),
+                ..
+            } => Some(record),
+            _ => None,
+        })
+        .expect("the already-stacked token trigger survives restoration");
+    assert!(
+        stacked_event.trigger_definitions.is_empty(),
+        "the stacked trigger retains its ability, not an invented source occurrence"
+    );
+    serde_json::to_value(ClientGameStateRef::wrap(&restored, Some(P0)))
+        .expect("the restored state remains serializable for the browser");
 }

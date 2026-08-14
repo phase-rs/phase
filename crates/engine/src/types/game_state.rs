@@ -8004,6 +8004,8 @@ pub(crate) fn migrate_legacy_zone_change_trigger_provenance(
         let mut trigger_bases = HashMap::new();
 
         (|| {
+            prune_ceased_source_legacy_trigger_payloads(state, objects)?;
+
             for field in [
                 "created_tokens_this_turn",
                 "sacrificed_permanents_this_turn",
@@ -8050,6 +8052,122 @@ pub(crate) fn migrate_legacy_zone_change_trigger_provenance(
     };
     state.insert("objects".to_string(), objects_value);
     migration
+}
+
+/// CR 400.7 + CR 603.3: a ceased source cannot be reconstructed through a
+/// same-id object lookup, while an already-stacked triggered ability keeps its
+/// captured ability independently of that source. Historical ledgers and stack
+/// entries may therefore discard only an all-payload legacy trigger list for a
+/// source which no longer exists. Live event carriers remain strict below: they
+/// can still need the exact trigger occurrence to finish trigger collection.
+fn prune_ceased_source_legacy_trigger_payloads(
+    state: &mut serde_json::Map<String, serde_json::Value>,
+    objects: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    for field in [
+        "created_tokens_this_turn",
+        "sacrificed_permanents_this_turn",
+        "zone_changes_this_turn",
+    ] {
+        let Some(records) = state.get_mut(field) else {
+            continue;
+        };
+        let records = records
+            .as_array_mut()
+            .ok_or_else(|| format!("{field} must be an array"))?;
+        for record in records {
+            prune_ceased_source_legacy_trigger_payload(record, objects)?;
+        }
+    }
+
+    for field in ["stack", "resolving_stack_entry"] {
+        let Some(entries) = state.get_mut(field) else {
+            continue;
+        };
+        visit_persisted_triggered_stack_entry_records(entries, &mut |record| {
+            prune_ceased_source_legacy_trigger_payload(record, objects)
+        })?;
+    }
+    Ok(())
+}
+
+fn prune_ceased_source_legacy_trigger_payload(
+    record: &mut serde_json::Value,
+    objects: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    let record = record
+        .as_object_mut()
+        .ok_or_else(|| "persisted zone-change record must be an object".to_string())?;
+    if !matches!(
+        record.get("trigger_source_context"),
+        Some(serde_json::Value::Null) | None
+    ) {
+        return Ok(());
+    }
+    let object_id: ObjectId = record
+        .get("object_id")
+        .cloned()
+        .ok_or_else(|| "persisted zone-change record has no object id".to_string())
+        .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()))?;
+    if objects.contains_key(&object_id.0.to_string()) {
+        return Ok(());
+    }
+    let entries = record
+        .get("trigger_definitions")
+        .cloned()
+        .map(serde_json::from_value::<Vec<TriggerEntry>>)
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .unwrap_or_default();
+    if legacy_trigger_entry_list(&entries).map_err(str::to_string)? {
+        record.insert(
+            "trigger_definitions".to_string(),
+            serde_json::Value::Array(Vec::new()),
+        );
+    }
+    Ok(())
+}
+
+/// Visits `ZoneChanged` records held by a current triggered stack entry. This
+/// intentionally does not recurse through generic live carriers: only a
+/// triggered ability already on the stack has completed trigger collection.
+fn visit_persisted_triggered_stack_entry_records(
+    value: &mut serde_json::Value,
+    visit: &mut impl FnMut(&mut serde_json::Value) -> Result<(), String>,
+) -> Result<(), String> {
+    match value {
+        serde_json::Value::Array(entries) => {
+            for entry in entries {
+                visit_persisted_triggered_stack_entry_records(entry, visit)?;
+            }
+        }
+        serde_json::Value::Object(entry) => {
+            let Some(kind) = entry
+                .get_mut("kind")
+                .and_then(serde_json::Value::as_object_mut)
+            else {
+                return Ok(());
+            };
+            if kind.get("type").and_then(serde_json::Value::as_str) != Some("TriggeredAbility") {
+                return Ok(());
+            }
+            let Some(event) = kind
+                .get_mut("data")
+                .and_then(serde_json::Value::as_object_mut)
+                .and_then(|data| data.get_mut("trigger_event"))
+            else {
+                return Ok(());
+            };
+            let Some(event) = event.as_object_mut() else {
+                return Ok(());
+            };
+            if let Some(record) = serialized_zone_changed_record_mut(event) {
+                visit(record)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// The only persisted object fields that can prove a context-free legacy
