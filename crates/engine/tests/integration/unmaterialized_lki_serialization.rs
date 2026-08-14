@@ -346,7 +346,7 @@ fn legacy_ceased_token_trigger_payloads_restore_after_trigger_is_stacked() {
         .as_array()
         .expect("zone-change ledger serializes as an array")
         .iter()
-        .find(|record| record["object_id"] == serde_json::Value::from(dying.0))
+        .find(|record| record["object_id"] == dying.0)
         .expect("token death remains in the current-turn ledger")
         .clone();
     legacy_record
