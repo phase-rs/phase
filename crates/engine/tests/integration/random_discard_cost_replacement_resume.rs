@@ -169,9 +169,26 @@ fn random_discard_cost_resumes_its_payment_after_an_accepted_replacement() {
         .position(|c| c.description == "Accept")
         .expect("an Accept option");
 
-    runner
+    let resumed = runner
         .act(GameAction::ChooseReplacement { index: accept_idx })
         .expect("accepting the redirect must be accepted");
+
+    // CR 118.12: the resume must settle through the PAID epilogue, not the
+    // decline tail. `EffectResolved` is emitted only by
+    // `finish_successful_unless_payment` — which also runs the `IfAPlayerDoes`
+    // alternative-outcome sub and the `SequentialSibling` chain. Routing a
+    // successful resume through `finish_unless_payment` skips all three, and
+    // Balduvian Horde's body is too simple to notice, so this event is the
+    // discriminator that does.
+    assert!(
+        resumed
+            .events
+            .iter()
+            .any(|e| matches!(e, engine::types::events::GameEvent::EffectResolved { .. })),
+        "the paid epilogue must run on resume (EffectResolved), got {:?}",
+        resumed.events
+    );
+
     runner.advance_until_stack_empty();
 
     assert_eq!(

@@ -6341,15 +6341,9 @@ pub enum PendingCostMoveResume {
 /// `GameState` — inside its stack budget.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RandomDiscardUnlessPaymentResume {
-    #[serde(deserialize_with = "crate::types::ability::deserialize_ability_cost_compat")]
-    pub cost: AbilityCost,
     pub pending_effect: Box<ResolvedAbility>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_event: Option<GameEvent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effect_description: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub remaining: Vec<PlayerId>,
     /// The paying player — the unless-payer, not necessarily the ability's
     /// controller.
     pub payer: PlayerId,

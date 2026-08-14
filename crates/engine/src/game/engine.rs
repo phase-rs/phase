@@ -5867,15 +5867,15 @@ pub(crate) fn drain_pending_cost_move_resume(
         state.pending_cost_move_resume,
         Some(PendingCostMoveResume::RandomDiscardUnlessPayment { .. })
     ) {
-        // CR 701.9b + CR 616.1: same Delivered/Prevented -> Paid/Failed mapping
-        // as the counter-addition sibling directly above; a delivered (possibly
-        // redirected) discard counts as paid, a fully prevented one cannot pay
-        // a cost (CR 118.3).
-        engine_payment_choices::resume_random_discard_unless_payment(
-            state,
-            events,
-            matches!(boundary, CostMoveDrainBoundary::ReplacementDelivered { .. }),
-        )?
+        // CR 118.12: unlike the counter-addition sibling directly above, the
+        // boundary is deliberately NOT passed in. The "if they do / don't"
+        // clause checks whether the player CHOSE to pay "regardless of what
+        // events actually occurred", and that choice was made — with the
+        // CR 118.3 resources already verified — before any replacement was
+        // consulted. Both boundaries therefore settle identically;
+        // `ReplacementPrevented` stays in the eligibility list above purely so
+        // a parked continuation is drained rather than stranded.
+        engine_payment_choices::resume_random_discard_unless_payment(state, events)?
     } else {
         unreachable!("eligible cost-move root must remain parked")
     };

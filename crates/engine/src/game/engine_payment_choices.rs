@@ -855,12 +855,9 @@ pub(super) fn handle_unless_payment(
                             state.pending_cost_move_resume =
                                 Some(PendingCostMoveResume::RandomDiscardUnlessPayment(Box::new(
                                     crate::types::game_state::RandomDiscardUnlessPaymentResume {
-                                        cost: poll_cost.clone(),
                                         source_id: pending_effect.source_id,
                                         pending_effect: pending_effect.clone(),
                                         trigger_event: trigger_event.clone(),
-                                        effect_description: effect_description.clone(),
-                                        remaining: remaining.clone(),
                                         payer: player,
                                         remaining_eligible,
                                         remaining_count: remaining_count as u32,
@@ -1976,23 +1973,26 @@ pub(super) fn resume_counter_addition_unless_payment(
 /// CR 701.9b + CR 118.12 + CR 616.1: Resume a RANDOM unless-discard after the
 /// replacement choice that paused it settled.
 ///
-/// `delivered` is the boundary the replacement pipeline resolved to, mapped the
-/// same way `resume_counter_addition_unless_payment` maps it:
+/// The replacement's outcome deliberately does NOT decide whether the cost was
+/// paid, which is why this takes no boundary argument. CR 118.12: the "if they
+/// do / don't" clause "checks whether the player chose to pay an optional cost
+/// … **regardless of what events actually occurred**." The player already
+/// elected to pay (`PayUnlessCost { pay: true }`) and the up-front eligible-hand
+/// check already established the CR 118.3 resources, so the payment is
+/// authorized before the replacement is ever consulted. A redirect (Library of
+/// Leng) and a prevention alike leave that choice intact.
 ///
-/// * `ReplacementDelivered` — the card moved (possibly redirected, e.g. Library
-///   of Leng putting it on top of the library instead of the graveyard). CR
-///   701.9a: it was still discarded, so that pick counts as paid and the batch
-///   continues with the picks it still owes.
-/// * `ReplacementPrevented` — nothing moved. CR 118.3 forbids partial payment,
-///   so the cost is unpayable; abandon the rest of the batch and let the
-///   unless-effect happen.
+/// The earlier `Delivered → Paid` / `Prevented → Failed` mapping was copied from
+/// `resume_counter_addition_unless_payment` rather than derived from CR 118.12;
+/// under it, an applicable replacement preventing the first move would sacrifice
+/// Balduvian Horde out from under a player who had paid.
 ///
-/// Either way the payment is settled exactly once through the same
-/// `finish_unless_payment` tail every other unless-cost shape uses.
+/// Both drain boundaries therefore land here and settle identically; the
+/// `ReplacementPrevented` arm remains in the eligibility list purely so a parked
+/// continuation is DRAINED rather than stranded at that boundary.
 pub(super) fn resume_random_discard_unless_payment(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
-    delivered: bool,
 ) -> Result<WaitingFor, EngineError> {
     let Some(PendingCostMoveResume::RandomDiscardUnlessPayment(parked)) =
         state.pending_cost_move_resume.take()
@@ -2000,19 +2000,15 @@ pub(super) fn resume_random_discard_unless_payment(
         unreachable!("random-discard unless-payment resume requires its typed continuation")
     };
     let crate::types::game_state::RandomDiscardUnlessPaymentResume {
-        cost,
         pending_effect,
         trigger_event,
-        effect_description,
-        remaining,
         payer,
         source_id,
         remaining_eligible,
         remaining_count,
     } = *parked;
 
-    let mut payment_succeeded = delivered;
-    if delivered && remaining_count > 0 {
+    if remaining_count > 0 {
         // Finish the batch. A SECOND replacement choice mid-remainder re-parks
         // the same continuation with the narrowed cursor, so an N-card random
         // discard can pause once per card without losing the payment.
@@ -2036,11 +2032,8 @@ pub(super) fn resume_random_discard_unless_payment(
                 state.pending_cost_move_resume =
                     Some(PendingCostMoveResume::RandomDiscardUnlessPayment(Box::new(
                         crate::types::game_state::RandomDiscardUnlessPaymentResume {
-                            cost,
                             pending_effect,
                             trigger_event,
-                            effect_description,
-                            remaining,
                             payer,
                             source_id,
                             remaining_eligible,
@@ -2050,22 +2043,16 @@ pub(super) fn resume_random_discard_unless_payment(
                 return Ok(state.waiting_for.clone());
             }
         }
-        payment_succeeded = true;
     }
 
-    finish_unless_payment(
-        state,
-        true,
-        !payment_succeeded,
-        cost,
-        pending_effect,
-        trigger_event,
-        effect_description,
-        remaining,
-        None,
-        events,
-    )?;
-    Ok(state.waiting_for.clone())
+    // CR 118.12 + CR 118.12a: settle through the PAID epilogue — the same call
+    // the uninterrupted path makes at the `!payment_failed` early return above.
+    // `finish_unless_payment` is the DECLINE tail: its body is gated on
+    // `!pay || payment_failed`, so routing a successful resume through it
+    // silently skips `EffectResolved`, the `IfAPlayerDoes` alternative-outcome
+    // sub, and the `SequentialSibling` chain. Balduvian Horde has none of
+    // those, which is exactly why that mistake was invisible in its tests.
+    finish_successful_unless_payment(state, &pending_effect, &trigger_event, events)
 }
 
 pub(super) fn handle_ward_sacrifice_choice(
