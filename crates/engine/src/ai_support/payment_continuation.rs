@@ -317,6 +317,7 @@ fn finalized_root_matches(
                             card_id: event_card_id,
                             controller: event_controller,
                             object_id: event_object_id,
+                            ..
                         } if *event_card_id == *card_id
                             && *event_controller == *controller
                             && *event_object_id == *object_id

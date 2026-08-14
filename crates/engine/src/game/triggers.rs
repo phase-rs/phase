@@ -15806,6 +15806,7 @@ pub mod tests {
                 card_id: CardId(2),
                 controller: player,
                 object_id: spell,
+                cast_mana_value: None,
             }],
         );
 
@@ -17281,6 +17282,7 @@ pub mod tests {
             card_id: CardId(10),
             controller: PlayerId(0),
             object_id: spell,
+            cast_mana_value: None,
         }];
 
         process_triggers(&mut state, &events);
@@ -17334,6 +17336,7 @@ pub mod tests {
             card_id: CardId(10),
             controller: PlayerId(0),
             object_id: creature_spell,
+            cast_mana_value: None,
         }];
 
         process_triggers(&mut state, &events);
@@ -17387,6 +17390,7 @@ pub mod tests {
             card_id: CardId(10),
             controller: PlayerId(1),
             object_id: spell,
+            cast_mana_value: None,
         }];
 
         process_triggers(&mut state, &events);
@@ -18568,6 +18572,7 @@ pub mod tests {
                 controller,
                 object_id: source,
                 card_id: CardId(0x98),
+                cast_mana_value: None,
             }),
             modal: Some(ModalChoice {
                 min_choices: 1,
@@ -20453,6 +20458,7 @@ pub mod tests {
             card_id: CardId(1),
             controller: PlayerId(0),
             object_id: spell_id,
+            cast_mana_value: None,
         }];
 
         process_triggers(&mut state, &events);
@@ -25543,6 +25549,7 @@ pub mod tests {
             card_id: CardId(2),
             controller: PlayerId(0),
             object_id: spell,
+            cast_mana_value: None,
         };
 
         // 2 mana spent: 2 > 3 false, 2 > 4 false — trigger does NOT fire.
@@ -25644,6 +25651,7 @@ pub mod tests {
             card_id: CardId(2),
             controller: PlayerId(1),
             object_id: spell,
+            cast_mana_value: None,
         };
 
         state
@@ -25689,6 +25697,7 @@ pub mod tests {
             card_id: CardId(2),
             controller: PlayerId(1),
             object_id: spell,
+            cast_mana_value: None,
         };
 
         state
@@ -25747,6 +25756,7 @@ pub mod tests {
             card_id: CardId(1),
             controller: PlayerId(0),
             object_id: ObjectId(1000),
+            cast_mana_value: None,
         };
 
         // Case A: first qualifying spell — record has exactly one X-cost cast.
@@ -25995,6 +26005,7 @@ pub mod tests {
                 card_id: CardId(1),
                 controller: PlayerId(0),
                 object_id: opponent_spell,
+                cast_mana_value: None,
             }],
         );
         assert!(
@@ -26019,6 +26030,7 @@ pub mod tests {
                 card_id: CardId(2),
                 controller: PlayerId(1),
                 object_id: controller_spell,
+                cast_mana_value: None,
             }],
         );
 
@@ -27760,6 +27772,7 @@ pub mod tests {
                 object_id: spell,
                 controller: caster,
                 card_id: CardId(2),
+                cast_mana_value: None,
             }],
         );
 
@@ -27805,6 +27818,7 @@ pub mod tests {
                 object_id: spell,
                 controller: caster,
                 card_id: CardId(1),
+                cast_mana_value: None,
             }],
         );
 
@@ -27867,6 +27881,7 @@ pub mod tests {
                 object_id: spell,
                 controller: caster,
                 card_id: CardId(2),
+                cast_mana_value: None,
             }],
         );
 
@@ -27910,6 +27925,7 @@ pub mod tests {
                 object_id: spell,
                 controller: caster,
                 card_id: CardId(1),
+                cast_mana_value: None,
             }],
         );
 
@@ -27988,6 +28004,7 @@ pub mod tests {
                 object_id: spell,
                 controller: caster,
                 card_id: CardId(2),
+                cast_mana_value: None,
             }],
         );
 
@@ -28044,6 +28061,7 @@ pub mod tests {
                 object_id: spell,
                 controller: caster,
                 card_id: CardId(1),
+                cast_mana_value: None,
             }],
         );
 
@@ -28084,6 +28102,7 @@ pub mod tests {
                 object_id: spell,
                 controller: caster,
                 card_id: CardId(1),
+                cast_mana_value: None,
             }],
         );
 
@@ -28122,6 +28141,7 @@ pub mod tests {
                 object_id: spell,
                 controller: caster,
                 card_id: CardId(1),
+                cast_mana_value: None,
             }],
         );
 
@@ -28196,6 +28216,7 @@ pub mod tests {
                 object_id: spell,
                 controller: caster,
                 card_id: CardId(2),
+                cast_mana_value: None,
             }],
         );
 
@@ -28283,6 +28304,7 @@ pub mod tests {
                 object_id: spell,
                 controller: caster,
                 card_id: CardId(2),
+                cast_mana_value: None,
             }],
         );
 
@@ -28365,6 +28387,7 @@ pub mod tests {
                 object_id: spell,
                 controller: caster,
                 card_id: CardId(1),
+                cast_mana_value: None,
             }],
         );
 
@@ -38085,6 +38108,7 @@ pub mod tests {
             card_id: CardId(999),
             object_id: ObjectId(999),
             controller,
+            cast_mana_value: None,
         };
 
         // Attacking: the copy trigger lands on the stack.

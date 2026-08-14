@@ -441,6 +441,19 @@ fn on_shortcut_byte_identical_to_pre_pr7_golden() {
     let (rest, wf) = drive_collect(&mut runner, 500);
     all.extend(rest);
 
+    // The golden covers event ordering and effect payloads from before
+    // SpellCast gained its optional cast-time snapshot. That orthogonal field
+    // is asserted by the Thor quantity tests, so omit it from this legacy
+    // byte-for-byte stream comparison.
+    for event in &mut all {
+        if let GameEvent::SpellCast {
+            cast_mana_value, ..
+        } = event
+        {
+            *cast_mana_value = None;
+        }
+    }
+
     assert_eq!(
         wf,
         WaitingFor::GameOver { winner: Some(P0) },
@@ -450,9 +463,9 @@ fn on_shortcut_byte_identical_to_pre_pr7_golden() {
         life(&runner, P1) > 0,
         "ON: the shortcut fired early (P1 positive)"
     );
+    let event_stream = format!("{all:?}").replace(", cast_mana_value: None", "");
     assert_eq!(
-        format!("{all:?}"),
-        GOLDEN_ON,
+        event_stream, GOLDEN_ON,
         "ON: the accumulated event stream must be byte-identical to the pre-PR-7 golden — \
          wrapping the reconcile body in the mode `match` must not perturb any event"
     );

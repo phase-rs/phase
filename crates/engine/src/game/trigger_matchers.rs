@@ -6547,6 +6547,7 @@ mod tests {
             card_id: CardId(10),
             controller: PlayerId(0),
             object_id: ObjectId(10),
+            cast_mana_value: None,
         };
         assert!(match_play_card(
             &spell_event,
@@ -6620,6 +6621,7 @@ mod tests {
             card_id: CardId(10),
             controller: PlayerId(1),
             object_id: ObjectId(10),
+            cast_mana_value: None,
         };
         assert!(!match_play_card(
             &opponent_spell,
@@ -7039,6 +7041,7 @@ mod tests {
                 card_id: CardId(2),
                 controller: PlayerId(1),
                 object_id: ObjectId(99),
+                cast_mana_value: None,
             },
             &trigger,
             &test_trigger_source_context(&state, source),
@@ -9948,6 +9951,7 @@ mod tests {
             card_id: CardId(10),
             controller: PlayerId(0),
             object_id: ObjectId(10),
+            cast_mana_value: None,
         };
         assert!(match_spell_cast(
             &event,
@@ -10021,6 +10025,7 @@ mod tests {
             card_id: CardId(100),
             controller: opponent,
             object_id: spell_id,
+            cast_mana_value: None,
         };
         assert!(!match_spell_cast(
             &event,
@@ -10059,6 +10064,7 @@ mod tests {
             card_id: CardId(100),
             controller: opponent,
             object_id: spell_id,
+            cast_mana_value: None,
         };
         assert!(match_spell_cast(
             &event,
@@ -10093,6 +10099,7 @@ mod tests {
             card_id: CardId(100),
             controller: caster,
             object_id: gy_id,
+            cast_mana_value: None,
         };
         assert!(match_spell_cast(
             &event,
@@ -10108,6 +10115,7 @@ mod tests {
             card_id: CardId(100),
             controller: caster,
             object_id: hand_id,
+            cast_mana_value: None,
         };
         assert!(!match_spell_cast(
             &event,

@@ -1796,6 +1796,7 @@ pub fn filter_events_for_viewer(
                     card_id: CardId(0),
                     controller: *controller,
                     object_id: *object_id,
+                    cast_mana_value: None,
                 }
             }
             other => other.clone(),
@@ -2855,16 +2856,19 @@ mod tests {
                 card_id: CardId(701),
                 controller: PlayerId(1),
                 object_id: face_down_spell,
+                cast_mana_value: Some(4),
             },
             GameEvent::SpellCast {
                 card_id: CardId(702),
                 controller: PlayerId(0),
                 object_id: own_spell,
+                cast_mana_value: Some(4),
             },
             GameEvent::SpellCast {
                 card_id: CardId(703),
                 controller: PlayerId(1),
                 object_id: opponent_face_up_spell,
+                cast_mana_value: Some(4),
             },
         ];
 
@@ -2876,18 +2880,23 @@ mod tests {
                     card_id: CardId(0),
                     controller: PlayerId(1),
                     object_id,
+                    cast_mana_value: None,
                 },
                 GameEvent::SpellCast {
                     card_id: CardId(702),
                     controller: PlayerId(0),
-                    ..
+                    object_id: own_object_id,
+                    cast_mana_value: Some(4),
                 },
                 GameEvent::SpellCast {
                     card_id: CardId(703),
                     controller: PlayerId(1),
                     object_id: face_up_object_id,
+                    cast_mana_value: Some(4),
                 },
-            ] if *object_id == face_down_spell && *face_up_object_id == opponent_face_up_spell
+            ] if *object_id == face_down_spell
+                && *own_object_id == own_spell
+                && *face_up_object_id == opponent_face_up_spell
         ));
 
         let spectator = filter_events_for_viewer(&events, &state, PlayerId(u8::MAX));

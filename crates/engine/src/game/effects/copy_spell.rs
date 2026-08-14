@@ -2046,6 +2046,7 @@ mod tests {
             card_id: CardId(1),
             object_id: cast_spell_id,
             controller: PlayerId(0),
+            cast_mana_value: None,
         });
 
         let copy_ability = ResolvedAbility::new(
@@ -2147,6 +2148,7 @@ mod tests {
                 card_id: CardId(1),
                 object_id: cast_spell_id,
                 controller: PlayerId(0),
+                cast_mana_value: None,
             }),
         );
 
@@ -3363,6 +3365,7 @@ mod tests {
             card_id: CardId(1),
             object_id: ObjectId(10),
             controller: PlayerId(0),
+            cast_mana_value: None,
         });
         let mut events = Vec::new();
         resolve(&mut state, &copy, &mut events).expect("automatic copy must resolve");

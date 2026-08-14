@@ -313,6 +313,7 @@ mod tests {
                 card_id: CardId(5),
                 controller: PlayerId(0),
                 object_id: ObjectId(22),
+                cast_mana_value: None,
             },
             GameEvent::PhaseChanged {
                 phase: Phase::BeginCombat,
