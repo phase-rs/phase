@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::ability::{
     AbilityTag, Comparator, FilterProp, QuantityExpr, TargetFilter, TriggerDefinitionOccurrenceRef,
-    TypeFilter, TypedFilter,
+    TypedFilter,
 };
 use super::counter::CounterType;
 use super::events::GameEvent;
