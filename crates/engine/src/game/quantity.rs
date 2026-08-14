@@ -6016,9 +6016,9 @@ fn spell_cast_mana_value_for_event(state: &GameState, event: &GameEvent) -> Opti
         return None;
     };
 
-    // CR 603.7c: the event-bound value is the authority for the exact cast that
-    // caused this trigger. It remains distinct when the same object id is cast
-    // again before an earlier trigger resolves.
+    // CR 603.2 + CR 603.3 + CR 608.2k: the event-bound value is the authority
+    // for the exact cast that caused this trigger. It remains distinct when the
+    // same object id is cast again before an earlier trigger resolves.
     if let Some(value) = cast_mana_value {
         return Some(u32_to_i32_saturating(*value));
     }
@@ -13992,7 +13992,7 @@ mod tests {
         );
     }
 
-    /// CR 603.7c + CR 202.3e: an event-bound cast-time mana value must win over
+    /// CR 603.2 + CR 603.3 + CR 608.2k + CR 202.3e: an event-bound cast-time mana value must win over
     /// later same-id history records, while a legacy event with no bound value
     /// must not guess between ambiguous records.
     #[test]

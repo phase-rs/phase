@@ -98,7 +98,7 @@ fn thor_deals_cast_time_mana_value_to_target_for_x_spell() {
     );
 }
 
-/// CR 603.7c + CR 202.3e: Each SpellCast trigger must retain the mana value of
+/// CR 603.2 + CR 603.3 + CR 608.2k + CR 202.3e: Each SpellCast trigger must retain the mana value of
 /// its own cast when the same object is cast again before the earlier trigger
 /// resolves. This uses a legal Counterspell response and a real Flashback cast
 /// rather than mutating the stack or zones directly.
