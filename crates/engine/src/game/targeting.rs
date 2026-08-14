@@ -1971,17 +1971,18 @@ fn stack_entry_controller_matches(
         return true;
     };
     let is_you = entry.controller == source_controller;
-    // CR 109.4: EXHAUSTIVE, no `_` — a new `ControllerRef` variant must fail to
-    // compile here rather than silently join the fail-closed tail. The prior
-    // wildcard swallowed every variant beyond the two below, which is how
-    // `SpecificPlayer` came to make a supported controller scope match NOTHING
-    // for the stack-ability class.
+    // ENGINE CONTRACT (not a rules requirement): EXHAUSTIVE, no `_`, so a new
+    // `ControllerRef` variant fails to compile here rather than silently joining
+    // the fail-closed tail. The prior wildcard swallowed every variant beyond the
+    // two below, which is how `SpecificPlayer` came to make a supported
+    // controller scope match NOTHING for the stack-ability class.
     match controller {
         ControllerRef::You => is_you,
         ControllerRef::Opponent => !is_you,
-        // CR 109.4 + CR 611.2: a resolution-time snapshot is already a concrete
-        // id, so it needs none of the ability/event context this function lacks —
-        // compare it directly.
+        // ENGINE CONTRACT: `SpecificPlayer` already carries the stored player id,
+        // so this predicate compares it with the stack entry's stored controller.
+        // No rules lookup is involved — unlike its siblings it needs none of the
+        // ability/event context this function lacks.
         ControllerRef::SpecificPlayer { id } => entry.controller == *id,
         // Every remaining scope needs context this function does not receive (no
         // `GameState`, no resolving `ResolvedAbility`, no triggering event), so
@@ -1997,8 +1998,10 @@ fn stack_entry_controller_matches(
         | ControllerRef::ChosenPlayer { .. }
         | ControllerRef::TriggeringPlayer
         | ControllerRef::EnchantedPlayer
-        // CR 102.1: resolvable in principle, but only from `GameState`, which is
-        // not threaded here.
+        // The active player (CR 102.1: "the player whose turn it is") is
+        // resolvable in principle, but only from `GameState`, which this function
+        // is not given — so it fails closed with the rest for that engine reason,
+        // not a rules one.
         | ControllerRef::ActivePlayer => false,
     }
 }
@@ -2587,8 +2590,9 @@ pub(crate) fn resolve_tracked_set_sentinel(
 #[cfg(test)]
 mod tests {
 
-    /// CR 109.4 + CR 611.2 + CR 115.1: a `SpecificPlayer` controller scope matches
-    /// a stack ability by comparing the snapshotted id directly.
+    /// A `SpecificPlayer` controller scope matches a stack ability by comparing
+    /// the stored player id with the stack entry's stored controller. This is an
+    /// engine contract, not a rules behavior, so it carries no CR annotation.
     ///
     /// `stack_entry_controller_matches` previously admitted only `You`/`Opponent`
     /// and swallowed everything else through a `_ => false` wildcard, so a filter

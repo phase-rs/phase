@@ -1758,7 +1758,7 @@ fn gideon_jura_full_parse() {
         "the window spans the targeted opponent's entire next turn"
     );
 
-    // --- −2 (CR 701.7) ---------------------------------------------------
+    // --- −2 (CR 701.8: Destroy) ------------------------------------------
     let Effect::Destroy { target, .. } = &*r.abilities[1].effect else {
         panic!("the −2 destroys, got {:?}", r.abilities[1].effect);
     };
