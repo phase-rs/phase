@@ -11,6 +11,7 @@ use crate::types::ability::{
     ExiledSpellRider, ModalChoice, ReplacementDefinition, SeatDirection, SolveCondition,
     SpellCastingOption, StaticDefinition, TriggerBaseSetInstanceRef, TriggerDefinition,
     TriggerDefinitionOccurrenceRef, TriggerEntry, TriggerOccurrenceState,
+    materialize_legacy_printed_trigger_entries,
 };
 use crate::types::card::{LayoutKind, PrintedCardRef, PrintedLoyalty, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
@@ -1631,32 +1632,16 @@ impl GameObject {
     /// runtime payloads are rejected rather than guessed from equal definition
     /// bytes.
     pub fn migrate_legacy_trigger_definitions(&mut self) -> Result<(), &'static str> {
-        let has_legacy_entries = self.trigger_definitions.iter_all().any(|entry| {
-            matches!(
-                entry.occurrence,
-                TriggerDefinitionOccurrenceRef::Unmaterialized
-            )
-        });
-        if !has_legacy_entries {
+        let mut entries = self.trigger_definitions.iter_all().cloned().collect();
+        materialize_legacy_printed_trigger_entries(
+            &mut entries,
+            self.base_trigger_definitions.as_slice(),
+            self.trigger_base_set_instance,
+        )?;
+        if entries == self.trigger_definitions.iter_all().cloned().collect::<Vec<_>>() {
             return self.validate_trigger_definitions();
         }
-        if self.base_trigger_definitions.is_empty()
-            || self.trigger_definitions.len() != self.base_trigger_definitions.len()
-            || !self.trigger_definitions.iter_all().all(|entry| {
-                matches!(
-                    entry.occurrence,
-                    TriggerDefinitionOccurrenceRef::Unmaterialized
-                )
-            })
-            || !self
-                .trigger_definitions
-                .iter_all()
-                .zip(self.base_trigger_definitions.iter())
-                .all(|(entry, base)| entry.definition == *base)
-        {
-            return Err("legacy runtime trigger payload has no provable producer or base slot");
-        }
-        self.materialize_base_trigger_definitions();
+        self.trigger_definitions = entries.into();
         self.validate_trigger_definitions()
     }
 

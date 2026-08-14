@@ -2826,6 +2826,23 @@ impl ResolutionStateWire {
         // both belong to `GameStateDecode`; no wire branch gets a private
         // `GameState` serde shortcut.
         GameStateDecode::prepare_resolution_wire(&mut value, decode_mode)?;
+        let additional_live_event_roots: &[&str] = match version {
+            LEGACY_RESOLUTION_STATE_WIRE_VERSION => &[
+                "pending_continuation",
+                "pending_choose_zone_trigger_context",
+                "pending_optional_trigger_event",
+                "pending_change_zone_iteration",
+                "pending_batch_deliveries",
+                "pending_mill_deliveries",
+                "pending_each_player_copy_chosen",
+            ][..],
+            RESOLUTION_STATE_WIRE_VERSION => &[],
+            _ => unreachable!("version was validated before migration"),
+        };
+        crate::types::game_state::migrate_legacy_zone_change_trigger_provenance(
+            &mut value,
+            additional_live_event_roots,
+        )?;
 
         match version {
             // V1 reader compatibility path: historical keys are consumed here

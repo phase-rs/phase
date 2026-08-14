@@ -22152,6 +22152,67 @@ impl TriggerEntry {
     }
 }
 
+/// Classifies a persisted trigger list without inferring runtime provenance.
+/// A list is either wholly legacy payloads or wholly identity-bearing entries;
+/// a mixture cannot establish an exact occurrence mapping.
+pub(crate) fn legacy_trigger_entry_list(
+    entries: &[TriggerEntry],
+) -> Result<bool, &'static str> {
+    let has_legacy = entries.iter().any(|entry| {
+        matches!(
+            entry.occurrence,
+            TriggerDefinitionOccurrenceRef::Unmaterialized
+        )
+    });
+    if has_legacy
+        && !entries.iter().all(|entry| {
+            matches!(
+                entry.occurrence,
+                TriggerDefinitionOccurrenceRef::Unmaterialized
+            )
+        })
+    {
+        return Err("legacy trigger list mixes payload-only and identity-bearing entries");
+    }
+    Ok(has_legacy)
+}
+
+/// Materializes a payload-only list only when an ordered printed base set proves
+/// every slot. Runtime copied and granted triggers have no equivalent proof.
+pub(crate) fn materialize_legacy_printed_trigger_entries(
+    entries: &mut Vec<TriggerEntry>,
+    base_definitions: &[TriggerDefinition],
+    base_set: TriggerBaseSetInstanceRef,
+) -> Result<(), &'static str> {
+    if !legacy_trigger_entry_list(entries)? {
+        return Ok(());
+    }
+    if base_definitions.is_empty()
+        || entries.len() != base_definitions.len()
+        || !entries
+            .iter()
+            .zip(base_definitions)
+            .all(|(entry, base)| entry.definition == *base)
+    {
+        return Err("legacy runtime trigger payload has no provable producer or base slot");
+    }
+    *entries = base_definitions
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(printed_index, definition)| {
+            TriggerEntry::new(
+                TriggerDefinitionOccurrenceRef::Printed {
+                    base_set,
+                    printed_index,
+                },
+                definition,
+            )
+        })
+        .collect();
+    Ok(())
+}
+
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum TriggerEntryWire {

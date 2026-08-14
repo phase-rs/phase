@@ -16,7 +16,8 @@ use super::ability::{
     ModalChoice, PermanentEntryMode, PileSource, QuantityExpr, ResolvedAbility,
     SearchDestinationSplit, SearchSelectionConstraint, StaticCondition, TapCreaturesAggregate,
     TargetFilter, TargetRef, ThisWayCause, TriggerCondition, TriggerDefinition,
-    TriggerDefinitionRef, TriggerEntry,
+    TriggerBaseSetInstanceRef, TriggerDefinitionRef, TriggerEntry,
+    legacy_trigger_entry_list, materialize_legacy_printed_trigger_entries,
 };
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, PrintedCardRef, TokenImageRef};
@@ -7964,6 +7965,192 @@ fn migrate_legacy_batched_zone_change_trigger_fired(
                 );
             }
         }
+    }
+    Ok(())
+}
+
+/// Promotes legacy payload-only trigger lists carried by persisted zone-change
+/// snapshots before the typed state can expose them to a serializer. A record's
+/// own source context is authoritative; an absent live-record context can use
+/// only the exact initial printed base set of the persisted object with the
+/// same map key and object id. Journal snapshots never receive that fallback.
+pub(crate) fn migrate_legacy_zone_change_trigger_provenance(
+    value: &mut serde_json::Value,
+    additional_live_event_roots: &[&str],
+) -> Result<(), String> {
+    let state = value
+        .as_object_mut()
+        .ok_or_else(|| "persisted game state must be a JSON object".to_string())?;
+    let objects = state
+        .get("objects")
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .ok_or_else(|| "persisted game state objects must be an object".to_string())?;
+
+    for field in [
+        "created_tokens_this_turn",
+        "sacrificed_permanents_this_turn",
+        "zone_changes_this_turn",
+    ] {
+        let Some(records) = state.get_mut(field) else {
+            continue;
+        };
+        let records = records
+            .as_array_mut()
+            .ok_or_else(|| format!("{field} must be an array"))?;
+        for record in records {
+            migrate_persisted_zone_change_trigger_record(record, &objects, true)?;
+        }
+    }
+
+    visit_persisted_live_zone_changed_records(state, additional_live_event_roots, &mut |record| {
+        migrate_persisted_zone_change_trigger_record(record, &objects, true)
+    })?;
+
+    if let Some(journal) = state.get_mut("resolved_rules_journal") {
+        visit_persisted_journal_zone_change_trigger_records(journal, &objects)?;
+    }
+    Ok(())
+}
+
+fn migrate_persisted_zone_change_trigger_record(
+    record: &mut serde_json::Value,
+    objects: &serde_json::Map<String, serde_json::Value>,
+    allow_object_fallback: bool,
+) -> Result<(), String> {
+    let record = record
+        .as_object_mut()
+        .ok_or_else(|| "persisted zone-change record must be an object".to_string())?;
+    let object_id: ObjectId = record
+        .get("object_id")
+        .cloned()
+        .ok_or_else(|| "persisted zone-change record has no object id".to_string())
+        .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()))?;
+    let mut entries = record
+        .get("trigger_definitions")
+        .cloned()
+        .map(serde_json::from_value::<Vec<TriggerEntry>>)
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .unwrap_or_default();
+    let has_legacy_entries = legacy_trigger_entry_list(&entries).map_err(str::to_string)?;
+
+    let migrated = match record.get("trigger_source_context") {
+        Some(serde_json::Value::Null) | None => {
+            if !has_legacy_entries {
+                return Ok(());
+            }
+            if !allow_object_fallback {
+                return Err(
+                    "legacy journal zone-change record has no record-owned trigger source context"
+                        .to_string(),
+                );
+            }
+            let object_key = object_id.0.to_string();
+            let object_value = objects.get(&object_key).ok_or_else(|| {
+                "legacy zone-change record has no same-id persisted object base set".to_string()
+            })?;
+            let object: GameObject =
+                serde_json::from_value(object_value.clone()).map_err(|error| error.to_string())?;
+            if object.id != object_id {
+                return Err(
+                    "legacy zone-change record object map key does not match serialized object id"
+                        .to_string(),
+                );
+            }
+            if object.trigger_base_set_instance != TriggerBaseSetInstanceRef::INITIAL {
+                return Err(
+                    "legacy zone-change record requires the initial printed trigger base set"
+                        .to_string(),
+                );
+            }
+            materialize_legacy_printed_trigger_entries(
+                &mut entries,
+                object.base_trigger_definitions.as_slice(),
+                TriggerBaseSetInstanceRef::INITIAL,
+            )
+            .map_err(str::to_string)?;
+            entries
+        }
+        Some(context_value) => {
+            let context: TriggerSourceContext = serde_json::from_value(context_value.clone())
+                .map_err(|error| error.to_string())?;
+            if context.identity.reference.object_id != object_id {
+                return Err(
+                    "zone-change trigger source context object id does not match its record"
+                        .to_string(),
+                );
+            }
+            if legacy_trigger_entry_list(&context.trigger_entries).map_err(str::to_string)? {
+                return Err(
+                    "zone-change trigger source context has unmaterialized trigger entries"
+                        .to_string(),
+                );
+            }
+            if entries.len() != context.trigger_entries.len() {
+                return Err(
+                    "zone-change record trigger list disagrees with its source context"
+                        .to_string(),
+                );
+            }
+            if has_legacy_entries {
+                if !entries
+                    .iter()
+                    .zip(&context.trigger_entries)
+                    .all(|(record_entry, context_entry)| {
+                        record_entry.definition == context_entry.definition
+                    })
+                {
+                    return Err(
+                        "zone-change record trigger list disagrees with its source context"
+                            .to_string(),
+                    );
+                }
+                context.trigger_entries
+            } else {
+                if entries != context.trigger_entries {
+                    return Err(
+                        "zone-change record trigger occurrence does not match its source context"
+                            .to_string(),
+                    );
+                }
+                return Ok(());
+            }
+        }
+    };
+
+    record.insert(
+        "trigger_definitions".to_string(),
+        serde_json::to_value(migrated).map_err(|error| error.to_string())?,
+    );
+    Ok(())
+}
+
+/// Journal snapshots are immutable historical authority: they may use only an
+/// exact record-owned context, never a current object's printed base set.
+fn visit_persisted_journal_zone_change_trigger_records(
+    value: &mut serde_json::Value,
+    objects: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                visit_persisted_journal_zone_change_trigger_records(value, objects)?;
+            }
+        }
+        serde_json::Value::Object(object) => {
+            if let Some(record) = serialized_zone_changed_record_mut(object) {
+                migrate_persisted_zone_change_trigger_record(record, objects, false)?;
+                return Ok(());
+            }
+            if let Some(record) = object.get_mut("zone_change_record") {
+                migrate_persisted_zone_change_trigger_record(record, objects, false)?;
+            }
+            for value in object.values_mut() {
+                visit_persisted_journal_zone_change_trigger_records(value, objects)?;
+            }
+        }
+        _ => {}
     }
     Ok(())
 }
