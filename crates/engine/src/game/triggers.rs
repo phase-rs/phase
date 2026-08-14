@@ -19235,9 +19235,19 @@ pub mod tests {
     /// wrongly discarded, because both readings put nothing on the stack the
     /// first time.
     ///
-    /// REVERT-TO-RED: drop the `delayed.one_shot &&` conjunct from the discard
-    /// condition in `check_delayed_triggers` (so every false gate consumes) and
-    /// `after_first` becomes `0` and the second death fires nothing.
+    /// REVERT-TO-RED, and the exact recipe matters here: `WheneverEvent` is
+    /// protected TWICE over, so neither half alone reds this test. Flipping only
+    /// `false_gate_consumes_one_shot`'s `WheneverEvent` arm to `true` changes
+    /// nothing, because the caller never consults it for a multi-fire trigger;
+    /// dropping only the caller's `delayed.one_shot &&` conjunct changes nothing,
+    /// because the arm still answers `false`. Do BOTH — flip the arm to `true`
+    /// AND drop the conjunct — and `after_first` becomes `0` and the second event
+    /// fires nothing (measured, not asserted from reading).
+    ///
+    /// That redundancy is the finding, not a weakness of the fixture: this test
+    /// pins the CONJUNCTION that is the actual guarantee, so it stays red for any
+    /// change that removes the protection outright rather than merely moving it
+    /// between the two layers.
     #[test]
     fn stated_duration_multi_fire_survives_a_false_intervening_if() {
         use crate::types::triggers::TriggerMode;
