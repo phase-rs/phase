@@ -5125,7 +5125,11 @@ mod tests {
         let mut ability = make_resolved_with_targets(vec![], source);
         ability.trigger_source = Some(source_context);
 
-        state.objects.get_mut(&source).expect("test source exists").controller = PlayerId(1);
+        state
+            .objects
+            .get_mut(&source)
+            .expect("test source exists")
+            .controller = PlayerId(1);
         assert_eq!(
             resolve_effect_player_ref(&state, &ability, &TargetFilter::SourceController),
             Some(PlayerId(1)),

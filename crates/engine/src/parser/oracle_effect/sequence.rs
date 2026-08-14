@@ -2450,8 +2450,7 @@ fn source_controller_predicate_has_action_tail(current: &str, tail: &str) -> boo
     )
     .parse(lower.as_str());
     parsed.is_ok_and(|(rest, _)| {
-        tag::<_, _, OracleError<'_>>("loses ").parse(rest).is_ok()
-            && starts_bare_and_clause(tail)
+        tag::<_, _, OracleError<'_>>("loses ").parse(rest).is_ok() && starts_bare_and_clause(tail)
     })
 }
 

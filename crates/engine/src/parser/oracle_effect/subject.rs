@@ -2883,8 +2883,8 @@ pub(super) fn parse_subject_application(
     // This matters when another player activates the source's ability (Xantcha,
     // Sleeper Agent class). Keep it distinct from the anaphoric "its controller"
     // branch below, which refers to a parent target.
-    if let Ok((after_head, _)) = tag::<_, _, OracleError<'_>>("~'s controller may")
-        .parse(lower.as_str())
+    if let Ok((after_head, _)) =
+        tag::<_, _, OracleError<'_>>("~'s controller may").parse(lower.as_str())
     {
         if after_head.trim().is_empty() {
             return Some(SubjectApplication {

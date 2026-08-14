@@ -7910,9 +7910,11 @@ fn resolve_self_enters_under_controller(
 ) -> Option<PlayerId> {
     let entering_controller = state.objects.get(&object_id)?.controller;
     match cref {
-        ControllerRef::Opponent => crate::game::players::choosable_opponents(state, entering_controller)
-            .into_iter()
-            .next(),
+        ControllerRef::Opponent => {
+            crate::game::players::choosable_opponents(state, entering_controller)
+                .into_iter()
+                .next()
+        }
         other => crate::game::filter::controller_ref_player(
             state,
             object_id,
@@ -8490,10 +8492,8 @@ fn apply_single_replacement(
                 // enters under its owner's control first). Resolve the carried
                 // `ControllerRef` against the entering object's own controller.
                 if let Some(cref) = modifiers.controller_override.as_ref() {
-                    let selected_entry_controller = new_event
-                        .applied_set()
-                        .iter()
-                        .find_map(|key| match key {
+                    let selected_entry_controller =
+                        new_event.applied_set().iter().find_map(|key| match key {
                             AppliedReplacementKey::EntryControllerChoice {
                                 source,
                                 index,
@@ -9246,7 +9246,10 @@ fn entry_controller_choice(
     };
     let replacement = replacement_definition_for_id(state, rid)?;
     if replacement_mode_is_optional(&replacement.mode)
-        || !matches!(replacement.enters_under.as_ref(), Some(ControllerRef::Opponent))
+        || !matches!(
+            replacement.enters_under.as_ref(),
+            Some(ControllerRef::Opponent)
+        )
     {
         return None;
     }

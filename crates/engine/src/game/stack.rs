@@ -115,7 +115,8 @@ fn push_to_stack_with_firing(
             // LKI controller after it leaves, without rebinding a re-entered
             // object that reuses this storage id.
             if ability.source_incarnation.is_none() {
-                ability.set_source_incarnation_recursive(source_ref.map(|source| source.incarnation));
+                ability
+                    .set_source_incarnation_recursive(source_ref.map(|source| source.incarnation));
             }
             // CR 701.27f: delayed triggered abilities already carry their
             // creation-time generation and must not be restamped when fired.

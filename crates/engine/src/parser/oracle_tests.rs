@@ -661,7 +661,10 @@ fn source_controller_predicate_chains_with_ordinary_controller_effect() {
         }
     ));
     assert!(matches!(
-        ability.sub_ability.as_deref().map(|next| next.effect.as_ref()),
+        ability
+            .sub_ability
+            .as_deref()
+            .map(|next| next.effect.as_ref()),
         Some(Effect::Draw {
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Controller,

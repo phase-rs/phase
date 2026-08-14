@@ -6,10 +6,10 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zones::move_to_zone;
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
-use engine::types::PlayerId;
 use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
+use engine::types::PlayerId;
 
 const XANTCHA_ORACLE: &str = "Xantcha enters under the control of an opponent of your choice.\nXantcha attacks each combat if able and can't attack its owner or planeswalkers its owner controls.\n{3}: Xantcha's controller loses 2 life and you draw a card. Any player may activate this ability.";
 const P2: PlayerId = PlayerId(2);
@@ -32,8 +32,12 @@ fn xantcha_chooses_entry_controller_before_battlefield_delivery() {
     let mut runner = scenario.build();
 
     let outcome = runner.cast(xantcha).resolve();
-    let WaitingFor::EntryControllerChoice { player, candidates } = outcome.final_waiting_for() else {
-        panic!("Xantcha must choose an entry controller, got {:?}", outcome.final_waiting_for());
+    let WaitingFor::EntryControllerChoice { player, candidates } = outcome.final_waiting_for()
+    else {
+        panic!(
+            "Xantcha must choose an entry controller, got {:?}",
+            outcome.final_waiting_for()
+        );
     };
     assert_eq!(*player, P0);
     assert_eq!(candidates, &[P1, P2]);
@@ -67,7 +71,10 @@ fn xantcha_chooses_entry_controller_before_battlefield_delivery() {
         .expect("P1 may activate Xantcha from priority");
     runner.advance_until_stack_empty();
 
-    assert_eq!(runner.state().players[P2.0 as usize].life, p2_life_before - 2);
+    assert_eq!(
+        runner.state().players[P2.0 as usize].life,
+        p2_life_before - 2
+    );
     assert_eq!(
         runner.state().players[P1.0 as usize].hand.len(),
         p1_hand_before + 1,

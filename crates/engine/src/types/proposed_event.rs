@@ -81,9 +81,16 @@ pub struct BoundSearchFoundCandidate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(tag = "type")]
 pub enum AppliedReplacementKey {
-    Object { source: ObjectId, index: usize },
-    Floating { index: usize },
-    StepEndMana { index: usize },
+    Object {
+        source: ObjectId,
+        index: usize,
+    },
+    Floating {
+        index: usize,
+    },
+    StepEndMana {
+        index: usize,
+    },
     /// CR 614.12a: The selected controller for an as-enters replacement.
     /// This rides the event's existing replacement provenance so the selected
     /// answer remains distinguishable from an originating controller override.
@@ -97,9 +104,16 @@ pub enum AppliedReplacementKey {
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(tag = "type")]
 enum TaggedAppliedReplacementKey {
-    Object { source: ObjectId, index: usize },
-    Floating { index: usize },
-    StepEndMana { index: usize },
+    Object {
+        source: ObjectId,
+        index: usize,
+    },
+    Floating {
+        index: usize,
+    },
+    StepEndMana {
+        index: usize,
+    },
     EntryControllerChoice {
         source: ObjectId,
         index: usize,
