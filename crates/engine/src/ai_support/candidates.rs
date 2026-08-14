@@ -425,6 +425,17 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        WaitingFor::EntryControllerChoice { player, candidates } => candidates
+            .iter()
+            .copied()
+            .map(|opponent| {
+                candidate(
+                    GameAction::ChooseEntryController { opponent },
+                    TacticalClass::Replacement,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::MoveCountersDistribution {
             player,
             available,
@@ -873,6 +884,18 @@ pub fn candidate_actions_broad_with_probe(
                         opponent: *opponent,
                     },
                     TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
+        WaitingFor::EntryControllerChoice { player, candidates } => candidates
+            .iter()
+            .map(|opponent| {
+                candidate(
+                    GameAction::ChooseEntryController {
+                        opponent: *opponent,
+                    },
+                    TacticalClass::Replacement,
                     Some(*player),
                 )
             })
@@ -3272,7 +3295,10 @@ pub fn candidate_actions_broad_with_probe(
         // proposer declares or returns to ordinary priority.
         // (Scored by `phase_ai::policies::loop_shortcut::LoopShortcutPolicy`.)
         WaitingFor::LoopShortcut {
-            proposer, schema, ..
+            proposer,
+            schema,
+            declaration,
+            ..
         } => {
             // CR 732.2a: `UntilLethal` names no count, so it is legal ONLY against an offer
             // that narrowed no bound. `handle_declare_shortcut` rejects it outright against
@@ -3304,15 +3330,23 @@ pub fn candidate_actions_broad_with_probe(
             // the AI's only non-declining option at such a node is an answer the engine
             // refuses. `ShortcutDecisionSchema::is_bounded()` is the engine's single
             // authority for "this producer narrowed the bound"; do NOT re-spell it as a
-            // comparison against `MAX_SHORTCUT_CYCLES`. Gated on empty `points` because this
-            // candidate carries `template: None`, which a published pin set fail-closes on.
-            if schema.points.is_empty() && schema.is_bounded() {
+            // comparison against `MAX_SHORTCUT_CYCLES`.
+            //
+            // The two admissible pin states, and nothing else: an EMPTY published point set
+            // (nothing to pin, so `template: None` is the complete answer), or a published set
+            // the offer ALREADY carries a declaration for. That `template` is the ENGINE'S OWN
+            // published declaration — the very value `handle_declare_shortcut` will validate —
+            // so there is exactly one pin authority at this node and the AI never constructs
+            // one. An offer with published points and NO declaration (a seat that never
+            // answered, or a `Conflicted` latch) still fail-closes: `declaration` is `None`,
+            // the conjunct below is false, and `DeclineShortcut` remains the only candidate.
+            if schema.is_bounded() && (schema.points.is_empty() || declaration.is_some()) {
                 v.push(candidate(
                     GameAction::DeclareShortcut {
                         count: crate::analysis::decision_template::IterationCount::Fixed(
                             schema.max_iterations,
                         ),
-                        template: None,
+                        template: declaration.clone(),
                     },
                     TacticalClass::Utility,
                     Some(*proposer),
@@ -4704,6 +4738,52 @@ fn named_choice_actions(
     choice_type: &ChoiceType,
     source_display_name: Option<&str>,
 ) -> Vec<CandidateAction> {
+    // CR 107.1a/b: an unbounded number choice ("a number 0 or greater") offers no
+    // option list, so the AI must SAMPLE a domain it cannot enumerate. The sample
+    // is deliberately small and game-relevant rather than a truncated 0..=N walk:
+    // on Wheel of Misfortune the meaningful decisions are "bid nothing", "bid just
+    // enough to wheel", and "bid past a life total", so the ladder is anchored to
+    // the live life totals rather than to an arbitrary ceiling.
+    //
+    // Every candidate is filtered through `accepts_free_entry_answer`, the same
+    // authority the answer seam uses, so the AI can never propose a value the
+    // engine would then reject.
+    if options.is_empty() {
+        if let ChoiceType::NumberRange { min, max: None, .. } = choice_type {
+            let highest_life = state
+                .players
+                .iter()
+                .map(|p| p.life.max(0) as u32)
+                .max()
+                .unwrap_or(0);
+            let mut sample: Vec<u32> = vec![
+                *min,
+                min.saturating_add(1),
+                min.saturating_add(2),
+                highest_life,
+                highest_life.saturating_add(1),
+            ];
+            sample.sort_unstable();
+            sample.dedup();
+            return sample
+                .into_iter()
+                .map(|n| n.to_string())
+                .filter(|choice| {
+                    choice_type
+                        .accepts_free_entry_answer(choice)
+                        .unwrap_or(false)
+                })
+                .map(|choice| {
+                    candidate(
+                        GameAction::ChooseOption { choice },
+                        TacticalClass::Selection,
+                        Some(player),
+                    )
+                })
+                .collect();
+        }
+    }
+
     if options.is_empty() && matches!(choice_type, ChoiceType::CardName) {
         return card_name_choice_candidates(state, player, source_display_name)
             .into_iter()
@@ -5403,6 +5483,7 @@ mod tests {
                 per_cycle: None,
             },
             schema: crate::analysis::decision_template::ShortcutDecisionSchema::default(),
+            declaration: None,
         };
 
         let candidates = candidate_actions(&state);
@@ -6292,7 +6373,7 @@ mod tests {
     }
 
     /// Regression (multi-requirement residual): a creature directed by
-    /// `MustAttackPlayer` (CR 508.1b) alongside a goaded creature (CR 701.15b)
+    /// `MustAttackDefender` (CR 508.1b) alongside a goaded creature (CR 701.15b)
     /// also forces a mixed-target declaration. The greedy forced-legal candidate
     /// must steer the directed creature onto its *required* player regardless of
     /// `valid_attack_targets` ordering. A goad-only target pick would land the
@@ -6329,8 +6410,8 @@ mod tests {
             .unwrap()
             .static_definitions
             .push(StaticDefinition::new(
-                crate::types::statics::StaticMode::MustAttackPlayer {
-                    player: PlayerId(1).into(),
+                crate::types::statics::StaticMode::MustAttackDefender {
+                    defender: PlayerId(1).into(),
                 },
             ));
         let goaded = make_creature(&mut state, 2);
@@ -6363,7 +6444,7 @@ mod tests {
         });
         assert!(
             has_legal,
-            "forced assignment must direct the MustAttackPlayer creature to its required player"
+            "forced assignment must direct the MustAttackDefender creature to its required player"
         );
     }
 
@@ -6388,6 +6469,7 @@ mod tests {
         names.extend((0..10_000).map(|i| format!("Bulk Card {i}")));
         state.all_card_names = names.into();
         state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(0),
             choice_type: ChoiceType::CardName,
             options: Vec::new(),
@@ -7926,6 +8008,140 @@ mod tests {
             Some(TacticalClass::Mana),
             "CR 605.1a: Jack-o'-Lantern's graveyard-activated mana ability \
              must be offered as a Mana-class ActivateAbility candidate"
+        );
+    }
+
+    // ── item-4 C2b row D6-n — the declare candidate is keyed to the offer's OWN declaration ──
+
+    const D6N_PROPOSER: PlayerId = PlayerId(1);
+
+    /// A BOUNDED offer publishing ONE point, carrying `declaration`. Called twice — once `None`,
+    /// once `Some` — so the two states differ in exactly one field and the mint spells the
+    /// `WaitingFor::LoopShortcut` anchor exactly once (a counted site in
+    /// `tests/integration/loop_shortcut_offer_writer_census.rs`).
+    ///
+    /// `ShortcutDecisionSchema::default()` carries `MAX_SHORTCUT_CYCLES`, i.e. `is_bounded()` is
+    /// FALSE — so `max_iterations` is set explicitly below the cap or the row would measure the
+    /// wrong conjunct.
+    fn d6n_offer(
+        declaration: Option<crate::analysis::decision_template::DecisionTemplate>,
+    ) -> GameState {
+        use crate::analysis::decision_template::{
+            DecisionPoint, DecisionPointKind, DecisionSlot, IterationCount, ShortcutDecisionSchema,
+        };
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::LoopShortcut {
+            proposer: D6N_PROPOSER,
+            predicted_winner: None,
+            certificate: crate::analysis::loop_check::LoopCertificate {
+                unbounded: vec![],
+                win_kind: crate::analysis::loop_check::WinKind::Advantage,
+                mandatory: false,
+                residual_board_delta: crate::analysis::resource::BoardDelta::default(),
+                per_cycle: None,
+            },
+            schema: ShortcutDecisionSchema {
+                iteration_count: IterationCount::Fixed(5),
+                max_iterations: 5,
+                points: vec![DecisionPoint {
+                    slot: DecisionSlot::target(d6n_source()),
+                    kind: DecisionPointKind::Targets {
+                        legal_targets: vec![TargetRef::Player(PlayerId(0))],
+                        min_targets: 1,
+                        max_targets: 1,
+                        ordered: false,
+                    },
+                }],
+                convoke_tappable_count: 0,
+            },
+            declaration,
+        };
+        state
+    }
+
+    fn d6n_source() -> crate::types::game_state::YieldTarget {
+        crate::types::game_state::YieldTarget::ThisObject {
+            source_id: ObjectId(555),
+            incarnation: Some(1),
+            trigger_description: None,
+        }
+    }
+
+    /// **Row D6-n — a bounded offer with published points and NO declaration enumerates only
+    /// `DeclineShortcut`.**
+    ///
+    /// CR 732.2a. The declare candidate carries the ENGINE's own published declaration, so an
+    /// offer that has none (a seat that never answered, or a `LoopAnswer::Conflicted` latch) must
+    /// fail closed rather than hand the search layer a fabricated pin set — which
+    /// `handle_declare_shortcut` would then refuse, i.e. an action that looks legal and is not.
+    ///
+    /// # Non-vacuity
+    ///
+    /// The positive arm is the SAME state one field apart: with `declaration: Some(..)` the
+    /// candidate appears AND carries that exact template. Without it, a generator that had
+    /// stopped emitting the candidate for any reason — including not running — would pass the
+    /// negative arm.
+    ///
+    /// REVERT-PROBE: replace `declaration.clone()` in the gate's `template:` with a fabricated
+    /// `Some(..)` and drop the `declaration.is_some()` conjunct ⇒ the negative arm flips.
+    ///
+    /// *What wrong implementation would still pass this row?* One that emits the candidate with
+    /// the RIGHT gate but a template it built itself — which the positive arm's equality against
+    /// the offer's own declaration refuses.
+    #[test]
+    fn d6n_a_points_carrying_offer_without_a_declaration_enumerates_only_decline() {
+        use crate::analysis::decision_template::{
+            DecisionGroupKey, DecisionKind, DecisionSlot, DecisionTemplate, IterationCount,
+            PinnedDecision, ReplayMode, TargetPin,
+        };
+
+        // ── the negative arm ──
+        let bare = d6n_offer(None);
+        let WaitingFor::LoopShortcut { schema, .. } = &bare.waiting_for else {
+            unreachable!("the fixture parks on the offer")
+        };
+        assert!(
+            schema.is_bounded(),
+            "reach-guard: the `Fixed` candidate is gated on `is_bounded()` too, so an unbounded \
+             offer would withhold it for the wrong reason"
+        );
+        assert!(
+            !schema.points.is_empty(),
+            "reach-guard: a NON-empty published pin set is the conjunct this row is about — with \
+             `points` empty the candidate is emitted regardless of the declaration"
+        );
+        assert_eq!(
+            crate::ai_support::legal_actions(&bare),
+            vec![GameAction::DeclineShortcut],
+            "CR 732.2a: with points published and no declaration to state, declining is the only \
+             honest candidate"
+        );
+
+        // ── the paired positive: the same state one field apart ──
+        let declaration = DecisionTemplate {
+            owner: D6N_PROPOSER,
+            decisions: vec![PinnedDecision::Targets {
+                slot: DecisionSlot::target(d6n_source()),
+                targets: vec![TargetPin::Player(PlayerId(0))],
+            }],
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::Fixed(5),
+            },
+            key: DecisionGroupKey::from_sources(&[d6n_source()], DecisionKind::LoopChoice),
+        };
+        let declared = d6n_offer(Some(declaration.clone()));
+        assert!(
+            crate::ai_support::legal_actions(&declared).contains(&GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(5),
+                template: Some(declaration),
+            }),
+            "POSITIVE CONTROL: with the offer carrying a declaration the candidate returns, and \
+             its `template` is the offer's OWN value — the AI never constructs one. got {:?}",
+            crate::ai_support::legal_actions(&declared)
+        );
+        assert!(
+            crate::ai_support::legal_actions(&declared).contains(&GameAction::DeclineShortcut),
+            "the decline stays legal on both arms, which is what keeps the pair one axis apart"
         );
     }
 }

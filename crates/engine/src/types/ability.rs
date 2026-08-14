@@ -548,9 +548,31 @@ pub enum ChoiceType {
     },
     CardName,
     /// "Choose a number between X and Y" — generates string options "0", "1", ..., "Y".
+    /// CR 107.1a/b + CR 608.2d: choose a number from `min` up to `max`.
+    ///
+    /// `max: None` is the UNBOUNDED form — "choose a number 0 or greater" (Wheel
+    /// of Misfortune, Menacing Ogre, Itazura). The rules state no maximum, so the
+    /// engine must not invent one: a bounded stand-in silently makes a legal
+    /// choice illegal, and on Wheel the magnitude of the number IS the decision.
+    ///
+    /// The practical ceiling on an unbounded choice is `i32::MAX`, enforced at the
+    /// answer seam rather than here. That is not an arbitrary UI cap but the
+    /// engine's own arithmetic domain: every quantity resolves through `i32`
+    /// (`game::quantity`), and damage and life totals are `i32`, so a number the
+    /// engine could not represent could not be acted on either. Within that
+    /// domain, every value the rules permit is accepted.
+    ///
+    /// Unbounded ranges enumerate no options — `compute_options` returns empty and
+    /// `options_supplied_by_player` is true, the same free-entry path `CardName`
+    /// already uses — so the client renders a numeric input instead of a button
+    /// per value.
     NumberRange {
-        min: u8,
-        max: u8,
+        min: u32,
+        /// `None` = no maximum (CR 107.1a/b). Bounded card text ("a number
+        /// between 1 and 5") keeps `Some`. The serde attributes that keep the
+        /// bounded form byte-identical on the wire live on the `ChoiceTypeData`
+        /// mirror, because `ChoiceType` itself has a hand-written `Serialize`.
+        max: Option<u32>,
         /// CR 609.3: distinctness requirement, parse-detected from "that hasn't
         /// been chosen". Default `Repeatable` for every existing card.
         distinctness: NumberDistinctness,
@@ -781,8 +803,78 @@ impl ChoiceType {
     /// predicate is true) from an impossible choice that must resolve as a
     /// no-op per CR 609.3 (this predicate is false).
     pub fn options_supplied_by_player(&self) -> bool {
-        matches!(self, Self::CardName | Self::Word | Self::Artist)
+        matches!(
+            self,
+            Self::CardName
+                | Self::Word
+                | Self::Artist
+                // CR 107.1a/b: an unbounded number choice cannot be enumerated,
+                // so the player supplies the value. Bounded ranges keep their
+                // option list and their button-per-value rendering.
+                | Self::NumberRange { max: None, .. }
+        )
     }
+
+    /// CR 107.1a/b + CR 608.2d: Is `answer` a legal value for this choice when
+    /// the engine cannot offer an option list to check it against?
+    ///
+    /// The single authority for validating a free-entry answer, shared by the
+    /// interactive handler and the AI's legal-action enumeration so a value one
+    /// accepts cannot be rejected by the other. Returns `None` for choice kinds
+    /// whose answers are validated by membership instead.
+    ///
+    /// Delegates to [`ChoiceType::free_entry`] so the rule this enforces and the
+    /// contract published to clients are the same value, not two statements of
+    /// the same intent.
+    pub fn accepts_free_entry_answer(&self, answer: &str) -> Option<bool> {
+        match self.free_entry()? {
+            FreeEntry::Number { min, max } => {
+                let parsed = answer.trim().parse::<u32>();
+                Some(parsed.is_ok_and(|n| n >= min && n <= max))
+            }
+        }
+    }
+
+    /// CR 107.1a/b: The free-entry contract for this choice, or `None` when the
+    /// answer is picked from an option list instead.
+    ///
+    /// This is the ONE definition of what a free-entry answer may be. It is what
+    /// [`ChoiceType::accepts_free_entry_answer`] validates against, what the AI's
+    /// legal-action enumeration samples within, and — published on
+    /// `WaitingFor::NamedChoice` — what a client renders and bounds its input by.
+    /// A client that reads this contract cannot reject a value the engine accepts,
+    /// because there is no second statement of the domain to drift from.
+    pub fn free_entry(&self) -> Option<FreeEntry> {
+        match self {
+            // CR 107.1a/b: an unbounded number choice cannot be enumerated, so
+            // the player supplies the value. Bounded ranges keep their option
+            // list and are validated by membership.
+            Self::NumberRange { min, max: None, .. } => Some(FreeEntry::Number {
+                min: *min,
+                // Not a UI cap, but the engine's own arithmetic domain: every
+                // quantity resolves through `i32`, so a number beyond this could
+                // not be dealt as damage or compared against a life total.
+                // Within that domain every value the rules permit is accepted.
+                max: i32::MAX as u32,
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// CR 107.1a/b: A choice whose answer the player supplies rather than picks from
+/// an enumerated list, together with the bounds that make an answer legal.
+///
+/// Published on the prompt (`WaitingFor::NamedChoice::free_entry`) so a client
+/// renders and bounds the input from engine-stated values instead of
+/// re-deriving them from the choice's own shape. `Number`'s bounds are both
+/// INCLUSIVE. `CardName` and the other unbounded-string choices are deliberately
+/// absent: their answers are validated against the card corpus, not a range, so
+/// they have no contract of this form to publish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum FreeEntry {
+    Number { min: u32, max: u32 },
 }
 
 impl Serialize for ChoiceType {
@@ -840,7 +932,17 @@ impl Serialize for ChoiceType {
             } => {
                 // Emit `distinctness` only when non-default so existing
                 // `{min,max}` card-data stays byte-stable.
-                let field_count = 2 + (*distinctness != NumberDistinctness::Repeatable) as usize;
+                //
+                // CR 107.1a/b: emit `max` only when the range HAS one. This is a
+                // hand-written `Serialize`, so the `skip_serializing_if` on the
+                // `ChoiceTypeData` deserialize mirror does not apply here and has
+                // to be mirrored by hand — otherwise an unbounded range writes
+                // `"max": null`, which round-trips correctly but needlessly
+                // changes the wire shape and reads as "a null bound" rather than
+                // "no bound".
+                let field_count = 1
+                    + max.is_some() as usize
+                    + (*distinctness != NumberDistinctness::Repeatable) as usize;
                 let mut variant = serializer.serialize_struct_variant(
                     "ChoiceType",
                     6,
@@ -848,7 +950,9 @@ impl Serialize for ChoiceType {
                     field_count,
                 )?;
                 variant.serialize_field("min", min)?;
-                variant.serialize_field("max", max)?;
+                if let Some(max) = max {
+                    variant.serialize_field("max", max)?;
+                }
                 if *distinctness != NumberDistinctness::Repeatable {
                     variant.serialize_field("distinctness", distinctness)?;
                 }
@@ -977,8 +1081,13 @@ impl<'de> Deserialize<'de> for ChoiceType {
                 excluded: Vec<CoreType>,
             },
             NumberRange {
-                min: u8,
-                max: u8,
+                min: u32,
+                /// CR 107.1a/b: absent = no maximum. A bounded range keeps
+                /// emitting `"max": N` exactly as before, so existing card-data
+                /// round-trips byte-identically; only the unbounded form omits
+                /// the key.
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                max: Option<u32>,
                 #[serde(default)]
                 distinctness: NumberDistinctness,
             },
@@ -1380,7 +1489,22 @@ pub enum ChosenAttribute {
     OddOrEven(Parity),
     CardName(String),
     /// Stores a chosen number (e.g., "choose a number" for Talion).
-    Number(u8),
+    ///
+    /// On the PLAYER axis (`Player::chosen_attributes`) this is the SECRET half
+    /// of the CR 101.4 secret-number ledger: `game::visibility` redacts it from
+    /// every viewer but its owner. `Effect::RevealChosenNumbers` converts it to
+    /// [`ChosenAttribute::RevealedNumber`], which is public — that conversion is
+    /// the card's "reveal" instruction as an observable state transition.
+    Number(u32),
+    /// CR 101.4 + CR 608.2c: A chosen number that a reveal instruction has
+    /// PUBLISHED ("then all players reveal those numbers simultaneously").
+    /// Identical in value to [`ChosenAttribute::Number`] and read
+    /// interchangeably with it by `Player::chosen_number`; the two differ only
+    /// in visibility, which is exactly what the reveal changes. Kept as a
+    /// distinct variant rather than a flag so the secret and published states
+    /// cannot be confused at a read site, and so `game::visibility` redacts on
+    /// the type rather than on a condition it might forget to check.
+    RevealedNumber(u32),
     /// Stores the chosen opponent/player ID (CR 800.4a).
     Player(PlayerId),
     /// Stores two chosen colors as a pair.
@@ -1464,9 +1588,14 @@ impl ChosenAttribute {
             Self::CardType(_) => ChoiceType::card_type(),
             Self::OddOrEven(_) => ChoiceType::OddOrEven,
             Self::CardName(_) => ChoiceType::CardName,
-            Self::Number(_) => ChoiceType::NumberRange {
+            // CR 101.4: the secret and the published number came from the same
+            // `NumberRange` prompt; revealing changes visibility, not category.
+            // CR 107.1a/b: recovering the CATEGORY from a stored value cannot
+            // recover the card's original bounds, so report the widest form the
+            // rules allow rather than inventing a ceiling this value never had.
+            Self::Number(_) | Self::RevealedNumber(_) => ChoiceType::NumberRange {
                 min: 0,
-                max: 20,
+                max: None,
                 distinctness: NumberDistinctness::Repeatable,
             },
             // Player covers both Player and Opponent choice types
@@ -1567,7 +1696,7 @@ pub enum ChoiceValue {
     CardType(CoreType),
     OddOrEven(Parity),
     CardName(String),
-    Number(u8),
+    Number(u32),
     Label(String),
     CardPredicate(CardPredicateChoice),
     LandType(String),
@@ -1601,7 +1730,7 @@ impl ChoiceValue {
             }
             ChoiceType::OddOrEven => value.parse::<Parity>().ok().map(Self::OddOrEven),
             ChoiceType::CardName => Some(Self::CardName(value.to_string())),
-            ChoiceType::NumberRange { .. } => value.parse::<u8>().ok().map(Self::Number),
+            ChoiceType::NumberRange { .. } => value.parse::<u32>().ok().map(Self::Number),
             ChoiceType::Labeled { .. } => Some(Self::Label(value.to_string())),
             ChoiceType::CardPredicate { options } | ChoiceType::CardPredicateGuess { options } => {
                 let predicate = CardPredicateChoice::from_label(value)?;
@@ -4052,6 +4181,28 @@ pub enum ControllerRef {
     /// player (Siren's Call, Maddening Imp), cast/activated only during an
     /// opponent's turn.
     ActivePlayer,
+    /// CR 109.4 + CR 611.2c: a player id SNAPSHOTTED at resolution — the lowered
+    /// form the dynamic siblings above collapse to once the resolving ability is
+    /// gone. Never produced by the parser; produced only by resolvers that
+    /// install a durable continuous effect whose *object set* must stay dynamic
+    /// while its *player reference* must not.
+    ///
+    /// Gideon Jura's "+2: During target opponent's next turn, creatures that
+    /// player controls attack Gideon Jura if able" is the canonical member. Per
+    /// CR 611.2c the requirement modifies no characteristics and changes no
+    /// controller, so the affected creature set is re-derived every
+    /// declare-attackers step (official ruling: the ability "doesn't lock in what
+    /// it applies to … includes creatures that come under that player's control
+    /// after the ability has resolved"). The *player*, by contrast, is fixed when
+    /// the ability resolves — and `ControllerRef::TargetPlayer` resolves by
+    /// reading `ability.targets`, which no longer exists at layer-evaluation
+    /// time, so `force_attack::resolve` lowers it to this arm on install.
+    ///
+    /// Mirrors the identical lower-at-resolution contract already documented on
+    /// [`RestrictionPlayerScope::SpecificPlayer`] and [`TargetFilter::SpecificPlayer`].
+    SpecificPlayer {
+        id: PlayerId,
+    },
 }
 
 /// CR 301 / CR 303: Kinds of attachments to permanents.
@@ -5145,6 +5296,16 @@ pub enum TargetFilter {
     Any,
     Player,
     Controller,
+    /// CR 608.2h + CR 113.7a: The controller of this ability's source object.
+    ///
+    /// Unlike [`Self::Controller`], which is the controller of the resolving
+    /// ability (and therefore the activator for an activated ability), this
+    /// follows the source's exact incarnation. Triggered abilities use their
+    /// [`TriggerSourceContext`] live-or-LKI authority; other stack abilities
+    /// use their captured `source_incarnation` and the incarnation-keyed LKI
+    /// history. This keeps "~'s controller" from rebinding to a later object
+    /// that reuses the same storage id.
+    SourceController,
     /// CR 615 + CR 614.1a: Compound damage recipient "you and [type] permanents
     /// you control" (Comeuppance's "you and planeswalkers you control"; Channel
     /// Harm's "you and permanents you control"). A PARSE-LAYER recipient
@@ -5667,6 +5828,28 @@ pub enum PlayerScope {
     /// `Duration::UntilNextStepOf` — never from a value/quantity/player-selection
     /// position.
     AnyTurn,
+    /// CR 109.4 + CR 611.2 + CR 514.2: a player id SNAPSHOTTED at resolution —
+    /// the player-scalar-axis analogue of [`ControllerRef::SpecificPlayer`] and
+    /// [`RestrictionPlayerScope::SpecificPlayer`], and the lowered form the
+    /// dynamic siblings above collapse to once the resolving ability is gone.
+    ///
+    /// DURATION-TIMING-ONLY, like [`AnyTurn`](Self::AnyTurn): never produced by
+    /// the parser and never read from a value/quantity/player-selection
+    /// position. It is constructed solely by resolvers that install a durational
+    /// continuous effect whose expiry keys on a player OTHER than the effect's
+    /// controller.
+    ///
+    /// Gideon Jura's "+2: During target opponent's next turn, …" is the
+    /// canonical member: the parser emits
+    /// `UntilEndOfNextTurnOf { player: PlayerScope::Target }`, and
+    /// `force_attack::resolve` lowers `Target` to this arm. Without the
+    /// lowering, the prune in `layers.rs::prune_until_next_turn_effects` — which
+    /// arms `UntilEndOfNextTurnOf` by comparing the ACTIVE player against the
+    /// effect's own `controller` — could never see the targeted opponent, and
+    /// the requirement would never arm nor expire. Overloading the effect's
+    /// `controller` field with the target instead would break CR 109.5's meaning
+    /// of "you" for every other consumer of that field.
+    SpecificPlayer { id: PlayerId },
 }
 
 /// Scope selector for object-axis quantities (Round Π-5). Picks WHICH object
@@ -6457,6 +6640,32 @@ pub enum QuantityRef {
     /// A number chosen as the source entered the battlefield (e.g., Talion, the Kindly Lord).
     /// Resolved from the source object's `ChosenAttribute::Number`.
     ChosenNumber,
+    /// CR 101.4 + CR 608.2d: The number a PLAYER chose during this resolution
+    /// ("each player secretly chooses a number 0 or greater"), read off
+    /// `Player::chosen_attributes` (`ChosenAttribute::Number`) — the player-axis
+    /// sibling of the object-axis [`QuantityRef::ChosenNumber`], which reads the
+    /// SOURCE object's persisted number instead. The two subjects have different
+    /// runtime resolvers (per-player scalar vs. source LKI), so they stay
+    /// separate variants rather than one subject-parameterized reference.
+    ///
+    /// A member of the per-player-scalar subset (`HandSize` / `LifeTotal` /
+    /// `GraveyardSize` / `PlayerCounter` / …), so `player` selects both WHICH
+    /// player is read and — for the aggregate scopes — HOW the per-player values
+    /// are folded:
+    /// - `AllPlayers { aggregate: Max }` — "the highest number" (Wheel of
+    ///   Misfortune, Menacing Ogre, Life at Stake).
+    /// - `AllPlayers { aggregate: Min }` — "the lowest number" (Wheel of
+    ///   Misfortune's discard clause).
+    /// - `ScopedPlayer` — the per-candidate read used by
+    ///   [`PlayerFilter::PlayerAttribute`] to select "each player who chose the
+    ///   highest number".
+    ///
+    /// Players who chose no number this resolution are EXCLUDED from the
+    /// aggregate populations (rather than contributing 0), so a card whose
+    /// choosers are a subset of the table — Life at Stake's "you and target
+    /// creature's controller" — still reads the extremum over the actual
+    /// choosers.
+    PlayerChosenNumber { player: PlayerScope },
     /// CR 508.1a: Number of creatures that attacked this turn, scoped by
     /// `scope` and optionally narrowed by `filter` (e.g. "attacked with a
     /// token / a commander / a Wolf"). `Controller` + `filter: None` counts all
@@ -7513,22 +7722,25 @@ impl QuantityExpr {
         }
     }
 
-    /// CR 608.2c: Rebind a later clause's generic event-context amount to the
-    /// scalar result of the immediately preceding resolved instruction.
+    /// CR 608.2c: Rebind a later clause's generic event-context amount ("that
+    /// much", "that many") to the `antecedent` the surrounding grammar names.
     ///
-    /// Parser chain assembly uses this only when grammar proves that the
-    /// antecedent is the prior effect, rather than a triggering event or a
-    /// per-player iteration. The recursive walk preserves arithmetic wrappers
-    /// such as "twice that much".
-    pub fn rebind_event_context_amount_to_previous_effect(&mut self) {
+    /// `EventContextAmount` is the *unbound* demonstrative: it means "the amount
+    /// from the surrounding event context", which is correct only when a
+    /// triggering event or a per-player iteration supplies one. When chain
+    /// assembly can PROVE a different antecedent from the printed grammar — the
+    /// preceding instruction's scalar result, or a number a preceding clause had
+    /// a player choose — it rebinds the leaf here. The antecedent is a parameter
+    /// rather than one method per referent, so every provable binding shares one
+    /// recursive walk (which preserves arithmetic wrappers such as "twice that
+    /// much"); callers must not use it for merely plausible antecedents.
+    pub fn rebind_event_context_amount(&mut self, antecedent: &QuantityRef) {
         match self {
             QuantityExpr::Ref {
                 qty: QuantityRef::EventContextAmount,
             } => {
                 *self = QuantityExpr::Ref {
-                    qty: QuantityRef::PreviousEffectAmount {
-                        channel: DamageChannel::Total,
-                    },
+                    qty: antecedent.clone(),
                 };
             }
             QuantityExpr::Offset { inner, .. }
@@ -7538,15 +7750,15 @@ impl QuantityExpr {
             | QuantityExpr::UpTo { max: inner }
             | QuantityExpr::Power {
                 exponent: inner, ..
-            } => inner.rebind_event_context_amount_to_previous_effect(),
+            } => inner.rebind_event_context_amount(antecedent),
             QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
                 for expr in exprs {
-                    expr.rebind_event_context_amount_to_previous_effect();
+                    expr.rebind_event_context_amount(antecedent);
                 }
             }
             QuantityExpr::Difference { left, right } => {
-                left.rebind_event_context_amount_to_previous_effect();
-                right.rebind_event_context_amount_to_previous_effect();
+                left.rebind_event_context_amount(antecedent);
+                right.rebind_event_context_amount(antecedent);
             }
             QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => {}
         }
@@ -9492,22 +9704,7 @@ impl AbilityCost {
                 filter: None,
                 ..
             } => true,
-            // CR 702.24a + CR 122.1: The existing resolution payment
-            // authority can place a counter on the source through the
-            // replacement pipeline. This covers cumulative-upkeep costs such
-            // as Aboroth's "put a -1/-1 counter on this creature" without
-            // admitting arbitrary effect-as-cost shapes.
-            AbilityCost::EffectCost { effect }
-                if matches!(
-                    effect.as_ref(),
-                    Effect::PutCounter {
-                        target: TargetFilter::SelfRef,
-                        ..
-                    }
-                ) =>
-            {
-                true
-            }
+            AbilityCost::EffectCost { .. } if self.supports_effect_cost_payment() => true,
             // CR 118.12a: OneOf at the base must be a disjunction of mana
             // costs; mixed-shape disjunctions are not yet expanded into a
             // payable per-counter form.
@@ -9522,6 +9719,28 @@ impl AbilityCost {
             }
             _ => false,
         }
+    }
+
+    /// CR 118.3: Effect-as-cost forms the payment authority can resolve without
+    /// a player choice. This is shared by cumulative-upkeep synthesis and the
+    /// resolution-time payment gate so supported cards never install a trigger
+    /// whose cost will later be rejected.
+    pub fn supports_effect_cost_payment(&self) -> bool {
+        matches!(
+            self,
+            AbilityCost::EffectCost { effect }
+                if matches!(
+                    effect.as_ref(),
+                    Effect::PutCounter {
+                        target: TargetFilter::SelfRef,
+                        ..
+                    } | Effect::Mana {
+                        produced: ManaProduction::Fixed { .. },
+                        target: None,
+                        ..
+                    }
+                )
+        )
     }
 
     /// CR 118: Classify this cost into one or more `CostCategory` buckets.
@@ -12429,6 +12648,33 @@ pub enum Effect {
         #[serde(default = "default_target_filter_self_ref")]
         target: TargetFilter,
     },
+    /// CR 101.4 + CR 608.2c: Publish the numbers `players` secretly chose earlier
+    /// in this resolution — "then all players reveal those numbers
+    /// simultaneously" (Wheel of Misfortune), "then you reveal the number you
+    /// chose" (The Toymaker's Trap), "Then those numbers are revealed" (Menacing
+    /// Ogre).
+    ///
+    /// Deliberately NOT a member of the `Reveal` / `RevealTop` / `RevealHand`
+    /// family: CR 701.20a defines revealing a CARD ("show that card to all
+    /// players"), and those effects are parameterized over zone, count and card
+    /// filter. A committed number is not a card and has none of those axes — it
+    /// is a per-player choice made during resolution (CR 608.2d), so it gets its
+    /// own publication channel rather than a card-reveal variant bent to fit.
+    ///
+    /// A player's chosen number is private until this effect names them: the
+    /// resolver calls
+    /// [`crate::types::player::Player::reveal_chosen_number`], which swaps that
+    /// player's [`ChosenAttribute::Number`] for
+    /// [`ChosenAttribute::RevealedNumber`]. `game::visibility` redacts the
+    /// former from every other viewer and leaves the latter public, so privacy
+    /// is a property of the attribute kind rather than of any separate flag.
+    /// Naming a player who chose no number is a legal no-op (CR 609.3), which is
+    /// what makes `players: All` correct for a card whose choosers were only a
+    /// subset of the table.
+    RevealChosenNumbers {
+        #[serde(default)]
+        players: PlayerFilter,
+    },
     /// CR 701.20a: Reveal the top N card(s) of a player's library.
     RevealTop {
         /// The player whose library to reveal from.
@@ -12609,14 +12855,43 @@ pub enum Effect {
         #[serde(default = "default_duration_until_end_of_turn")]
         duration: Duration,
     },
-    /// CR 508.1d: Target creature must attack the required player this turn/combat if able.
+    /// CR 508.1d + CR 506.3: The creatures matching `target` must attack the
+    /// required defender this turn/combat if able.
+    ///
+    /// `required_defender` is a `TargetFilter` because CR 506.3's defender
+    /// category ("a player, a planeswalker, or a battle") is already spanned by
+    /// that type — no second reference vocabulary is introduced. A filter that
+    /// denotes a PLAYER (`Controller`, a `ChosenPlayer` ref) grafts
+    /// `RequiredDefender::Fixed`; one that denotes an OBJECT (`SelfRef` — Gideon
+    /// Jura's "attack Gideon Jura if able") grafts `RequiredDefender::Permanent`.
+    /// `force_attack::resolve` is the single place that classifies it.
+    ///
+    /// `scope` is the single-vs-mass axis, exactly as on [`Effect::Transform`]
+    /// and [`Effect::SetTapState`] — parameterized rather than split into a
+    /// sibling `ForceAttackAll`. `Single` (the default, and every pre-Gideon-Jura
+    /// card) makes `target` a SELECTABLE target filter that surfaces a slot
+    /// ("Target creature attacks you this combat if able"). `All` makes it a
+    /// non-targeting POPULATION filter enumerated at resolution — Gideon Jura's
+    /// "creatures that player controls", which per CR 115.1 targets only the
+    /// opponent and never the creatures. `target_filter()` is `None` under `All`,
+    /// so no creature slot is built; the companion PLAYER slot still surfaces via
+    /// `mass_all_target_filter`.
+    ///
+    /// `serde`: pre-widening payloads named this field `required_player`, which
+    /// the alias below accepts; `scope` is absent from them and defaults to
+    /// `Single`, which is what every such payload meant.
     ForceAttack {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
-        #[serde(default = "default_target_filter_controller")]
-        required_player: TargetFilter,
+        #[serde(
+            default = "default_target_filter_controller",
+            alias = "required_player"
+        )]
+        required_defender: TargetFilter,
         #[serde(default = "default_duration_until_end_of_turn")]
         duration: Duration,
+        #[serde(default = "default_effect_scope_single")]
+        scope: EffectScope,
     },
     /// CR 719.2: Solve the source Case — it becomes solved.
     SolveCase,
@@ -15119,6 +15394,10 @@ impl TargetFilter {
                 | TargetFilter::SelfRef
                 | TargetFilter::SourceOrPaired
                 | TargetFilter::Controller
+                // CR 608.2h + CR 113.7a: "~'s controller" is resolved from
+                // the source's live-or-LKI incarnation, never chosen while
+                // announcing the ability.
+                | TargetFilter::SourceController
                 | TargetFilter::OriginalController
                 // CR 608.2c: the reanimator-Aura's pre-rebind source identity is
                 // resolved (concretized to SpecificObject) during resolution, never
@@ -15419,7 +15698,6 @@ impl Effect {
             | Effect::PhaseOut { target, .. }
             | Effect::PhaseIn { target, .. }
             | Effect::ForceBlock { target, .. }
-            | Effect::ForceAttack { target, .. }
             | Effect::BecomePrepared { target, .. }
             | Effect::BecomeUnprepared { target, .. }
             | Effect::BecomeSaddled { target, .. }
@@ -15643,6 +15921,23 @@ impl Effect {
                 ..
             } => None,
 
+            // CR 508.1d + CR 115.1: `ForceAttack` exposes its target only for the
+            // single-creature scope ("Target creature attacks you this combat if
+            // able"). The `All` scope is a non-targeting population enumerated at
+            // resolution — Gideon Jura's "creatures that player controls", whose
+            // only target is the opponent — so, like `Transform`/`SetTapState`
+            // above, its `target_filter()` is `None` and no creature slot or
+            // prompt is built.
+            Effect::ForceAttack {
+                scope: EffectScope::Single,
+                target,
+                ..
+            } => Some(target),
+            Effect::ForceAttack {
+                scope: EffectScope::All,
+                ..
+            } => None,
+
             // CR 701.60a: `Suspect`/`Unsuspect` expose a target slot only for the
             // single-permanent scope (targeted/anaphoric "suspect target
             // creature" / "it's no longer suspected"). The `All` scope ("all
@@ -15671,6 +15966,7 @@ impl Effect {
             Effect::StartYourEngines { .. }
             // CR 311.7: the chaos anchor swap is a non-targeting per-player effect.
             | Effect::SwapChosenLabels { .. }
+            | Effect::RevealChosenNumbers { .. }
             // CR 109.4: owner/type_filter are non-targeting resolution-time
             // filters; the copy source is chosen from the format pool, not
             // declared as a target.
@@ -16550,6 +16846,7 @@ impl Effect {
             | Effect::StartYourEngines { .. }
             | Effect::Suspect { .. }
             | Effect::SwapChosenLabels { .. }
+            | Effect::RevealChosenNumbers { .. }
             | Effect::SwitchPT { .. }
             | Effect::TakeTheInitiative
             | Effect::TargetOnly { .. }
@@ -17102,6 +17399,7 @@ impl Effect {
             | Effect::TargetOnly { .. }
             | Effect::Choose { .. }
             | Effect::SwapChosenLabels { .. }
+            | Effect::RevealChosenNumbers { .. }
             | Effect::ChooseDamageSource { .. }
             | Effect::Suspect { .. }
             | Effect::Unsuspect { .. }
@@ -17381,6 +17679,7 @@ impl Effect {
             | Effect::Cascade
             | Effect::Choose { .. }
             | Effect::SwapChosenLabels { .. }
+            | Effect::RevealChosenNumbers { .. }
             | Effect::ChooseAndSacrificeRest { .. }
             | Effect::EachPlayerCopyChosen { .. }
             | Effect::ChooseDamageSource { .. }
@@ -17643,6 +17942,7 @@ impl Effect {
             | Effect::Cascade
             | Effect::Choose { .. }
             | Effect::SwapChosenLabels { .. }
+            | Effect::RevealChosenNumbers { .. }
             | Effect::ChooseAndSacrificeRest { .. }
             | Effect::EachPlayerCopyChosen { .. }
             | Effect::ChooseDamageSource { .. }
@@ -17846,6 +18146,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Choose { .. } => "Choose",
         Effect::OpponentGuess { .. } => "OpponentGuess",
         Effect::SwapChosenLabels { .. } => "SwapChosenLabels",
+        Effect::RevealChosenNumbers { .. } => "RevealChosenNumbers",
         Effect::ChooseDamageSource { .. } => "ChooseDamageSource",
         Effect::Suspect { .. } => "Suspect",
         Effect::Unsuspect { .. } => "Unsuspect",
@@ -18361,6 +18662,10 @@ impl From<&Effect> for EffectKind {
             // CR 311.7: The chaos swap re-chooses each player's anchor, so it
             // reports as a `Choose`-kind resolution for event/AI purposes.
             Effect::SwapChosenLabels { .. } => EffectKind::Choose,
+            // CR 101.4: publishing a chosen number is a choice-ledger write,
+            // classified with the choice that produced it rather than with the
+            // CR 701.20 card reveals.
+            Effect::RevealChosenNumbers { .. } => EffectKind::Choose,
             Effect::ChooseDamageSource { .. } => EffectKind::ChooseDamageSource,
             Effect::Suspect { .. } => EffectKind::Suspect,
             Effect::Unsuspect { .. } => EffectKind::Unsuspect,
@@ -18960,8 +19265,13 @@ pub struct AbilityDefinition {
     pub optional_targeting: bool,
     /// CR 608.2d: When true, the controller chooses whether to perform this effect ("You may X").
     pub optional: bool,
+    /// CR 608.2d: Event-relative player named by an optional subject (for example,
+    /// "they may"). Unlike `optional_for` and `target_chooser`, this selects the
+    /// resolution-time optional actor; `None` uses this ability's controller.
+    pub optional_player: Option<TargetFilter>,
     /// CR 608.2d: When set, an opponent (not the controller) chooses whether to perform this
-    /// optional effect. Requires `optional: true`. Opponents are prompted in APNAP order.
+    /// optional effect. Unlike `optional_player` and `target_chooser`, this is an
+    /// any-opponent permission. Requires `optional: true`; prompts use APNAP order.
     pub optional_for: Option<OpponentMayScope>,
     /// Variable-count targeting: min/max targets the player can choose.
     /// When present, resolution enters MultiTargetSelection instead of immediate resolve.
@@ -19041,8 +19351,8 @@ pub struct AbilityDefinition {
     /// CR 601.2c + CR 603.3d: When set, this player (not the controller) announces
     /// this ability's target(s) at stack placement. `None` = controller chooses
     /// (default). Mirrors `target_selection_mode` (the same "by-whom are targets
-    /// selected" axis). Distinct from CR 608.2d resolution-time "of their choice"
-    /// sacrifices.
+    /// selected" axis). Unlike `optional_player` and `optional_for`, this is a
+    /// stack-placement target choice, not a resolution-time optional actor.
     pub target_chooser: Option<TargetFilter>,
     /// CR 608.2c + CR 107.1c: per-iteration loop-continuation predicate, the
     /// non-count companion to `repeat_for`. When `Some`, the resolution chain
@@ -19103,6 +19413,8 @@ struct AbilityDefinitionRepr<'a> {
     condition: &'a Option<AbilityCondition>,
     optional_targeting: bool,
     optional: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    optional_player: &'a Option<TargetFilter>,
     #[serde(skip_serializing_if = "Option::is_none")]
     optional_for: &'a Option<OpponentMayScope>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -19170,6 +19482,7 @@ impl Serialize for AbilityDefinition {
             condition,
             optional_targeting,
             optional,
+            optional_player,
             optional_for,
             multi_target,
             target_constraints,
@@ -19211,6 +19524,7 @@ impl Serialize for AbilityDefinition {
             condition,
             optional_targeting: *optional_targeting,
             optional: *optional,
+            optional_player,
             optional_for,
             multi_target,
             target_constraints,
@@ -19302,6 +19616,8 @@ struct AbilityDefinitionDe {
     #[serde(default)]
     optional: bool,
     #[serde(default)]
+    optional_player: Option<TargetFilter>,
+    #[serde(default)]
     optional_for: Option<OpponentMayScope>,
     #[serde(default)]
     multi_target: Option<MultiTargetSpec>,
@@ -19374,6 +19690,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             condition: de.condition,
             optional_targeting: de.optional_targeting,
             optional: de.optional,
+            optional_player: de.optional_player,
             optional_for: de.optional_for,
             multi_target: de.multi_target,
             target_constraints: de.target_constraints,
@@ -19570,6 +19887,7 @@ impl AbilityDefinition {
             condition: None,
             optional_targeting: false,
             optional: false,
+            optional_player: None,
             optional_for: None,
             multi_target: None,
             target_constraints: Vec::new(),
@@ -22178,6 +22496,65 @@ impl TriggerEntry {
     }
 }
 
+/// Classifies a persisted trigger list without inferring runtime provenance.
+/// A list is either wholly legacy payloads or wholly identity-bearing entries;
+/// a mixture cannot establish an exact occurrence mapping.
+pub(crate) fn legacy_trigger_entry_list(entries: &[TriggerEntry]) -> Result<bool, &'static str> {
+    let has_legacy = entries.iter().any(|entry| {
+        matches!(
+            entry.occurrence,
+            TriggerDefinitionOccurrenceRef::Unmaterialized
+        )
+    });
+    if has_legacy
+        && !entries.iter().all(|entry| {
+            matches!(
+                entry.occurrence,
+                TriggerDefinitionOccurrenceRef::Unmaterialized
+            )
+        })
+    {
+        return Err("legacy trigger list mixes payload-only and identity-bearing entries");
+    }
+    Ok(has_legacy)
+}
+
+/// Materializes a payload-only list only when an ordered printed base set proves
+/// every slot. Runtime copied and granted triggers have no equivalent proof.
+pub(crate) fn materialize_legacy_printed_trigger_entries(
+    entries: &mut Vec<TriggerEntry>,
+    base_definitions: &[TriggerDefinition],
+    base_set: TriggerBaseSetInstanceRef,
+) -> Result<(), &'static str> {
+    if !legacy_trigger_entry_list(entries)? {
+        return Ok(());
+    }
+    if base_definitions.is_empty()
+        || entries.len() != base_definitions.len()
+        || !entries
+            .iter()
+            .zip(base_definitions)
+            .all(|(entry, base)| entry.definition == *base)
+    {
+        return Err("legacy runtime trigger payload has no provable producer or base slot");
+    }
+    *entries = base_definitions
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(printed_index, definition)| {
+            TriggerEntry::new(
+                TriggerDefinitionOccurrenceRef::Printed {
+                    base_set,
+                    printed_index,
+                },
+                definition,
+            )
+        })
+        .collect();
+    Ok(())
+}
+
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum TriggerEntryWire {
@@ -22668,7 +23045,7 @@ pub struct StaticDefinition {
     pub source_controller: Option<crate::types::player::PlayerId>,
     /// CR 508.1d + CR 611.2c: The object that grafted this static onto its
     /// carrier (the ForceAttack/Encore/mass-coerce source for a
-    /// `MustAttackPlayer` requirement). Stamped at materialization from the
+    /// `MustAttackDefender` requirement). Stamped at materialization from the
     /// resolving continuous effect's `source_id`, but ONLY for static modes in
     /// the directing-source attribution class (see
     /// `static_mode_carries_directing_source` in game/layers.rs) — mirrors the
@@ -24455,6 +24832,9 @@ pub struct ResolvedAbility {
     /// CR 608.2d: Optional effect — controller prompted before execution.
     #[serde(default)]
     pub optional: bool,
+    /// CR 608.2d: Event-relative player explicitly named by an optional subject.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optional_player: Option<TargetFilter>,
     /// CR 608.2d: When set, an opponent chooses whether to perform this optional effect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub optional_for: Option<OpponentMayScope>,
@@ -24695,6 +25075,7 @@ impl ResolvedAbility {
             context: SpellContext::default(),
             optional_targeting: false,
             optional: false,
+            optional_player: None,
             optional_for: None,
             multi_target: None,
             target_constraints: Vec::new(),
@@ -26138,7 +26519,7 @@ mod tests {
             legacy,
             ChoiceType::NumberRange {
                 min: 1,
-                max: 5,
+                max: Some(5),
                 distinctness: NumberDistinctness::Repeatable,
             }
         );
@@ -26148,10 +26529,32 @@ mod tests {
             "Repeatable must not emit the distinctness field"
         );
 
+        // CR 107.1a/b: making `max` optional must not disturb the BOUNDED wire
+        // shape — the assertions above already prove `"max":5` both reads and
+        // writes unchanged, so existing card-data round-trips byte-identically.
+        // The UNBOUNDED form is the new shape: it omits the key entirely, and a
+        // payload with no `max` reads back as unbounded rather than defaulting to
+        // some ceiling.
+        let unbounded = ChoiceType::NumberRange {
+            min: 0,
+            max: None,
+            distinctness: NumberDistinctness::Repeatable,
+        };
+        assert_eq!(
+            serde_json::to_string(&unbounded).unwrap(),
+            r#"{"NumberRange":{"min":0}}"#,
+            "an unbounded range must omit max rather than emit a stand-in"
+        );
+        assert_eq!(
+            serde_json::from_str::<ChoiceType>(r#"{"NumberRange":{"min":0}}"#).unwrap(),
+            unbounded,
+            "a payload with no max is unbounded, not defaulted"
+        );
+
         // A DistinctFromSourceHistory value round-trips and emits the field.
         let distinct = ChoiceType::NumberRange {
             min: 1,
-            max: 5,
+            max: Some(5),
             distinctness: NumberDistinctness::DistinctFromSourceHistory,
         };
         let json = serde_json::to_string(&distinct).unwrap();

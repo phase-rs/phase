@@ -237,6 +237,7 @@ fn candidate_draws_structurally(ctx: &PolicyContext<'_>) -> bool {
         | GameAction::SelectTargets { .. }
         | GameAction::ChooseTarget { .. }
         | GameAction::ChooseReplacement { .. }
+        | GameAction::ChooseEntryController { .. }
         | GameAction::OrderTriggers { .. }
         | GameAction::CancelCast
         | GameAction::Equip { .. }

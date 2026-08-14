@@ -1078,6 +1078,7 @@ fn client_forbidden_draft_action_reason(action: &draft_core::types::DraftAction)
         }
         DraftAction::StartDraft
         | DraftAction::Pick { .. }
+        | DraftAction::PickWithDraftEffect { .. }
         | DraftAction::SubmitDeck { .. }
         | DraftAction::ReportMatchResult { .. }
         | DraftAction::AdvanceRound
@@ -9794,6 +9795,11 @@ mod handshake_tests {
             draft_core::types::DraftAction::Pick {
                 seat: 0,
                 card_instance_id: "x".into(),
+            },
+            draft_core::types::DraftAction::PickWithDraftEffect {
+                seat: 0,
+                effect_card_instance_id: "effect".into(),
+                card_instance_ids: vec!["x".into(), "y".into()],
             },
             draft_core::types::DraftAction::SubmitDeck {
                 seat: 0,

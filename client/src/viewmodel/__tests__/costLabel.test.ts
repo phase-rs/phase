@@ -443,6 +443,44 @@ describe("additionalCostChoices — repeatable additional cost", () => {
 });
 
 describe("formatAbilityCost", () => {
+  // CR 101.4: `QuantityRef::PlayerChosenNumber` renders the cross-player fold the
+  // engine supplies — "the highest number" for `Max`, "the lowest number" for
+  // `Min` — and falls back to the bare noun for a single-player scope, which
+  // carries no fold. All three go through the i18n boundary, so the assertions
+  // read the `en` catalog rather than frontend-authored literals.
+  it.each([
+    ["Max", "Pay the highest number life"],
+    ["Min", "Pay the lowest number life"],
+  ])("formats a chosen-number cost for the %s fold", (aggregate, expected) => {
+    expect(
+      formatAbilityCost({
+        type: "PayLife",
+        amount: {
+          type: "Ref",
+          qty: {
+            type: "PlayerChosenNumber",
+            player: { type: "AllPlayers", aggregate },
+          },
+        },
+      }),
+    ).toBe(expected);
+  });
+
+  it("falls back to the bare noun for a scoped chosen number", () => {
+    expect(
+      formatAbilityCost({
+        type: "PayLife",
+        amount: {
+          type: "Ref",
+          qty: {
+            type: "PlayerChosenNumber",
+            player: { type: "ScopedPlayer" },
+          },
+        },
+      }),
+    ).toBe("Pay the chosen number life");
+  });
+
   it("formats disjunctive activation cost branches", () => {
     expect(formatAbilityCost({
       type: "OneOf",

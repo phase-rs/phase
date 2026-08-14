@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { GameObject } from "../../adapter/types";
-import { formatCounterTooltip, toCardProps, toRoman } from "../cardProps";
+import { formatCounterTooltip, shouldRenderCardBack, toCardProps, toRoman } from "../cardProps";
 
 function makeGameObject(overrides: Partial<GameObject> = {}): GameObject {
   return {
@@ -126,6 +126,17 @@ describe("toCardProps", () => {
     expect(props.name).toBe("Face-down card");
     expect(props.power).toBe(3);
     expect(props.toughness).toBe(4);
+  });
+
+  it("uses the engine-projected identity for a face-down card the viewer may inspect", () => {
+    const obj = makeGameObject({
+      face_down: true,
+      display_visible_to_viewer: true,
+      name: "Hidden Sorcery",
+    });
+
+    expect(shouldRenderCardBack(obj)).toBe(false);
+    expect(toCardProps(obj).name).toBe("Hidden Sorcery");
   });
 
   it("detects creature and land types", () => {

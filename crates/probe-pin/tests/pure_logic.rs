@@ -1,6 +1,14 @@
 //! Tier 1 — §10 rows 3-13, 15-20, 22-31 and 33's non-ordering arms. Zero namespace
 //! dependency: nothing here runs `unshare`.
 //!
+//! Zero namespace dependency is not the same as host-portable. The arms that drive a real
+//! libtest child spawn GNU `timeout(1)` — the same binary the shipping isolation script
+//! resolves through `PATH` — which macOS does not ship. Those arms are `ignore`d off Linux
+//! rather than `cfg`'d out, on purpose: a compiled-out test is INVISIBLE in the report, and
+//! an unmeasured claim that reports as nothing is the same failure as one that reports as a
+//! pass. An ignored test reports as ignored — the vocabulary the Tier-2 `#[ignore]`s already
+//! use for "this venue cannot measure it".
+//!
 //! The `ppfixture_*` tests at the bottom are not assertions about probe-pin — they are the
 //! TARGETS the Tier-2 dogfood manifests and the child-process arms below drive. They are
 //! inert (or trivially passing) unless `PP_FIXTURE` selects them, so a plain
@@ -243,6 +251,10 @@ fn reserved_arg() {
 /// `RUST_MIN_STACK` value rescues it — the suite terminal record is what fires, and dropping
 /// the marker requirement would turn rc 134 into a `Verdict::Fail`.
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "spawns GNU timeout(1); see docs/probe-pin.md"
+)]
 fn harness() {
     for stack in ["", "1", "16777216", "268435456"] {
         let env: Vec<(&str, &str)> = if stack.is_empty() {
@@ -522,6 +534,10 @@ fn anchor_dup() {
 /// writes the resulting capture length to `PP_OUT`. Both a DROP (no clear) and a TRIVIALIZE
 /// (clear, then re-import everything) leak the ambient value into the innermost target.
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "spawns GNU timeout(1); see docs/probe-pin.md"
+)]
 fn env_hermetic() {
     let dir = tempfile::tempdir().unwrap();
     let measure = |name: &str, ambient: &[(&str, &str)]| -> usize {
@@ -573,6 +589,10 @@ fn env_hermetic() {
 /// so `"1"` (the TRIVIALIZE: a default that exists and is useless) is measurably different
 /// from the shipping default.
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "spawns GNU timeout(1); see docs/probe-pin.md"
+)]
 fn env_default() {
     let t: Target = toml::from_str(
         "mode='runtime-read'\npackage='p'\ntest='t'\nfilter='f'\nfilter_match='substring'",
@@ -1206,6 +1226,10 @@ fn output_file_must_be_workspace_relative() {
 /// Final review-impl, MINOR-5: `timeout_secs = 0` disables the guard instead of tightening it.
 /// The shell behaviour is MEASURED here, not argued — it is the whole reason for the refusal.
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "spawns GNU timeout(1); see docs/probe-pin.md"
+)]
 fn timeout_zero_is_refused() {
     let rc = |secs: &str, sleep: &str| {
         Command::new("timeout")
@@ -2287,6 +2311,10 @@ fn abort_texts_promise_only_measured_values() {
 /// ordering arm — the abort names the CONTROL and no probe runs — is
 /// `isolation_e2e::no_tests_selected_ordering`.
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "spawns GNU timeout(1); see docs/probe-pin.md"
+)]
 fn no_tests_selected() {
     let mut t = target();
     // arm 1: the shipping substring filter selects tests
@@ -2332,6 +2360,10 @@ fn no_tests_selected() {
 /// stay green forever; `--bench` is reachable through `[target].args`, which is why the argv
 /// shape check alone would not have closed it.
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "spawns GNU timeout(1); see docs/probe-pin.md"
+)]
 fn execution_floor_reads_what_executed() {
     let mut t = target();
     let obs = |run: &Run, t: &Target| verdict::observe("P0_control", run, t, &[]);
@@ -2408,6 +2440,10 @@ fn execution_floor_reads_what_executed() {
 /// `filter_match` and `[target].args` both reach libtest's own selection — the only place
 /// where a dead schema field would show. Measured against this binary's real test names.
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "spawns GNU timeout(1); see docs/probe-pin.md"
+)]
 fn argv_is_live() {
     let mut t = target();
     t.filter = "ppfixture".into();

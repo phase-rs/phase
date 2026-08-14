@@ -660,13 +660,22 @@ pub fn prune_until_next_turn_effects(state: &mut GameState, active_player: Playe
     // turn's own cleanup because that turn's untap step already passed before
     // the effect was created, so this is the controller's *next* turn.
     for e in state.transient_continuous_effects.iter_mut() {
-        if matches!(
-            e.duration,
+        // CR 514.2 + CR 109.4: the player whose next turn ends this effect. The
+        // `Controller` scope reads the effect's own controller ("until the end of
+        // YOUR next turn"); `SpecificPlayer` is the resolution-time snapshot a
+        // resolver installs when the window belongs to someone else — Gideon
+        // Jura's "During target opponent's next turn". Both arm identically once
+        // that player becomes the active player.
+        let armed_for = match e.duration {
             Duration::UntilEndOfNextTurnOf {
-                player: PlayerScope::Controller
-            }
-        ) && e.controller == active_player
-        {
+                player: PlayerScope::Controller,
+            } => Some(e.controller),
+            Duration::UntilEndOfNextTurnOf {
+                player: PlayerScope::SpecificPlayer { id },
+            } => Some(id),
+            _ => None,
+        };
+        if armed_for == Some(active_player) {
             e.duration = Duration::UntilEndOfTurn;
         }
     }
@@ -2832,6 +2841,7 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         // Per-turn bend-type tracking (Avatar Aang) — turn history, not a zone read.
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::ChosenNumber
+        | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::ColorsInCommandersColorIdentity
         | QuantityRef::CommanderCastFromCommandZoneCount
         | QuantityRef::ConvokedCreatureCount
@@ -3154,6 +3164,7 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
+        | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::SpellsCastLastTurn
@@ -3372,6 +3383,7 @@ fn target_filter_reads_life_total(filter: &TargetFilter) -> bool {
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::SourceController
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
@@ -6803,8 +6815,8 @@ fn static_mode_needs_source_controller_anchor(mode: &crate::types::statics::Stat
 
 /// CR 508.1d + CR 611.2c: True when a granted static mode belongs to the
 /// directing-source attribution class — modes whose consumers need to name
-/// the object that grafted the requirement (currently `MustAttackPlayer`,
-/// consumed by `combat::must_attack_player_directives_for_creature`). This
+/// the object that grafted the requirement (currently `MustAttackDefender`,
+/// consumed by `combat::must_attack_defender_directives_for_creature`). This
 /// gates the `source_object` stamp so ONLY these modes split into distinct
 /// defs per directing source; every other `AddStaticMode` mode keeps
 /// `source_object == None` and dedups unchanged (crew/keyword/evasion/…
@@ -6813,7 +6825,7 @@ fn static_mode_needs_source_controller_anchor(mode: &crate::types::statics::Stat
 /// match arm when a new consumer needs another mode's directing source.
 fn static_mode_carries_directing_source(mode: &crate::types::statics::StaticMode) -> bool {
     use crate::types::statics::StaticMode;
-    matches!(mode, StaticMode::MustAttackPlayer { .. })
+    matches!(mode, StaticMode::MustAttackDefender { .. })
 }
 
 /// CR 109.5: True when a `TargetFilter` constrains the controller of matched
@@ -8211,7 +8223,7 @@ fn apply_continuous_effect_filtered(
                 // CR 611.2c: stamp the directing object so combat / future
                 // attribution consumers can name the object that grafted this
                 // static (the ForceAttack / Encore / mass-coerce source for a
-                // MustAttackPlayer requirement). Gated on the attribution-class
+                // MustAttackDefender requirement). Gated on the attribution-class
                 // predicate so only those modes split per source; every other
                 // mode stays None and dedups unchanged (see the census in the
                 // plan / the crew-delta scoped-stamp guard test). Mirrors the
@@ -8591,6 +8603,69 @@ pub(crate) fn compute_current_copiable_values(
 
 #[cfg(test)]
 mod tests {
+
+    /// CR 514.2 + CR 109.4: `prune_until_next_turn_effects` arms an
+    /// `UntilEndOfNextTurnOf { SpecificPlayer }` effect on the SNAPSHOTTED
+    /// player's turn — not its controller's.
+    ///
+    /// This drives the arming function directly, which the Gideon integration
+    /// tests do not: they set `active_player` by hand and assert the INSTALLED
+    /// duration, so they would still pass if the prune never recognized the new
+    /// scope and the requirement silently never expired.
+    ///
+    /// The controller (P0) and the snapshotted player (P1) are deliberately
+    /// different — that difference is the whole reason the variant exists, and a
+    /// prune that keyed on `e.controller` would arm on the wrong turn and pass a
+    /// same-player fixture.
+    #[test]
+    fn until_end_of_next_turn_of_specific_player_arms_on_that_players_turn() {
+        fn armed_after_pruning(active: PlayerId) -> Duration {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                P0,
+                "Gideon Jura".to_string(),
+                Zone::Battlefield,
+            );
+            // Controller P0; the window belongs to P1.
+            state.add_transient_continuous_effect(
+                source,
+                P0,
+                Duration::UntilEndOfNextTurnOf {
+                    player: PlayerScope::SpecificPlayer { id: P1 },
+                },
+                TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::SpecificPlayer { id: P1 }),
+                ),
+                vec![ContinuousModification::AddStaticMode {
+                    mode: crate::types::statics::StaticMode::MustAttackDefender {
+                        defender: crate::types::statics::RequiredDefender::Fixed { player: P0 },
+                    },
+                }],
+                None,
+            );
+            prune_until_next_turn_effects(&mut state, active);
+            state.transient_continuous_effects[0].duration.clone()
+        }
+
+        // The CONTROLLER's turn must not arm it — the window is not theirs.
+        assert_eq!(
+            armed_after_pruning(P0),
+            Duration::UntilEndOfNextTurnOf {
+                player: PlayerScope::SpecificPlayer { id: P1 }
+            },
+            "the controller's untap step leaves a SpecificPlayer window un-armed"
+        );
+
+        // The SNAPSHOTTED player's turn arms it, so the existing cleanup-step
+        // prune ends it at that turn's cleanup (CR 514.2).
+        assert_eq!(
+            armed_after_pruning(P1),
+            Duration::UntilEndOfTurn,
+            "the snapshotted player's untap step arms the window"
+        );
+    }
     use super::*;
     use crate::game::elimination::eliminate_player;
     use crate::game::scenario::{GameScenario, P0, P1};

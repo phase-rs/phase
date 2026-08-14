@@ -2016,6 +2016,7 @@ fn card_name_choice_validates_against_all_card_names() {
     let mut state = GameState::new_two_player(42);
     state.all_card_names = vec!["Lightning Bolt".to_string(), "Counterspell".to_string()].into();
     state.waiting_for = WaitingFor::NamedChoice {
+        free_entry: None,
         player: PlayerId(0),
         choice_type: crate::types::ability::ChoiceType::CardName,
         options: Vec::new(),
@@ -2034,6 +2035,7 @@ fn card_name_choice_validates_against_all_card_names() {
 
     // Reset state for invalid test
     state.waiting_for = WaitingFor::NamedChoice {
+        free_entry: None,
         player: PlayerId(0),
         choice_type: crate::types::ability::ChoiceType::CardName,
         options: Vec::new(),
@@ -2056,6 +2058,7 @@ fn card_name_choice_is_case_insensitive() {
     let mut state = GameState::new_two_player(42);
     state.all_card_names = vec!["Lightning Bolt".to_string()].into();
     state.waiting_for = WaitingFor::NamedChoice {
+        free_entry: None,
         player: PlayerId(0),
         choice_type: crate::types::ability::ChoiceType::CardName,
         options: Vec::new(),
@@ -3508,6 +3511,7 @@ fn post_replacement_choose_sets_named_choice_waiting_for() {
     assert!(matches!(
         waiting_for,
         Some(WaitingFor::NamedChoice {
+            free_entry: None,
             choice_type: crate::types::ability::ChoiceType::BasicLandType,
             ..
         })
@@ -3531,6 +3535,7 @@ fn choose_option_with_exact_source_stores_chosen_attribute() {
 
     // Set up an exact-object prompt (simulating a persist=true Choose).
     state.waiting_for = WaitingFor::NamedChoice {
+        free_entry: None,
         player: PlayerId(0),
         choice_type: ChoiceType::color(),
         options: vec![
@@ -3607,6 +3612,7 @@ fn glacierwood_siege_resolution_prompts_for_anchor_word_choice() {
     assert!(state.battlefield.contains(&siege_id));
     match resolve.waiting_for {
         WaitingFor::NamedChoice {
+            free_entry: None,
             player,
             choice_type: crate::types::ability::ChoiceType::Labeled { ref options },
             source: Some(source),
@@ -3641,6 +3647,7 @@ fn restricted_color_choice_rejects_excluded_color() {
 
     let mut state = GameState::new_two_player(42);
     state.waiting_for = WaitingFor::NamedChoice {
+        free_entry: None,
         player: PlayerId(0),
         choice_type: ChoiceType::color_excluding(vec![ManaColor::White]),
         options: vec![
@@ -3909,6 +3916,7 @@ fn echoing_deeps_copying_sunken_citadel_prompts_for_the_copied_color_choice() {
     )
     .expect("Echoing Deeps should copy Sunken Citadel");
     let WaitingFor::NamedChoice {
+        free_entry: None,
         player,
         source: Some(source),
         options,

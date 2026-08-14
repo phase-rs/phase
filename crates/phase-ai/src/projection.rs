@@ -1218,6 +1218,7 @@ mod tests {
                 per_cycle: None,
             },
             schema: engine::analysis::decision_template::ShortcutDecisionSchema::default(),
+            declaration: None,
         };
 
         let (_actor, action, is_policy_choice, _successor) =

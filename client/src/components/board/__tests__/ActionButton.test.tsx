@@ -303,7 +303,7 @@ describe("ActionButton", () => {
         valid_attacker_ids: [100],
         valid_attack_targets: [target],
         valid_attack_targets_by_attacker: { "100": [target] },
-        attacker_constraints: { "100": { kind: "MustAttack", players: [] } },
+        attacker_constraints: { "100": { kind: "MustAttack", defenders: [] } },
       },
     };
     useGameStore.setState({

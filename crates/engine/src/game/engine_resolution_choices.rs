@@ -6126,6 +6126,14 @@ pub(super) fn handle_resolution_choice(
                 choice_type,
                 mut source,
                 persist_player,
+                // MUST stay a wildcard. The published contract is a projection of
+                // `choice_type`, and validation below consults that single
+                // authority directly (`accepts_free_entry_answer`) — so a client
+                // cannot widen its own domain by echoing back a different one.
+                // Binding this to a literal instead would make the arm miss every
+                // prompt that HAS a contract, i.e. every free-entry answer would
+                // fall through to "action not allowed".
+                free_entry: _,
             },
             GameAction::ChooseOption { choice },
         ) => {
@@ -6139,6 +6147,18 @@ pub(super) fn handle_resolution_choice(
                     return Err(EngineError::InvalidAction(format!(
                         "Invalid card name '{}'",
                         choice
+                    )));
+                }
+            } else if let Some(accepted) = choice_type.accepts_free_entry_answer(&choice) {
+                // CR 107.1a/b + CR 608.2d: a free-entry choice has no option list
+                // to check membership against, so it is validated by RULE instead
+                // — "a number 0 or greater" accepts any nonnegative integer the
+                // engine's `i32` quantity domain can represent. Routed through the
+                // shared authority on `ChoiceType` so the AI's legal-action
+                // enumeration cannot disagree with this seam about what is legal.
+                if !accepted {
+                    return Err(EngineError::InvalidAction(format!(
+                        "Invalid number '{choice}' for this choice"
                     )));
                 }
             } else if !options.contains(&choice) {
@@ -6171,6 +6191,11 @@ pub(super) fn handle_resolution_choice(
                 source.as_mut(),
                 persist_player,
             );
+            // CR 101.4 + CR 608.2d: additionally record a chosen NUMBER on the
+            // player who chose it, so a later clause can read every player's
+            // answer back ("the highest number", "each player who didn't choose
+            // the lowest number"). Additive to the source binding above.
+            effects::choose::record_player_chosen_number(state, player, &choice_type, &choice);
             if let Some(context) = updated_context {
                 if let Some(frame) = state.active_ability_continuation_frame_mut() {
                     frame
@@ -10094,6 +10119,7 @@ mod tests {
             Zone::Battlefield,
         );
         let waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(1),
             choice_type: ChoiceType::CardPredicateGuess {
                 options: ChoiceType::land_or_nonland_card_predicate_options(),
@@ -10145,6 +10171,7 @@ mod tests {
             Zone::Battlefield,
         );
         let waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(0),
             choice_type: ChoiceType::CardPredicate {
                 options: ChoiceType::land_or_nonland_card_predicate_options(),
@@ -10715,14 +10742,10 @@ mod tests {
         // EXIT-AXIS BINDING — the half the two assertions above cannot supply, because they compare
         // `possible_hold` against a transcription of itself. Counting unit and decomposition are the
         // ones stated on `BoundaryHold`: 4 control-flow statements = 1 push + 2 item-level non-push
-        // + 1 inner per-growth skip. Comment lines are stripped so prose ABOUT `continue`/`return`
-        // cannot inflate the count.
-        let code: String = boundary_apply_loop_region()
-            .lines()
-            .map(str::trim_start)
-            .filter(|line| !line.starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        // + 1 inner per-growth skip. `crate::source_census::code_lines` is the shared rule:
+        // whole-line AND trailing comment text removed, so prose ABOUT `continue`/`return`
+        // cannot inflate the count from either position.
+        let code: String = crate::source_census::code_lines(boundary_apply_loop_region());
         // The counters read raw text, and a string literal is not a comment, so one carrying the
         // word `break` (or a `?`) would be counted as control flow — a red no reader could act on.
         // There are none in the loop today; keep it that way, or teach the counters to skip them.

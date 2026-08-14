@@ -11,10 +11,10 @@ use crate::types::ability::{
     Comparator, ContinuousModification, ControllerRef, CopyChooseScope, CopyRetargetPermission,
     CountScope, DamageChannel, DamageModification, DamageSource, DelayedTriggerCondition,
     DiscardSelfScope, Duration, Effect, EffectScope, FilterProp, ManaContribution, ManaProduction,
-    ManaSpendPermission, ObjectScope, PerpetualModification, PlayerFilter, PlayerScope, PtStat,
-    PtValue, PtValueScope, QuantityExpr, QuantityRef, SeatDirection, SharedQuality,
-    SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter, TriggerCondition, TypeFilter,
-    TypedFilter, ZoneRef,
+    ManaSpendPermission, ModalChoice, ObjectScope, PerpetualModification, PlayerFilter,
+    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, SeatDirection,
+    SharedQuality, SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter,
+    TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -2472,6 +2472,100 @@ fn trigger_etb_subject_enters_untapped_attaches_negated_condition() {
             condition: Box::new(TriggerCondition::ZoneChangeObjectIsTapped)
         })
     );
+    let execute = def.execute.as_deref().expect("Charismatic execute ability");
+    assert!(execute.optional, "they may tap must remain optional");
+    assert_eq!(
+        execute.optional_player,
+        Some(TargetFilter::TriggeringPlayer),
+        "the parsed `they` subject, not the tap shape, names the optional actor"
+    );
+    assert!(matches!(
+        execute.effect.as_ref(),
+        Effect::SetTapState {
+            target: TargetFilter::TriggeringSource,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        }
+    ));
+    let decline = execute
+        .sub_ability
+        .as_deref()
+        .expect("decline token continuation");
+    assert_eq!(
+        decline.condition,
+        Some(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::effect_performed()),
+        }),
+        "the Vampire token must remain the optional tap's decline branch"
+    );
+}
+
+/// CR 608.2d: The controller's "you may" modal must not acquire the
+/// event-relative actor provenance reserved for an explicit "they may" subject.
+#[test]
+fn trigger_you_may_tap_does_not_stamp_triggering_player_as_optional_actor() {
+    let def = parse_trigger_line(
+        "Whenever a creature enters, you may tap that permanent.",
+        "Controller's Tap",
+    );
+    let execute = def.execute.as_deref().expect("execute ability");
+    assert!(execute.optional);
+    assert_eq!(execute.optional_player, None);
+}
+
+/// CR 603.4 + CR 608.2d: Actor provenance survives a supported intervening-if
+/// wrapper, so its `they may` body still prompts the player from the event.
+#[test]
+fn conditional_they_may_tap_stamps_triggering_player_as_optional_actor() {
+    let def = parse_trigger_line(
+        "Whenever a creature enters, if that creature is white, they may tap that permanent.",
+        "Conditional Tap",
+    );
+    let execute = def.execute.as_deref().expect("execute ability");
+    assert!(execute.optional);
+    assert_eq!(
+        execute.optional_player,
+        Some(TargetFilter::TriggeringPlayer)
+    );
+}
+
+/// CR 603.2 + CR 603.6 + CR 608.2k: Only a trigger's direct, untargeted
+/// "tap that permanent" instruction is rebound to the zone-change object.
+/// A reflexive selected tap and an untap anaphor retain their own referents.
+#[test]
+fn event_source_tap_lift_preserves_reflexive_and_untap_referents() {
+    fn first_tap(ability: &AbilityDefinition) -> Option<&Effect> {
+        if matches!(ability.effect.as_ref(), Effect::SetTapState { .. }) {
+            return Some(ability.effect.as_ref());
+        }
+        ability.sub_ability.as_deref().and_then(first_tap)
+    }
+
+    let snare = parse_trigger_line(
+        "When Snaremaster Sprite enters, you may pay {2}. When you do, tap target creature an opponent controls and put a stun counter on it.",
+        "Snaremaster Sprite",
+    );
+    assert!(matches!(
+        snare.execute.as_deref().and_then(first_tap),
+        Some(Effect::SetTapState {
+            target: TargetFilter::ParentTarget,
+            state: TapStateChange::Tap,
+            ..
+        })
+    ));
+
+    let howl = parse_trigger_line(
+        "When Howl of the Hunt enters, if enchanted creature is a Wolf or Werewolf, untap that creature.",
+        "Howl of the Hunt",
+    );
+    assert!(matches!(
+        howl.execute.as_deref().and_then(first_tap),
+        Some(Effect::SetTapState {
+            target: TargetFilter::ParentTarget,
+            state: TapStateChange::Untap,
+            ..
+        })
+    ));
 }
 
 // Guard: a bare "enters" (no tapped-state rider) must NOT attach a
@@ -12259,27 +12353,49 @@ fn self_etb_sacrifice_it_anaphor_binds_to_self_ref() {
     );
 }
 
+/// CR 701.9b + CR 118.12a: Balduvian Horde — "sacrifice it unless you discard a
+/// card at random". The clause is now fully supported, and this test tracks the
+/// third state it has been in.
+///
+/// Originally it asserted a `Chosen` discard: the clause lowered, but the payer
+/// got to pick, which made the printed cost strictly cheaper. It was then
+/// changed to assert `Unimplemented` — honest, but it dropped the card. Now the
+/// unless-payment resolver honors `CardSelectionMode::Random`
+/// (`effects::discard::discard_at_random`), so the clause lowers truthfully:
+/// a real unless-cost whose selection mode is `Random`.
+///
+/// `selection` is the load-bearing assertion. A `Chosen` here would be the
+/// original bug back again, and the test would still otherwise pass.
 #[test]
-fn trigger_unless_you_discard_a_card_at_random_preserves_unsupported_clause() {
-    // Balduvian Horde's random discard cannot be lowered as a player-chosen
-    // unless payment: the payment resolver currently ignores selection mode.
-    // Keep the entire clause visible as unsupported until it can honor random
-    // discard rather than silently changing the card's behavior.
+fn trigger_unless_you_discard_a_card_at_random_lowers_as_random_cost() {
     let def = parse_trigger_line(
         "When ~ enters, sacrifice it unless you discard a card at random.",
         "Balduvian Horde",
     );
-    assert!(
-        def.unless_pay.is_none(),
-        "random discard must not lower to a player-chosen unless payment"
-    );
-    let execute = def
-        .execute
+
+    let unless_pay = def
+        .unless_pay
         .as_ref()
-        .expect("should preserve the unsupported clause");
+        .expect("the random discard must lower to a real unless cost");
+    assert_eq!(unless_pay.payer, TargetFilter::Controller);
     assert!(
-        matches!(*execute.effect, Effect::Unimplemented { .. }),
-        "random-discard unless clause must remain visible as unimplemented, got {:?}",
+        matches!(
+            unless_pay.cost,
+            AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: None,
+                selection: CardSelectionMode::Random,
+                self_scope: DiscardSelfScope::FromHand
+            }
+        ),
+        "cost must be a one-card RANDOM discard, got {:?}",
+        unless_pay.cost
+    );
+
+    let execute = def.execute.as_ref().expect("should have execute");
+    assert!(
+        matches!(*execute.effect, Effect::Sacrifice { .. }),
+        "the unless-effect is the self-sacrifice, got {:?}",
         execute.effect
     );
 }
@@ -13561,18 +13677,80 @@ fn unless_discard_cost_phrase_rejects_zero_count() {
     );
 }
 
-/// CR 701.9b: random discard is distinct from a player-selected discard. Until
-/// the unless-payment resolver preserves `CardSelectionMode::Random`, this
-/// phrase must remain unsupported rather than being lowered dishonestly.
+/// CR 701.9b: random discard is distinct from a player-selected discard, and
+/// the phrase now lowers TRUTHFULLY as `CardSelectionMode::Random` instead of
+/// having to pick between two wrong answers. This test previously asserted the
+/// clause stayed unsupported — the right call only while the unless-payment
+/// resolver ignored `selection`. It now honors it
+/// (`effects::discard::discard_at_random`), so the honest lowering is the typed
+/// one. The mode must be `Random`, not `Chosen`, on BOTH payer forms, or a
+/// Balduvian Horde-class cost silently gets cheaper than printed.
 #[test]
-fn unless_discard_cost_phrase_rejects_random_discard() {
+fn unless_discard_cost_phrase_lowers_random_discard_as_random() {
+    let (they_cost, rest) =
+        parse_unless_they_discard_cost("a card at random").expect("the they form must lower");
     assert!(
-        parse_unless_they_discard_cost("a card at random").is_none(),
-        "the anaphoric-payer form must not lower random discard as chosen"
+        rest.trim().is_empty(),
+        "the whole branch should be consumed, left {rest:?}"
+    );
+    let you_cost =
+        parse_unless_alt_cost("you discard a card at random").expect("the you form must lower");
+    assert_eq!(
+        they_cost, you_cost,
+        "both payer forms must agree on the random tail"
     );
     assert!(
-        parse_unless_alt_cost("you discard a card at random").is_none(),
-        "the controller form must not lower random discard as chosen"
+        matches!(
+            they_cost,
+            AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: None,
+                selection: CardSelectionMode::Random,
+                ..
+            }
+        ),
+        "expected a one-card RANDOM discard, got {they_cost:?}"
+    );
+}
+
+/// The random tail must be FULLY consumed. A prefix match would swallow
+/// "at randomly" and "at random foo" and lower an unrecognized clause as a
+/// random discard, which is the coverage-dishonesty failure mode in the other
+/// direction — claiming support for text the grammar never understood.
+#[test]
+fn unless_discard_cost_phrase_rejects_partial_random_suffix() {
+    for tail in [
+        "a card at randomly",
+        "a card at random foo",
+        "a card atrandom",
+    ] {
+        assert!(
+            parse_unless_they_discard_cost(tail).is_none(),
+            "{tail:?} is not the random-discard grammar and must not lower"
+        );
+        assert!(
+            parse_unless_alt_cost(&format!("you discard {tail}")).is_none(),
+            "{tail:?} must not lower on the controller form either"
+        );
+    }
+}
+
+/// NO-REGRESSION twin: without an "at random" tail the discard stays
+/// player-chosen. Guards against the randomness axis leaking onto every
+/// unless-discard — which would make Court of Ambition pick for the opponent
+/// instead of letting them choose what to pitch.
+#[test]
+fn unless_discard_cost_phrase_without_random_tail_stays_chosen() {
+    let cost = parse_unless_alt_cost("you discard a card").expect("plain discard must lower");
+    assert!(
+        matches!(
+            cost,
+            AbilityCost::Discard {
+                selection: CardSelectionMode::Chosen,
+                ..
+            }
+        ),
+        "a plain discard must remain player-chosen, got {cost:?}"
     );
 }
 
@@ -28871,4 +29049,45 @@ fn synthetic_sentence_separated_mass_move_damage_keeps_event_context_amount() {
         } => {}
         other => panic!("expected DamageEachPlayer(EventContextAmount, Opponent), got {other:?}"),
     }
+}
+
+/// SHAPE — inline modal roots are independent of `sub_ability`, but a
+/// targetless top-level tap in each mode still refers to the zone-change event
+/// source. This pins the parser's event-source rewrite without widening it
+/// through an explicitly chosen target.
+#[test]
+fn event_source_lift_rewrites_inline_modal_tap_mode_roots() {
+    let mode = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::SetTapState {
+            target: TargetFilter::ParentTarget,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        },
+    );
+    let mut root = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::unimplemented("modal marker", "Choose one"),
+    )
+    .with_modal(
+        ModalChoice {
+            min_choices: 1,
+            max_choices: 1,
+            mode_count: 1,
+            mode_descriptions: vec!["Tap that permanent.".to_string()],
+            ..Default::default()
+        },
+        vec![mode],
+    );
+
+    lift_parent_target_to_triggering_source_in_ability(&mut root);
+
+    assert!(matches!(
+        root.mode_abilities[0].effect.as_ref(),
+        Effect::SetTapState {
+            target: TargetFilter::TriggeringSource,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        }
+    ));
 }

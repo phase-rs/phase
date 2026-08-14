@@ -2764,6 +2764,7 @@ fn ability_reads_last_created(def: &AbilityDefinition) -> bool {
             | TargetFilter::Any
             | TargetFilter::Player
             | TargetFilter::Controller
+            | TargetFilter::SourceController
             | TargetFilter::ControllerAndControlledPermanents { .. }
             | TargetFilter::Opponent
             | TargetFilter::SelfRef
@@ -4427,6 +4428,18 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
         return (Some(attr_scope), deconjugated);
     }
 
+    // CR 101.4 + CR 608.2d: "who [didn't] chose/choose the highest/lowest
+    // number" restricts the player set to those whose secretly-chosen number
+    // matches (or fails to match) the cross-player extremum — Wheel of
+    // Misfortune's "each player who didn't choose the lowest number discards
+    // their hand, then draws seven cards", Life at Stake's "each player who
+    // chose the highest number loses that much life". Sibling of the attribute
+    // clause above and consumed on the same terms.
+    if let Some((chosen_scope, after_clause)) = strip_chosen_number_clause(&scope, rest) {
+        let deconjugated = subject::deconjugate_verb(&after_clause);
+        return (Some(chosen_scope), deconjugated);
+    }
+
     // CR 608.2c + CR 109.5: A "who [verb]ed … this way" relative clause after
     // "each player" / "each opponent" restricts the affected set to the players
     // who performed the tracked action during THIS resolution (Kwain, Itinerant
@@ -4534,13 +4547,21 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
         );
     }
 
-    // CR 608.2c: A leading "also" after a resolved player-scope subject
-    // ("each opponent also discards a card") is a continuation adverb with no
-    // semantic weight — the same additive connector handled for self-ref
-    // subjects in `parse_effect_clause_inner`. Strip it via `tag()` so the
-    // residual ("discards a card") deconjugates and dispatches normally.
+    // CR 608.2c: A leading manner/continuation adverb after a resolved
+    // player-scope subject carries no AST weight — strip it via `tag()` so the
+    // residual deconjugates and dispatches normally.
+    //
+    // - "also" ("each opponent also discards a card") is the additive connector
+    //   also handled for self-ref subjects in `parse_effect_clause_inner`.
+    // - CR 101.4 + CR 608.2d: "secretly" (Wheel of Misfortune's "each player
+    //   secretly chooses a number 0 or greater"; Menacing Ogre's "each player
+    //   secretly chooses a number") marks the choice as hidden from the other
+    //   choosers. That is a VISIBILITY property, enforced at the state-filtering
+    //   seam (`game::visibility` keeps each player's `ChosenAttribute::Number`
+    //   private to that player), not a distinct effect — so the choice itself
+    //   parses exactly like an open one.
     let rest = nom_on_lower(rest, &rest_condition_lower, |i| {
-        value((), tag("also ")).parse(i)
+        value((), alt((tag("also "), tag("secretly ")))).parse(i)
     })
     .map(|((), after)| after)
     .unwrap_or(rest);
@@ -5085,6 +5106,139 @@ fn strip_player_attribute_clause(
     ))
 }
 
+/// CR 101.4 + CR 608.2d: a player-set restriction keyed on the number each
+/// player secretly chose during this resolution. Returns the comparator and the
+/// extremum to compare against:
+///
+/// - `"who chose the highest number"` → `(EQ, Max)` — Life at Stake.
+/// - `"who didn't choose the lowest number"` → `(NE, Min)` — Wheel of Misfortune.
+/// - `"with the highest number"` → `(EQ, Max)` — Menacing Ogre's participial form.
+/// - `"who chose that number"` → `(EQ, anaphor)` — Wheel of Misfortune's damage
+///   recipient, where "that number" refers back to the extremum the same clause
+///   already named as its amount.
+///
+/// Composed by axis (polarity × verb form × extremum), not enumerated as
+/// permutations, so a new phrasing on any one axis costs one `tag`. `anaphor`
+/// supplies the referent for "that number"; `None` disables that arm, which is
+/// correct wherever no extremum is in scope to anaphor back to.
+/// A trailing `" of "` disqualifies EVERY arm: "the highest number OF cards in
+/// hand" is a counting phrase over a population, not a reference to a chosen
+/// number. This is the same guard the quantity-side `parse_extreme_chosen_number_ref`
+/// carries — without it here, "choose an opponent with the highest number of
+/// cards in hand" binds a chosen-number comparison to a card that has no choice
+/// in it, the Custodi Peacekeeper failure one layer over.
+pub(crate) fn parse_chosen_number_restriction(
+    i: &str,
+    anaphor: Option<AggregateFunction>,
+) -> OracleResult<'_, (Comparator, AggregateFunction)> {
+    terminated(
+        parse_chosen_number_restriction_body(anaphor),
+        not(tag(" of ")),
+    )
+    .parse(i)
+}
+
+fn parse_chosen_number_restriction_body(
+    anaphor: Option<AggregateFunction>,
+) -> impl FnMut(&str) -> OracleResult<'_, (Comparator, AggregateFunction)> {
+    move |i: &str| {
+        alt((
+            map(
+                (
+                    tag("who "),
+                    alt((
+                        value(
+                            Comparator::NE,
+                            alt((tag("didn't "), tag("did not "), tag("doesn't "))),
+                        ),
+                        nom::combinator::success(Comparator::EQ),
+                    )),
+                    alt((tag("chose "), tag("chooses "), tag("choose "))),
+                    tag("the "),
+                    nom_quantity::parse_chosen_number_extremum,
+                    nom_quantity::parse_chosen_number_noun,
+                ),
+                |(_, comparator, _, _, aggregate, ())| (comparator, aggregate),
+            ),
+            map(
+                terminated(
+                    preceded(tag("with the "), nom_quantity::parse_chosen_number_extremum),
+                    nom_quantity::parse_chosen_number_noun,
+                ),
+                |aggregate| (Comparator::EQ, aggregate),
+            ),
+            nom::combinator::map_opt(
+                terminated(
+                    tag("who chose that"),
+                    nom_quantity::parse_chosen_number_noun,
+                ),
+                move |_| anaphor.map(|aggregate| (Comparator::EQ, aggregate)),
+            ),
+        ))
+        .parse(i)
+    }
+}
+
+/// CR 101.4 + CR 608.2d: the `PlayerFilter` selecting the players whose
+/// secretly-chosen number compares (under `comparator`) to the cross-player
+/// extremum of the same scalar.
+///
+/// Reuses the existing parameterized [`PlayerFilter::PlayerAttribute`] rather
+/// than minting a "chose the highest number" variant: the per-candidate scalar
+/// is [`QuantityRef::PlayerChosenNumber`] under `ScopedPlayer` (read off each
+/// candidate by `effects::candidate_player_scalar`), and the threshold is the
+/// same reference under `AllPlayers { aggregate }`. "Didn't choose the lowest"
+/// is therefore just `Comparator::NE` — no negation wrapper, no `AllExcept`.
+pub(crate) fn chosen_number_player_filter(
+    relation: crate::types::ability::PlayerRelation,
+    comparator: Comparator,
+    aggregate: AggregateFunction,
+) -> PlayerFilter {
+    use crate::types::ability::PlayerScope;
+    PlayerFilter::PlayerAttribute {
+        relation,
+        attr: Box::new(QuantityRef::PlayerChosenNumber {
+            player: PlayerScope::ScopedPlayer,
+        }),
+        comparator,
+        value: Box::new(QuantityExpr::Ref {
+            qty: QuantityRef::PlayerChosenNumber {
+                player: PlayerScope::AllPlayers {
+                    aggregate,
+                    exclude: None,
+                },
+            },
+        }),
+    }
+}
+
+/// CR 101.4 + CR 608.2d + CR 109.5: Strip a chosen-number relative clause after
+/// an "each player" / "each opponent" subject ("Each player who didn't choose
+/// the lowest number discards their hand"). Returns the narrowed scope and the
+/// verb-phrase remainder. Structural sibling of `strip_player_attribute_clause`:
+/// same `PlayerAttribute` shape, different per-candidate scalar. Like every
+/// relative clause in this dispatcher the clause MUST be consumed and reflected
+/// in the scope — dropping it would apply the effect to every player.
+fn strip_chosen_number_clause(base: &PlayerFilter, rest: &str) -> Option<(PlayerFilter, String)> {
+    use crate::types::ability::PlayerRelation;
+    let relation = match base {
+        PlayerFilter::Opponent => PlayerRelation::Opponent,
+        PlayerFilter::All => PlayerRelation::All,
+        _ => return None,
+    };
+    let lower = rest.to_lowercase();
+    let ((comparator, aggregate), remainder) =
+        nom_on_lower(rest, &lower, |i| parse_chosen_number_restriction(i, None))?;
+    let verb_phrase = remainder.trim_start();
+    if verb_phrase.is_empty() {
+        return None;
+    }
+    Some((
+        chosen_number_player_filter(relation, comparator, aggregate),
+        verb_phrase.to_string(),
+    ))
+}
+
 /// CR 608.2c + CR 109.5: Strip a "who [verb]ed … this way" relative clause after
 /// an "each opponent"/"each player" subject. Returns
 /// `PlayerFilter::PerformedActionThisWay` (carrying the base subject's relation
@@ -5227,6 +5381,52 @@ pub(crate) fn parse_damage_each_player_scope(text: &str) -> Option<PlayerFilter>
     rest.chars()
         .all(|c| c.is_ascii_whitespace() || c.is_ascii_punctuation())
         .then_some(filter)
+}
+
+/// CR 101.4 + CR 120.3 + CR 608.2d: an all-consuming damage-recipient scope
+/// narrowed by a chosen-number relative clause — "each player who chose that
+/// number" (Wheel of Misfortune), "each player who chose the highest number".
+///
+/// `anaphor` is the extremum the enclosing clause already named as its damage
+/// amount, which is what an anaphoric "that number" refers to; pass `None` where
+/// the amount is not a chosen-number extremum, and the anaphoric arm declines
+/// (so the clause falls through to the unnarrowed scopes instead of silently
+/// binding the wrong referent).
+fn parse_damage_each_chosen_number_scope(
+    text: &str,
+    anaphor: Option<AggregateFunction>,
+) -> Option<PlayerFilter> {
+    use crate::types::ability::PlayerRelation;
+    let (rest, base) = preceded(tag("each "), parse_damage_player_scope)
+        .parse(text)
+        .ok()?;
+    let relation = match base {
+        PlayerFilter::Opponent => PlayerRelation::Opponent,
+        PlayerFilter::All => PlayerRelation::All,
+        _ => return None,
+    };
+    let (rest, (comparator, aggregate)) =
+        preceded(multispace1, |i| parse_chosen_number_restriction(i, anaphor))
+            .parse(rest)
+            .ok()?;
+    rest.chars()
+        .all(|c| c.is_ascii_whitespace() || c.is_ascii_punctuation())
+        .then(|| chosen_number_player_filter(relation, comparator, aggregate))
+}
+
+/// CR 608.2c: the cross-player extremum a quantity names, when it is one. This
+/// is the referent an anaphoric "that number" in the same clause points back to
+/// — read off the already-parsed AST rather than re-matching Oracle text.
+fn chosen_number_extremum_of(amount: &QuantityExpr) -> Option<AggregateFunction> {
+    match amount {
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::PlayerChosenNumber {
+                    player: crate::types::ability::PlayerScope::AllPlayers { aggregate, .. },
+                },
+        } => Some(*aggregate),
+        _ => None,
+    }
 }
 
 /// CR 120.2b + CR 120.3 + CR 102.2: leading "each opponent/player/foe/other
@@ -6387,9 +6587,9 @@ fn strip_distribute_among_target_quantifier<'a>(
     strip_optional_target_prefix(text)
 }
 
-/// CR 115.1d: Strip optional target-count prefixes before a targeted phrase.
-/// "up to one target creature" → ("target creature", Some { min: 0, max: Some(1) })
-/// "up to one other target creature or spell" → ("other target creature or spell", Some { ... })
+/// Strip optional target-count prefixes before a targeted phrase.
+/// For spells, CR 115.1a + CR 115.6 + CR 601.2c: the caster announces
+/// zero through the stated maximum legal targets as the spell is cast.
 pub(crate) fn strip_optional_target_prefix(text: &str) -> (&str, Option<MultiTargetSpec>) {
     let lower = text.to_ascii_lowercase();
     let Ok((after_up_to, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(lower.as_str()) else {
@@ -7902,6 +8102,25 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                 rem,
             ));
         }
+        // CR 101.4 + CR 120.3: "… to each player who chose that number" (Wheel of
+        // Misfortune). The recipient set is keyed on the secretly-chosen numbers,
+        // and the anaphoric "that number" points back to the extremum THIS clause
+        // already named as its amount — resolved structurally from the parsed
+        // `amount`, never by re-reading the Oracle phrase. Tried before the plain
+        // each-player scope so the relative clause is consumed rather than left as
+        // a remainder that would widen the damage to every player.
+        if let Some(player_filter) = parse_damage_each_chosen_number_scope(
+            after_to_for_classification,
+            chosen_number_extremum_of(&amount),
+        ) {
+            return Some((
+                Effect::DamageEachPlayer {
+                    amount,
+                    player_filter,
+                },
+                "",
+            ));
+        }
         if let Some(player_filter) = parse_damage_each_player_scope(after_to_for_classification) {
             return Some((
                 Effect::DamageEachPlayer {
@@ -8054,6 +8273,10 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
         ));
     }
 
+    let (after_to, multi_target) = strip_optional_target_prefix(after_to);
+    if let Some(spec) = multi_target {
+        ctx.pending_damage_multi_target = Some(spec);
+    }
     let (target, rem) = parse_target_with_ctx(after_to, ctx);
     let (target, rem) = refine_damage_target_remainder(target, rem);
     let rem = trim_dangling_target_word(rem);
@@ -8197,6 +8420,17 @@ fn resolve_player_anaphor_damage_recipient(
     // them"), not just the subject verb forms handled in subject.rs.
     if let Some(filter) =
         super::subject::enchanted_player_anaphor_filter(ctx.relative_player_scope.as_ref())
+    {
+        return Some(filter);
+    }
+    // CR 608.2c + CR 109.4: "Choose an opponent …. ~ deals that much damage to
+    // them." — the recipient is the player the earlier `Choose(Player)` clause
+    // selected, carried on `relative_player_scope` across the sentence boundary.
+    // Same single-authority binding the subject-position "they" anaphor uses
+    // (`resolve_they_pronoun`), so both pronoun positions in this card class
+    // (Itazura, Lingering Wick; Gluntch, the Bestower) name the same player.
+    if let Some(filter) =
+        super::subject::chosen_player_anaphor_filter(ctx.relative_player_scope.as_ref())
     {
         return Some(filter);
     }

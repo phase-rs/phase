@@ -142,6 +142,8 @@ interface MultiplayerDraftActions {
   startDraft: (botFillEmptySeats?: boolean) => Promise<void>;
   /** Both: submit a pick. */
   submitPick: (cardInstanceId: string) => Promise<void>;
+  /** Both: submit a pick using a drafted card's draft-time effect. */
+  submitPickWithDraftEffect: (effectCardInstanceId: string, cardInstanceIds: string[]) => Promise<void>;
   /** Both: select a card (UI highlight before confirming pick). */
   selectCard: (cardInstanceId: string | null) => void;
   /** Both: confirm the currently selected card as pick. */
@@ -578,6 +580,20 @@ export const useMultiplayerDraftStore = create<
       set({ view, selectedCard: null });
     } else if (role === "guest" && activeGuestAdapter) {
       await activeGuestAdapter.submitPick(cardInstanceId);
+      set({ selectedCard: null });
+    }
+  },
+
+  submitPickWithDraftEffect: async (effectCardInstanceId, cardInstanceIds) => {
+    const { role } = get();
+    if (role === "host" && activeHostAdapter) {
+      const view = await activeHostAdapter.submitPickWithDraftEffect(
+        effectCardInstanceId,
+        cardInstanceIds,
+      );
+      set({ view, selectedCard: null });
+    } else if (role === "guest" && activeGuestAdapter) {
+      await activeGuestAdapter.submitPickWithDraftEffect(effectCardInstanceId, cardInstanceIds);
       set({ selectedCard: null });
     }
   },

@@ -1,7 +1,10 @@
 use std::collections::HashSet;
 
 use crate::types::events::GameEvent;
-use crate::types::game_state::{ActiveSearchDecisionAuthority, GameState, WaitingFor};
+use crate::types::game_state::{
+    ActiveSearchDecisionAuthority, CollectEvidenceResume, DeferredLifeCostResume, GameState,
+    PendingCast, PendingCostMoveResume, WaitingFor,
+};
 use crate::types::identifiers::ObjectIncarnationRef;
 use crate::types::match_config::MatchPhase;
 use crate::types::player::PlayerId;
@@ -11,6 +14,101 @@ use crate::types::resolved_commands::{
 use crate::types::zones::Zone;
 
 use super::players;
+
+/// CR 800.4a: A spell that has been announced but not yet cast can be parked in
+/// several replacement-aware cost continuations. Once its controller leaves,
+/// none may resume into finalization after the announcement stack entry has
+/// been removed.
+fn is_abandoned_spell(
+    state: &GameState,
+    departing_player: PlayerId,
+    spell_ids: &[crate::types::identifiers::ObjectId],
+    pending: &PendingCast,
+) -> bool {
+    pending.activation_ability_index.is_none()
+        && (spell_ids.contains(&pending.object_id)
+            || state
+                .objects
+                .get(&pending.object_id)
+                .is_some_and(|object| object.controller == departing_player))
+}
+
+fn abandon_pending_spell_casts(
+    state: &mut GameState,
+    departing_player: PlayerId,
+    spell_ids: &[crate::types::identifiers::ObjectId],
+) {
+    if state
+        .pending_cast
+        .as_ref()
+        .is_some_and(|pending| is_abandoned_spell(state, departing_player, spell_ids, pending))
+    {
+        state.pending_cast = None;
+    }
+
+    if state
+        .waiting_for
+        .pending_cast_ref()
+        .is_some_and(|pending| is_abandoned_spell(state, departing_player, spell_ids, pending))
+    {
+        state.waiting_for = WaitingFor::Priority {
+            player: state.active_player,
+        };
+    }
+
+    if matches!(
+        state.pending_deferred_life_cost_resume.as_ref(),
+        Some(DeferredLifeCostResume::Cast {
+            pending: Some(pending),
+            ..
+        }) if is_abandoned_spell(state, departing_player, spell_ids, pending)
+    ) {
+        state.pending_deferred_life_cost_resume = None;
+    }
+
+    if let Some(resume) = state.pending_cost_move_resume.take() {
+        let abandons_spell = match &resume {
+            PendingCostMoveResume::Cast {
+                pending: Some(pending),
+                ..
+            }
+            | PendingCostMoveResume::SacrificeForCost { pending, .. } => {
+                is_abandoned_spell(state, departing_player, spell_ids, pending)
+            }
+            PendingCostMoveResume::CollectEvidencePayment { resume, .. } => matches!(
+                resume.as_ref(),
+                CollectEvidenceResume::Casting { pending_cast, .. }
+                    if is_abandoned_spell(state, departing_player, spell_ids, pending_cast)
+            ),
+            PendingCostMoveResume::ActivationMillPayment { pending, .. } => {
+                is_abandoned_spell(state, departing_player, spell_ids, pending)
+            }
+            PendingCostMoveResume::Cast { pending: None, .. }
+            | PendingCostMoveResume::WardSacrificePayment { .. }
+            | PendingCostMoveResume::ReplacementMayCost { .. }
+            | PendingCostMoveResume::Foretell { .. }
+            | PendingCostMoveResume::DelveManaPayment { .. }
+            | PendingCostMoveResume::UnlessBouncePayment { .. }
+            | PendingCostMoveResume::ManaAbilityPayment { .. }
+            | PendingCostMoveResume::LoyaltyActivation { .. }
+            | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+            | PendingCostMoveResume::RandomDiscardUnlessPayment(..) => false,
+        };
+        if !abandons_spell {
+            state.pending_cost_move_resume = Some(resume);
+        }
+    }
+
+    if state
+        .pending_discard_for_cost
+        .as_ref()
+        .is_some_and(|resume| {
+            is_abandoned_spell(state, departing_player, spell_ids, &resume.pending)
+        })
+    {
+        state.pending_discard_for_cost = None;
+    }
+}
 
 /// Eliminate a player from the game per CR 800.4.
 ///
@@ -644,6 +742,10 @@ fn do_eliminate(
         .record_player_leave(command)
         .expect("resolved player leave must have a live journal cause");
 
+    // CR 800.4a + CR 616.1: Capture the parked replacement chooser before
+    // cast-abandonment teardown can replace its prompt with priority.
+    let leaving_is_latched_chooser = state.waiting_for.acting_player() == Some(player);
+
     abandon_source_bound_resolution_prompt(state, player);
     retire_pending_zone_change_contexts_owned_by(state, player);
     abandon_change_zone_family_for_controller(state, player);
@@ -656,18 +758,26 @@ fn do_eliminate(
     // one unjournalable mutation; removing by position instead records each
     // entry with the index it occupied at the moment IT was removed, so a replay
     // reproduces both the count and the surviving entries' relative order.
+    let mut abandoned_spell_ids = Vec::new();
     while let Some(idx) = state
         .stack
         .iter()
         .position(|entry| entry.controller == player)
     {
-        super::stack::remove_nonresolving_stack_entry_at(
+        let removed = super::stack::remove_nonresolving_stack_entry_at(
             state,
             idx,
             super::lifecycle::DelayedTerminalDisposition::Eliminated,
         )
         .expect("position yielded a live stack index");
+        if matches!(
+            removed.entry.kind,
+            crate::types::game_state::StackEntryKind::Spell { .. }
+        ) {
+            abandoned_spell_ids.push(removed.entry.id);
+        }
     }
+    abandon_pending_spell_casts(state, player, &abandoned_spell_ids);
 
     // CR 800.4a + CR 800.4b: A control-another-player effect (CR 723, e.g.
     // Mindslaver / Secret of Bloodbending) ends when EITHER party leaves the
@@ -804,7 +914,8 @@ fn do_eliminate(
     // `begin_pending_trigger_target_selection` (which gates on `pending_trigger`)
     // back into target selection for a dead entry id, panicking in
     // `mutate_pending_trigger_entry`. Clear the cursor only when the entry it
-    // tracks is no longer on the stack, mirroring the `pending_cast` cleanup below.
+    // tracks is no longer on the stack, mirroring the early
+    // `abandon_pending_spell_casts` teardown above.
     if state
         .pending_trigger_entry
         .is_some_and(|entry_id| !state.stack.iter().any(|entry| entry.id == entry_id))
@@ -818,24 +929,6 @@ fn do_eliminate(
         state.pending_trigger_entry = None;
         state.pending_trigger = None;
         state.pending_trigger_event_batch.clear();
-    }
-
-    // CR 800.4a: Abandon any not-yet-resolved cast this player controls. A spell
-    // paused mid-cast (e.g. a convoke spell awaiting `WaitingFor::ManaPayment`)
-    // is held in `state.pending_cast`, not as a stack entry, so the stack retain
-    // above does not clear it. Left behind, the in-progress cast lingers in the
-    // GameState after the player leaves — and because the WASM engine is a
-    // singleton reused across games, it can resurface as a stuck mana-payment
-    // window in a later game. Only clear a pending cast the *leaving* player
-    // controls; another living player's mid-cast must survive an opponent's
-    // departure, so key off the spell object's controller (the caster).
-    if state
-        .pending_cast
-        .as_ref()
-        .and_then(|pc| state.objects.get(&pc.object_id))
-        .is_some_and(|obj| obj.controller == player)
-    {
-        state.pending_cast = None;
     }
 
     // CR 800.4a + CR 616.1 + CR 704.4: Abandon a parked replacement choice this
@@ -852,9 +945,9 @@ fn do_eliminate(
     // Key off the LATCHED chooser identity, not the mutating object graph:
     // `waiting_for.acting_player()` is the affected player for both
     // `ReplacementChoice{player}` (game_state.rs) and a MayCost sub-choice re-park
-    // (payer == affected, replacement.rs), and `do_eliminate` never mutates
-    // `waiting_for` (the rewrite runs after the loop), so this key is CONSTANT
-    // across a simultaneous multi-elimination batch and object-graph-independent.
+    // (payer == affected, replacement.rs). The identity was captured before
+    // teardown can mutate `waiting_for`, so it remains constant across a
+    // simultaneous multi-elimination batch and object-graph-independent.
     // (`ProposedEvent::affected_player` would mis-resolve here: once a co-eliminated
     // lower-id loser has exiled the affected object, its effective controller is
     // reverted to its owner — CR 616.1's owner-fallback is pre-existing and NOT
@@ -871,7 +964,6 @@ fn do_eliminate(
     // remaining players (not field-nulling), tracked as a separate follow-up. This
     // fix deliberately addresses only the CR 704.4 SBA-freeze introduced by the
     // `pending_replacement` guard.
-    let leaving_is_latched_chooser = state.waiting_for.acting_player() == Some(player);
     // CR 800.4a: Tear down choices and continuations owned by the leaving player.
     // CR 616.1: SearchFound owns an outer per-card batch, and a replacement-
     // selected zone move may own a nested batch completion. The
@@ -905,7 +997,7 @@ fn do_eliminate(
     // `pending_replacement` (nested `ContinueZoneDeliveryTail` early-return,
     // engine_replacement.rs), so it is torn down under its OWN controller-keyed
     // guard — cleared only for the LEAVING player's own resolution (mirroring the
-    // `pending_cast` controller key above) so a living player's paused resolution
+    // cast-abandonment controller key above) so a living player's paused resolution
     // survives an opponent's departure.
     if state
         .active_spell_resolution()
@@ -1088,6 +1180,7 @@ fn retire_pending_zone_change_contexts_owned_by(state: &mut GameState, player: P
 fn abandon_source_bound_resolution_prompt(state: &mut GameState, player: PlayerId) {
     let abandon = match &state.waiting_for {
         WaitingFor::NamedChoice {
+            free_entry: None,
             player: chooser,
             source,
             persist_player,
@@ -1249,8 +1342,10 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        Effect, EffectKind, PostReplacementContinuation, ResolvedAbility, TargetRef,
+        Effect, EffectKind, PostReplacementContinuation, ReplacementDefinition, ReplacementMode,
+        ResolvedAbility, TargetRef,
     };
+    use crate::types::actions::GameAction;
     use crate::types::counter::CounterType;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
@@ -1262,6 +1357,7 @@ mod tests {
     use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
     use crate::types::mana::ManaCost;
     use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
+    use crate::types::replacements::ReplacementEvent;
 
     fn setup_two_player() -> GameState {
         let mut state = GameState::new_two_player(42);
@@ -1712,6 +1808,7 @@ mod tests {
         );
         let context = source_context(&state, source);
         state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(1),
             choice_type: crate::types::ability::ChoiceType::Labeled {
                 options: vec!["chosen".to_string()],
@@ -1751,6 +1848,7 @@ mod tests {
     fn leaving_persisted_named_choice_player_abandons_the_whole_family() {
         let mut state = setup_three_player();
         state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(0),
             choice_type: crate::types::ability::ChoiceType::Labeled {
                 options: vec!["chosen".to_string()],
@@ -2326,6 +2424,110 @@ mod tests {
         assert!(
             state.pending_cast.is_some(),
             "an opponent leaving must not abandon the caster's in-progress spell"
+        );
+    }
+
+    #[test]
+    fn elimination_abandons_deferred_life_cast_and_preserves_living_replacement() {
+        // CR 104.3a + CR 800.4a: a player may concede during a paused life-cost
+        // continuation. The announcement leaves the stack at departure, so the
+        // deferred cast must be retired rather than resumed into finalization.
+        let mut state = setup_three_player();
+        let discarded = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(2),
+            "Replacement-prompt discard".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&discarded)
+            .expect("discarded card exists")
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::Discard)
+                    .valid_card(crate::types::ability::TargetFilter::SelfRef)
+                    .mode(ReplacementMode::Optional { decline: None }),
+            );
+        let mut setup_events = Vec::new();
+        assert!(matches!(
+            crate::game::replacement::replace_event(
+                &mut state,
+                ProposedEvent::Discard {
+                    player_id: PlayerId(2),
+                    object_id: discarded,
+                    source_id: None,
+                    caused_by_effect: false,
+                    discard_frame: None,
+                    applied: HashSet::new(),
+                },
+                &mut setup_events,
+            ),
+            crate::game::replacement::ReplacementResult::NeedsChoice(PlayerId(2))
+        ));
+        crate::game::replacement::park_waiting_for(&mut state, PlayerId(2));
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice {
+                player: PlayerId(2),
+                ..
+            }
+        ));
+
+        let leaving_spell = stash_pending_cast(&mut state, PlayerId(1));
+        let leaving_pending = state.pending_cast.take().expect("test cast exists");
+        state.stack.push_back(StackEntry {
+            id: leaving_spell,
+            source_id: leaving_spell,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(99),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        state.pending_deferred_life_cost_resume = Some(DeferredLifeCostResume::Cast {
+            player: PlayerId(1),
+            pending: Some(leaving_pending),
+            remaining_life_payments: vec![],
+            resume_at_resolution_depth: 0,
+        });
+        let result = super::super::engine::apply_as_current(
+            &mut state,
+            GameAction::Concede {
+                player_id: PlayerId(1),
+            },
+        )
+        .expect("a player may concede during a paused cast");
+
+        assert!(
+            state.pending_deferred_life_cost_resume.is_none(),
+            "a departed caster's deferred life-payment continuation must not resume"
+        );
+        assert!(
+            !state.stack.iter().any(|entry| entry.id == leaving_spell),
+            "the departed caster's announced spell leaves the stack"
+        );
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::ReplacementChoice {
+                player: PlayerId(2),
+                ..
+            }
+        ));
+        let resolved = super::super::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseReplacement { index: 1 },
+        )
+        .expect("the living player's replacement choice must not resume the abandoned cast");
+        assert!(
+            !resolved
+                .events
+                .iter()
+                .any(|event| matches!(event, GameEvent::SpellCast { object_id, .. } if *object_id == leaving_spell)),
+            "answering the living player's replacement choice must not cast the departed player's spell"
         );
     }
 

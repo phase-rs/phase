@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { WasmAdapter } from "../wasm-adapter";
+import { WasmAdapter, getHostAdapter, getSharedAdapter } from "../wasm-adapter";
 import { EngineWorkerClient } from "../engine-worker-client";
 import type {
   AiActionProposal,
@@ -57,6 +57,9 @@ const mockWorkerClient = {
   exportState: vi.fn().mockResolvedValue("{}"),
   restoreState: vi.fn().mockResolvedValue(undefined),
   resumeMultiplayerHostState: vi.fn().mockResolvedValue(undefined),
+  setMultiplayerMode: vi.fn().mockResolvedValue(undefined),
+  resetGame: vi.fn().mockResolvedValue(undefined),
+  applySeatMutation: vi.fn().mockResolvedValue({ state: {}, delta: {} }),
   ping: vi.fn().mockResolvedValue("phase-rs engine ready"),
   takeLastPanic: vi.fn().mockResolvedValue(null),
   dispose: vi.fn(),
@@ -647,6 +650,23 @@ describe("WasmAdapter", () => {
     });
   });
 
+  describe("applySeatMutation", () => {
+    it("does not load the card database", async () => {
+      await adapter.initialize();
+
+      const mutation = JSON.stringify({ type: "AddAiSeat", difficulty: "Medium" });
+      await adapter.applySeatMutation("{}", mutation);
+
+      expect(mockWorkerClient.applySeatMutation).toHaveBeenCalledWith("{}", mutation);
+      // Seat mutations are a pure reducer over the passed-in seat state plus the
+      // static starter-deck table; the engine re-resolves against CARD_DB at
+      // `initializeGame`. Warming it here would put a second full card database
+      // in memory for every lobby seat change.
+      expect(mockWorkerClient.loadCardDbFromUrl).not.toHaveBeenCalled();
+      expect(adapter.cardDbLoaded).toBe(false);
+    });
+  });
+
   describe("initializeGame", () => {
     it("delegates to worker client with seed", async () => {
       await adapter.initialize();
@@ -671,5 +691,98 @@ describe("WasmAdapter", () => {
       await adapter.initialize();
       expect(adapter.getEngineClient()).toBe(mockWorkerClient);
     });
+  });
+
+});
+
+/**
+ * The device predicate is module-private and reads `navigator` on every call,
+ * so both branches are driven here by redefining the properties it reads (same
+ * technique as `PermanentCard.test.tsx`). Without this, the shared-engine path
+ * would only ever run on the devices we cannot test.
+ */
+describe("getHostAdapter", () => {
+  const realUserAgent = navigator.userAgent;
+
+  function setMemoryConstrained(constrained: boolean): void {
+    Object.defineProperty(navigator, "userAgent", {
+      configurable: true,
+      value: constrained
+        ? "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15"
+        : realUserAgent,
+    });
+    Object.defineProperty(navigator, "maxTouchPoints", { configurable: true, value: 0 });
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    setMemoryConstrained(false);
+    // `dispose()` nulls the singleton, so a leaked shared adapter cannot
+    // cross-talk into the next test.
+    getSharedAdapter().dispose();
+  });
+
+  it("hands the host the tab's shared engine on a memory-constrained device", () => {
+    setMemoryConstrained(true);
+    expect(getHostAdapter()).toBe(getSharedAdapter());
+  });
+
+  it("gives the host its own engine everywhere else", () => {
+    setMemoryConstrained(false);
+    const host = getHostAdapter();
+    expect(host).not.toBe(getSharedAdapter());
+    host.dispose();
+  });
+});
+
+describe("releaseHostSession", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    getSharedAdapter().dispose();
+  });
+
+  it("keeps the shared worker and its card database, clearing only what the host installed", async () => {
+    const shared = getSharedAdapter();
+    await shared.warmCardDatabase();
+    expect(shared.cardDbLoaded).toBe(true);
+
+    await shared.releaseHostSession(true);
+
+    expect(getSharedAdapter()).toBe(shared);
+    expect(shared.cardDbLoaded).toBe(true);
+    expect(mockWorkerClient.dispose).not.toHaveBeenCalled();
+    expect(mockWorkerClient.setMultiplayerMode).toHaveBeenCalledWith(false);
+    expect(mockWorkerClient.resetGame).toHaveBeenCalledOnce();
+    expect(mockWorkerClient.setMultiplayerMode.mock.invocationCallOrder[0])
+      .toBeLessThan(mockWorkerClient.resetGame.mock.invocationCallOrder[0]);
+  });
+
+  it("leaves the shared engine completely untouched when the host never claimed it", async () => {
+    const shared = getSharedAdapter();
+    await shared.initialize();
+
+    await shared.releaseHostSession(false);
+
+    expect(mockWorkerClient.setMultiplayerMode).not.toHaveBeenCalled();
+    expect(mockWorkerClient.resetGame).not.toHaveBeenCalled();
+    expect(mockWorkerClient.dispose).not.toHaveBeenCalled();
+  });
+
+  it("disposes a private host engine outright, as teardown always did", async () => {
+    const host = new WasmAdapter();
+    await host.initialize();
+
+    await host.releaseHostSession(true);
+
+    expect(mockWorkerClient.dispose).toHaveBeenCalledOnce();
+    await expect(host.getState()).rejects.toThrow(AdapterError);
+    // A private release must never post the shared engine's flag clear.
+    expect(mockWorkerClient.setMultiplayerMode).not.toHaveBeenCalled();
   });
 });

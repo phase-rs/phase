@@ -1,7 +1,7 @@
 //! CR 508.1d + CR 611.2c: true directing-carrier attribution for grafted
-//! `MustAttackPlayer` combat requirements.
+//! `MustAttackDefender` combat requirements.
 //!
-//! A `MustAttackPlayer` requirement is never an intrinsic printed static — it is
+//! A `MustAttackDefender` requirement is never an intrinsic printed static — it is
 //! always grafted onto its carrier creature by a directing object (an
 //! `Effect::ForceAttack` / `Encore` / mass-coerce source) through an
 //! `AddStaticMode` transient continuous effect. Before this change the combat
@@ -20,7 +20,7 @@
 use std::sync::Arc;
 
 use engine::game::combat::{
-    attacker_constraints_for_active_player, get_valid_attacker_ids, CombatRequirement,
+    attacker_constraints_for_active_player, get_valid_attacker_ids, AttackTarget, CombatRequirement,
 };
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -31,7 +31,7 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::statics::{CrewAction, CrewContributionKind, StaticMode};
 
-/// Graft a `MustAttackPlayer { player }` requirement onto `creature` from the
+/// Graft a `MustAttackDefender { player }` requirement onto `creature` from the
 /// directing object `source`, exactly as `Effect::ForceAttack` resolves it. The
 /// stamp reads `effect.source_id` (= `source`), so the materialized static gains
 /// `source_object == Some(source)`.
@@ -47,8 +47,8 @@ fn graft_must_attack_player(
         Duration::UntilEndOfCombat,
         TargetFilter::SpecificObject { id: creature },
         vec![ContinuousModification::AddStaticMode {
-            mode: StaticMode::MustAttackPlayer {
-                player: player.into(),
+            mode: StaticMode::MustAttackDefender {
+                defender: player.into(),
             },
         }],
         None,
@@ -68,7 +68,7 @@ fn refresh(runner: &mut GameRunner) {
     evaluate_layers(runner.state_mut());
 }
 
-/// 7.1a — a grafted `MustAttackPlayer` requirement attributes the DIRECTING
+/// 7.1a — a grafted `MustAttackDefender` requirement attributes the DIRECTING
 /// object, not the creature. REVERT-FAIL: without the `source_object` stamp in
 /// `layers.rs` (or the carrier threading in `combat.rs`), the carrier falls back
 /// to the creature, so `sources == [creature]` and both the `contains(source)`
@@ -92,14 +92,18 @@ fn grafted_must_attack_player_attributes_directing_source() {
     );
 
     let constraints = attacker_constraints_for_active_player(runner.state(), &valid);
-    let Some(CombatRequirement::MustAttack { players, sources }) = constraints.get(&creature)
+    let Some(CombatRequirement::MustAttack { defenders, sources }) = constraints.get(&creature)
     else {
         panic!(
             "expected a MustAttack requirement for the forced creature, got {:?}",
             constraints.get(&creature)
         );
     };
-    assert_eq!(players, &vec![P1], "the required defending player surfaces");
+    assert_eq!(
+        defenders,
+        &vec![AttackTarget::Player(P1)],
+        "the required defending player surfaces"
+    );
     assert!(
         sources.contains(&source),
         "the directing object is attributed as the requirement source"
@@ -108,11 +112,11 @@ fn grafted_must_attack_player_attributes_directing_source() {
         !sources.contains(&creature),
         "the creature itself is NOT the source — the stamp fired (this is the whole change)"
     );
-    // 7.4 drift pin: for the single attackable directive, its player is in
-    // `players` iff its carrier is in `sources` (one scan feeds both).
+    // 7.4 drift pin: for the single attackable directive, its defender is in
+    // `defenders` iff its carrier is in `sources` (one scan feeds both).
     assert!(
-        players.contains(&P1) == sources.contains(&source),
-        "players and sources derive from one scan — no drift"
+        defenders.contains(&AttackTarget::Player(P1)) == sources.contains(&source),
+        "defenders and sources derive from one scan — no drift"
     );
 }
 
@@ -140,7 +144,7 @@ fn generic_must_attack_attributes_the_creature_itself() {
     assert_eq!(
         constraints.get(&creature),
         Some(&CombatRequirement::MustAttack {
-            players: vec![],
+            defenders: vec![],
             sources: vec![creature],
         }),
         "a generic must-attack creature is its own source (carrier fallback)"
@@ -149,7 +153,7 @@ fn generic_must_attack_attributes_the_creature_itself() {
 
 /// 7.1c — two distinct directing sources forcing the SAME creature to attack the
 /// SAME player retain BOTH ids in `sources` (full-def dedup keeps both because
-/// their `source_object` differs), while `players` deduplicates to one entry.
+/// their `source_object` differs), while `defenders` deduplicates to one entry.
 /// REVERT-FAIL: without per-source `source_object`, the two grafts collapse to
 /// one def and `sources` carries a single (creature-fallback) id.
 #[test]
@@ -168,7 +172,7 @@ fn two_sources_forcing_same_player_surface_both_and_dedup_players() {
 
     let valid = get_valid_attacker_ids(runner.state());
     let constraints = attacker_constraints_for_active_player(runner.state(), &valid);
-    let Some(CombatRequirement::MustAttack { players, sources }) = constraints.get(&creature)
+    let Some(CombatRequirement::MustAttack { defenders, sources }) = constraints.get(&creature)
     else {
         panic!("expected MustAttack, got {:?}", constraints.get(&creature));
     };
@@ -177,15 +181,15 @@ fn two_sources_forcing_same_player_surface_both_and_dedup_players() {
         "both directing sources are attributed ({sources:?})"
     );
     assert_eq!(
-        players,
-        &vec![P1],
-        "the multi-source multiplicity lives in `sources`, not `players` (deduped set)"
+        defenders,
+        &vec![AttackTarget::Player(P1)],
+        "the multi-source multiplicity lives in `sources`, not `defenders` (deduped set)"
     );
     // 7.4 drift pin for the multi-source case.
     for src in [s1, s2] {
         assert!(
-            players.contains(&P1) == sources.contains(&src),
-            "each attackable directive's player∈players iff its carrier∈sources"
+            defenders.contains(&AttackTarget::Player(P1)) == sources.contains(&src),
+            "each attackable directive's defender∈defenders iff its carrier∈sources"
         );
     }
 }
@@ -213,14 +217,18 @@ fn departed_directing_source_id_is_surfaced_without_panic() {
 
     let valid = get_valid_attacker_ids(runner.state());
     let constraints = attacker_constraints_for_active_player(runner.state(), &valid);
-    let Some(CombatRequirement::MustAttack { players, sources }) = constraints.get(&creature)
+    let Some(CombatRequirement::MustAttack { defenders, sources }) = constraints.get(&creature)
     else {
         panic!(
             "the requirement must persist after the source departs (CR 611.2c), got {:?}",
             constraints.get(&creature)
         );
     };
-    assert_eq!(players, &vec![P1], "the requirement persists");
+    assert_eq!(
+        defenders,
+        &vec![AttackTarget::Player(P1)],
+        "the requirement persists"
+    );
     assert!(
         sources.contains(&source),
         "the departed directing id is still surfaced (no panic, no silent drop)"
@@ -233,7 +241,7 @@ fn departed_directing_source_id_is_surfaced_without_panic() {
 /// crew math is byte-identical to today (`base + 1`, NOT `base + 2`). REVERT-FAIL:
 /// an UNCONDITIONAL stamp (dropping the `static_mode_carries_directing_source`
 /// gate) splits the two crew grafts and yields `base + 2`. Discriminating
-/// positive: the same two-source pattern with `MustAttackPlayer` (7.1c) DOES
+/// positive: the same two-source pattern with `MustAttackDefender` (7.1c) DOES
 /// split — together they prove the gate splits attribution modes and only those.
 #[test]
 fn source_object_stamp_scoped_to_attribution_modes() {
@@ -285,8 +293,8 @@ fn static_definition_source_object_serde_default() {
     assert_eq!(decoded.source_object, None);
 
     // A stamped value round-trips.
-    let stamped = StaticDefinition::new(StaticMode::MustAttackPlayer {
-        player: PlayerId(1).into(),
+    let stamped = StaticDefinition::new(StaticMode::MustAttackDefender {
+        defender: PlayerId(1).into(),
     })
     .source_object(ObjectId(7));
     let round: StaticDefinition =

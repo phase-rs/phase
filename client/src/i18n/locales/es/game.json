@@ -20,6 +20,11 @@
     "fixedCount_other": "Repeat at most {{count}} times.",
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
     "convokeInfo_other": "Auto-taps up to {{count}} creatures for convoke each iteration.",
+    "countAria": "Number of iterations",
+    "previewTitle_one": "Repeating once produces:",
+    "previewTitle_other": "Repeating {{count}} times produces:",
+    "previewEntry": "{{amount}} {{resource}}",
+    "previewEntryPlayer": "{{amount}} {{resource}} — {{player}}",
     "winKind": {
       "LethalDamage": "This loop deals lethal damage.",
       "PoisonLoss": "This loop gives lethal poison counters.",
@@ -1809,6 +1814,10 @@
     "title": "Elegir destinatario del regalo",
     "subtitle": "Elige qué oponente recibe el regalo prometido."
   },
+  "entryController": {
+    "title": "Elegir controlador al entrar",
+    "subtitle": "Elige qué oponente controla este permanente al entrar."
+  },
   "optionalCost": {
     "gift": {
       "title": "¿Prometer un regalo?",
@@ -2042,6 +2051,7 @@
     "searchPlaceholder": "Buscar por nombre...",
     "noCardsFound": "No se encontraron cartas",
     "buttonSubtitle": "Selecciona una opción",
+    "numberSubtitle": "Introduce un número entero mayor o igual que {{min}}",
     "filterPlaceholder": "Filtrar opciones...",
     "noOptionsMatch": "Ninguna opción coincide"
   },

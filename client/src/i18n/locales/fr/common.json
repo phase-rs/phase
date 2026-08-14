@@ -5,6 +5,11 @@
     "close": "Fermer",
     "closeNamed": "Fermer {{name}}"
   },
+  "quantityRef": {
+    "highestNumber": "le nombre le plus élevé",
+    "lowestNumber": "le nombre le plus bas",
+    "chosenNumber": "le nombre choisi"
+  },
   "scryOutcome": {
     "title": "Regard terminé",
     "you": "Vous",

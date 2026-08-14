@@ -1339,6 +1339,7 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::SourceController
         | TargetFilter::Opponent
         | TargetFilter::Typed(..)
         | TargetFilter::Not { .. }
@@ -2103,6 +2104,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::TurnsTaken
         | QuantityRef::CrimesCommittedThisTurn
         | QuantityRef::ChosenNumber
+        | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         // CR 701.65b/701.66b/701.67c: controller-scoped per-turn bend accumulator
@@ -2226,6 +2228,9 @@ fn legacy_controller_ref(x: &ControllerRef) -> bool {
         // CR 102.1: the active player is a game-defined role read live, not a
         // frozen event-context tag.
         | ControllerRef::ActivePlayer
+        // CR 109.4 + CR 611.2: a frozen player id is a plain literal read, not
+        // an event-context tag.
+        | ControllerRef::SpecificPlayer { .. }
         | ControllerRef::EnchantedPlayer => false,
     }
 }
@@ -2273,6 +2278,7 @@ fn legacy_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::SourceController
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
@@ -2484,6 +2490,7 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::AttachedTo
         | TargetFilter::Neighbor { .. }
         | TargetFilter::OriginalController
+        | TargetFilter::SourceController
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::PostReplacementSourceController
@@ -2575,6 +2582,9 @@ fn member_bound_controller_ref(x: &ControllerRef) -> bool {
         // CR 102.1: the active player is a game-defined role read live from
         // `state.active_player`, not per-source member-bound storage.
         | ControllerRef::ActivePlayer
+        // CR 109.4 + CR 611.2: a frozen player id is a plain literal read, not
+        // an event-context tag.
+        | ControllerRef::SpecificPlayer { .. }
         | ControllerRef::DefendingPlayer => false,
     }
 }
@@ -3071,6 +3081,12 @@ fn legacy_effect(x: &Effect) -> bool {
             first: _,
             second: _,
         } => false,
+        // CR 101.4: unlike its `SwapChosenLabels` neighbour this variant DOES
+        // carry a `PlayerFilter`, so it must be traversed rather than answered
+        // `false` outright — `legacy_player_filter` detects `TriggeringPlayer`
+        // and recurses through the nested `ControlsCount` / `PlayerAttribute` /
+        // `AllExcept` forms, any of which a future reveal could name.
+        Effect::RevealChosenNumbers { players } => legacy_player_filter(players),
         Effect::Attach { attachment, target } | Effect::UnattachAll { attachment, target } => {
             legacy_target_filter(attachment) || legacy_target_filter(target)
         }
@@ -3266,11 +3282,14 @@ fn legacy_effect(x: &Effect) -> bool {
         }
         Effect::ForceAttack {
             target,
-            required_player,
+            required_defender,
             duration,
+            // A static single-vs-mass discriminant (CR 115.1), never a legacy
+            // target/duration seam of its own.
+            scope: _,
         } => {
             legacy_target_filter(target)
-                || legacy_target_filter(required_player)
+                || legacy_target_filter(required_defender)
                 || legacy_duration(duration)
         }
 
@@ -3801,6 +3820,7 @@ fn walk_ability(
         context: _,
         optional_targeting: _,
         optional: _,
+        optional_player,
         optional_for: _,
         target_choice_timing: _,
         description: _,
@@ -3880,6 +3900,9 @@ fn walk_ability(
     if let Some(tc) = target_chooser {
         acc.merge(rw_target_filter(tc));
     }
+    if let Some(player) = optional_player {
+        acc.merge(rw_target_filter(player));
+    }
     if let Some(ru) = repeat_until {
         acc.merge(rw_repeat_continuation(ru));
     }
@@ -3934,6 +3957,7 @@ fn walk_definition(
         ability_tag: _,
         optional_targeting: _,
         optional: _,
+        optional_player,
         optional_for: _,
         target_choice_timing: _,
         distribute: _,
@@ -3998,6 +4022,9 @@ fn walk_definition(
     }
     if let Some(tc) = target_chooser {
         acc.merge(rw_target_filter(tc));
+    }
+    if let Some(player) = optional_player {
+        acc.merge(rw_target_filter(player));
     }
     if let Some(ru) = repeat_until {
         acc.merge(rw_repeat_continuation(ru));
@@ -5516,8 +5543,11 @@ fn rw_effect(
         | Effect::SolveCase => (ext_write(StateKind::Other), None),
         Effect::ForceAttack {
             target,
-            required_player: _,
+            required_defender: _,
             duration,
+            // A static single-vs-mass discriminant (CR 115.1): reads nothing and
+            // writes nothing, so it contributes no read/write profile.
+            scope: _,
         } => {
             let mut p = ext_write(StateKind::Other);
             flag_legacy_write_target(&mut p, target);
@@ -5674,6 +5704,12 @@ fn rw_effect(
             first: _,
             second: _,
         } => (ext_write(StateKind::Other), None),
+        // CR 101.4 + CR 603.3b: publishes per-player chosen numbers. The write is
+        // to the same per-player chosen-attribute storage `Effect::Choose`
+        // produces, so it is classified with it (`StateKind::Other`, the
+        // unclassifiable/fail-closed kind) rather than given a narrower kind that
+        // no profiled read would conflict with.
+        Effect::RevealChosenNumbers { players: _ } => (ext_write(StateKind::Other), None),
 
         // ---- Histogram-absent ⇒ fail-closed conservative ----
         Effect::StartYourEngines { .. }
@@ -5969,6 +6005,12 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         | QuantityRef::TrackedSetSize
         | QuantityRef::FilteredTrackedSetSize { .. }
         | QuantityRef::ChosenNumber
+        // CR 101.4 + CR 608.2d: the player-axis chosen-number read. Its producer
+        // is a persisting `Effect::Choose`, whose own arm below already declares
+        // `reads_member_bound`; classifying the reader the same way keeps the
+        // CR 603.3b same-event ordering gate fail-closed for the producer/consumer
+        // pair, exactly as for the object-axis `ChosenNumber` sibling.
+        | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::CostXPaid
         | QuantityRef::KickerCount
         | QuantityRef::AdditionalCostPaymentCount
@@ -6516,6 +6558,9 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         }
         // CR 607.2d / CR 607.2m (by analogy): durable per-player anchor-label reads.
         TargetFilter::PlayerWhoChoseLabel { label: _ } => reads_player_of(StateKind::Other),
+        // CR 608.2h + CR 113.7a: source-controller resolution follows the
+        // source's exact live-or-LKI incarnation.
+        TargetFilter::SourceController => reads_src_of(StateKind::Other),
         TargetFilter::Typed(tf) => {
             if tf
                 .properties
@@ -6664,6 +6709,9 @@ fn rw_player_scope(x: &PlayerScope) -> RwProfile {
         | PlayerScope::Opponent { .. }
         | PlayerScope::RecipientController
         | PlayerScope::AnyTurn
+        // CR 611.2 + CR 514.2: duration-timing-only, like `AnyTurn` — never reached
+        // from a value/quantity/player-selection position.
+        | PlayerScope::SpecificPlayer { .. }
         | PlayerScope::DefendingPlayer => RwProfile::empty(),
     }
 }
@@ -6689,6 +6737,9 @@ fn rw_controller_ref(x: &ControllerRef) -> RwProfile {
         // CR 102.1: a live read of `state.active_player` — no sibling-mutable
         // state, empty RW profile (mirrors `DefendingPlayer`).
         | ControllerRef::ActivePlayer
+        // CR 109.4 + CR 611.2: a frozen player id is a plain literal read, not
+        // an event-context tag.
+        | ControllerRef::SpecificPlayer { .. }
         // resolution-local (ResolvedAbility.chosen_players)
         | ControllerRef::ChosenPlayer { .. } => RwProfile::empty(),
     }

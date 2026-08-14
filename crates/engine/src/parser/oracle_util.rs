@@ -13,7 +13,8 @@ use crate::types::mana::{ManaColor, ManaCost};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::space1;
-use nom::combinator::{eof, opt, peek, value};
+use nom::combinator::{eof, map_res, opt, peek, value};
+use nom::sequence::terminated;
 
 /// A borrowed pair of `(original, lowercase)` slices kept in lockstep.
 ///
@@ -413,23 +414,12 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
         return Some((expr, rest.trim_start()));
     }
 
-    // CR 107.3: "twice N" / "three times N" — multiplicative count (Procrastinate:
-    // "Put twice X stun counters on it"). Mirrors the `parse_cda_quantity` branch
+    // Multiplicative count prefixes. Mirrors the `parse_cda_quantity` branch
     // but applies inside effect-count positions (put-counter count, draw count,
     // mill count, etc.) so every quantity-taking verb picks it up uniformly. The
-    // inner count recursively delegates back to `parse_count_expr`, so "twice X"
-    // and "three times five" both compose through the same types.
-    if let Some((factor, rest)) = super::oracle_nom::bridge::nom_on_lower(text, &lower, |i| {
-        nom::branch::alt((
-            nom::combinator::value(
-                2i32,
-                nom::bytes::complete::tag::<_, _, OracleError<'_>>("twice "),
-            ),
-            nom::combinator::value(2i32, nom::bytes::complete::tag("two times ")),
-            nom::combinator::value(3i32, nom::bytes::complete::tag("three times ")),
-        ))
-        .parse(i)
-    }) {
+    // inner count recursively delegates back to `parse_count_expr`, so any
+    // supported number word or digit composes through the same types.
+    if let Some((factor, rest)) = nom_on_lower(text, &lower, parse_count_multiplier) {
         if let Some((inner, after)) = parse_count_expr(rest) {
             return Some((
                 QuantityExpr::Multiply {
@@ -641,6 +631,31 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
         }
     }
     Some((QuantityExpr::Fixed { value: base }, rest))
+}
+
+/// Parse a multiplicative count prefix, such as `twice ` or `five times `.
+///
+/// A multiplier must be greater than one: `one time` is not a multiplicative
+/// Oracle count phrase, and zero/negative factors cannot arise from the shared
+/// unsigned number grammar.
+// CR 107.3a + CR 107.3i: a spell's controller announces a cost X while
+// casting, and its X instances normally share that announced value. The
+// multiplier wraps the recursively parsed X so each quantity consumer reads
+// that same value.
+pub(crate) fn parse_count_multiplier(input: &str) -> OracleResult<'_, i32> {
+    alt((
+        value(2i32, terminated(tag("twice"), space1)),
+        map_res(
+            terminated(nom_primitives::parse_number, tag(" times ")),
+            |factor| {
+                i32::try_from(factor)
+                    .ok()
+                    .filter(|factor| *factor > 1)
+                    .ok_or(())
+            },
+        ),
+    ))
+    .parse(input)
 }
 
 /// CR 107.1a: Parse a standalone trailing rounding marker left after another
@@ -3623,6 +3638,50 @@ mod tests {
             other => panic!("expected Multiply, got {other:?}"),
         }
         assert_eq!(rest, "cards");
+    }
+
+    #[test]
+    fn parse_count_expr_english_and_numeric_times_x() {
+        for (text, expected_factor) in [
+            ("three times X cards", 3),
+            ("five times X damage", 5),
+            ("17 times X counters", 17),
+        ] {
+            let (qty, rest) = parse_count_expr(text).unwrap();
+            assert!(
+                matches!(
+                    &qty,
+                    QuantityExpr::Multiply { factor, inner }
+                        if *factor == expected_factor
+                            && matches!(
+                                inner.as_ref(),
+                                QuantityExpr::Ref {
+                                    qty: QuantityRef::Variable { name }
+                                } if name == "X"
+                            )
+                ),
+                "{text:?} must retain its multiplier and Variable X, got {qty:?}"
+            );
+            assert!(
+                matches!(rest, "cards" | "damage" | "counters"),
+                "{text:?} must leave the noun phrase untouched, got {rest:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_count_expr_rejects_invalid_multiplier_prefixes() {
+        for (text, expected_remainder) in [
+            ("one time X damage", "time X damage"),
+            ("five timesX damage", "timesX damage"),
+        ] {
+            let (qty, rest) = parse_count_expr(text).unwrap();
+            assert!(
+                !matches!(&qty, QuantityExpr::Multiply { .. }),
+                "{text:?} must not parse as a multiplier, got {qty:?}"
+            );
+            assert_eq!(rest, expected_remainder);
+        }
     }
 
     // CR 107.3: Mathemagics' "draws 2ˣ cards" — digit + U+02E3 MODIFIER LETTER

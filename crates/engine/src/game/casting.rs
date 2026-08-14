@@ -602,10 +602,15 @@ pub(crate) fn begin_variable_speed_payment(
         player,
         options: (min..=max).map(|value| value.to_string()).collect(),
         choice_type: ChoiceType::NumberRange {
-            min,
-            max,
+            min: u32::from(min),
+            // CR 702.179: a speed payment is bounded by the player's current
+            // speed, so this range states a real maximum.
+            max: Some(u32::from(max)),
             distinctness: crate::types::ability::NumberDistinctness::Repeatable,
         },
+        // A stated maximum means the options above enumerate the domain; there
+        // is no free entry to contract for.
+        free_entry: None,
         source: None,
         persist_player: None,
     }

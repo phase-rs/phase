@@ -625,6 +625,7 @@ fn ability_window_reach(def: &AbilityDefinition) -> WindowReach {
         repeat_for,
         announced_x,
         repeat_until,
+        optional_player,
         optional_for,
         iteration_kind_binding,
         // ---- read-free ----
@@ -691,6 +692,7 @@ fn ability_window_reach(def: &AbilityDefinition) -> WindowReach {
         || repeat_for.is_some()
         || announced_x.is_some()
         || repeat_until.is_some()
+        || optional_player.is_some()
         || optional_for.is_some()
         || iteration_kind_binding.is_some();
     acc.or(WindowReach::of(!conservative_when_present))

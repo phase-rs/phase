@@ -14740,16 +14740,18 @@ mod tests {
             matches!(
                 *execute.effect,
                 Effect::Choose {
+                    // CR 107.1a/b: Talion states no maximum, so the range is
+                    // unbounded rather than the old 0-20 stand-in.
                     choice_type: ChoiceType::NumberRange {
                         min: 0,
-                        max: 20,
+                        max: None,
                         ..
                     },
                     persist: true,
                     ..
                 }
             ),
-            "expected a persisted NumberRange(0,20) choice, got {:?}",
+            "expected a persisted unbounded NumberRange choice, got {:?}",
             execute.effect
         );
     }

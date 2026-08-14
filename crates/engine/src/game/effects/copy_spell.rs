@@ -497,7 +497,10 @@ fn resolve_copier_player(
         | ControllerRef::EnchantedPlayer
         // CR 102.1: no card scopes "the active player copies this spell";
         // fail closed (mirrors DefendingPlayer / EnchantedPlayer).
-        | ControllerRef::ActivePlayer => None,
+        | ControllerRef::ActivePlayer
+        // CR 109.4 + CR 611.2: no card scopes a copier to a snapshotted player;
+        // the lowering exists only for combat-requirement continuous effects.
+        | ControllerRef::SpecificPlayer { .. } => None,
     }
 }
 

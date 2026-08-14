@@ -9782,9 +9782,8 @@ mod tests {
             );
         }
 
-        // Enter the battlefield with NO imperative controller override (default
-        // would be the owner's control, player 0). The self-replacement must
-        // flip control to the opponent, player 1.
+        // Seed player 0 explicitly as a cast path does. The self-replacement
+        // must still flip control to the sole opponent, player 1.
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
                 origin: Some(Zone::Hand),
@@ -9792,7 +9791,7 @@ mod tests {
                 target: TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                enters_under: None,
+                enters_under: Some(ControllerRef::You),
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
@@ -9818,5 +9817,77 @@ mod tests {
             PlayerId(1),
             "CR 110.2a: enters under the opponent's control, not its owner's"
         );
+    }
+
+    /// CR 614.12a: with multiple eligible opponents, a self-entry controller
+    /// replacement pauses before the physical move and delivers directly under
+    /// the chosen opponent's control.
+    #[test]
+    fn self_enters_under_opponent_choice_is_pre_entry_and_honors_selection() {
+        use crate::types::ability::{ControllerRef, ReplacementDefinition};
+        use crate::types::card_type::CoreType;
+        use crate::types::format::FormatConfig;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 7);
+        let obj = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Xantcha, Sleeper Agent".to_string(),
+            Zone::Hand,
+        );
+        {
+            let object = state.objects.get_mut(&obj).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.replacement_definitions.push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination_zone(Zone::Battlefield)
+                    .enters_under(ControllerRef::Opponent),
+            );
+        }
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![TargetRef::Object(obj)],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&obj].zone, Zone::Hand);
+        assert!(matches!(
+            &state.waiting_for,
+            crate::types::game_state::WaitingFor::EntryControllerChoice {
+                player: PlayerId(0),
+                candidates,
+            } if candidates == &vec![PlayerId(1), PlayerId(2)]
+        ));
+
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseEntryController {
+                opponent: PlayerId(2),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(state.objects[&obj].zone, Zone::Battlefield);
+        assert_eq!(state.objects[&obj].controller, PlayerId(2));
     }
 }

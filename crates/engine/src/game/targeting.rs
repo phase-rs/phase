@@ -260,6 +260,8 @@ fn find_legal_targets_with_context(
                     // player and is a valid candidate for an active-player-scoped
                     // target filter (read live).
                     Some(ControllerRef::ActivePlayer) => player.id == state.active_player,
+                    // CR 109.4 + CR 611.2: a snapshotted id, compared directly.
+                    Some(ControllerRef::SpecificPlayer { id }) => player.id == *id,
                     None => true,
                 };
                 if include {
@@ -1449,6 +1451,30 @@ pub fn resolve_effect_player_ref(
         // `effects::resolve_player_for_context_ref`, which resolves `Controller`
         // straight to `ability.controller`.
         TargetFilter::Controller => Some(ability.controller),
+        // CR 608.2h + CR 113.7a: "~'s controller" follows the source's exact
+        // incarnation. A triggered ability owns the richer TriggerSourceContext
+        // authority; an activated ability carries its source incarnation from
+        // the shared stack-push seam. Neither path may fall back to the latest
+        // object with the same storage id.
+        TargetFilter::SourceController => ability
+            .trigger_source
+            .as_ref()
+            .map(|source| source.source_read(state).controller())
+            .or_else(|| {
+                let incarnation = ability.source_incarnation?;
+                state
+                    .objects
+                    .get(&ability.source_id)
+                    .filter(|source| source.incarnation == incarnation)
+                    .map(|source| source.controller)
+                    .or_else(|| {
+                        state
+                            .lki_by_incarnation
+                            .get(&ability.source_id)
+                            .and_then(|by_incarnation| by_incarnation.get(&incarnation))
+                            .map(|lki| lki.controller)
+                    })
+            }),
         // CR 109.5: The ability's original controller — fixed even when
         // `player_scope` iteration has rebound `ability.controller`.
         TargetFilter::OriginalController => {
@@ -1969,10 +1995,38 @@ fn stack_entry_controller_matches(
         return true;
     };
     let is_you = entry.controller == source_controller;
+    // ENGINE CONTRACT (not a rules requirement): EXHAUSTIVE, no `_`, so a new
+    // `ControllerRef` variant fails to compile here rather than silently joining
+    // the fail-closed tail. The prior wildcard swallowed every variant beyond the
+    // two below, which is how `SpecificPlayer` came to make a supported
+    // controller scope match NOTHING for the stack-ability class.
     match controller {
         ControllerRef::You => is_you,
         ControllerRef::Opponent => !is_you,
-        _ => false,
+        // ENGINE CONTRACT: `SpecificPlayer` already carries the stored player id,
+        // so this predicate compares it with the stack entry's stored controller.
+        // No rules lookup is involved — unlike its siblings it needs none of the
+        // ability/event context this function lacks.
+        ControllerRef::SpecificPlayer { id } => entry.controller == *id,
+        // Every remaining scope needs context this function does not receive (no
+        // `GameState`, no resolving `ResolvedAbility`, no triggering event), so
+        // they stay fail-closed — but named, so the claim is per-variant rather
+        // than a blanket wildcard.
+        ControllerRef::ScopedPlayer
+        | ControllerRef::TargetPlayer
+        | ControllerRef::TargetOpponent
+        | ControllerRef::ParentTargetController
+        | ControllerRef::ParentTargetOwner
+        | ControllerRef::DefendingPlayer
+        | ControllerRef::SourceChosenPlayer
+        | ControllerRef::ChosenPlayer { .. }
+        | ControllerRef::TriggeringPlayer
+        | ControllerRef::EnchantedPlayer
+        // The active player (CR 102.1: "the player whose turn it is") is
+        // resolvable in principle, but only from `GameState`, which this function
+        // is not given — so it fails closed with the rest for that engine reason,
+        // not a rules one.
+        | ControllerRef::ActivePlayer => false,
     }
 }
 
@@ -2559,6 +2613,74 @@ pub(crate) fn resolve_tracked_set_sentinel(
 
 #[cfg(test)]
 mod tests {
+
+    /// A `SpecificPlayer` controller scope matches a stack ability by comparing
+    /// the stored player id with the stack entry's stored controller. This is an
+    /// engine contract, not a rules behavior, so it carries no CR annotation.
+    ///
+    /// `stack_entry_controller_matches` previously admitted only `You`/`Opponent`
+    /// and swallowed everything else through a `_ => false` wildcard, so a filter
+    /// carrying a resolution-time snapshot silently had NO legal target for the
+    /// whole stack-ability class.
+    ///
+    /// Three arms deliberately: the snapshot that matches, the snapshot that does
+    /// not, and a `You` control — the negative is what proves the match is an id
+    /// comparison rather than a blanket `true`, and the `You` arm proves the
+    /// pre-existing scopes still work.
+    #[test]
+    fn stack_ability_controller_matches_a_specific_player_snapshot() {
+        let controller = PlayerId(1);
+        let other = PlayerId(0);
+        let entry = StackEntry {
+            id: ObjectId(9),
+            source_id: ObjectId(9),
+            controller,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: ObjectId(9),
+                ability: Box::new(ResolvedAbility::new(
+                    crate::types::ability::Effect::Draw {
+                        target: TargetFilter::Controller,
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    vec![],
+                    ObjectId(9),
+                    controller,
+                )),
+            },
+        };
+
+        let filter = |id: PlayerId| TargetFilter::StackAbility {
+            controller: Some(ControllerRef::SpecificPlayer { id }),
+            tag: None,
+            kind: None,
+        };
+
+        // The snapshot naming this entry's controller matches...
+        assert!(
+            stack_ability_matches_filter(&entry, &filter(controller), other),
+            "a snapshot naming the entry's controller matches"
+        );
+        // ...and one naming anybody else does not.
+        assert!(
+            !stack_ability_matches_filter(&entry, &filter(other), other),
+            "a snapshot naming a different player does not match"
+        );
+        // Reach guard: the pre-existing scopes are unaffected. The entry is
+        // controlled by P1 while the source controller is P0, so this is
+        // "an opponent controls it".
+        assert!(
+            stack_ability_matches_filter(
+                &entry,
+                &TargetFilter::StackAbility {
+                    controller: Some(ControllerRef::Opponent),
+                    tag: None,
+                    kind: None,
+                },
+                other,
+            ),
+            "the Opponent scope still matches"
+        );
+    }
     use super::*;
     use crate::game::game_object::AttachTarget;
     use crate::game::zones::create_object;
@@ -5079,6 +5201,48 @@ mod tests {
             source,
             PlayerId(0),
         )
+    }
+
+    /// CR 608.2h + CR 113.7a: A source-controller predicate on a triggered
+    /// ability reads the observed incarnation while it remains in its observed
+    /// zone, then uses that incarnation's LKI rather than a same-id return.
+    #[test]
+    fn source_controller_trigger_context_uses_live_then_lki_provenance() {
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "trigger source".to_string(),
+            Zone::Battlefield,
+        );
+        let source_context = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            state.objects.get(&source).expect("test source exists"),
+        );
+        let mut ability = make_resolved_with_targets(vec![], source);
+        ability.trigger_source = Some(source_context);
+
+        state
+            .objects
+            .get_mut(&source)
+            .expect("test source exists")
+            .controller = PlayerId(1);
+        assert_eq!(
+            resolve_effect_player_ref(&state, &ability, &TargetFilter::SourceController),
+            Some(PlayerId(1)),
+            "the exact live incarnation observes a control change"
+        );
+
+        let returned = state.objects.get_mut(&source).expect("test source exists");
+        returned.zone = Zone::Battlefield;
+        returned.incarnation += 1;
+        returned.controller = PlayerId(1);
+        assert_eq!(
+            resolve_effect_player_ref(&state, &ability, &TargetFilter::SourceController),
+            Some(PlayerId(0)),
+            "a same-id re-entry must use the triggering incarnation's LKI"
+        );
     }
 
     /// CR 109.5 + CR 701.55a: A villainous-choice "you …" branch is resolved

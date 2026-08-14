@@ -70,8 +70,13 @@
 //! needing no crown — so a reject that ignored the count would be wrong for the class. Today's AI
 //! candidate generator only ever emits `UntilLethal`, but `Fixed(n)` is reachable through the
 //! public `GameAction` surface: `handle_declare_shortcut` moves `count` into the proposal with
-//! ZERO validation (the fail-closed firewall validates only `template` pins, and is skipped
-//! entirely when `template` is `None`).
+//! ZERO validation (the fail-closed firewall validates only `template` pins, and it runs against
+//! the RESOLVED template rather than the payload's: the handler shadows it with
+//! `template.or_else(|| offer.declaration.cloned())` before the `match`, so a payload carrying
+//! `None` against an offer that PUBLISHED a declaration reaches the `Some` arm and IS
+//! pin-validated by `declaration_conforms`. The firewall is skipped only when the payload carried
+//! none AND the offer published none — the arm that still refuses unless the proposer controls
+//! the recorded loop period).
 //!
 //! ## Why the verdict reads `proposer` from the state, never `ctx.ai_player`
 //!
@@ -138,6 +143,10 @@ impl TacticalPolicy for LoopShortcutPolicy {
             predicted_winner,
             schema,
             certificate,
+            // Scoring reads the offer's BOUND and its certificate, never its pins: the
+            // engine-published declaration is what the candidate already carries, so re-reading
+            // it here would score the same value twice.
+            declaration: _,
         } = &ctx.state.waiting_for
         else {
             return na();
@@ -439,6 +448,7 @@ mod tests {
             predicted_winner,
             certificate: cert(),
             schema: ShortcutDecisionSchema::default(),
+            declaration: None,
         };
         state
     }
@@ -629,6 +639,7 @@ mod tests {
                 max_iterations,
                 ..Default::default()
             },
+            declaration: None,
         };
         state
     }
@@ -649,6 +660,7 @@ mod tests {
                 max_iterations,
                 ..Default::default()
             },
+            declaration: None,
         };
         state
     }

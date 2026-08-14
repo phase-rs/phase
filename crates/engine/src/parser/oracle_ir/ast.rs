@@ -673,15 +673,21 @@ pub(crate) enum ImperativeFamilyAst {
         attacker: Option<ForceBlockAttackerRef>,
         duration: Duration,
     },
-    /// CR 508.1d: Attack a required player this turn/combat if able. The
-    /// `required_player` filter selects whom the forced attacker must attack —
-    /// `TargetFilter::Controller` for "attacks you", or
+    /// CR 508.1d + CR 506.3: Attack a required DEFENDER this turn/combat if
+    /// able. The `required_defender` filter selects whom the forced attacker
+    /// must attack — `TargetFilter::Controller` for "attacks you",
     /// `ControllerRef::ChosenPlayer { index }` for "attacks that player" (the
     /// opponent chosen by a preceding "choose an opponent" instruction in the
-    /// same resolution, e.g. Ruhan of the Fomori).
+    /// same resolution, e.g. Ruhan of the Fomori), or `TargetFilter::SelfRef`
+    /// for a permanent defender ("attack ~ if able" — Gideon Jura, whose
+    /// required defender is the planeswalker itself).
     ForceAttack {
-        duration: Duration,
-        required_player: TargetFilter,
+        /// `None` is the WINDOWLESS form ("attack ~ if able" — Gideon Jura),
+        /// whose span is stated by an enclosing clause ("During target
+        /// opponent's next turn, …") and applied by the clause machinery.
+        /// `Some` carries the window the predicate states for itself.
+        duration: Option<Duration>,
+        required_defender: TargetFilter,
     },
     /// CR 701.15a: Goad target creature.
     Goad,
@@ -1515,7 +1521,7 @@ pub(crate) enum PutImperativeAst {
         enters_under: EntersUnderSpec,
         /// CR 603.6d: "enters tapped" — enters the battlefield tapped.
         enter_tapped: bool,
-        /// CR 701.28c: "transformed" — enters with its back face up.
+        /// CR 712.14a: "transformed" — enters with its back face up.
         enter_transformed: bool,
         /// CR 508.4: "tapped and attacking [<player_phrase>]" — the moved
         /// object enters the battlefield as an attacking creature (without

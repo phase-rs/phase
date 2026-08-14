@@ -348,6 +348,16 @@ fn controller_to_scope(c: &ControllerRef) -> ConvResult<ProhibitionScope> {
             engine_type: "ProhibitionScope",
             needed_variant: "TargetOpponent".into(),
         }),
+        // CR 109.4 + CR 611.2: a resolution-time snapshotted player id. Like the
+        // single-/targeted-player siblings above it has no broadcast
+        // `ProhibitionScope` equivalent, so mapping it would over-broaden the
+        // prohibition — strict-fail. Unreachable in practice: this variant is
+        // produced only by engine resolvers installing durational continuous
+        // effects, never by a converter or the Oracle parser.
+        ControllerRef::SpecificPlayer { .. } => Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "ProhibitionScope",
+            needed_variant: "SpecificPlayer".into(),
+        }),
     }
 }
 

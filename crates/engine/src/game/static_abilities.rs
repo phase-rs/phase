@@ -197,7 +197,7 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // CR 508.1d + CR 701.15b: MustAttackAwayFromSource — the goad requirement
     // pair without the designation (Kardur, Doomscourge; Maximum Carnage I).
     // Nullary, so it is registry-keyable (unlike the data-carrying
-    // `MustAttackPlayer`). Runtime enforcement lives in combat.rs. The registry
+    // `MustAttackDefender`). Runtime enforcement lives in combat.rs. The registry
     // key is ALSO what keeps `coverage::unimplemented_mechanics` quiet for every
     // creature this grafts onto — it is load-bearing for the client, not
     // decoration.
@@ -1994,6 +1994,11 @@ pub(crate) fn static_filter_matches(
                         // `state.active_player`.
                         crate::types::ability::ControllerRef::ActivePlayer => {
                             state.active_player == player_id
+                        }
+                        // CR 109.4 + CR 611.2: a snapshotted id, resolvable
+                        // directly (mirrors the ActivePlayer arm above).
+                        crate::types::ability::ControllerRef::SpecificPlayer { id } => {
+                            *id == player_id
                         }
                     };
                 }

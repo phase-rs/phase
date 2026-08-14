@@ -141,7 +141,7 @@ fn goaded_creature_under_pacifism_is_visible_as_cant_attack_not_must_attack() {
         // CR 701.15b: direct player-goad (`goaded_by`) carries no object source →
         // EMPTY sources. This is the documented player-level goad row.
         Some(&CombatRequirement::MustAttack {
-            players: vec![],
+            defenders: vec![],
             sources: vec![]
         }),
         "an unencumbered goaded creature must surface as MustAttack with no specific-player constraint"

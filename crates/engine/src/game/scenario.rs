@@ -703,6 +703,60 @@ impl GameScenario {
         builder
     }
 
+    /// CR 306.1 + CR 306.5b: Add a planeswalker to the battlefield with its
+    /// loyalty abilities parsed from Oracle text and `loyalty` loyalty counters
+    /// already on it.
+    ///
+    /// Mirrors [`Self::add_enchantment_from_oracle`], plus the two things a
+    /// planeswalker needs that no other permanent does: the loyalty counters
+    /// (CR 306.5b — a planeswalker with none is put into its owner's graveyard
+    /// as a state-based action, so a fixture without them evaporates), and the
+    /// `Gideon`-style planeswalker subtype the caller supplies.
+    pub fn add_planeswalker_from_oracle(
+        &mut self,
+        player: PlayerId,
+        name: &str,
+        subtype: &str,
+        loyalty: u32,
+        oracle_text: &str,
+    ) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let ts = self.state.next_timestamp();
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Planeswalker);
+        obj.card_types.subtypes.push(subtype.to_string());
+        obj.base_card_types = obj.card_types.clone();
+        obj.timestamp = ts;
+        // A pre-existing permanent (entered on a prior turn), matching the
+        // enchantment/land builders. CR 302.6 gates only creatures, but a
+        // planeswalker animated by its own ability would otherwise inherit the
+        // flag.
+        obj.summoning_sick = false;
+        // CR 306.5b: a planeswalker's loyalty IS the count of loyalty counters on
+        // it, but the engine keeps a `loyalty` field alongside the counter map —
+        // the activation gate reads the counters (CR 606.3) while the
+        // zero-loyalty state-based action reads the field (CR 704.5i). Seed BOTH
+        // so they start in sync; seeding only one produces a planeswalker that
+        // can be activated but can never die.
+        obj.loyalty = Some(loyalty);
+        obj.counters
+            .insert(crate::types::counter::CounterType::Loyalty, loyalty);
+
+        let mut builder = CardBuilder {
+            state: &mut self.state,
+            id,
+        };
+        builder.from_oracle_text(oracle_text);
+        builder
+    }
+
     /// Add a creature to hand with abilities parsed from Oracle text.
     pub fn add_creature_to_hand_from_oracle(
         &mut self,
@@ -1808,6 +1862,7 @@ impl GameRunner {
             WaitingFor::EnlistChoice { .. } => "EnlistChoice",
             WaitingFor::GameOver { .. } => "GameOver",
             WaitingFor::ReplacementChoice { .. } => "ReplacementChoice",
+            WaitingFor::EntryControllerChoice { .. } => "EntryControllerChoice",
             WaitingFor::OrderTriggers { .. } => "OrderTriggers",
             WaitingFor::CopyTargetChoice { .. } => "CopyTargetChoice",
             WaitingFor::ExploreChoice { .. } => "ExploreChoice",

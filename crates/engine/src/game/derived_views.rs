@@ -1839,33 +1839,41 @@ fn scheduled_display_axes(
     axes
 }
 
-/// CR 732.2a: which player's HUD a pumped `axis` belongs to, given the loop's
-/// `controller`. Exhaustive by design (no wildcard) — a new `ResourceAxis`
-/// variant must make a deliberate attribution choice here, never silently inherit
-/// a default.
+/// The seat a resource axis LANDS ON, for the four axes that name one — and `None` for every
+/// axis that is a whole-game quantity with no seat at all.
 ///
-/// A payload-keyed axis names the player it acts on, so the badge follows the
-/// payload, NOT permanent control:
+/// **This is the SINGLE authority for that partition.** Both consumers derive from it rather
+/// than restating it: [`attribution_player`] below (which resolves `None` to the loop's
+/// controller for the HUD badge) and `game::interaction`'s CR 732.2a shortcut preview (which
+/// publishes `None` as "no seat"). Two exhaustive matches over the same 17 `ResourceAxis`
+/// variants would force a future payload-keyed axis to make two decisions but not the SAME
+/// decision, and the offer could then attribute a seat the HUD does not.
+///
+/// Exhaustive by design (no wildcard) — a new `ResourceAxis` variant must make a deliberate
+/// seat choice here, never silently inherit a default.
+///
+/// A payload-keyed axis names the player it acts on, so the seat follows the payload, NOT
+/// permanent control, and in particular is NOT keyed from the loop's proposer — a drain's
+/// magnitude belongs to the player LOSING the life, which is exactly the key
+/// `ResourceVector`'s per-player maps already use:
 /// - CR 119.3 + CR 704.5a: `Life(p)` — CR 119.3 makes `p` the player whose life total the
 ///   effect adjusts, and CR 704.5a is why that matters (the afflicted player reaching 0 life
 ///   loses). A drain drives an opponent's total down and lifegain raises the controller's own;
-///   either way the badge belongs on `p`'s HUD.
-/// - CR 120: `DamageDealt(p)` — damage accrues to the player it is dealt to, so an
-///   opponent-burn loop shows `∞` on the victim's HUD.
-/// - CR 704.5b: `LibraryDelta(p)` — a mill drives an opponent's library toward the
-///   empty-draw loss and a self-mill the controller's own; the badge follows `p`.
-///
+///   either way it belongs to `p`.
+/// - CR 120.1: `DamageDealt(p)` — damage accrues to the player it is dealt to, so an
+///   opponent-burn loop lands on the victim.
+/// - CR 401 + CR 704.5b: `LibraryDelta(p)` — a mill drives an opponent's library toward the
+///   empty-draw loss and a self-mill the controller's own; the seat follows `p`.
 /// - CR 704.5c: `Poison(p)` — a poison ∞ drives the afflicted player toward the
-///   10-poison loss, so the badge belongs on the VICTIM's HUD.
+///   10-poison loss, so it belongs to the VICTIM.
 ///
-/// Every aggregate axis carries no victim PlayerId and is attributed to the loop's
-/// `controller` (the player generating the unbounded resource).
-fn attribution_player(axis: ResourceAxis, controller: PlayerId) -> PlayerId {
+/// Every aggregate axis carries no victim `PlayerId` and therefore no seat.
+pub(crate) fn payload_seat(axis: ResourceAxis) -> Option<PlayerId> {
     match axis {
         ResourceAxis::Life(p)
         | ResourceAxis::DamageDealt(p)
         | ResourceAxis::LibraryDelta(p)
-        | ResourceAxis::Poison(p) => p,
+        | ResourceAxis::Poison(p) => Some(p),
         ResourceAxis::Mana(_)
         | ResourceAxis::Counter(_, _)
         | ResourceAxis::Trigger(_)
@@ -1878,8 +1886,20 @@ fn attribution_player(axis: ResourceAxis, controller: PlayerId) -> PlayerId {
         | ResourceAxis::DeathTriggers
         | ResourceAxis::EtbTriggers
         | ResourceAxis::LtbTriggers
-        | ResourceAxis::SacTriggers => controller,
+        // A whole-game quantity: mana in a pool, tokens on a board, triggers on a stack.
+        // Nothing in the payload names a player, so there is no seat to report.
+        | ResourceAxis::SacTriggers => None,
     }
+}
+
+/// CR 732.2a: which player's HUD a pumped `axis` belongs to, given the loop's `controller`.
+///
+/// A thin resolution of [`payload_seat`], which is the authority for the partition and carries
+/// the per-axis CR citations: a payload-keyed axis badges on the seat it names, and every
+/// aggregate axis badges on the loop's `controller` (the player generating the unbounded
+/// resource). Deliberately NOT a second exhaustive match — see `payload_seat`.
+fn attribution_player(axis: ResourceAxis, controller: PlayerId) -> PlayerId {
+    payload_seat(axis).unwrap_or(controller)
 }
 
 /// CR 732.2a: whether the object-growth `∞` display set the accept registered for `axis`

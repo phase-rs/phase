@@ -37,7 +37,7 @@ use super::oracle_nom::target as nom_target;
 use crate::parser::oracle_effect::counter::normalize_counter_type;
 use crate::parser::oracle_effect::parse_controls_permanent_object;
 use crate::parser::oracle_target::{parse_target, parse_type_phrase, parse_type_phrase_with_ctx};
-use crate::parser::oracle_util::merge_or_filters;
+use crate::parser::oracle_util::{merge_or_filters, parse_count_multiplier};
 use crate::types::ability::{
     AggregateFunction, AttackScope, AttackSubject, Comparator, ControllerRef, CountScope,
     DamageChannel, DamageKindFilter, DevotionColors, FilterProp, ObjectProperty, ObjectScope,
@@ -785,6 +785,32 @@ pub(crate) fn parse_cda_quantity_with_context(
 ) -> Option<QuantityExpr> {
     let text = text.trim().trim_end_matches('.');
 
+    // CR 101.4 + CR 608.2d: "the highest number" / "the lowest number" — the
+    // cross-player extremum of the numbers players secretly chose earlier in THIS
+    // ability (Wheel of Misfortune, Menacing Ogre, Life at Stake).
+    //
+    // Gated on PROVENANCE, never on wording. The phrase is ambiguous in isolation:
+    // Custodi Peacekeeper's "power less than or equal to the highest number you
+    // noted for cards named Custodi Peacekeeper" is a draft-time noted value, and
+    // reading it as a secretly-chosen number silently reinterpreted a card that
+    // has no choice in it at all. `pending_choice_type` is the chunk-loop-threaded
+    // record of the last `Effect::Choose` domain in this ability (set in
+    // `imperative.rs`, carried across chunks by `chain_pending_choice_type`), so
+    // requiring it to be a `NumberRange` binds the reference to an actual
+    // preceding secret-number ledger. Same provenance gate `try_parse_guess_clause`
+    // applies to "guesses which number you chose". Without a proven choice the arm
+    // declines and the phrase falls through to the pre-existing grammar unchanged.
+    if matches!(
+        ctx.pending_choice_type,
+        Some(crate::types::ability::ChoiceType::NumberRange { .. })
+    ) {
+        if let Ok((rest, qty)) = nom_quantity::parse_extreme_chosen_number_ref(text) {
+            if rest.is_empty() {
+                return Some(QuantityExpr::Ref { qty });
+            }
+        }
+    }
+
     // CR 107.1a: "half/third/tenth <inner>, rounded up/down" fractional
     // quantities delivered via a "where X is …" binding or a CDA route through
     // here (Chainer's Torment, Endless Ranks of the Dead, Ghoulcaller's Harvest,
@@ -837,13 +863,10 @@ pub(crate) fn parse_cda_quantity_with_context(
         }
     }
 
-    // "twice [inner]" or "three times [inner]" → Multiply { factor, inner }
-    if let Ok((rest, factor)) = alt((
-        value(2i32, tag::<_, _, OracleError<'_>>("twice ")),
-        value(3, tag("three times ")),
-    ))
-    .parse(text)
-    {
+    // Multiplicative quantity prefixes share the nom authority used by effect
+    // count positions, so `N times <quantity>` has one grammar across CDA and
+    // imperative consumers.
+    if let Ok((rest, factor)) = parse_count_multiplier(text) {
         if let Some(inner) = parse_cda_quantity_with_context(rest, ctx) {
             return Some(QuantityExpr::Multiply {
                 factor,
@@ -5633,6 +5656,23 @@ mod tests {
             }
             other => panic!("Expected Multiply, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cda_quantity_five_times_object_count() {
+        let qty = parse_cda_quantity("five times the number of creatures you control").unwrap();
+        assert!(matches!(
+            qty,
+            QuantityExpr::Multiply {
+                factor: 5,
+                inner,
+            } if matches!(
+                inner.as_ref(),
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                }
+            )
+        ));
     }
 
     #[test]

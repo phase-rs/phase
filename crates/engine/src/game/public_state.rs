@@ -444,6 +444,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::ReplacementApplied { .. }
             | GameEvent::DayNightChanged { .. }
             | GameEvent::CardsRevealed { .. }
+            | GameEvent::ChosenNumbersRevealed { .. }
             | GameEvent::CombatDamageDealtToPlayer { .. }
             | GameEvent::PlayerEliminated { .. }
             | GameEvent::CrimeCommitted { .. }
