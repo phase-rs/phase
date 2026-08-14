@@ -43,6 +43,23 @@ pub enum ServerErrorCode {
 /// handshake. When making such changes, plan a deprecation window where
 /// both the old and new variants coexist, then bump and remove the old.
 ///
+/// 31 — `WaitingFor::LoopShortcut` publishes the engine-issued `declaration`, and
+///      `InteractionResponseSpec::Shortcut` publishes `preview`, the per-axis
+///      consequence of the offered count. Both are `Option` and neither type sets
+///      `deny_unknown_fields`, so a v30 peer still *parses* the frame — this is a
+///      capability bump like 24, not a parse bump. UNLIKE 24, no pairing is left to
+///      exercise the gap, so this entry names no silent-drop hazard. Full-game floors
+///      are exact-match on both sides (`server_core::MIN_SUPPORTED_PROTOCOL ==
+///      PROTOCOL_VERSION`, and `MIN_SUPPORTED_SERVER_PROTOCOL` in
+///      `client/src/adapter/ws-adapter.ts`), so a v31/v30 full-game pair is refused
+///      at the handshake and never sends an action frame. The one-version window is
+///      this file's `MIN_SUPPORTED_PROTOCOL` below, and it is lobby-only:
+///      `DeclareShortcut` rides `ClientMessage::Action`, which `LobbyClientMessage`
+///      has no variant for at all, and which `reject_if_disabled` in
+///      `crates/phase-server/src/main.rs` answers under `ServerMode::LobbyOnly` with
+///      an explicit rejection rather than a silent drop. The P2P games this broker
+///      matchmakes are gated tighter still, on build-commit equality
+///      (`check_build_commit`), not on a protocol window.
 /// 30 — Serialized player-action completion provenance and modal continuations.
 /// 29 — Added requester-correlated `ResolveAllRejected` response frames.
 /// 28 — Added native `ResolveAll` request/result frames.
@@ -77,7 +94,7 @@ pub enum ServerErrorCode {
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 30;
+pub const PROTOCOL_VERSION: u32 = 31;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake. Lobby traffic has a one-version rollout window; full game servers
@@ -414,12 +431,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 30);
+        assert_eq!(PROTOCOL_VERSION, 31);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which is what refuses an older full-game peer whose GameState cannot
         // understand a success acknowledgment the submitting client awaits.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 29);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 30);
     }
 
     #[test]

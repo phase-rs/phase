@@ -307,6 +307,12 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
             };
             cmp_val(a0, b0)
         }
+        GameAction::ChooseEntryController { opponent: a0 } => {
+            let GameAction::ChooseEntryController { opponent: b0 } = b else {
+                unreachable!("cmp_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0)
+        }
         GameAction::OrderTriggers { order: a0 } => {
             let GameAction::OrderTriggers { order: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");

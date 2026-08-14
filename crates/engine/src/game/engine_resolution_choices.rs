@@ -10715,14 +10715,10 @@ mod tests {
         // EXIT-AXIS BINDING — the half the two assertions above cannot supply, because they compare
         // `possible_hold` against a transcription of itself. Counting unit and decomposition are the
         // ones stated on `BoundaryHold`: 4 control-flow statements = 1 push + 2 item-level non-push
-        // + 1 inner per-growth skip. Comment lines are stripped so prose ABOUT `continue`/`return`
-        // cannot inflate the count.
-        let code: String = boundary_apply_loop_region()
-            .lines()
-            .map(str::trim_start)
-            .filter(|line| !line.starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        // + 1 inner per-growth skip. `crate::source_census::code_lines` is the shared rule:
+        // whole-line AND trailing comment text removed, so prose ABOUT `continue`/`return`
+        // cannot inflate the count from either position.
+        let code: String = crate::source_census::code_lines(boundary_apply_loop_region());
         // The counters read raw text, and a string literal is not a comment, so one carrying the
         // word `break` (or a `?`) would be counted as control flow — a red no reader could act on.
         // There are none in the loop today; keep it that way, or teach the counters to skip them.

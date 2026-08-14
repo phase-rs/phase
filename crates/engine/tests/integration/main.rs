@@ -1,3 +1,12 @@
+// THE SHARED COMMENT RULE for every source census in this binary, compiled from the SAME FILE the
+// crate's own unit-test censuses use. `#[path]` rather than a copy: `src/source_census.rs` is
+// `#![cfg(test)]`, and `cfg(test)` HOLDS in this venue too (an integration target is built with
+// `--test`), so one implementation serves both without shipping guard code in a release build.
+// MEASURED, not assumed — the alternative already in this tree is `test_support.rs` / `support.rs`,
+// twin files kept equal by a comment asking a human to remember.
+#[path = "../../src/source_census.rs"]
+mod source_census;
+
 mod abigale_integration;
 mod abundance_optional_draw_replacement;
 mod ad_nauseam_repeat;
@@ -132,6 +141,7 @@ mod cr733_resolved_trigger_collection;
 mod cr733_resolved_trigger_removal;
 mod cr733_resolved_zone_change;
 mod cr_annotations;
+mod crackle_with_power;
 mod craft_tithing_blade_transform;
 mod crime_tracking;
 mod cross_line_instead_override_branch;
@@ -174,6 +184,7 @@ mod dig_impossible_keep_count;
 mod dig_rest_pile_stranding_on_etb_pause;
 mod diligent_farmhand_counts_as_named;
 mod diluvian_primordial_6754;
+mod dina_noff_turn5_loader;
 mod disjunctive_state_change_head_coverage_honesty;
 mod disorder_in_the_court_5955;
 mod divine_visitation_token_substitution;
@@ -201,6 +212,7 @@ mod enlightened_tutor_regression;
 mod equipment_etb_attach_parent_target;
 mod ertai_trickery_counter_kicked;
 mod escape_tunnel_landfall;
+mod esper_origins_flashback_transform;
 mod etali_primal_sickness_poison;
 mod etrata_cloak_enters_under_cloaker_5944;
 mod evelyn_regression;
@@ -563,6 +575,7 @@ mod issue_4358_hama_pashar_dungeon;
 mod issue_4379_convoke_cancel_untap;
 mod issue_4384_airbend_stack_spell;
 mod issue_4388_mana_on_opponents_turn;
+mod issue_4395_braid_of_fire;
 mod issue_4420_lava_blister_unless_deal_damage;
 mod issue_4459_decoy_gambit_unless_have_you_draw;
 mod issue_4503_incremental_growth;
@@ -590,6 +603,7 @@ mod issue_4955_greenbelt_rampager;
 mod issue_4956_gift_of_immortality_reattach;
 mod issue_4960_nova_flame;
 mod issue_4962_volo_guide_to_monsters;
+mod issue_4963_charismatic_conqueror;
 mod issue_4966_waterbenders_ascension;
 mod issue_4991_vigorous_farming;
 mod issue_4999_treasure_cruise_delve_tokens;
@@ -698,6 +712,7 @@ mod issue_688_mind_into_matter;
 mod issue_689_resonating_lute_hand_size;
 mod issue_6908_kozilek_discard_mana_value;
 mod issue_6913_eagle_vision_freerunning;
+mod issue_6916_xantcha_entry_controller;
 mod issue_691_sheoldred_saga_lore;
 mod issue_6943_faerie_slumber_party;
 mod issue_6979_land_mana_amplification;
@@ -891,6 +906,7 @@ mod prepared_state_serde;
 mod primo_unbounded_fractal_counters;
 mod printed_ability_order;
 mod proliferate_zero_counter;
+mod pulse_of_the_forge;
 mod punishing_punch_twice_subject_power;
 mod purged_source_attachment_count_lki;
 mod purged_source_attacked_this_turn_lki;
@@ -1179,6 +1195,8 @@ mod loop_shortcut;
 mod loop_shortcut_activation;
 mod loop_shortcut_mana_engine;
 mod loop_shortcut_offer_writer_census;
+mod loop_shortcut_ranking;
+mod loop_shortcut_seat_pin_census;
 mod lose_control_this_turn_delayed_trigger;
 mod lost_mine_fungi_cavern_duration_runtime;
 mod lost_mine_storeroom_targeting_runtime;

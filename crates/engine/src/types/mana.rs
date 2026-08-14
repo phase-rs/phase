@@ -3,7 +3,8 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
-    AbilityTag, Comparator, QuantityExpr, TargetFilter, TriggerDefinitionOccurrenceRef,
+    AbilityTag, Comparator, FilterProp, QuantityExpr, TargetFilter, TriggerDefinitionOccurrenceRef,
+    TypedFilter,
 };
 use super::counter::CounterType;
 use super::events::GameEvent;
@@ -1391,6 +1392,68 @@ enum ManaSpellGrantRepr {
     },
 }
 
+/// Wire form written before spend-trigger predicates moved from the CR 106.6
+/// mana-restriction axis to the CR 603.3 event-filter axis.
+#[derive(Deserialize)]
+enum LegacyManaSpellGrantRepr {
+    TriggerOnSpend {
+        #[serde(default)]
+        restriction: Option<LegacyManaSpendTriggerRestriction>,
+        ability: Box<crate::types::ability::AbilityDefinition>,
+    },
+}
+
+#[derive(Deserialize)]
+enum LegacyManaSpendTriggerRestriction {
+    OnlyForSpellWithManaValue { comparator: Comparator, value: u32 },
+    OnlyForCreatureType(String),
+    SharesCreatureTypeWithCommander,
+}
+
+impl LegacyManaSpendTriggerRestriction {
+    /// CR 603.3: A historical mana-spend trigger's old restriction selected the
+    /// spell event that makes the trigger fire, so preserve it as that event's
+    /// object filter rather than as a current CR 106.6 spend restriction.
+    fn try_into_event_filter(self) -> Result<TargetFilter, String> {
+        Ok(match self {
+            Self::OnlyForSpellWithManaValue { comparator, value } => {
+                TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Cmc {
+                    comparator,
+                    value: QuantityExpr::Fixed {
+                        value: i32::try_from(value).map_err(|_| {
+                            "legacy mana spend trigger value exceeds i32 range".to_string()
+                        })?,
+                    },
+                }]))
+            }
+            Self::OnlyForCreatureType(subtype) => {
+                TargetFilter::Typed(TypedFilter::creature().subtype(subtype))
+            }
+            Self::SharesCreatureTypeWithCommander => TargetFilter::Typed(
+                TypedFilter::creature()
+                    .properties(vec![FilterProp::SharesCreatureTypeWithCommander]),
+            ),
+        })
+    }
+}
+
+impl TryFrom<LegacyManaSpellGrantRepr> for ManaSpellGrant {
+    type Error = String;
+
+    fn try_from(value: LegacyManaSpellGrantRepr) -> Result<Self, Self::Error> {
+        match value {
+            LegacyManaSpellGrantRepr::TriggerOnSpend {
+                restriction,
+                ability,
+            } => Ok(Self::TriggerOnSpend {
+                filter: restriction
+                    .map_or(Ok(TargetFilter::Any), |value| value.try_into_event_filter())?,
+                ability,
+            }),
+        }
+    }
+}
+
 impl From<ManaSpellGrantRepr> for ManaSpellGrant {
     fn from(value: ManaSpellGrantRepr) -> Self {
         match value {
@@ -1432,9 +1495,12 @@ impl<'de> Deserialize<'de> for ManaSpellGrant {
             });
         }
 
-        serde_json::from_value::<ManaSpellGrantRepr>(value)
-            .map(Into::into)
-            .map_err(serde::de::Error::custom)
+        match serde_json::from_value::<ManaSpellGrantRepr>(value.clone()) {
+            Ok(value) => Ok(value.into()),
+            Err(current_error) => serde_json::from_value::<LegacyManaSpellGrantRepr>(value)
+                .map_err(|_| serde::de::Error::custom(current_error))
+                .and_then(|value| value.try_into().map_err(serde::de::Error::custom)),
+        }
     }
 }
 
@@ -2403,6 +2469,7 @@ pub fn apply_empty_mana_pool_decisions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::{AbilityDefinition, AbilityKind, Effect};
 
     #[test]
     fn mana_spell_grant_accepts_legacy_unqualified_counter_protection() {
@@ -2419,6 +2486,80 @@ mod tests {
         let round_tripped: ManaSpellGrant =
             serde_json::from_str(&serialized).expect("current grant deserializes");
         assert_eq!(round_tripped, grant);
+    }
+
+    #[test]
+    fn mana_spell_grant_migrates_legacy_spend_trigger_restrictions() {
+        let ability = AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp);
+        let cases = [
+            (
+                serde_json::json!("SharesCreatureTypeWithCommander"),
+                TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .properties(vec![FilterProp::SharesCreatureTypeWithCommander]),
+                ),
+            ),
+            (
+                serde_json::json!({"OnlyForCreatureType": "Dragon"}),
+                TargetFilter::Typed(TypedFilter::creature().subtype("Dragon".to_string())),
+            ),
+            (
+                serde_json::json!({"OnlyForSpellWithManaValue": {"comparator": "GE", "value": 4}}),
+                TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Cmc {
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Fixed { value: 4 },
+                }])),
+            ),
+        ];
+
+        for (restriction, filter) in cases {
+            let legacy = serde_json::json!({
+                "TriggerOnSpend": {
+                    "restriction": restriction,
+                    "ability": ability.clone(),
+                }
+            });
+            let grant: ManaSpellGrant =
+                serde_json::from_value(legacy).expect("legacy grant deserializes");
+            assert_eq!(
+                grant,
+                ManaSpellGrant::TriggerOnSpend {
+                    filter,
+                    ability: Box::new(ability.clone()),
+                }
+            );
+        }
+
+        let without_restriction = serde_json::json!({
+            "TriggerOnSpend": {
+                "ability": ability.clone(),
+            }
+        });
+        let grant: ManaSpellGrant = serde_json::from_value(without_restriction)
+            .expect("unrestricted legacy grant deserializes");
+        assert_eq!(
+            grant,
+            ManaSpellGrant::TriggerOnSpend {
+                filter: TargetFilter::Any,
+                ability: Box::new(ability.clone()),
+            }
+        );
+
+        let out_of_range = serde_json::json!({
+            "TriggerOnSpend": {
+                "restriction": {
+                    "OnlyForSpellWithManaValue": {
+                        "comparator": "GE",
+                        "value": 2_147_483_648u64,
+                    }
+                },
+                "ability": ability,
+            }
+        });
+        assert!(
+            serde_json::from_value::<ManaSpellGrant>(out_of_range).is_err(),
+            "an out-of-range legacy threshold must not wrap into a negative value"
+        );
     }
 
     /// CR 702.143: `reduced_generic_by` reduces only the generic component,

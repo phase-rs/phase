@@ -128,6 +128,7 @@ impl PackSource for PackGenerator {
                 colors: card.colors.clone(),
                 cmc: card.cmc,
                 type_line: card.type_line.clone(),
+                draft_effect: card.draft_effect,
             })
             .collect();
 
@@ -267,6 +268,7 @@ mod tests {
                 colors: Vec::new(),
                 cmc: 0,
                 type_line: String::new(),
+                draft_effect: None,
             })
             .collect()
     }
@@ -686,6 +688,7 @@ mod tests {
                     colors: vec![],
                     cmc: 0,
                     type_line: String::new(),
+                    draft_effect: None,
                 },
                 SheetCard {
                     name: "Single".to_string(),
@@ -696,6 +699,7 @@ mod tests {
                     colors: vec![],
                     cmc: 0,
                     type_line: String::new(),
+                    draft_effect: None,
                 },
             ],
             total_weight: 3,
@@ -719,6 +723,7 @@ mod tests {
                 colors: vec![],
                 cmc: 0,
                 type_line: String::new(),
+                draft_effect: None,
             }],
             total_weight: 1,
             allow_duplicates: true,

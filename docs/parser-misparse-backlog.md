@@ -1211,7 +1211,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Prompto Argentum
 - Prowling Geistcatcher
 - Pugnacious Hammerskull
-- Pulse of the Forge
 - Pulse of the Hunter Maze
 - Qasali Ambusher
 - Quest for the Nihil Stone

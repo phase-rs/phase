@@ -92,7 +92,7 @@ export function HostControls() {
     return null;
 
   return (
-    <div className="fixed bottom-4 right-4 z-50 flex min-w-[180px] flex-col gap-2 rounded-[18px] border border-white/10 bg-black/18 p-3 shadow-[0_18px_54px_rgba(0,0,0,0.22)] backdrop-blur-md">
+    <div className="fixed bottom-[calc(env(safe-area-inset-bottom)+5.25rem)] right-3 z-50 flex min-w-[180px] flex-col gap-2 rounded-[18px] border border-white/10 bg-black/18 p-3 shadow-[0_18px_54px_rgba(0,0,0,0.22)] backdrop-blur-md min-[820px]:bottom-4 min-[820px]:right-4">
       <div className="text-[0.68rem] uppercase tracking-[0.18em] text-white/40">
         {t("hostControls.title")}
       </div>

@@ -673,9 +673,18 @@ pub struct PeriodicDelta {
     /// The whole-game resource change across one repetition, measured from the very
     /// frame pair that certified it.
     pub delta: ResourceVector,
-    /// CR 704.5a: per published choice slot, the life magnitude one repetition charges
-    /// to whichever player that slot's pin names. EMPTY for the untargeted class, where
-    /// the victims are already visible in `delta.life`.
+    /// CR 704.5a: per ANNOUNCED target slot, the life magnitude one repetition charges
+    /// to whichever player that slot's declaration names. EMPTY for the untargeted class,
+    /// where the victims are already visible in `delta.life`.
+    ///
+    /// ANNOUNCED, not PUBLISHED, and the distinction is load-bearing rather than pedantic:
+    /// CR 732.2a withholds a decision point for an announcement the PROPOSER does not make
+    /// (`game::engine::TargetAnnouncement::NotProposerChoice` — its own doc enumerates the
+    /// three routes: a single legal assignment, a CR 601.2c `target_chooser` seated on another
+    /// player, or a non-`Chosen` `TargetSelectionMode`), but CR 704.5a charges that victim all
+    /// the same. A slot present here with no matching `ShortcutDecisionSchema` point is
+    /// therefore CORRECT and expected, not a schema/certificate mismatch. Deriving this from
+    /// the published points instead let the withhold silently raise the bound.
     pub victim_slot: Vec<(DecisionSlot, i64)>,
 }
 
@@ -868,49 +877,57 @@ impl ResourceVector {
         any_increase || mills
     }
 
-    /// The component axes that strictly increased over this delta — the
-    /// candidate **unbounded** resources a `WinKind` classifier (PR-2) reads to
-    /// name the loop's win condition. A mill axis surfaces here as a negative
-    /// `library_delta`, so it is reported separately via its sign.
+    /// EVERY axis this delta moved, in either direction, as a [`ResourceAxis`] tag with its
+    /// signed magnitude — the unfiltered fold [`Self::unbounded_components`] narrows.
     ///
-    /// Returns each increasing axis as a [`ResourceAxis`] tag with its signed
-    /// magnitude.
-    pub fn unbounded_components(&self) -> Vec<(ResourceAxis, i64)> {
+    /// Named `axis_components` because [`Self::components`] is taken by a different fold over
+    /// the same fields: that one yields the [`Component`] CONSUMED/GAINED classification with
+    /// no axis identity, for [`Self::is_net_progress`].
+    ///
+    /// The distinction from that method is the SIGN, and it is the whole reason this exists:
+    /// `unbounded_components` reports only what a loop *accrues*, so a drain loop's defining
+    /// term — the victim's NEGATIVE `life` — is invisible through it. A consumer that has to
+    /// state what a repetition COSTS, rather than what it gains, cannot be built on that
+    /// method. The one such consumer today is `game::interaction`'s CR 732.2a shortcut
+    /// preview, which states the finished magnitude of a declared repeat count and would
+    /// otherwise show a lethal drain as producing nothing.
+    ///
+    /// Order is fixed (mana, life, damage, library, poison, counters, triggers, then the
+    /// scalar axes) and every map is a `BTreeMap`, so the result is deterministic.
+    pub fn axis_components(&self) -> Vec<(ResourceAxis, i64)> {
         let mut out = Vec::new();
         for (i, &n) in self.mana.iter().enumerate() {
-            if n > 0 {
+            if n != 0 {
                 out.push((ResourceAxis::Mana(MANA_INDEX[i]), n));
             }
         }
         for (pid, &n) in &self.life {
-            if n > 0 {
+            if n != 0 {
                 out.push((ResourceAxis::Life(*pid), n));
             }
         }
         for (pid, &n) in &self.damage_dealt {
-            if n > 0 {
+            if n != 0 {
                 out.push((ResourceAxis::DamageDealt(*pid), n));
             }
         }
-        // CR 401: a mill loop is unbounded *downward* on library size.
         for (pid, &n) in &self.library_delta {
             if n != 0 {
                 out.push((ResourceAxis::LibraryDelta(*pid), n));
             }
         }
-        // CR 704.5c: rising poison on a victim is an unbounded loss axis.
         for (pid, &n) in &self.poison {
-            if n > 0 {
+            if n != 0 {
                 out.push((ResourceAxis::Poison(*pid), n));
             }
         }
         for (&key, &n) in &self.counters {
-            if n > 0 {
+            if n != 0 {
                 out.push((ResourceAxis::Counter(key.0, key.1), n));
             }
         }
         for (&kind, &n) in &self.generic_triggers {
-            if n > 0 {
+            if n != 0 {
                 out.push((ResourceAxis::Trigger(kind), n));
             }
         }
@@ -926,11 +943,38 @@ impl ResourceVector {
             (ResourceAxis::LtbTriggers, self.ltb_triggers),
             (ResourceAxis::SacTriggers, self.sac_triggers),
         ] {
-            if n > 0 {
+            if n != 0 {
                 out.push((axis, n));
             }
         }
         out
+    }
+
+    /// The component axes that strictly increased over this delta — the
+    /// candidate **unbounded** resources a `WinKind` classifier (PR-2) reads to
+    /// name the loop's win condition. A mill axis surfaces here as a negative
+    /// `library_delta`, so it is reported separately via its sign.
+    ///
+    /// Returns each increasing axis as a [`ResourceAxis`] tag with its signed
+    /// magnitude.
+    ///
+    /// CR 401: the `LibraryDelta` exemption is what keeps a mill loop — unbounded
+    /// *downward* on library size — in the result while every other axis is required to
+    /// have risen.
+    ///
+    /// CR 704.5c: rising poison on a victim is an unbounded loss axis — and unlike mill it
+    /// needs no exemption, because poison RISES toward the ten-counter loss, so `Poison(p)`
+    /// is carried by the `n > 0` term itself. RELOCATED, not re-derived: this annotation sat
+    /// above the poison arm of this method's own loop until the `axis_components` split moved
+    /// that loop out, and it belongs beside the CR 401 term because the pair is what states
+    /// WHICH loss axes survive the filter and why. Re-verified against
+    /// `docs/MagicCompRules.txt`: "704.5c If a player has ten or more poison counters, that
+    /// player loses the game."
+    pub fn unbounded_components(&self) -> Vec<(ResourceAxis, i64)> {
+        self.axis_components()
+            .into_iter()
+            .filter(|&(axis, n)| n > 0 || matches!(axis, ResourceAxis::LibraryDelta(_)))
+            .collect()
     }
 
     /// CR 732.2a + CR 704.5a / CR 704.5c / CR 104.3c + CR 121.4: the largest number of
@@ -955,12 +999,20 @@ impl ResourceVector {
     ///
     /// # Aggregation per DECLARABLE victim
     ///
-    /// `declarable_victims` is the union of the published `Targets` slots' legal targets —
-    /// EMPTY for the untargeted class. `slot_magnitude` is the per-period life loss the
-    /// certificate attributed to each published slot. A declaration may aim **every** slot
+    /// `declarable_victims` is the union of the ANNOUNCED target slots' legal player targets
+    /// — EMPTY for the untargeted class. `slot_magnitude` is the per-period life loss the
+    /// certificate attributed to each announced slot. A declaration may aim **every** slot
     /// at **one** opponent, so a declarable victim's life magnitude is the SUM over all
     /// slots; that is what makes an all-slots-on-one-seat declaration bounded by
     /// construction rather than by a cross-slot check in `validate_pins`.
+    ///
+    /// ANNOUNCED, NOT PUBLISHED, and the caller
+    /// (`game::engine::bounded_cycle_charged_targets_for_window`) supplies it that way on
+    /// purpose. CR 732.2a withholds a decision point when the announcement is FORCED — the
+    /// player makes no choice — but CR 704.5a charges that victim regardless of who chose it.
+    /// Feeding this the PUBLISHED point set instead dropped a forced victim into the `else`
+    /// arm below and RAISED the bound; on a victim whose measured period nets a life GAIN it
+    /// disarmed the life axis at `MAX_SHORTCUT_CYCLES` outright.
     ///
     /// PRECISELY WHAT IS IMPLEMENTED, and how it differs from the specified rule: this
     /// sums **every** positive `slot_magnitude` and charges that one total `S` to **every**
@@ -2526,8 +2578,16 @@ pub(crate) fn loop_states_cover_modulo_growth_scoped<'a>(
     //
     // PINS ARE PLUGGED IN HERE (`scope.pinned`, minted by the single authority
     // `game::engine::bounded_cycle_pin_slots`). Precondition (a) holds by construction:
-    // the pins that channel carries are `TargetPin::Player` / `MayChoice` designations,
-    // both state-independent (never "the newest copy"). Precondition (c) is NOT taken on
+    // the pins that channel carries are SEAT designations and `MayChoice` designations,
+    // both state-independent (never "the newest copy"). A seat designation now has TWO
+    // spellings and (a) holds for both: `TargetPin::Player` is the CR 115.10a CHOICE class,
+    // while a CR 601.2c TARGET-class seat is
+    // `Scheduled(TargetSchedule::Constant(Ranking::one(AnnouncementSubject::Seat(..))))` —
+    // one entry, selected without reading the iteration index, so it too can never denote
+    // "the newest copy". The split changes WHICH AUTHORITY judges a seat's legality, never
+    // whether the designation is state-independent, which is all this precondition asks.
+    // (This module reads no pin VARIANT at all — every `TargetPin::` occurrence in it is
+    // prose — so no relief verdict can move with the spelling.) Precondition (c) is NOT taken on
     // trust from the mint site: [`pinned_may_choice_relief`] re-runs the mint's own
     // per-entry acceptance test — controller conjunct included — for THIS entry, so the
     // relief predicate is the mint predicate rather than a coarser sibling of it.
@@ -4357,7 +4417,27 @@ fn stack_entry_has_no_ordering_input(state: &GameState, entry: &StackEntry) -> b
 /// single legal assignment exists, limit=2) — the same authority the trigger
 /// dispatcher uses. Fail-closed on any build error, empty slots, or ≥2 legal
 /// assignments (`Ok(None)` / `Err`).
-fn forced_unique_targeting(
+///
+/// "The same authority the trigger dispatcher uses" is MEASURED, not asserted:
+/// `triggers::prepare_trigger_targets` calls this very function and routes
+/// `Ok(Some(targets))` to `PreparedTriggerTargets::AutoAssigned` (targets assigned
+/// at dispatch, no prompt) and `Ok(None)` to `NeedsPlayerChoice` (the
+/// `WaitingFor::TriggerTargetSelection` prompt). So `true` here is exactly "the
+/// dispatcher will announce this target itself and the player is never asked".
+///
+/// `pub(crate)` for ONE additional consumer, and it is the publish side of the same
+/// question: [`crate::game::engine::entry_publishes_pin_slots`] must not publish a
+/// CR 732.2a decision point for a choice no player makes. Exported rather than
+/// re-derived there — two copies of this predicate could disagree about whether a
+/// choice is forced, and the publisher and the relief disagreeing is precisely the
+/// fail-open shape gate (3) exists to prevent.
+///
+/// ⚠ THE BOARD IS THE VERDICT. Every caller must pass the frame the rest of its own
+/// derivation uses — the announced pair's CARRYING FRAME for a retained sample, the
+/// live board only for a live entry. Handing a retained pair the live board is
+/// fail-OPEN: a target legal on the frame but gone from the live board collapses the
+/// assignment to "forced" and relieves (or unpublishes) a choice that is not forced.
+pub(crate) fn forced_unique_targeting(
     state: &GameState,
     ability: &crate::types::ability::ResolvedAbility,
 ) -> bool {
@@ -7319,6 +7399,888 @@ mod tests {
         );
     }
 
+    /// **Row F1.** CR 732.2a: a FORCED target is not a game choice, so the mint must NOT
+    /// publish a decision point for it.
+    ///
+    /// CR 732.2a describes a shortcut as "a sequence of game choices, for all players"; a
+    /// published `DecisionPoint` stands for one such choice. When exactly one legal assignment
+    /// exists, the announcing player makes none — `triggers::prepare_trigger_targets` routes
+    /// this predicate's `Ok(Some(..))` straight to `AutoAssigned`, so no
+    /// `WaitingFor::TriggerTargetSelection` is raised, so `record_trigger_target_answer` (whose
+    /// only two call sites are that prompt's reducer arms) never runs. A point published here
+    /// would therefore demand a `predictability_gate` answer that CANNOT ARRIVE, and since the
+    /// gate's `required` set is EVERY published point, one such point makes the whole offer
+    /// undeclarable — the precise failure the bounded-offer journal exists to remove.
+    ///
+    /// # Discrimination, and the confound it breaks
+    ///
+    /// (a) vs (b) differ in the number of living opponents, which is confounded with the number
+    /// of legal assignments — so (a′) repeats the forced verdict at (b)'s SEAT COUNT with one
+    /// opponent eliminated (CR 800.4 + CR 102.1: a departed seat is not choosable). An
+    /// implementation keyed on "is this a 2-player game" passes (a) and (b) and FAILS (a′).
+    ///
+    /// REVERT-PROBE, MEASURED (deleting the `forced_unique_targeting` withhold from
+    /// `entry_publishes_pin_slots`, with the mutation `cmp`-proved to have applied): the row
+    /// FLIPS TO FAILING at arm (a) — "CR 732.2a: no choice is made here, so nothing is
+    /// published". (a′) and (c) assert the SAME withhold on two further boards and are not
+    /// separately measured, because (a) panics first; each carries its own reach-guard instead.
+    /// (b)'s positive is pinned INDEPENDENTLY OF THIS ROW and on BOTH sides of the change, by
+    /// `bounded_cycle_pin_slots_requires_a_single_mandatory_announcement_slot`'s control on the
+    /// same 3p `drain_entry` fixture — so "the mint publishes nothing" cannot be what makes the
+    /// forced arms pass.
+    ///
+    /// # Reach-guards
+    ///
+    /// Each forced arm asserts the FULL announcement shape first (one mandatory slot, all-player
+    /// legal set), so the withhold is attributable to forced-ness rather than to one of the
+    /// upstream cardinality / optionality / all-`Player` conjuncts. Arm (d) asserts the RELIEF
+    /// survives: gate (3) was already passing on a forced board through
+    /// `stack_entry_has_no_ordering_input`, so unpublishing the point costs no cover.
+    #[test]
+    fn a_forced_target_is_not_a_published_decision_point() {
+        use crate::analysis::decision_template::DecisionPointKind;
+        use crate::game::ability_utils::build_target_slots;
+        use crate::game::engine::{bounded_cycle_pin_slots, entry_publishes_pin_slots};
+
+        let announcement = |state: &GameState| {
+            build_target_slots(state, state.stack[2].ability().unwrap())
+                .map(|slots| {
+                    slots
+                        .iter()
+                        .map(|s| (s.optional, s.legal_targets.clone()))
+                        .collect::<Vec<_>>()
+                })
+                .ok()
+        };
+
+        // ── (a) FORCED: 2p, the single opponent is the only legal assignment ──
+        let (_p2, c2) = grown_window(2, |id| drain_entry(id, vec![]));
+        assert_eq!(
+            announcement(&c2),
+            Some(vec![(false, vec![TargetRef::Player(PlayerId(1))])]),
+            "reach-guard: ONE mandatory slot over PLAYERS — every conjunct upstream of the \
+             forced-ness check accepts this entry, so the withhold below is attributable"
+        );
+        assert!(
+            forced_unique_targeting(&c2, c2.stack[2].ability().unwrap()),
+            "reach-guard: one legal assignment ⇒ the dispatcher announces it without asking"
+        );
+        assert!(
+            entry_publishes_pin_slots(&c2, &c2.stack[2], PlayerId(0)).is_none(),
+            "CR 732.2a: no choice is made here, so nothing is published — and a mandatory \
+             drain has no CR 603.5 gate to publish either"
+        );
+        assert!(
+            bounded_cycle_pin_slots(&c2, PlayerId(0)).is_empty(),
+            "and the point mint carries the withhold through"
+        );
+
+        // ── (a′) SAME SEAT COUNT as (b), one opponent eliminated ⇒ still forced ──
+        let (_pe, mut ce) = grown_window(3, |id| drain_entry(id, vec![]));
+        ce.players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(2))
+            .expect("fixture: the 3p board seats P2")
+            .is_eliminated = true;
+        assert_eq!(
+            ce.players.len(),
+            3,
+            "reach-guard: the SEAT COUNT still matches (b) — only legality differs"
+        );
+        assert_eq!(
+            announcement(&ce),
+            Some(vec![(false, vec![TargetRef::Player(PlayerId(1))])]),
+            "reach-guard: CR 800.4 + CR 102.1 — a departed seat is not one of the people in \
+             the game, so the announcement authority enumerates ONE opponent"
+        );
+        assert!(
+            entry_publishes_pin_slots(&ce, &ce.stack[2], PlayerId(0)).is_none(),
+            "the verdict follows the LEGAL SET, not the seat count"
+        );
+
+        // ── (b) MATCHED POSITIVE: 3p, two legal assignments ⇒ a real choice ⇒ published ──
+        let (_p3, c3) = grown_window(3, |id| drain_entry(id, vec![]));
+        assert!(
+            !forced_unique_targeting(&c3, c3.stack[2].ability().unwrap()),
+            "reach-guard: two opponents ⇒ `auto_select => Ok(None)` ⇒ the player IS asked"
+        );
+        let published = bounded_cycle_pin_slots(&c3, PlayerId(0));
+        assert_eq!(
+            published.len(),
+            1,
+            "control: an unforced target choice is still published — without this every \
+             assertion above is satisfied by a mint that publishes nothing"
+        );
+        assert!(
+            matches!(published[0].kind, DecisionPointKind::Targets { .. }),
+            "control: and it is the CR 601.2c Targets point, not some other kind"
+        );
+
+        // ── (c) the CR 603.5 gate SURVIVES the withhold ──
+        // Withholding the forced target must not suppress the entry: a "may" on the same
+        // source is a real per-iteration choice with its own sub-index.
+        let (_pm, cm) = grown_window(2, optional_drain);
+        let pins = entry_publishes_pin_slots(&cm, &cm.stack[2], PlayerId(0))
+            .expect("an optional entry still publishes its CR 603.5 gate");
+        assert!(
+            pins.target.is_none(),
+            "the forced CR 601.2c target is withheld"
+        );
+        assert!(pins.may.is_some(), "the CR 603.5 take/decline is not");
+        assert!(
+            pins.legal_targets.is_empty(),
+            "no target slot carries no legal set"
+        );
+        let may_points = bounded_cycle_pin_slots(&cm, PlayerId(0));
+        assert_eq!(
+            may_points.len(),
+            1,
+            "exactly the may point reaches the schema: {may_points:?}"
+        );
+        assert!(
+            matches!(may_points[0].kind, DecisionPointKind::MayChoice),
+            "and it is the MayChoice point"
+        );
+
+        // ── (d) NO RELIEF IS LOST: gate (3) passes on a forced board without any pin ──
+        for (label, state) in [("(a) 2p", &c2), ("(a′) eliminated", &ce), ("(c) may", &cm)] {
+            assert!(
+                stack_entry_has_no_ordering_input(state, &state.stack[2]),
+                "{label}: the target axis of gate (3) is discharged by forced-ness itself, so \
+                 unpublishing the point cannot cost the cover a relief it used to get"
+            );
+        }
+    }
+
+    /// CR 704.5a — **WITHHOLDING A FORCED ANNOUNCEMENT FROM THE SCHEMA DOES NOT UNCHARGE ITS
+    /// VICTIM: the bound is the SAME whether or not the point is published.**
+    ///
+    /// The sibling row above asserts the CR 732.2a WITHHOLD (a forced announcement is not a
+    /// game choice, so no decision point is published). That withhold is right, and its blast
+    /// radius was not: `declarable_victims` and `PeriodicDelta::victim_slot` were BOTH derived
+    /// from the published point set, so withholding the point dropped the forced victim into
+    /// `elimination_bounds`' bare-`observed_life_loss` arm and the bound GREW — an offer
+    /// declaring more repetitions legal than CR 732.2a permits, on the very operator that
+    /// proves the proposal "may be legally taken based on the current game state".
+    ///
+    /// This row therefore asserts THE BOUND, not the publication. A row that only re-asserted
+    /// "the point is withheld" is exactly the row that already existed and that missed this.
+    ///
+    /// # The matched pair, and why the two arms are comparable
+    ///
+    /// Both arms run step (7)'s own two derivations verbatim, then the production
+    /// `elimination_bounds`. They differ in ONE axis — how many opponents the announcement
+    /// authority enumerates, which is what makes the announcement `Forced` (2p, one legal
+    /// assignment, point WITHHELD) or `Chosen` (3p, two legal assignments, point PUBLISHED).
+    /// The extra seat is parked at 40 life so its own headroom never binds, and the delta is
+    /// byte-identical across the arms, so the ONLY thing that can move the bound is whether
+    /// the withheld announcement is charged. Asserting EQUALITY pins both directions at once:
+    /// the pre-fix fail-OPEN (looser when withheld) and an over-correction (tighter when
+    /// withheld, which would silently shrink offers on boards that work today).
+    ///
+    /// * **(A) the ordinary forced drain** — P1 loses 1 per period. Charged: P1's magnitude is
+    ///   `observed 1 + S 1 = 2` over headroom `7 - 1`, so **3**. Uncharged it is `1`, giving
+    ///   **6**.
+    /// * **(B) the victim who NETS A LIFE GAIN** — P1 *gains* 1 per period while the proposer
+    ///   loses 2. This is the shape where the defect is worst rather than merely loose:
+    ///   uncharged, P1's magnitude is `-1`, `elimination_bounds`' `narrow` guard
+    ///   (`magnitude > 0`) never fires and P1's life axis is DISARMED outright, leaving only
+    ///   the proposer's `20 / 2 = 10`. Charged, the `.max(0)` clamp floors the gain at zero
+    ///   and P1 is charged `0 + S 2 = 2` over headroom `7 - 1`, so **3**. Case (o) of
+    ///   `elimination_bounds_conventions` guards that clamp in isolation; this row is what
+    ///   proves a real production derivation still REACHES it on a forced board.
+    ///
+    /// # What a wrong implementation would still pass, and the guard for each
+    ///
+    /// * *charge every living seat* (ignore the legal set): both arms move together and stay
+    ///   equal ⇒ the VICTIM-SET assertions below, not the equality, are what reject it.
+    /// * *republish the forced point* (revert the sibling row's withhold): the two derivations
+    ///   coincide again and equality holds ⇒ the withhold reach-guard rejects it.
+    /// * *charge the victim but not the magnitude* (or vice versa): arm (A) yields 6, not 3 ⇒
+    ///   the exact-value assertions reject it.
+    ///
+    /// REVERT-PROBE, MEASURED (the mutation `cmp`-proved to have applied, and the file
+    /// restored byte-identically by SHA256 afterwards): RE-CONFLATE the two questions inside
+    /// the charging mint — add `.filter(|t| t.announcement == TargetAnnouncement::Chosen)` to
+    /// `game::engine::bounded_cycle_charged_targets_for_window`, which is precisely "charge
+    /// only what CR 732.2a publishes". The forced arm then charges NOTHING and the row FLIPS
+    /// TO FAILING at arm (A)'s first victim-set assertion: `[]` where `[PlayerId(1)]` is
+    /// required. Arm (B) is not separately measured because (A) panics first; it carries its
+    /// own exact-value assertion instead.
+    ///
+    /// ⚠ THE OTHER OBVIOUS REVERT DOES NOT REACH THIS ROW, and that is worth stating rather
+    /// than leaving to be re-derived: restoring step (7)'s published-point derivation inside
+    /// `try_offer_bounded_cycle_shortcut` leaves this row GREEN (measured), because this row
+    /// calls the charging mint directly. That revert is discriminated by the sibling
+    /// production-offer row `the_bounded_offer_charges_a_forced_victim_it_publishes_no_point_for`,
+    /// which flips on it. The two rows cover the two halves of the seam on purpose.
+    #[test]
+    fn a_withheld_forced_announcement_is_charged_like_a_published_one() {
+        use crate::analysis::decision_template::DecisionPointKind;
+        use crate::game::engine::{
+            bounded_cycle_charged_targets_for_window, bounded_cycle_pin_slots,
+        };
+        use std::collections::BTreeMap;
+
+        /// Step (7)'s own two derivations, verbatim — the union of the CHARGED
+        /// announcements' legal player sets, and the per-slot magnitude keyed by
+        /// `worst_seat_life_loss`. One function, so neither arm can compute them a
+        /// different way.
+        fn step_seven(
+            state: &GameState,
+            delta: &ResourceVector,
+        ) -> (Vec<PlayerId>, BTreeMap<DecisionSlot, i64>) {
+            let touch =
+                certified_period_touch(&[], state, PeriodCertification::ResourceSignatureOnly);
+            let charged = bounded_cycle_charged_targets_for_window(&touch, PlayerId(0));
+            let mut victims: Vec<PlayerId> = charged
+                .iter()
+                .flat_map(|(_, seats)| seats.iter().copied())
+                .collect();
+            victims.sort_unstable();
+            victims.dedup();
+            let magnitude = charged
+                .iter()
+                .map(|(slot, _)| (slot.clone(), delta.worst_seat_life_loss()))
+                .collect();
+            (victims, magnitude)
+        }
+
+        // One board per arm: `players` seats, P0 (the proposer) at 21, P1 (the victim) at
+        // 7, and every further seat parked at 40 so only P1's headroom can bind.
+        let board = |players: u8| {
+            let (_prior, mut current) = grown_window(players, |id| drain_entry(id, vec![]));
+            for p in current.players.iter_mut() {
+                p.life = match p.id {
+                    PlayerId(0) => 21,
+                    PlayerId(1) => 7,
+                    _ => 40,
+                };
+            }
+            current
+        };
+        let life_delta = |seats: &[(PlayerId, i64)]| {
+            let mut v = ResourceVector::default();
+            for (seat, n) in seats {
+                v.life.insert(*seat, *n);
+            }
+            v
+        };
+
+        let forced = board(2);
+        let chosen = board(3);
+
+        // ── REACH-GUARDS: the two arms really are the withheld/published pair ────────────
+        assert!(
+            bounded_cycle_pin_slots(&forced, PlayerId(0)).is_empty(),
+            "REACH-GUARD: the 2p arm's announcement must still be WITHHELD (CR 732.2a — one \
+             legal assignment is no game choice). Without this the row would be satisfied by \
+             re-publishing the forced point, which is the change the sibling row forbids"
+        );
+        assert!(
+            bounded_cycle_pin_slots(&chosen, PlayerId(0))
+                .iter()
+                .any(|p| matches!(p.kind, DecisionPointKind::Targets { .. })),
+            "REACH-GUARD: the 3p arm must PUBLISH its `Targets` point, else 'published' and \
+             'withheld' name the same board and the equality below is vacuous"
+        );
+
+        for (label, delta, expected, uncharged) in [
+            (
+                "(A) ordinary forced drain",
+                life_delta(&[(PlayerId(1), -1)]),
+                3,
+                6,
+            ),
+            (
+                "(B) victim nets a life GAIN",
+                life_delta(&[(PlayerId(1), 1), (PlayerId(0), -2)]),
+                3,
+                10,
+            ),
+        ] {
+            let (forced_victims, forced_magnitude) = step_seven(&forced, &delta);
+            let (chosen_victims, chosen_magnitude) = step_seven(&chosen, &delta);
+
+            // The victim SETS, asserted by content: an implementation that charged every
+            // living seat would keep the two bounds equal and pass the equality alone.
+            assert_eq!(
+                forced_victims,
+                vec![PlayerId(1)],
+                "{label}: CR 704.5a — the WITHHELD announcement still charges the one seat \
+                 its legal set names, and only that seat"
+            );
+            assert_eq!(
+                chosen_victims,
+                vec![PlayerId(1), PlayerId(2)],
+                "{label}: and the published one charges both of its legal targets"
+            );
+            assert_eq!(
+                (forced_magnitude.len(), chosen_magnitude.len()),
+                (1, 1),
+                "{label}: one SOURCE announces on both boards, so exactly one slot is \
+                 charged on each (PER SOURCE, NOT PER ENTRY)"
+            );
+
+            let forced_bound =
+                delta.elimination_bounds(&forced, &forced_victims, &forced_magnitude);
+            let chosen_bound =
+                delta.elimination_bounds(&chosen, &chosen_victims, &chosen_magnitude);
+            assert_eq!(
+                forced_bound, chosen_bound,
+                "{label}: CR 704.5a — the bound must not move because CR 732.2a declined to \
+                 publish the announcement as a game choice. The victim loses the life either \
+                 way; who chose the target is not an input to how much is lost"
+            );
+            assert_eq!(
+                forced_bound, expected,
+                "{label}: and the shared value is the CHARGED one ({expected}), re-derived \
+                 by hand above — not the UNCHARGED {uncharged} the published-point \
+                 derivation produced"
+            );
+            assert_ne!(
+                expected, uncharged,
+                "{label}: fixture guard — the two derivations must actually disagree on this \
+                 board, else the row cannot discriminate"
+            );
+        }
+    }
+
+    /// CR 704.5a + CR 732.2a — **a slot ANNOUNCED TWICE in one window is charged the UNION of
+    /// its legal sets, not the first frame's.**
+    ///
+    /// The two mints agree on WHICH entries the cycle accepts (both read `entry_announces`)
+    /// and they dedup the same slot the same way — but they keep DIFFERENT FRAMES of a repeat,
+    /// because publication skips a `NotProposerChoice` frame and charging does not. First-wins
+    /// charging therefore let a NARROW earlier frame's legal set stand for a slot the schema
+    /// publishes from a WIDER later one: the schema states the client may pin P2,
+    /// `declarable_victims` reads `[P1]`, `elimination_bounds` never charges P2, and
+    /// `max_iterations` GROWS. That is the fail-OPEN direction, on the operator whose whole job
+    /// is proving the proposed sequence "may be legally taken based on the current game state".
+    ///
+    /// # The board, and why it is a legal transition rather than a contrived one
+    ///
+    /// Three frames on ONE source (`CHURN_SRC`, P0's). The middle frame carries a P2-controlled
+    /// permanent whose `StaticMode::Hexproof` affects its controller — CR 702.11c, "you can't
+    /// be the target of spells or abilities your opponents control" — so the announcement
+    /// authority enumerates ONE opponent there and the announcement is forced. On the live
+    /// board that permanent has LEFT, so both opponents are legal and the announcement is the
+    /// proposer's choice. A permanent leaving the battlefield between two retained ring frames
+    /// is an ordinary event; nothing here rewinds an irreversible fact (contrast
+    /// `is_eliminated`, which is why this row does not use the elimination lever the sibling
+    /// rows use).
+    ///
+    /// **REACHABILITY: NARROW, AND NOT CLOSED — stated in both directions.** No production
+    /// trajectory that reaches this shape has been built, by the reviewer, the orchestrator or
+    /// this row. Elimination — the realistic mechanism, and the one every tracked dump shows —
+    /// narrows the legal set MONOTONICALLY, which puts the widest frame first and lands
+    /// first-wins fail-CLOSED. The fail-open direction needs a seat's untargetability to END
+    /// mid-window; a corpus census measured 14 cards granting a player untargetability
+    /// mid-loop, all self-protective and predominantly "until end of turn", which does not
+    /// expire mid-turn, so the path additionally needs the grantor to leave or a shorter
+    /// duration. This row builds the grantor-leaves half at the mint's own boundary. It is
+    /// NOT evidence that a full drive reaches it, and the shape is NOT "unreachable".
+    ///
+    /// # What a wrong implementation would still pass this row, and the guard for each
+    ///
+    /// * *charge every living seat* — passes the union assertion and FAILS the narrow-frame
+    ///   reach-guard, which pins the first frame's legal set at exactly `[P1]`.
+    /// * *keep the LAST frame instead of unioning* — indistinguishable HERE (the later frame
+    ///   is the wider one) and equally sound on this board, but it is not monotone in general;
+    ///   the `charged.len() == 1` + slot-identity guards are what keep the row about the DEDUP
+    ///   rather than about frame order, and the doc on
+    ///   `game::engine::bounded_cycle_charged_targets_for_window` carries the monotonicity
+    ///   argument the union rests on.
+    /// * *publish nothing at all* — the publication reach-guard requires the WIDE point to
+    ///   reach the schema at the same `DecisionSlot`, so a mint that published nothing fails
+    ///   before the claim.
+    /// * *drop the dedup entirely* — `charged.len() == 1` fails; two charged copies of one
+    ///   slot would double `declared_life_magnitude` and silently halve the bound.
+    ///
+    /// REVERT-PROBE, and it is the shipped code's own previous form: replace the union arm
+    /// with `if charged.iter().any(|(slot, _)| *slot == target.slot) { continue; }`. The
+    /// charged victim list reads `[PlayerId(1)]` and the row FLIPS TO FAILING at the union
+    /// assertion; the bound assertion below then reads 6 where 3 is required.
+    #[test]
+    fn a_repeated_slots_victim_lists_are_unioned_not_first_wins() {
+        use crate::analysis::decision_template::DecisionPointKind;
+        use crate::game::ability_utils::build_target_slots;
+        use crate::game::engine::{
+            bounded_cycle_charged_targets_for_window, bounded_cycle_pin_slots_for_window,
+        };
+        use std::collections::BTreeMap;
+
+        const GRANTOR: ObjectId = ObjectId(600);
+
+        // P1 is parked out of reach so only P2's headroom can bind the life axis, and P2 is
+        // seeded at 7 so neither the charged nor the uncharged bound lands on the `1` floor.
+        let mut base = drain_state(3);
+        for p in base.players.iter_mut() {
+            p.life = match p.id {
+                PlayerId(0) => 21,
+                PlayerId(1) => 40,
+                _ => 7,
+            };
+        }
+
+        // Window head: nothing on the stack, so frame 1's entry counts as ANNOUNCED there.
+        let head = base.clone();
+
+        // Frame 1 — CR 702.11c: P2 controls a permanent granting its controller hexproof, so
+        // an opponent-controlled source cannot target them and the announcement is forced.
+        let mut narrow = base.clone();
+        let mut grantor = GameObject::new(
+            GRANTOR,
+            CardId(77),
+            PlayerId(2),
+            "You Have Hexproof".to_string(),
+            Zone::Battlefield,
+        );
+        grantor.static_definitions =
+            vec![
+                StaticDefinition::new(StaticMode::Hexproof).affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            ]
+            .into();
+        narrow.objects.insert(GRANTOR, grantor);
+        narrow.battlefield.push_back(GRANTOR);
+        crate::game::layers::flush_layers(&mut narrow);
+        narrow.stack.push_back(drain_entry(10, vec![]));
+
+        // The live board — the grantor has left, so both opponents are legal again.
+        let mut current = base.clone();
+        current.stack.push_back(drain_entry(20, vec![]));
+
+        let legal = |state: &GameState, entry: usize| {
+            build_target_slots(state, state.stack[entry].ability().unwrap())
+                .map(|slots| {
+                    slots
+                        .iter()
+                        .map(|s| (s.optional, s.legal_targets.clone()))
+                        .collect::<Vec<_>>()
+                })
+                .ok()
+        };
+
+        // ── REACH-GUARDS: the window really is the narrow-then-wide repeat ──────────────
+        assert_eq!(
+            legal(&narrow, 0),
+            Some(vec![(false, vec![TargetRef::Player(PlayerId(1))])]),
+            "REACH-GUARD: CR 702.11c — the hexproof grantor must actually remove P2 from the \
+             announcement authority's legal set on the FIRST frame, else this row is two \
+             identical frames and the dedup is unobservable"
+        );
+        assert_eq!(
+            legal(&current, 0),
+            Some(vec![(
+                false,
+                vec![
+                    TargetRef::Player(PlayerId(1)),
+                    TargetRef::Player(PlayerId(2))
+                ]
+            )]),
+            "REACH-GUARD: and the live board must admit BOTH opponents, so the later frame is \
+             the WIDER one"
+        );
+
+        let touch = certified_period_touch(
+            &[&head, &narrow],
+            &current,
+            PeriodCertification::ResourceSignatureOnly,
+        );
+        assert_eq!(
+            touch
+                .announced
+                .iter()
+                .map(|(_, e)| e.id)
+                .collect::<Vec<_>>(),
+            vec![ObjectId(10), ObjectId(20)],
+            "REACH-GUARD: exactly two announcements, NARROW FIRST — first-wins keeps the \
+             narrow one, which is the whole shape under test"
+        );
+
+        // ── The publication half: ONE point, carrying the WIDE legal set ────────────────
+        let points = bounded_cycle_pin_slots_for_window(&touch, PlayerId(0));
+        assert_eq!(
+            points.len(),
+            1,
+            "REACH-GUARD: the narrow frame's announcement is forced and withheld, the wide \
+             one is the proposer's own choice and published — exactly one point: {points:?}"
+        );
+        assert_eq!(
+            points[0].kind,
+            DecisionPointKind::Targets {
+                legal_targets: vec![
+                    TargetRef::Player(PlayerId(1)),
+                    TargetRef::Player(PlayerId(2))
+                ],
+                min_targets: 1,
+                max_targets: 1,
+                ordered: false,
+            },
+            "REACH-GUARD: the SCHEMA states the client may pin P2. Everything below is about \
+             the bound owing a charge for that stated pin"
+        );
+
+        // ── THE CLAIM: one slot, and its charge is the UNION ────────────────────────────
+        let charged = bounded_cycle_charged_targets_for_window(&touch, PlayerId(0));
+        assert_eq!(
+            charged.len(),
+            1,
+            "PER SOURCE, NOT PER ENTRY: both entries carry one source, so one slot is \
+             charged. Two copies would double `declared_life_magnitude` and halve the bound \
+             instead of widening the victim set: {charged:?}"
+        );
+        assert_eq!(
+            charged[0].0, points[0].slot,
+            "the charged slot IS the published slot — without this the union below could be \
+             about a different decision point than the one the schema offers"
+        );
+        assert_eq!(
+            charged[0].1,
+            vec![PlayerId(1), PlayerId(2)],
+            "CR 704.5a: a repeated slot charges the UNION of its announcements' legal player \
+             sets. First-wins reads [P1] here, so the schema would offer a P2 pin that \
+             `elimination_bounds` never charges and `max_iterations` would GROW"
+        );
+
+        // ── And the bound really moves, so the union is not a cosmetic set difference ───
+        let mut delta = ResourceVector::default();
+        delta.life.insert(PlayerId(2), -1);
+        let magnitude: BTreeMap<DecisionSlot, i64> = charged
+            .iter()
+            .map(|(slot, _)| (slot.clone(), delta.worst_seat_life_loss()))
+            .collect();
+        assert_eq!(
+            delta.elimination_bounds(&current, &charged[0].1, &magnitude),
+            3,
+            "P2 is a declarable victim, so its life magnitude is `observed 1 + S 1 = 2` over \
+             CR 704.5a headroom `7 - 1`; first-wins leaves P2 out of the victim set, charges \
+             the bare observed 1 and returns 6"
+        );
+        assert_eq!(
+            delta.elimination_bounds(&current, &[PlayerId(1)], &magnitude),
+            6,
+            "fixture guard — the two victim sets must actually disagree on this board, else \
+             the assertion above cannot discriminate"
+        );
+    }
+
+    /// CR 601.2c + CR 115.1 + CR 732.2a — **an announcement the PROPOSER does not make is
+    /// withheld from the schema and charged all the same, on all THREE of CR 601.2c's axes.**
+    ///
+    /// `TargetAnnouncement` answers "is announcing this a game choice the proposer makes".
+    /// `forced_unique_targeting` answers only the assignment-COUNT half of that question, and
+    /// two `triggers::prepare_trigger_targets` routes raise no prompt for the proposer while
+    /// the count half reports "not forced":
+    ///
+    /// * **(a) CR 601.2c `target_chooser`** — "of an opponent's choice" (Volcanic Offering's
+    ///   shape). `ability_utils::auto_select_targets_for_ability` early-returns `Ok(None)`
+    ///   whenever ANY slot carries a chooser, so the count half is false even with exactly ONE
+    ///   legal assignment — arm (a2) is that exact board. The prompt is raised for the
+    ///   CHOOSER, `record_trigger_target_answer` journals under the seat that answered, and
+    ///   every consumer reads `loop_answer(slot, proposer)` ⇒ an unanswerable published point,
+    ///   which is the undeclarable-offer condition the bounded offer exists to remove.
+    /// * **(b) `TargetSelectionMode::Random`** — routed to `random_select_targets_for_ability`
+    ///   and then `AutoAssigned`, so no prompt is ever raised, and the pin RELIEVES gate (3):
+    ///   the offer would be minted because of a designation the RNG contradicts at drive time.
+    ///
+    /// **SCOPING HONESTY: the publication behaviour PREDATES the commit this row ships in.**
+    /// What is new is a named authority claiming to answer the whole question while reading one
+    /// of its three members. This row is not evidence of a defect this commit introduced.
+    ///
+    /// # What a wrong implementation would still pass, and the guard for each
+    ///
+    /// * *withhold everything* — arm (c) publishes on the SAME 3p board with neither axis set,
+    ///   so a mint that published nothing fails there.
+    /// * *withhold by legal-set size* — arm (a1)/(b) have TWO legal opponents and are still
+    ///   withheld; arm (c) has the same two and publishes. Size cannot separate them.
+    /// * *withhold, and also stop charging* — every arm asserts the CR 704.5a charge survives
+    ///   with the full legal player set, which is the half `elimination_bounds` reads.
+    /// * *key the chooser on presence rather than on the SEAT* — not discriminated here and
+    ///   deliberately so: `collect_target_slots` already drops a chooser equal to the
+    ///   ability's controller, so on these fixtures `is_some()` and `is_some_and(!= proposer)`
+    ///   coincide. The inequality guards `entry.controller != ability.controller` skew, which
+    ///   no fixture in this crate builds.
+    ///
+    /// REVERT-PROBE (each measured separately, since the first failing arm panics): delete the
+    /// `slot.chooser` disjunct from `game::engine::entry_announces` ⇒ arms (a1)/(a2) FLIP TO
+    /// FAILING on "must be WITHHELD"; delete the `target_selection_mode` disjunct ⇒ arm (b)
+    /// flips instead. Neither deletion touches arm (c), which is what makes the two axes
+    /// separately attributable rather than jointly.
+    #[test]
+    fn an_announcement_the_proposer_does_not_make_is_withheld_but_still_charged() {
+        use crate::analysis::decision_template::DecisionPointKind;
+        use crate::game::ability_utils::build_target_slots;
+        use crate::game::engine::{
+            bounded_cycle_charged_targets_for_window, bounded_cycle_pin_slots,
+            entry_publishes_pin_slots,
+        };
+        use crate::types::ability::TargetSelectionMode;
+
+        // The drain, with one of CR 601.2c's non-count announcement axes set.
+        let axis_drain = |id: u64, chooser: bool, random: bool| {
+            let mut ability = lose_life_targeting(event_amount(), opp_typed(vec![]));
+            ability.targets = vec![TargetRef::Player(PlayerId(1))];
+            if chooser {
+                // CR 601.2c: "of an opponent's choice" — `resolve_effect_player_ref` reads the
+                // already-announced opponent target, so the announcing seat is P1.
+                ability.target_chooser = Some(TargetFilter::Opponent);
+            }
+            if random {
+                ability.target_selection_mode = TargetSelectionMode::Random;
+            }
+            churn_entry(id, 0, ability, None)
+        };
+
+        let charged_victims = |state: &GameState| {
+            let touch =
+                certified_period_touch(&[], state, PeriodCertification::ResourceSignatureOnly);
+            bounded_cycle_charged_targets_for_window(&touch, PlayerId(0))
+        };
+        let announcement_slot = |state: &GameState| {
+            build_target_slots(state, state.stack[2].ability().unwrap())
+                .map(|slots| {
+                    slots
+                        .iter()
+                        .map(|s| (s.optional, s.chooser, s.legal_targets.clone()))
+                        .collect::<Vec<_>>()
+                })
+                .ok()
+        };
+
+        // ── (c) CONTROL first: neither axis, two legal opponents ⇒ PUBLISHED ────────────
+        let (_pc, control) = grown_window(3, |id| axis_drain(id, false, false));
+        let control_points = bounded_cycle_pin_slots(&control, PlayerId(0));
+        assert_eq!(control_points.len(), 1, "control: {control_points:?}");
+        assert!(
+            matches!(control_points[0].kind, DecisionPointKind::Targets { .. }),
+            "control: an announcement the proposer DOES make is still published — without \
+             this every withhold below is satisfied by a mint that publishes nothing"
+        );
+
+        // ── (a1) CR 601.2c chooser, 3p: two legal assignments, still not the proposer's ──
+        let (_p1, chooser_3p) = grown_window(3, |id| axis_drain(id, true, false));
+        assert_eq!(
+            announcement_slot(&chooser_3p),
+            Some(vec![(
+                false,
+                Some(PlayerId(1)),
+                vec![
+                    TargetRef::Player(PlayerId(1)),
+                    TargetRef::Player(PlayerId(2))
+                ]
+            )]),
+            "REACH-GUARD (a1): ONE mandatory slot over PLAYERS whose ANNOUNCER is P1, not the \
+             proposer — every conjunct upstream of the announcement check accepts this entry, \
+             and the legal set is the SAME SIZE as the control's, so size cannot be the \
+             discriminator"
+        );
+        assert!(
+            entry_publishes_pin_slots(&chooser_3p, &chooser_3p.stack[2], PlayerId(0)).is_none(),
+            "CR 601.2c: P1 announces this target, so no point the PROPOSER could answer is \
+             published — a published one is unanswerable at `loop_answer(slot, proposer)` and \
+             one unanswerable point makes the WHOLE offer undeclarable"
+        );
+        assert_eq!(
+            charged_victims(&chooser_3p)
+                .into_iter()
+                .map(|(_, seats)| seats)
+                .collect::<Vec<_>>(),
+            vec![vec![PlayerId(1), PlayerId(2)]],
+            "CR 704.5a: withheld is not uncharged — whoever announces it, the named seat \
+             loses the life"
+        );
+
+        // ── (a2) CR 601.2c chooser, 2p: EXACTLY ONE legal assignment, and the count half is
+        //        blind to it — the precise claim, isolated ────────────────────────────────
+        let (_p2, chooser_2p) = grown_window(2, |id| axis_drain(id, true, false));
+        assert_eq!(
+            announcement_slot(&chooser_2p),
+            Some(vec![(
+                false,
+                Some(PlayerId(1)),
+                vec![TargetRef::Player(PlayerId(1))]
+            )]),
+            "REACH-GUARD (a2): exactly ONE legal assignment"
+        );
+        assert!(
+            !forced_unique_targeting(&chooser_2p, chooser_2p.stack[2].ability().unwrap()),
+            "REACH-GUARD (a2): and the assignment-COUNT authority still reports NOT forced — \
+             `auto_select_targets_for_ability` early-returns `Ok(None)` on any chooser. This \
+             is why the count half alone minted `Chosen` for a one-assignment announcement"
+        );
+        assert!(
+            entry_publishes_pin_slots(&chooser_2p, &chooser_2p.stack[2], PlayerId(0)).is_none(),
+            "so the withhold must come from the CHOOSER axis, not from forced-ness"
+        );
+        assert_eq!(
+            charged_victims(&chooser_2p)
+                .into_iter()
+                .map(|(_, seats)| seats)
+                .collect::<Vec<_>>(),
+            vec![vec![PlayerId(1)]],
+            "CR 704.5a: still charged, and only the one seat its legal set names"
+        );
+
+        // ── (b) CR 115.1 overridden: the GAME selects, so nobody is prompted ─────────────
+        let (_p3, random_3p) = grown_window(3, |id| axis_drain(id, false, true));
+        assert_eq!(
+            announcement_slot(&random_3p),
+            Some(vec![(
+                false,
+                None,
+                vec![
+                    TargetRef::Player(PlayerId(1)),
+                    TargetRef::Player(PlayerId(2))
+                ]
+            )]),
+            "REACH-GUARD (b): no chooser is involved — this arm is the SELECTION-MODE axis \
+             alone, on the control's own legal set"
+        );
+        assert!(
+            !forced_unique_targeting(&random_3p, random_3p.stack[2].ability().unwrap()),
+            "REACH-GUARD (b): two legal assignments, so the count authority reports NOT \
+             forced and would have published"
+        );
+        assert!(
+            entry_publishes_pin_slots(&random_3p, &random_3p.stack[2], PlayerId(0)).is_none(),
+            "CR 115.1 is overridden — `prepare_trigger_targets` routes this to \
+             `random_select_targets_for_ability` and `AutoAssigned`, raising no prompt at \
+             all, so a pin would be a designation the RNG contradicts at drive time"
+        );
+        assert_eq!(
+            charged_victims(&random_3p)
+                .into_iter()
+                .map(|(_, seats)| seats)
+                .collect::<Vec<_>>(),
+            vec![vec![PlayerId(1), PlayerId(2)]],
+            "CR 704.5a: the RNG names one of these seats and it loses the life"
+        );
+    }
+
+    /// CR 704.5a + CR 732.2a — **the same fix at the PRODUCTION OFFER, on a board that
+    /// publishes NO decision point at all.**
+    ///
+    /// [`a_withheld_forced_announcement_is_charged_like_a_published_one`] drives step (7)'s
+    /// derivations directly; this one drives
+    /// `try_offer_bounded_cycle_shortcut_metered` — the producer the interactive bridge
+    /// calls — and asserts the value that actually ships to the client.
+    ///
+    /// THE COMBINATION IS UNREACHABLE BEFORE THE FIX: a published schema with ZERO decision
+    /// points, and a certificate whose `victim_slot` is NON-EMPTY. Both derivations used to
+    /// read the same list, so "no points" implied "nothing charged" by construction.
+    ///
+    /// # The board
+    ///
+    /// `ring_announcing_on_its_newest_sample` is a 2-seat ring whose newest retained sample
+    /// carries the drain entry, so the announcement's legal set is the single opponent and
+    /// the announcement is FORCED. The harness steps P1's life one point per retained frame,
+    /// so the certified period's measured delta is P1 `-1`.
+    ///
+    /// # The arithmetic, re-derived independently of `elimination_bounds`
+    ///
+    /// The certifying pair is the ring frame one period back against the live board, and the
+    /// harness steps P1 one life point per retained frame, so the MEASURED per-period delta is
+    /// P1 `-2` (asserted below rather than assumed). `worst_seat_life_loss` is therefore 2 and
+    /// one slot is charged, so `S = 2`; P1 is a declarable victim and is charged
+    /// `observed 2 + S 2 = 4` against CR 704.5a headroom `21 - 1 = 20`, giving **5**.
+    /// Uncharged — the published-point derivation, which sees no points here at all — P1's
+    /// magnitude is the bare observed `2` and the bound is **10**.
+    ///
+    /// P1 is seeded at 21 rather than the harness default so neither value lands on the `1`
+    /// floor of the legal range, where an over-charging bug would be indistinguishable from
+    /// the right answer.
+    ///
+    /// REVERT-PROBE: restore step (7)'s published-point derivation ⇒ `victim_slot` is empty
+    /// and `max_iterations` is 10 ⇒ both the non-empty assertion and the value assertion FLIP.
+    #[test]
+    fn the_bounded_offer_charges_a_forced_victim_it_publishes_no_point_for() {
+        use crate::game::engine::{
+            try_offer_bounded_cycle_shortcut_metered, BoundedOfferRefusal, ProbeCap,
+        };
+        use crate::types::game_state::WaitingFor;
+
+        let state = ring_announcing_on_its_newest_sample(
+            |s| {
+                announcing_ring_source(s, CHURN_SRC);
+                // Seeded BEFORE any frame is snapshotted, so every retained sample and the
+                // live board share this headroom and only the harness's own per-frame step
+                // separates them.
+                s.players
+                    .iter_mut()
+                    .find(|p| p.id == PlayerId(1))
+                    .expect("the harness seats P1")
+                    .life = 21;
+            },
+            |frame| {
+                frame.stack.push_back(drain_entry(950, vec![]));
+            },
+        );
+        // REACH-GUARD: the fixture must really be the FORCED shape, or this row is about the
+        // ordinary published path the F4 dumps already cover.
+        let announced = announced_from_retained_sample(&state, 950);
+        assert!(
+            forced_unique_targeting(announced, announced.stack[0].ability().unwrap()),
+            "REACH-GUARD: one living opponent ⇒ one legal assignment ⇒ the dispatcher \
+             announces the target itself and no player is ever asked"
+        );
+
+        let (outcome, meter) =
+            try_offer_bounded_cycle_shortcut_metered(&state, false, ProbeCap::Shipped);
+        let waiting = outcome.unwrap_or_else(|refusal: BoundedOfferRefusal| {
+            panic!(
+                "REACH-GUARD: the bounded offer must FIRE on this board, else every assertion \
+                 below is made about a refusal; got {refusal:?}, meter {meter:?}"
+            )
+        });
+        let WaitingFor::LoopShortcut {
+            certificate,
+            schema,
+            ..
+        } = &waiting
+        else {
+            panic!("the bounded producer returns a `LoopShortcut` offer; got {waiting:?}")
+        };
+        let per_cycle = certificate
+            .per_cycle
+            .as_ref()
+            .expect("a bounded offer publishes the per-period signature its bound was divided by");
+
+        assert!(
+            schema.points.is_empty(),
+            "CR 732.2a: the ONE announcement on this board is FORCED, so the schema publishes \
+             no decision point at all; got {:?}",
+            schema.points
+        );
+        assert_eq!(
+            per_cycle.delta.life.get(&PlayerId(1)).copied(),
+            Some(-2),
+            "REACH-GUARD: the certified period must really drain the victim, else the bound \
+             below is not about a CR 704.5a threshold; delta {:?}",
+            per_cycle.delta
+        );
+        assert_eq!(
+            per_cycle
+                .victim_slot
+                .iter()
+                .map(|(_, m)| *m)
+                .collect::<Vec<_>>(),
+            vec![2],
+            "CR 704.5a: the forced announcement is CHARGED even though CR 732.2a published no \
+             point for it — the combination that was unreachable before, because both \
+             derivations read the published list; got {:?}",
+            per_cycle.victim_slot
+        );
+        assert_eq!(
+            schema.max_iterations, 5,
+            "CR 704.5a: headroom `21 - 1` over the charged magnitude `observed 2 + S 2`. The \
+             published-point derivation charged nothing here and produced 10, declaring twice \
+             as many repetitions legal as CR 732.2a permits"
+        );
+    }
+
     /// A slot an OFFER would publish for `CHURN_SRC`'s entries — built through the same
     /// authority the gates rebuild it with, so the rows prove the KEY matches rather than
     /// asserting a hand-written literal. `index: 0` is the CR 115.2 target choice,
@@ -7500,7 +8462,10 @@ mod tests {
             "PINNED: the published CR 603.5 gate specifies that choice ⇒ cover"
         );
         // The MayChoice point is load-bearing on its own: pinning only the target slot
-        // leaves the resolution choice unspecified.
+        // leaves the resolution choice unspecified. NOTE the target slot is pinned but NOT
+        // published on this board — the target is forced-unique (asserted above), so
+        // `a_forced_target_is_not_a_published_decision_point` is the row that owns that fact.
+        // Gate (3) still passes here on the ordering-input arm; only gate (6) rejects.
         assert!(
             !loop_states_cover_modulo_growth_scoped(
                 &p_may,
@@ -12865,6 +13830,7 @@ mod tests {
             predicted_winner: None,
             certificate: cert.clone(),
             schema: ShortcutDecisionSchema::default(),
+            declaration: None,
         };
         let offer_json =
             serde_json::to_string(&offer).expect("the LoopShortcut payload carrying it must too");
@@ -12883,6 +13849,7 @@ mod tests {
                 ..cert
             },
             schema: ShortcutDecisionSchema::default(),
+            declaration: None,
         };
         let shipped_json = serde_json::to_string(&shipped).expect("serializes");
         assert!(
@@ -14240,9 +15207,10 @@ mod tests {
             "the extractor must return the whole predicate, not a truncated span; got \
              {head}-{end}"
         );
+        // The shared comment rule (`crate::source_census::code`), so a trailing comment naming
+        // one of the tokens below cannot be read as a code site.
         let code: Vec<(usize, &str)> = (head..=end)
-            .map(|i| (i, lines[i]))
-            .filter(|(_, l)| !l.trim_start().starts_with("//"))
+            .map(|i| (i, crate::source_census::code(lines[i])))
             .collect();
 
         let item6_head = code

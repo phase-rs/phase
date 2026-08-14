@@ -92,6 +92,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "PrecastCopyShortcutOffer",
     "RespondToPrecastCopyShortcut",
     "ReplacementChoice",
+    "EntryControllerChoice",
     "CopyTargetChoice",
     "CopyRetarget",
     "ExploreChoice",

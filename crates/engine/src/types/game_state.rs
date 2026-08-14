@@ -3614,7 +3614,7 @@ pub enum PersistentAxisMaterialization {
     /// (the `TokensCreated` axis). Carries NO per-cycle count because the per-cycle
     /// fodder count k is STRUCTURALLY ≡ 1: this stash is only registered when
     /// `materialize_object_growth_shortcut`'s `derived_fodder_class`
-    /// (engine.rs:1991-2005) found EXACTLY one new battlefield object per period
+    /// found EXACTLY one new battlefield object per period
     /// (a two+-object period returns `None` ⇒ no `Tokens` stash), so the boundary
     /// mint of `count: amount` == k·amount is EXACT. (Contrast `Counters`/`Life`,
     /// which carry a measured `per_cycle_delta` to handle k>1.)
@@ -9445,6 +9445,56 @@ fn migrate_legacy_mana_target_roles_in_value(
     Ok(())
 }
 
+/// Upgrade the pre-`SetTapState` tap-family effects at the persisted-state
+/// boundary. This is deliberately scoped to `effect` payloads: `Untap` is
+/// still meaningful in other serialized enums (for example, a phase or a
+/// target property), and current card data must continue to reject obsolete
+/// effect variants rather than silently accepting them.
+fn migrate_legacy_tap_effects(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                migrate_legacy_tap_effects(value);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            if let Some(effect) = object.get_mut("effect") {
+                migrate_legacy_tap_effect(effect);
+            }
+            for value in object.values_mut() {
+                migrate_legacy_tap_effects(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn migrate_legacy_tap_effect(effect: &mut serde_json::Value) {
+    let Some(effect) = effect.as_object_mut() else {
+        return;
+    };
+    let Some((scope, state)) = effect
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|effect_type| match effect_type {
+            "Tap" => Some(("Single", "Tap")),
+            "Untap" => Some(("Single", "Untap")),
+            "TapAll" => Some(("All", "Tap")),
+            "UntapAll" => Some(("All", "Untap")),
+            _ => None,
+        })
+    else {
+        return;
+    };
+
+    effect.insert(
+        "type".to_string(),
+        serde_json::Value::String("SetTapState".to_string()),
+    );
+    effect.insert("scope".to_string(), serde_json::json!({ "type": scope }));
+    effect.insert("state".to_string(), serde_json::json!({ "type": state }));
+}
+
 fn delayed_trigger_install_command(
     entry: &serde_json::Value,
 ) -> Option<&serde_json::Map<String, serde_json::Value>> {
@@ -9512,6 +9562,7 @@ fn reject_zero_bound_shortcut_offer(state: &GameState) -> Result<(), String> {
     if let WaitingFor::LoopShortcut {
         schema,
         certificate,
+        proposer,
         ..
     } = &state.waiting_for
     {
@@ -9519,6 +9570,73 @@ fn reject_zero_bound_shortcut_offer(state: &GameState) -> Result<(), String> {
             return Err(
                 "persisted LoopShortcut offer states max_iterations 0, which CR 732.2a admits \
                  no legally takeable sequence for"
+                    .to_string(),
+            );
+        }
+        // THE PAIR NO PRODUCER MINTS. `is_bounded()` says the offer's producer NARROWED the
+        // repetition bound below `MAX_SHORTCUT_CYCLES`; `loop_period_controller()` says a driving
+        // period belonging to THIS proposer is recorded. The engine's three `LoopShortcut` mints
+        // partition that cross-product and none of them lands in this cell:
+        //
+        //   * the object-growth mint (`reconcile_terminal_result`, schema from
+        //     `try_offer_object_growth_shortcut`) and the Path A drain mint
+        //     (`interactive_loop_bridge`) both hand `build_shortcut_schema` the global
+        //     `MAX_SHORTCUT_CYCLES` verbatim, so neither is EVER `is_bounded()` — the growth mint
+        //     is the one that REQUIRES its proposer's own period, and it is unbounded by
+        //     construction;
+        //   * the bounded mint (`certified_bounded_cycle_offer`) is `is_bounded()` by construction
+        //     — it refuses `NoNarrowedLegalCount` unless `(1..MAX_SHORTCUT_CYCLES)` contains the
+        //     bound — but its caller's gate (1b) (`bounded_cycle_offer`) returns
+        //     `BoundedOfferRefusal::ProposerHasDrivingPeriod` while that seat's own period is
+        //     accumulating, so it can never mint INTO this cell;
+        //   * `visibility.rs`'s per-viewer re-wrap copies `max_iterations` verbatim off an offer
+        //     one of the three already minted.
+        //
+        // No live beat can join the two afterwards either. Nothing assigns `schema` or
+        // `max_iterations` in place anywhere in the engine, so an unbounded offer cannot ACQUIRE a
+        // narrowed bound; and every writer that GROWS `last_loop_action_sequence` is priority-side
+        // — the `TapLandForMana` / `ActivateManaSource` / `ActivateAbility` `WaitingFor::Priority`
+        // arms (`accumulate_loop_action_step` and the token-creating `vec![step]` beside it) and
+        // the cast finalize. A pending offer reaches none of them: its only reducer arms are
+        // `DeclareShortcut` and `DeclineShortcut`.
+        //
+        // WHAT IT COSTS TO ACCEPT IT: `materialize_fixed_shortcut` (SITE C) dispatches on period
+        // ownership ALONE and early-returns the accepted proposal into
+        // `materialize_object_growth_shortcut`, committing ZERO of the agreed cycles — the silent
+        // misroute gate (1b)'s own doc block exists to prevent, entering through the restore door
+        // instead of the producer door.
+        //
+        // ⚠ DELIBERATELY CARRIES NO `CR` ANNOTATION, and the measurement for that absence travels
+        // with it so a later reader does not "fix" the omission. CR 732.2a's own Example is a
+        // proposer repeating THEIR OWN activation a SPECIFIED 999,999 more times — bounded, own
+        // period — so this state class is LEGAL AT THE TABLE and the rules license nothing here to
+        // enforce. What is violated is a producer-reachability fact about this engine, not a rule.
+        // Same call, same reason, same file family as `handle_declare_shortcut`'s IMPLEMENTATION
+        // BUDGET BOUND note: "a maintainer applying the CR 732.2a iff to a branch that wears a CR
+        // number will either trust it wrongly or delete it wrongly."
+        //
+        // BOTH conjuncts are required. Own period ALONE is the object-growth route's own admission
+        // condition, so rejecting it would refuse every legitimate growth capture; a narrowed bound
+        // ALONE is the ordinary bounded offer.
+        //
+        // ⚠ AFTER THE ZERO-BOUND CHECK, DELIBERATELY: `0 < MAX_SHORTCUT_CYCLES`, so a zero bound is
+        // ALSO `is_bounded()` and hoisting this block would relabel a corrupt zero with the wrong
+        // invariant. Observed, not assumed — see the zero-bound-plus-own-period arm of
+        // `a_wire_bounded_offer_carrying_the_proposers_own_period_fails_the_load`.
+        //
+        // ⚠ THIS BLOCK COVERS ONE OF THE HARM'S TWO WIRE HOSTS, and unlike the zero-bound sibling
+        // above the residual is NOT empty. A persisted `WaitingFor::RespondToShortcut { proposal }`
+        // whose `proposal.proposer` owns the recorded period reaches the SAME SITE C misroute via
+        // `apply_confirmed_shortcut`. No bound-keyed conjunct can see it — `ShortcutProposal`
+        // carries no `schema`/`max_iterations` at all (the scoping note on the zero-bound guard
+        // above). The candidate discriminator on that host is `proposal.per_cycle.is_some()`; it is
+        // filed rather than shipped because "`per_cycle: Some` ⟺ the bounded mint" is not yet
+        // measured per branch, and a guard on an inherited marker is what this seam must not carry.
+        if schema.is_bounded() && state.loop_period_controller() == Some(*proposer) {
+            return Err(
+                "persisted LoopShortcut offer narrows its repetition bound while recording the \
+                 proposer's own driving period; no producer mints that pair, and accepting it \
+                 routes the agreed cycles to the object-growth materializer, committing none"
                     .to_string(),
             );
         }
@@ -9825,6 +9943,32 @@ impl PersistedGameState {
         // one (it is lowered to the activator at creation), so this only sanitizes
         // corrupt/forged snapshots and closes the fail-open path in both consumers.
         state.drop_unresolved_source_controller_restrictions();
+        // Issue #5466: `rng` is `#[serde(skip)]`, so a decode leaves the LIVE ChaCha20 stream at
+        // word 0 while the serialized high-water `rng_word_pos` keeps its saved offset. A
+        // `capture_rng_word_pos` on that state — the production library shuffle performs one, see
+        // `game/library.rs` — then `.expect`-panics `HighWaterRegression { current: <saved>,
+        // requested: 0 }`, and any shuffle before it replays entropy the game already consumed.
+        //
+        // Rehydrating HERE means every caller of the chokepoint inherits the repair instead of
+        // owing its own. It does NOT make the load paths equivalent: what each caller does
+        // AFTERWARDS is that caller's own policy, and they differ.
+        //   * `engine-wasm`'s `restore_game_state` still calls `rehydrate_rng` itself, so that
+        //     path now runs it twice. Harmless — `rehydrate_rng` is idempotent, both of its
+        //     statements being absolute assignments from persisted fields.
+        //   * `engine-wasm`'s `resume_multiplayer_host_state` deliberately re-seeds and sets
+        //     `rng_word_pos = 0` so a resumed host does not replay saved randomness. That is a
+        //     resume policy choice, not a bug, and it leaves live position and high-water agreed.
+        //   * `server-core`'s `GameSession::from_persisted` re-seeds `rng` from fresh entropy and
+        //     zeroes `rng_word_pos` in the same step, so it lands on the same agreed live-0 /
+        //     high-water-0 pair as the host resume above. It therefore DISCARDS the position this
+        //     call just restored, deliberately: a resumed server game must not replay randomness
+        //     the pre-save game already consumed. That makes this call's rehydrate inert on the
+        //     server path — the chokepoint hands every caller a coherent stream, and a caller
+        //     wanting a different one overwrites BOTH halves rather than half of one. Re-seeding
+        //     WITHOUT zeroing the offset was the earlier server bug: it left live 0 / high-water
+        //     <saved>, so the next `capture_rng_word_pos` `.expect`-panicked `HighWaterRegression`.
+        // Offline tooling (`phase-ai`'s `load_saved_game_state`) simply inherits the repair.
+        state.rehydrate_rng();
         state
     }
 }
@@ -10108,6 +10252,14 @@ pub enum WaitingFor {
         candidate_count: usize,
         #[serde(default)]
         candidates: Vec<ReplacementCandidateSummary>,
+    },
+    /// CR 614.12a: choose the opponent that a permanent enters under before
+    /// the zone change is delivered. `candidates` is captured at replacement
+    /// application time; the pending replacement retains the exact proposed
+    /// event and replacement-applied set for the shared pipeline resume.
+    EntryControllerChoice {
+        player: PlayerId,
+        candidates: Vec<PlayerId>,
     },
     /// CR 603.3b: When a player controls 2+ triggered abilities placed on the
     /// stack in the same pass, that player chooses the order. The variant is
@@ -10985,6 +11137,39 @@ pub enum WaitingFor {
         /// forward-compatible deserialization of pre-schema snapshots.
         #[serde(default)]
         schema: crate::analysis::decision_template::ShortcutDecisionSchema,
+        /// CR 732.2a: the declaration the ENGINE itself can already specify from what this
+        /// window's proposer actually did — one pin per published point of `schema`, read out
+        /// of the `(DecisionSlot, PlayerId)` answer journal at offer construction, or `None`
+        /// when any published point has no single answer under the proposer's own key.
+        /// Built by `game::engine::build_bounded_declaration`; `None` on every other mint.
+        ///
+        /// LATCHED at offer time, not a live view: it is a snapshot of the answers the
+        /// detection window observed. Latching the pin SET latches no per-iteration OUTCOME,
+        /// because no pin kind stores one: a SEAT designation is state-independent under
+        /// either spelling — the CR 115.10a `TargetPin::Player` and the CR 601.2c
+        /// `Scheduled(Constant(Ranking::one(AnnouncementSubject::Seat(..))))` alike — and
+        /// `TargetPin::ByIdentity` re-resolves live per iteration inside
+        /// `analysis::decision_template::resolve` (CR 608.2b). The ranked spelling is
+        /// re-resolved live too, and it is the STRONGER case rather than a new exposure: its
+        /// arm re-asks CR 702.11c hexproof / CR 702.18a shroud / CR 702.16b protection at
+        /// every iteration, so a latched TARGET-class seat can stop resolving mid-drive where
+        /// a latched CHOICE-class one could not.
+        ///
+        /// `#[serde(default)]` follows `schema`'s precedent on this same variant. Consequence,
+        /// chosen rather than discovered: a pre-declaration save decodes with `None`, which is
+        /// exactly today's refusal — fail-closed. ⚠ MEASURED: the attribute is BELT-AND-BRACES
+        /// on an `Option` field, not the mechanism — `serde_derive` routes a missing field
+        /// through `missing_field`, whose deserializer answers `deserialize_option` with
+        /// `visit_none`, so removing it changes no decode today. It is kept because it states
+        /// the intent at the field and becomes load-bearing the moment this stops being an
+        /// `Option`. Either way this field IS a client INGRESS — a restored save can carry a
+        /// hostile declaration, and the AI generator hands whatever it finds straight to
+        /// `GameAction::DeclareShortcut`. That is safe today only
+        /// because `handle_declare_shortcut` runs the owner firewall, `predictability_gate`
+        /// and `validate_pins` on EVERY declaration regardless of origin, and nothing here
+        /// adds a path around them.
+        #[serde(default)]
+        declaration: Option<crate::analysis::decision_template::DecisionTemplate>,
     },
     /// CR 732.2b/c: the APNAP accept-or-shorten window. After the proposer declares the
     /// shortcut, each other living player is prompted in turn order (drain-one-advance
@@ -12125,6 +12310,7 @@ impl WaitingFor {
             WaitingFor::EnlistChoice { .. } => "EnlistChoice",
             WaitingFor::GameOver { .. } => "GameOver",
             WaitingFor::ReplacementChoice { .. } => "ReplacementChoice",
+            WaitingFor::EntryControllerChoice { .. } => "EntryControllerChoice",
             WaitingFor::OrderTriggers { .. } => "OrderTriggers",
             WaitingFor::CopyTargetChoice { .. } => "CopyTargetChoice",
             WaitingFor::ExploreChoice { .. } => "ExploreChoice",
@@ -12276,6 +12462,7 @@ impl WaitingFor {
             | WaitingFor::ExertChoice { player, .. }
             | WaitingFor::EnlistChoice { player, .. }
             | WaitingFor::ReplacementChoice { player, .. }
+            | WaitingFor::EntryControllerChoice { player, .. }
             | WaitingFor::OrderTriggers { player, .. }
             | WaitingFor::CopyTargetChoice { player, .. }
             | WaitingFor::ExploreChoice { player, .. }
@@ -14425,6 +14612,68 @@ declare_game_state! {
     /// dedup on semantically-identical positions is unaffected.
     #[serde(skip, default)]
     pub loop_detect_ring: std::collections::VecDeque<std::sync::Arc<LoopDetectSample>>,
+    /// CR 603.5 + CR 608.2b + CR 732.2a: the answers given to published decision SLOTS
+    /// during the window `loop_detect_ring` is sampling, so the CR 732.2a declaration can
+    /// pin the choice each iteration actually made instead of guessing one. Both published
+    /// axes ride ONE journal: the CR 603.5 "may" gate and the CR 601.2c target
+    /// announcement, distinguished by the value's own kind ([`LoopAnswerValue`]) and by the
+    /// slot's sub-index — a parallel target journal would double the eight ring-clear
+    /// sites and widen their census for no capability this field lacks.
+    ///
+    /// KEYED BY THE PAIR `(slot, seat)`, not by the source alone. The SUB-INDEX half is
+    /// what keeps the two slots one source can publish apart: `entry_publishes_pin_slots`
+    /// binds `source` ONCE and builds both `DecisionSlot::target(source)` (CR 601.2c) and
+    /// `DecisionSlot::may(source)` (CR 603.5) from it, and the shipped unit test
+    /// `bounded_cycle_pin_slots_publishes_the_may_gate_of_an_optional_trigger` asserts an
+    /// optional targeted trigger publishes both. Under a source-only key those two writes
+    /// would land in ONE entry with different values and latch `Conflicted`. NON-CLAIM,
+    /// measured: no board in this lane exercises that collision — every published point on
+    /// the three tracked F4 dumps carries a distinct source — so the sub-index is adopted
+    /// because it aligns the journal's identity with the engine's own published one
+    /// (`DecisionPoint.slot`, which is what the consumer looks up), never because a
+    /// measured board needs it.
+    ///
+    /// The SEAT half: CR 603.5 routes a
+    /// "may" to whichever seat the effect names, and `game::effects` really does prompt
+    /// several seats for ONE source inside one window (the scoped-search acceptance
+    /// cascade). A seat can therefore only ever answer for itself: no seat's answer can
+    /// fill another's slot, and no two seats can manufacture a false disagreement. The
+    /// seat authority lives in the key type rather than in a consumer-side guard.
+    ///
+    /// STATED SO IT IS NOT OVER-READ: this is DEFENSE IN DEPTH PLUS A CODE DELETION, NOT
+    /// A LIVE-BUG FIX. Both harms a source-only key could produce are already firewalled
+    /// downstream — the pin injector reads the recipient off the prompt in hand and aborts
+    /// the replay when it does not match the template owner (`game::engine`'s
+    /// `WaitingFor::OptionalEffectChoice` arm, `if *player != template.owner`). NO BOARD
+    /// HAS BEEN MEASURED on which the seat component changes an offer; the multi-seat
+    /// board that does exist journals two seats and mints no offer at all
+    /// (`tests/integration/natural_balance.rs`). The claim this key earns is "cannot be
+    /// worse, and removes a runtime guard", not "prevents a reachable wrong declaration".
+    ///
+    /// TRANSIENT DERIVED STATE with `loop_detect_ring`'s exact treatment — same
+    /// `#[serde(skip, default)]`, same omission from `impl PartialEq for GameState`
+    /// (rebuilt from play; comparing it would break AI-search dedup on
+    /// semantically-identical positions), and cleared at every one of the ring's clear
+    /// sites on the same receiver. `#[serde(skip)]` is also load-bearing rather than
+    /// merely tidy: a `BTreeMap` with a tuple key has no JSON object form and
+    /// [`LoopAnswer`] AND [`LoopAnswerValue`] both deliberately derive no `Serialize`, so a
+    /// future attempt to persist this fails at compile time instead of silently emitting a
+    /// stale window.
+    ///
+    /// `Option<Box<..>>` for `game_state_size.rs`'s stated reason — "box it if it is a
+    /// large rarely-populated one" — costing 8 B inline like the `life_safety_probe`
+    /// neighbour below. NOTHING TESTS THE BOXING: at the current ceiling an unboxed
+    /// `BTreeMap` (24 B inline) also fits, so this rationale is a convention here, not a
+    /// guarded invariant.
+    #[serde(skip, default)]
+    pub(crate) loop_answer_journal: Option<
+        Box<
+            std::collections::BTreeMap<
+                (crate::analysis::decision_template::DecisionSlot, PlayerId),
+                crate::analysis::decision_template::LoopAnswer,
+            >,
+        >,
+    >,
     /// Live-only authority for the finite pre-cast shortcut. It is absent from
     /// raw/public serialization; trusted persistence uses the explicit codec
     /// envelope in `game::precast_copy_shortcut`.
@@ -16300,7 +16549,9 @@ impl GameStateDecode {
             value,
             matches!(mode, GameStateDecodeMode::ResolutionWireV1),
         )?;
-        migrate_legacy_mana_target_roles(value)
+        migrate_legacy_mana_target_roles(value)?;
+        migrate_legacy_tap_effects(value);
+        Ok(())
     }
 
     pub(crate) fn materialize_prepared(value: serde_json::Value) -> Result<GameState, String> {
@@ -19873,6 +20124,7 @@ impl GameState {
             static_source_index: StaticSourceIndex::default(),
             static_mode_presence: crate::types::statics::StaticModePresence::all_present(),
             loop_detect_ring: std::collections::VecDeque::new(),
+            loop_answer_journal: None,
             precast_shortcut_runtime: PrecastShortcutRuntime::default(),
             life_safety_probe: Box::default(),
             next_timestamp: 1,
@@ -20769,6 +21021,9 @@ impl GameState {
         // the live ring → recursive/quadratic growth. Cleared ⇒ every stored snapshot
         // has clone depth 1. Does not affect any comparison (the ring is eq-excluded).
         clone.loop_detect_ring.clear();
+        // CR 603.5: the "may"-answer journal belongs to the LIVE window, not to a stored
+        // position sample. Cleared with the ring, on this same receiver.
+        clone.loop_answer_journal = None;
         // Private shortcut capabilities are live interaction state, never part
         // of a CR 104.4b position sample.
         clone.precast_shortcut_runtime = PrecastShortcutRuntime::default();
@@ -20959,11 +21214,15 @@ impl GameState {
     ///
     /// The ring clear is mandatory and is `normalize_for_loop`'s own reason: samples are
     /// produced from the live state, so without it each stored sample would carry a clone
-    /// of the live ring ⇒ recursive/quadratic growth. **Nothing else is touched** — every
-    /// other field is what makes this half the evaluable one.
+    /// of the live ring ⇒ recursive/quadratic growth. The CR 603.5 `loop_answer_journal`
+    /// is cleared alongside it for a DIFFERENT reason — not recursion, but ownership: the
+    /// journal records the live window's answers, and a stored sample must not carry them.
+    /// **Nothing else is touched** — every other field is what makes this half the
+    /// evaluable one.
     pub(crate) fn loop_detect_live_sample(&self) -> GameState {
         let mut clone = self.clone();
         clone.loop_detect_ring.clear();
+        clone.loop_answer_journal = None;
         clone
     }
 
@@ -21005,7 +21264,7 @@ impl GameState {
     /// shorter slice, so a short snapshot would silently skip tail seats and RETAIN the
     /// ring — the one direction the "clearing can only SHRINK the prior set" guarantee
     /// forbids. One comparison keeps that guarantee structural instead of contractual.
-    /// (CR 119.3, `MagicCompRules.txt:1065`, is the rule the life comparison implements.)
+    /// (CR 119.3 is the rule the life comparison implements.)
     pub(crate) fn invalidate_loop_ring_on_unobserved_life_move(&mut self, lives_before: &[i32]) {
         if self.players.len() != lives_before.len()
             || self
@@ -21015,7 +21274,100 @@ impl GameState {
                 .any(|(p, &before)| p.life != before)
         {
             self.loop_detect_ring.clear();
+            // CR 603.5: the answers belong to the window the ring just lost.
+            self.loop_answer_journal = None;
         }
+    }
+
+    /// CR 603.5 + CR 608.2b: record ONE seat's answer to ONE published decision SLOT for
+    /// the current loop-detection window. A second, DIFFERENT answer from THE SAME SEAT for
+    /// THE SAME SLOT latches [`LoopAnswer::Conflicted`] (see that type — an
+    /// engine-capability refusal, not a CR mandate). A different seat, or the same source's
+    /// OTHER slot, occupies a DIFFERENT KEY and can neither conflict with, nor be read in
+    /// place of, this entry.
+    ///
+    /// The latch arm is axis-agnostic by construction: it compares whole
+    /// [`LoopAnswer`] values, so widening the value to carry CR 601.2c target vectors added
+    /// no second conflict rule. Equality for `Targets` is derived `Vec<TargetPin>`
+    /// equality — order-sensitive, which is STRICTER than set equality and therefore
+    /// fail-closed (strictly fewer offers, never a wrong pin). Order-sensitivity cannot bite
+    /// on the BOUNDED-CYCLE schema, whose producer
+    /// (`game::engine::bounded_cycle_pin_slots_for_window`) hard-codes `min_targets: 1,
+    /// max_targets: 1, ordered: false` — a one-pin answer has no order to disagree about.
+    /// That is the SCOPE of the claim, not a whole-value-space one: a published `Targets`
+    /// point has a SECOND production producer, `game::engine::pinned_decisions_to_points`,
+    /// which emits `ordered: true` with `min/max = targets.len()` from a carried pin list;
+    /// and the writer (`game::engine::record_trigger_target_answer`) can journal a MULTI-PIN
+    /// vector for one slot. That stays FAIL-CLOSED on the stricter-than-set-equality reading
+    /// above rather than unreachable.
+    ///
+    /// ⚠ THE MECHANISM NAMED HERE WAS WRONG, and is corrected rather than dropped because the
+    /// CONCLUSION above survives it. The claim used to be that the writer "journals whatever
+    /// the announcement carried, which for one `multi_target` slot is several pins" — true on
+    /// ONE of its two reducer arms only. `GameAction::SelectTargets` hands the whole announced
+    /// vector over at once, so a multi-pin `Targets` value really is written in a single call.
+    /// `GameAction::ChooseTarget` does not: `engine_stack`'s
+    /// `handle_trigger_target_selection_choose_target` re-raises the SAME
+    /// `WaitingFor::TriggerTargetSelection` with the same one-element `target_slots` and only
+    /// `selection` advanced, and the writer reads its slot count off the prompt in hand — so a
+    /// two-pick single slot arrives as `Targets([A])` and then `Targets([B])` on ONE key, and
+    /// the latch above answers `Conflicted` rather than storing an ordered pair. Both routes
+    /// are fail-closed; only the second one is a conflict rather than an order comparison.
+    ///
+    /// Gated exactly like `game::engine::record_loop_pin`
+    /// (`samples() && !in_simulation_probe()`), so the #4603-Off build never records and
+    /// the detection/materialize drive replays without re-recording.
+    pub(crate) fn record_loop_answer(
+        &mut self,
+        slot: crate::analysis::decision_template::DecisionSlot,
+        player: PlayerId,
+        answer: crate::analysis::decision_template::LoopAnswer,
+    ) {
+        use crate::analysis::decision_template::LoopAnswer;
+        use std::collections::btree_map::Entry;
+        if !self.loop_detection.samples() || crate::game::engine::in_simulation_probe() {
+            return;
+        }
+        match self
+            .loop_answer_journal
+            .get_or_insert_default()
+            .entry((slot, player))
+        {
+            Entry::Vacant(v) => {
+                v.insert(answer);
+            }
+            Entry::Occupied(mut o) => {
+                if *o.get() != answer {
+                    o.insert(LoopAnswer::Conflicted);
+                }
+            }
+        }
+    }
+
+    /// The observed answer for one published SLOT AS ANSWERED BY `player`. `None` = that
+    /// seat never answered this slot in this window ⇒ a declaration must refuse, exactly as
+    /// [`LoopAnswer::Conflicted`] does.
+    pub fn loop_answer(
+        &self,
+        slot: &crate::analysis::decision_template::DecisionSlot,
+        player: PlayerId,
+    ) -> Option<crate::analysis::decision_template::LoopAnswer> {
+        // `BTreeMap` keys by the owned tuple and no `Borrow` shape spans a tuple, so the
+        // key is built. This is the seam's own idiom — `entry_publishes_pin_slots` builds
+        // its slot with `source: source.clone()`. One clone per published point at
+        // declaration-build time, never per iteration. `.cloned()` rather than `.copied()`
+        // because `LoopAnswer` gave up `Copy` when its value grew a `Vec<TargetPin>`.
+        self.loop_answer_journal
+            .as_ref()?
+            .get(&(slot.clone(), player))
+            .cloned()
+    }
+
+    /// How many distinct (slot, seat) pairs this window has answered. `None` and an
+    /// empty map are indistinguishable here BY DESIGN — no caller may branch on the
+    /// `Option`.
+    pub fn loop_answers_recorded(&self) -> usize {
+        self.loop_answer_journal.as_ref().map_or(0, |m| m.len())
     }
 
     /// CR 732.2a: record that an unbounded (net-progress) loop under `controller`
@@ -21565,6 +21917,13 @@ fn _gamestate_partition_is_total(s: &GameState) {
         static_source_index: _,
         static_mode_presence: _,
         loop_detect_ring: _,
+        // CR 603.5 + CR 732.2a "may"-answer journal: EXCLUDED from `impl PartialEq for
+        // GameState` for `loop_detect_ring`'s reason — transient derived state rebuilt
+        // from play, and comparing it would split two semantically-identical positions
+        // in AI-search dedup. It cannot become a hidden per-cycle accumulator riding a
+        // covering pair: `project_out_resources` opens with `normalize_for_loop`, which
+        // is one of the ring-clear sites this field follows, so the projection clears it.
+        loop_answer_journal: _,
         precast_shortcut_runtime: _,
         life_safety_probe: _,
         next_timestamp: _,
@@ -21831,9 +22190,11 @@ fn _gamestate_partition_is_total(s: &GameState) {
         //     legitimate loop; a heterogeneous/reordered period is correctly caught and rejected).
         last_loop_action_sequence: _,
         //   - `resolution_source_relatch` (CR 400.7j self-move re-latch): EXCLUDED-REQUIRED (measured
-        //     by ordering trace, not doc-trust). The clear at stack.rs:194 fires at the START of the
+        //     by ordering trace, not doc-trust). The `stack.rs` clears (`resolution_source_relatch =
+        //     None`, one at each resolution-start site) fire at the START of the
         //     NEXT resolution, while `record_loop_detect_sample` fires at the Priority window AFTER
-        //     this resolution's self-move SET it (zones.rs:610) — so at the sample beat it HOLDS this
+        //     this resolution's self-move SET it (`zones::record_resolution_source_relatch`) — so at
+        //     the sample beat it HOLDS this
         //     iteration's `current_incarnation`, which bumps every iteration. COMPARING it would make
         //     every self-moving loop compare UNEQUAL (a false-negative — it would make the 4d
         //     Sprout-Swarm buyback loop undetectable). It is an incarnation/timestamp identity, and
@@ -22614,6 +22975,7 @@ mod forced_cascade_window_tests {
                     predicted_winner: Some(PlayerId(0)),
                     certificate: certificate(),
                     schema: Default::default(),
+                    declaration: None,
                 },
             ),
             (
@@ -22901,15 +23263,105 @@ mod tests {
     use crate::game::triggers::{PendingTrigger, PendingTriggerContext};
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, PostReplacementContinuation, QuantityExpr,
-        ResolvedAbility, TargetFilter, TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef,
-        TriggerEntry, TriggerGrantInstanceRef,
+        AbilityDefinition, AbilityKind, Effect, EffectScope, PostReplacementContinuation,
+        QuantityExpr, ResolvedAbility, TapStateChange, TargetFilter, TriggerBaseSetInstanceRef,
+        TriggerDefinitionOccurrenceRef, TriggerEntry, TriggerGrantInstanceRef,
     };
     use crate::types::deterministic_serde::test_support::ReverseBuildHasher;
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
     };
     use crate::types::resolved_commands::ResolvedDelayedTriggerCommand;
+
+    #[test]
+    fn persisted_legacy_tap_effects_migrate_only_effect_payloads() {
+        let mut persisted = serde_json::json!({
+            "objects": {
+                "3": {
+                    "abilities": [{
+                        "effect": { "type": "Untap", "target": { "type": "ParentTarget" } },
+                        "sub_ability": {
+                            "effect": { "type": "TapAll", "target": { "type": "Typed" } }
+                        }
+                    }]
+                }
+            },
+            "unrelated": { "type": "Untap" }
+        });
+
+        migrate_legacy_tap_effects(&mut persisted);
+
+        assert_eq!(
+            persisted["objects"]["3"]["abilities"][0]["effect"],
+            serde_json::json!({
+                "type": "SetTapState",
+                "target": { "type": "ParentTarget" },
+                "scope": { "type": "Single" },
+                "state": { "type": "Untap" }
+            }),
+            "legacy single-target Untap maps to the parameterized effect"
+        );
+        assert_eq!(
+            persisted["objects"]["3"]["abilities"][0]["sub_ability"]["effect"],
+            serde_json::json!({
+                "type": "SetTapState",
+                "target": { "type": "Typed" },
+                "scope": { "type": "All" },
+                "state": { "type": "Tap" }
+            }),
+            "nested legacy mass effects retain their population scope"
+        );
+        assert_eq!(
+            persisted["unrelated"],
+            serde_json::json!({ "type": "Untap" }),
+            "only serialized Effect payloads are migrated"
+        );
+    }
+
+    #[test]
+    fn persisted_legacy_untap_effect_restores_as_set_tap_state() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Legacy untap source".to_string(),
+            Zone::Battlefield,
+        );
+        Arc::make_mut(
+            &mut state
+                .objects
+                .get_mut(&source)
+                .expect("test source exists")
+                .abilities,
+        )
+        .push(AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::SetTapState {
+                target: TargetFilter::ParentTarget,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
+            },
+        ));
+
+        let mut persisted = serde_json::to_value(state).expect("state serializes");
+        persisted["objects"][source.0.to_string()]["abilities"][0]["effect"] = serde_json::json!({
+            "type": "Untap",
+            "target": { "type": "ParentTarget" }
+        });
+
+        let restored = serde_json::from_value::<PersistedGameState>(persisted)
+            .expect("legacy effect save restores through the persisted boundary")
+            .into_game_state();
+        assert!(matches!(
+            restored.objects[&source].abilities[0].effect.as_ref(),
+            Effect::SetTapState {
+                target: TargetFilter::ParentTarget,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
+            }
+        ));
+    }
 
     /// The `LiminalEntrant` witness is a compile-time distinction with no wire
     /// footprint: it serializes as the bare projected object, exactly as this
@@ -29907,6 +30359,365 @@ mod tests {
         assert!(
             moved_state.loop_detect_ring.is_empty(),
             "an observed life move on a full-length snapshot still clears the ring"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────────
+    // C2a — the loop-answer journal's STORAGE CONTRACT on the widened `(slot, seat)` key.
+    //
+    // ⚠ TIER, stated rather than implied: these three rows are IN-CRATE STORAGE-CONTRACT
+    // rows, NOT wire rows. They assert what the map does with the keys and values it is
+    // handed; that the PRODUCTION reducer arms hand it the right ones is asserted at the
+    // wire tier by `tests/integration/fantastic_four_bounded_loop.rs` (the CR 603.5 arm
+    // and the CR 608.2b `ChooseTarget` arm) and `tests/integration/loop_shortcut.rs` (the
+    // CR 608.2b `SelectTargets` arm).
+    // ─────────────────────────────────────────────────────────────────────────────────
+
+    /// A `GameState` whose detector SAMPLES, which is `record_loop_answer`'s own gate. A
+    /// state built without this records nothing and every row below would pass vacuously
+    /// on an empty map — which is why each row asserts a CARDINALITY first.
+    fn journal_state() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.loop_detection = LoopDetectionMode::Interactive;
+        state
+    }
+
+    fn journal_source(id: u64) -> crate::analysis::decision_template::DecisionSource {
+        YieldTarget::ThisObject {
+            source_id: ObjectId(id),
+            incarnation: Some(1),
+            trigger_description: None,
+        }
+    }
+
+    /// **Row T2 — the SUB-INDEX half of the key.** CR 601.2c and CR 603.5 are two choices
+    /// of ONE ability instance, and `entry_publishes_pin_slots` publishes both from a
+    /// single bound `source`. They must occupy TWO journal entries.
+    ///
+    /// # Discrimination
+    ///
+    /// Collapse the key to `(slot.source, player)` in `record_loop_answer`'s `entry(..)`
+    /// and `loop_answer`'s `get(..)` (keep both signatures) ⇒ the two writes land in ONE
+    /// entry, the second differs from the first, and the `Entry::Occupied` arm latches
+    /// `Conflicted`: the cardinality assertion reads 1 and both value lookups read
+    /// `Conflicted`.
+    ///
+    /// # Reach-guard
+    ///
+    /// The cardinality is asserted FIRST and is value-independent, so an unsampled
+    /// detector — an empty map — fails this row before any content assertion can pass on
+    /// nothing.
+    ///
+    /// # NON-CLAIM, measured and shipped in the row rather than in a report
+    ///
+    /// NO REAL BOARD IN THIS LANE EXERCISES THIS COLLISION: every published point on all
+    /// three tracked F4 dumps carries a DISTINCT source, so collapsing the sub-index
+    /// leaves those declarations intact. The card class is real (Scryfall: ≥8 cards
+    /// phrased "you may have target opponent …", e.g. Disciple of the Vault) and the
+    /// two-slots-from-one-source publisher shape is asserted in-tree by
+    /// `game::engine`'s `bounded_cycle_pin_slots_publishes_the_may_gate_of_an_optional_trigger`,
+    /// but the end-to-end board is UNMEASURED. This row is the storage invariant only.
+    #[test]
+    fn c2a_row_t2_one_source_two_sub_indices_occupy_two_journal_entries() {
+        use crate::analysis::decision_template::{
+            DecisionSlot, LoopAnswer, LoopAnswerValue, MayChoiceOption, TargetPin,
+        };
+
+        let mut state = journal_state();
+        assert_eq!(
+            state.loop_answers_recorded(),
+            0,
+            "reach-guard: a fresh board starts with an EMPTY journal, so every entry below \
+             is one this row wrote"
+        );
+        let source = journal_source(910);
+        let seat = PlayerId(0);
+
+        state.record_loop_answer(
+            DecisionSlot::may(source.clone()),
+            seat,
+            LoopAnswer::Uniform(LoopAnswerValue::May(MayChoiceOption::Take)),
+        );
+        state.record_loop_answer(
+            DecisionSlot::target(source.clone()),
+            seat,
+            LoopAnswer::Uniform(LoopAnswerValue::Targets(vec![TargetPin::Player(PlayerId(
+                1,
+            ))])),
+        );
+
+        assert_eq!(
+            state.loop_answers_recorded(),
+            2,
+            "CR 601.2c and CR 603.5 are two choices of ONE ability instance: the sub-index \
+             must keep them in two entries. A source-only key holds 1"
+        );
+        assert_eq!(
+            state.loop_answer(&DecisionSlot::may(source.clone()), seat),
+            Some(LoopAnswer::Uniform(LoopAnswerValue::May(
+                MayChoiceOption::Take
+            ))),
+            "the CR 603.5 gate's own answer survives the CR 601.2c write on the same source"
+        );
+        assert_eq!(
+            state.loop_answer(&DecisionSlot::target(source), seat),
+            Some(LoopAnswer::Uniform(LoopAnswerValue::Targets(vec![
+                TargetPin::Player(PlayerId(1))
+            ]))),
+            "and the CR 601.2c announcement's own answer survives the CR 603.5 write"
+        );
+    }
+
+    /// **Row T3 — the LATCH, on the target axis.** CR 732.2a: two observed iterations of
+    /// one (slot, seat) pair that DISAGREE latch [`LoopAnswer::Conflicted`], and the latch
+    /// is idempotent and seat-local.
+    ///
+    /// # Discrimination
+    ///
+    /// Narrow the `Entry::Occupied` arm to the may axis —
+    /// `if *o.get() != answer && !matches!(answer, LoopAnswer::Uniform(LoopAnswerValue::Targets(_)))`
+    /// ⇒ this row reds while C1's existing may-conflict row
+    /// (`c1_row2b_one_seat_answering_one_source_two_ways_latches_conflicted`) stays GREEN.
+    /// The mutation is therefore discriminating rather than shared.
+    ///
+    /// # Paired positive / reach-guards
+    ///
+    /// The first write is read back as `Uniform` BEFORE the differing one lands, so a
+    /// writer that recorded nothing cannot satisfy this row; and the sibling seat's entry
+    /// is asserted still `Uniform` afterwards, so a latch that fired globally fails too.
+    ///
+    /// # NON-CLAIM, measured and shipped in the row
+    ///
+    /// THE TARGET LATCH HAS NO MEASURED WIRE-TIER REACHABILITY: driving the three tracked
+    /// F4 dumps under an ALTERNATING-target policy through production `apply()` reaches NO
+    /// OFFER AT ALL (a varying player target moves a different seat's resources, so the
+    /// period's signature never repeats and certification refuses upstream), while
+    /// constant P1, constant P2 and constant P3 all certify. It is the VARIATION, not the
+    /// seat, that blocks certification. This latch is defence in depth.
+    #[test]
+    fn c2a_row_t3_a_differing_target_answer_latches_conflicted_idempotently_and_seat_locally() {
+        use crate::analysis::decision_template::{
+            DecisionSlot, LoopAnswer, LoopAnswerValue, TargetPin,
+        };
+
+        let mut state = journal_state();
+        assert_eq!(
+            state.loop_answers_recorded(),
+            0,
+            "reach-guard: a fresh board starts with an EMPTY journal"
+        );
+        let slot = DecisionSlot::target(journal_source(911));
+        let (seat, other_seat) = (PlayerId(0), PlayerId(1));
+        let aimed_at_1 = LoopAnswer::Uniform(LoopAnswerValue::Targets(vec![TargetPin::Player(
+            PlayerId(1),
+        )]));
+        let aimed_at_0 = LoopAnswer::Uniform(LoopAnswerValue::Targets(vec![TargetPin::Player(
+            PlayerId(0),
+        )]));
+
+        state.record_loop_answer(slot.clone(), seat, aimed_at_1.clone());
+        state.record_loop_answer(slot.clone(), other_seat, aimed_at_1.clone());
+        assert_eq!(
+            state.loop_answer(&slot, seat),
+            Some(aimed_at_1.clone()),
+            "paired positive: the FIRST answer is journalled as Uniform before any \
+             disagreement, so a writer that stored nothing cannot reach the latch"
+        );
+
+        // The disagreement.
+        state.record_loop_answer(slot.clone(), seat, aimed_at_0);
+        assert_eq!(
+            state.loop_answer(&slot, seat),
+            Some(LoopAnswer::Conflicted),
+            "CR 732.2a: this engine refuses on a differing answer — an ENGINE-CAPABILITY \
+             limit, not a rule the CR states"
+        );
+        assert_eq!(
+            state.loop_answer(&slot, other_seat),
+            Some(aimed_at_1.clone()),
+            "seat-local: the other seat's entry is a DIFFERENT key and is untouched by the \
+             latch"
+        );
+
+        // Idempotence: the latch fires on DISAGREEMENT, not on repetition, and never
+        // returns to `Uniform`.
+        state.record_loop_answer(slot.clone(), seat, aimed_at_1);
+        assert_eq!(
+            state.loop_answer(&slot, seat),
+            Some(LoopAnswer::Conflicted),
+            "the latch never returns to Uniform, even when a later answer matches the first"
+        );
+    }
+
+    /// **Row T4 — the SEAT half of the key, on the target axis.** A seat can only ever
+    /// answer for itself: two seats announcing DIFFERENT targets for one slot occupy two
+    /// entries and neither can be read in place of the other.
+    ///
+    /// # Discrimination
+    ///
+    /// Drop `player` from the key in `record_loop_answer`/`loop_answer` ⇒ ONE entry, the
+    /// second write disagrees with the first, and the latch makes both lookups
+    /// `Conflicted`: the cardinality reads 1 and both value assertions flip.
+    ///
+    /// # Reach-guard
+    ///
+    /// The two seats are asserted DISTINCT and their two answers asserted DIFFERENT before
+    /// the lookups — two identical answers would occupy two entries under either key shape
+    /// and prove nothing.
+    #[test]
+    fn c2a_row_t4_two_seats_answering_one_target_slot_occupy_two_independent_entries() {
+        use crate::analysis::decision_template::{
+            DecisionSlot, LoopAnswer, LoopAnswerValue, TargetPin,
+        };
+
+        let mut state = journal_state();
+        assert_eq!(
+            state.loop_answers_recorded(),
+            0,
+            "reach-guard: a fresh board starts with an EMPTY journal"
+        );
+        let slot = DecisionSlot::target(journal_source(912));
+        let (seat_a, seat_b) = (PlayerId(0), PlayerId(1));
+        assert_ne!(
+            seat_a, seat_b,
+            "reach-guard: the two answering seats must differ, else there is no seat axis"
+        );
+        let answer_a = LoopAnswer::Uniform(LoopAnswerValue::Targets(vec![TargetPin::Player(
+            PlayerId(1),
+        )]));
+        let answer_b = LoopAnswer::Uniform(LoopAnswerValue::Targets(vec![TargetPin::Player(
+            PlayerId(0),
+        )]));
+        assert_ne!(
+            answer_a, answer_b,
+            "reach-guard: the two answers must DIFFER, else a collapsed key would also hold \
+             two consistent entries and this row would not discriminate"
+        );
+
+        state.record_loop_answer(slot.clone(), seat_a, answer_a.clone());
+        state.record_loop_answer(slot.clone(), seat_b, answer_b.clone());
+
+        assert_eq!(
+            state.loop_answers_recorded(),
+            2,
+            "the seat is part of the key: two seats answering one slot hold TWO entries. A \
+             seat-less key holds 1"
+        );
+        assert_eq!(
+            state.loop_answer(&slot, seat_a),
+            Some(answer_a),
+            "each seat reads back its OWN announcement, uncorrupted by the other's"
+        );
+        assert_eq!(state.loop_answer(&slot, seat_b), Some(answer_b));
+    }
+
+    /// **Row T3-R — the latch, exercised with the MIGRATED spelling.** CR 601.2c: after the
+    /// provenance split an announced seat is journalled as
+    /// `Scheduled(Constant(Ranking::one(AnnouncementSubject::Seat(..))))`, and this row
+    /// asserts the [`LoopAnswer::Conflicted`] latch behaves identically on that value.
+    ///
+    /// # Why it exists — the gap it closes
+    ///
+    /// [`c2a_row_t3_a_differing_target_answer_latches_conflicted_idempotently_and_seat_locally`]
+    /// and its T4 sibling HAND-BUILD their `LoopAnswer`s, so the producer migration cannot
+    /// reach them and they stay green unmodified. That leaves the latch never exercised with
+    /// the value production now writes: equality preservation across the re-spelling would
+    /// rest on derived structural `PartialEq` alone — sound, but unpinned. This pins it.
+    ///
+    /// # Discrimination
+    ///
+    /// Two independent mutants, each caught by a different arm, and BOTH RUN rather than
+    /// reasoned about (the mutation must target EQUALITY, not the producer — this row builds
+    /// its own values, so a producer mutation cannot reach it):
+    ///
+    /// * hand-write `impl PartialEq for Ranking` as `self.head() == other.head()` — the
+    ///   head-only shape `evaluate_schedule` uses to RESOLVE, and therefore the plausible
+    ///   wrong reading ⇒ arm (b)'s same-head/different-tail pair compares EQUAL ⇒ no latch ⇒
+    ///   **arm (b) FAILS while arms (a) and (c) stay green**, because (a)'s heads already
+    ///   differ. The tail is the NEXT episode's pre-declaration, so two proposals agreeing
+    ///   only about this episode are not the same answer;
+    /// * hand-write `impl PartialEq for AnnouncementSubject` with `(Seat(_), Seat(_)) => true`
+    ///   ⇒ two DIFFERENT seats compare equal ⇒ arm (a)'s own reach-guard fires first and
+    ///   names the vacuity by hand, which is the reach-guard doing its job rather than the
+    ///   latch assertion doing it late.
+    ///
+    /// # Paired positive
+    ///
+    /// Arm (c) records the SAME ranking twice and requires the entry to stay `Uniform`. Without
+    /// it, a latch that fired on every write — i.e. an equality that is always false — would
+    /// satisfy both negative arms.
+    #[test]
+    fn c2a_row_t3r_the_conflicted_latch_is_unchanged_by_the_migrated_seat_spelling() {
+        use crate::analysis::decision_template::{
+            AnnouncementSubject, DecisionSlot, LoopAnswer, LoopAnswerValue, Ranking, TargetPin,
+            TargetSchedule,
+        };
+
+        let ranked = |subjects: Vec<AnnouncementSubject>| {
+            LoopAnswer::Uniform(LoopAnswerValue::Targets(vec![TargetPin::Scheduled(
+                TargetSchedule::Constant(
+                    Ranking::new(subjects).expect("non-empty, duplicate-free by construction"),
+                ),
+            )]))
+        };
+        let seat = |p: u8| AnnouncementSubject::Seat(PlayerId(p));
+
+        // ── (a) two rankings naming DIFFERENT seats ⇒ Conflicted ──
+        let mut state = journal_state();
+        let slot_a = DecisionSlot::target(journal_source(913));
+        let aimed_at_1 = ranked(vec![seat(1)]);
+        let aimed_at_2 = ranked(vec![seat(2)]);
+        assert_ne!(
+            aimed_at_1, aimed_at_2,
+            "reach-guard: the two announcements must DIFFER as values, else the latch has \
+             nothing to fire on and every arm below is vacuous"
+        );
+        state.record_loop_answer(slot_a.clone(), PlayerId(0), aimed_at_1.clone());
+        assert_eq!(
+            state.loop_answer(&slot_a, PlayerId(0)),
+            Some(aimed_at_1.clone()),
+            "paired positive: the FIRST ranked answer is journalled as Uniform before any \
+             disagreement, so a writer that stored nothing cannot reach the latch"
+        );
+        state.record_loop_answer(slot_a.clone(), PlayerId(0), aimed_at_2);
+        assert_eq!(
+            state.loop_answer(&slot_a, PlayerId(0)),
+            Some(LoopAnswer::Conflicted),
+            "CR 732.2a: two announcements naming different seats are a disagreement in the \
+             ranked spelling exactly as they were in the CHOICE-class one"
+        );
+
+        // ── (b) SAME head, DIFFERENT tail ⇒ still Conflicted ──
+        //
+        // The tail is a pre-declaration for the NEXT episode (CR 732.2a), not decoration, so
+        // two proposals that agree only about this episode are not the same answer. This is
+        // the arm a head-only equality would lose.
+        let slot_b = DecisionSlot::target(journal_source(914));
+        let head1_tail2 = ranked(vec![seat(1), seat(2)]);
+        let head1_tail3 = ranked(vec![seat(1), seat(3)]);
+        state.record_loop_answer(slot_b.clone(), PlayerId(0), head1_tail2.clone());
+        assert_eq!(
+            state.loop_answer(&slot_b, PlayerId(0)),
+            Some(head1_tail2),
+            "reach-guard: the multi-entry ranking round-trips as Uniform first"
+        );
+        state.record_loop_answer(slot_b.clone(), PlayerId(0), head1_tail3);
+        assert_eq!(
+            state.loop_answer(&slot_b, PlayerId(0)),
+            Some(LoopAnswer::Conflicted),
+            "equality over a `Ranking` is STRUCTURAL, not head-only: the tail is the next \
+             episode's pre-declaration, so differing tails are differing answers"
+        );
+
+        // ── (c) the SAME ranking twice ⇒ still Uniform ──
+        let slot_c = DecisionSlot::target(journal_source(915));
+        state.record_loop_answer(slot_c.clone(), PlayerId(0), aimed_at_1.clone());
+        state.record_loop_answer(slot_c.clone(), PlayerId(0), aimed_at_1.clone());
+        assert_eq!(
+            state.loop_answer(&slot_c, PlayerId(0)),
+            Some(aimed_at_1),
+            "the latch fires on DISAGREEMENT, not on repetition — without this arm an \
+             always-false equality would satisfy (a) and (b)"
         );
     }
 }

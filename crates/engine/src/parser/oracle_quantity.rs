@@ -37,7 +37,7 @@ use super::oracle_nom::target as nom_target;
 use crate::parser::oracle_effect::counter::normalize_counter_type;
 use crate::parser::oracle_effect::parse_controls_permanent_object;
 use crate::parser::oracle_target::{parse_target, parse_type_phrase, parse_type_phrase_with_ctx};
-use crate::parser::oracle_util::merge_or_filters;
+use crate::parser::oracle_util::{merge_or_filters, parse_count_multiplier};
 use crate::types::ability::{
     AggregateFunction, AttackScope, AttackSubject, Comparator, ControllerRef, CountScope,
     DamageChannel, DamageKindFilter, DevotionColors, FilterProp, ObjectProperty, ObjectScope,
@@ -837,13 +837,10 @@ pub(crate) fn parse_cda_quantity_with_context(
         }
     }
 
-    // "twice [inner]" or "three times [inner]" → Multiply { factor, inner }
-    if let Ok((rest, factor)) = alt((
-        value(2i32, tag::<_, _, OracleError<'_>>("twice ")),
-        value(3, tag("three times ")),
-    ))
-    .parse(text)
-    {
+    // Multiplicative quantity prefixes share the nom authority used by effect
+    // count positions, so `N times <quantity>` has one grammar across CDA and
+    // imperative consumers.
+    if let Ok((rest, factor)) = parse_count_multiplier(text) {
         if let Some(inner) = parse_cda_quantity_with_context(rest, ctx) {
             return Some(QuantityExpr::Multiply {
                 factor,
@@ -5633,6 +5630,23 @@ mod tests {
             }
             other => panic!("Expected Multiply, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cda_quantity_five_times_object_count() {
+        let qty = parse_cda_quantity("five times the number of creatures you control").unwrap();
+        assert!(matches!(
+            qty,
+            QuantityExpr::Multiply {
+                factor: 5,
+                inner,
+            } if matches!(
+                inner.as_ref(),
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                }
+            )
+        ));
     }
 
     #[test]

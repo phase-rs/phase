@@ -13,7 +13,7 @@ function canGroup(obj: GameObject, ringBearerIds: ReadonlySet<ObjectId>): boolea
   // Ring-bearers (CR 701.54) must never be hidden behind a same-named
   // non-bearer representative in a collapsed/stacked group display — render
   // them solo so the ring-bearer badge in PermanentCard is always visible.
-  return obj.attachments.length === 0 && !ringBearerIds.has(obj.id);
+  return obj.attachments.length === 0 && !ringBearerIds.has(obj.id) && !obj.face_down;
 }
 
 function groupKey(

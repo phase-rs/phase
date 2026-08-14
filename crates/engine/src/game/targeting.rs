@@ -1451,6 +1451,30 @@ pub fn resolve_effect_player_ref(
         // `effects::resolve_player_for_context_ref`, which resolves `Controller`
         // straight to `ability.controller`.
         TargetFilter::Controller => Some(ability.controller),
+        // CR 608.2h + CR 113.7a: "~'s controller" follows the source's exact
+        // incarnation. A triggered ability owns the richer TriggerSourceContext
+        // authority; an activated ability carries its source incarnation from
+        // the shared stack-push seam. Neither path may fall back to the latest
+        // object with the same storage id.
+        TargetFilter::SourceController => ability
+            .trigger_source
+            .as_ref()
+            .map(|source| source.source_read(state).controller())
+            .or_else(|| {
+                let incarnation = ability.source_incarnation?;
+                state
+                    .objects
+                    .get(&ability.source_id)
+                    .filter(|source| source.incarnation == incarnation)
+                    .map(|source| source.controller)
+                    .or_else(|| {
+                        state
+                            .lki_by_incarnation
+                            .get(&ability.source_id)
+                            .and_then(|by_incarnation| by_incarnation.get(&incarnation))
+                            .map(|lki| lki.controller)
+                    })
+            }),
         // CR 109.5: The ability's original controller — fixed even when
         // `player_scope` iteration has rebound `ability.controller`.
         TargetFilter::OriginalController => {
@@ -5177,6 +5201,48 @@ mod tests {
             source,
             PlayerId(0),
         )
+    }
+
+    /// CR 608.2h + CR 113.7a: A source-controller predicate on a triggered
+    /// ability reads the observed incarnation while it remains in its observed
+    /// zone, then uses that incarnation's LKI rather than a same-id return.
+    #[test]
+    fn source_controller_trigger_context_uses_live_then_lki_provenance() {
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "trigger source".to_string(),
+            Zone::Battlefield,
+        );
+        let source_context = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            state.objects.get(&source).expect("test source exists"),
+        );
+        let mut ability = make_resolved_with_targets(vec![], source);
+        ability.trigger_source = Some(source_context);
+
+        state
+            .objects
+            .get_mut(&source)
+            .expect("test source exists")
+            .controller = PlayerId(1);
+        assert_eq!(
+            resolve_effect_player_ref(&state, &ability, &TargetFilter::SourceController),
+            Some(PlayerId(1)),
+            "the exact live incarnation observes a control change"
+        );
+
+        let returned = state.objects.get_mut(&source).expect("test source exists");
+        returned.zone = Zone::Battlefield;
+        returned.incarnation += 1;
+        returned.controller = PlayerId(1);
+        assert_eq!(
+            resolve_effect_player_ref(&state, &ability, &TargetFilter::SourceController),
+            Some(PlayerId(0)),
+            "a same-id re-entry must use the triggering incarnation's LKI"
+        );
     }
 
     /// CR 109.5 + CR 701.55a: A villainous-choice "you …" branch is resolved

@@ -1430,6 +1430,64 @@ pub(super) fn handle_replacement_choice(
     }
 }
 
+/// CR 614.12a: Commit a pre-entry controller choice onto the exact parked
+/// ZoneChange, then resume through the ordinary replacement-choice handler so
+/// delivery, trigger collection, and any later replacement ordering retain
+/// their existing single authorities.
+pub(super) fn handle_entry_controller_choice(
+    state: &mut GameState,
+    opponent: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let (player, candidates) = match &state.waiting_for {
+        WaitingFor::EntryControllerChoice { player, candidates } => (*player, candidates),
+        _ => {
+            return Err(EngineError::InvalidAction(
+                "entry controller choice is not pending".to_string(),
+            ));
+        }
+    };
+    if !candidates.contains(&opponent)
+        || !crate::game::players::choosable_opponents(state, player).contains(&opponent)
+    {
+        return Err(EngineError::InvalidAction(
+            "chosen entry controller is not eligible".to_string(),
+        ));
+    }
+    let Some(pending) = state.pending_replacement.as_mut() else {
+        return Err(EngineError::InvalidAction(
+            "entry controller choice has no pending replacement".to_string(),
+        ));
+    };
+    if pending.candidates.len() != 1 || pending.is_optional {
+        return Err(EngineError::InvalidAction(
+            "entry controller choice has an invalid replacement resume".to_string(),
+        ));
+    }
+    let ProposedEvent::ZoneChange {
+        controller_override,
+        to: Zone::Battlefield,
+        ..
+    } = &mut pending.proposed
+    else {
+        return Err(EngineError::InvalidAction(
+            "entry controller choice does not own a battlefield entry".to_string(),
+        ));
+    };
+    *controller_override = Some(opponent);
+    pending.proposed.applied_set_mut().insert(
+        crate::types::proposed_event::AppliedReplacementKey::EntryControllerChoice {
+            source: pending.candidates[0].source,
+            index: pending.candidates[0].index,
+            controller: opponent,
+        },
+    );
+    // Mark before re-entering the ordinary handler so the pre-entry chooser
+    // is not offered again while that handler applies this same replacement.
+    pending.proposed.mark_applied(pending.candidates[0]);
+    handle_replacement_choice(state, 0, events)
+}
+
 /// CR 707.2c + CR 614.12a + CR 613.1a: Answer path for Metamorphic Alteration's
 /// "As this Aura enters, choose a creature." Latches the chosen creature's
 /// copiable values (fixed here, per CR 707.2c, as the copy effect first starts

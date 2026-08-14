@@ -1313,9 +1313,10 @@ export class P2PHostAdapter implements EngineAdapter {
       }
       // Resume path: load the persisted GameState with a fresh RNG seed
       // and atomic multiplayer-flag flip. `resumeMultiplayerHostState`
-      // mirrors server-core's `from_persisted` pattern. Fresh-host path:
-      // just flip the flag; engine state is populated by the guests
-      // joining + `initializeGame`.
+      // mirrors server-core's `from_persisted` pattern. A fresh host lobby
+      // sets no engine flag at all — `setMultiplayerMode(true)` is deferred to
+      // `startPregameGameInner`, immediately before `initializeGame` claims
+      // the engine, so an open lobby leaves zero engine footprint.
       if (this.isResume && this.resumeGameState) {
         await this.wasm.resumeMultiplayerHostState(this.resumeGameState);
         this.resumeGameState = null;
@@ -1323,8 +1324,6 @@ export class P2PHostAdapter implements EngineAdapter {
           tokens: this.playerTokens.size,
           gameStarted: this.gameStarted,
         });
-      } else {
-        await this.wasm.setMultiplayerMode(true);
       }
       this.resolvePregameReady();
     } catch (err) {
@@ -1645,6 +1644,12 @@ export class P2PHostAdapter implements EngineAdapter {
       const playerCount = allowPartialStart
         ? orderedOpponents.length + 1
         : this.pregameSeatState.seats.length;
+      // Claim the engine for multiplayer here, not at lobby open: the only
+      // in-creation reader of the flag is `initialize_debug_permissions`,
+      // evaluated inside `initialize_game`, so setting it on the line before is
+      // equivalent. The resume path is untouched — `resume_multiplayer_host_state`
+      // refuses when the flag is already set and sets it itself.
+      await this.wasm.setMultiplayerMode(true);
       const result = await this.wasm.initializeGame(
         deckPayload,
         this.formatConfig,

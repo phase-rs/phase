@@ -15,6 +15,7 @@ import {
   deriveActivationAffordances,
   resolveObjectActivation,
 } from "../../viewmodel/cardActionChoice.ts";
+import { shouldRenderCardBack } from "../../viewmodel/cardProps.ts";
 import { CardImage } from "../card/CardImage.tsx";
 import { fanGeometry, spreadFactor } from "../card/fanGeometry.ts";
 
@@ -304,7 +305,7 @@ function FanCard({
           tokenFilters={isToken ? tokenFiltersForObject(obj) : undefined}
           tokenImageRef={isToken ? obj.token_image_ref : undefined}
           oracleText={isToken ? obj.token_rules_text : undefined}
-          faceDown={obj.face_down}
+          faceDown={shouldRenderCardBack(obj)}
           className="!w-[var(--fan-card-w)] !h-[var(--fan-card-h)]"
         />
       </div>

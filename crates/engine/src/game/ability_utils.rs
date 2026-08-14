@@ -119,6 +119,7 @@ pub fn build_resolved_from_def_with_targets(
     }
     resolved.optional_targeting = def.optional_targeting;
     resolved.optional = def.optional;
+    resolved.optional_player = def.optional_player.clone();
     resolved.optional_for = def.optional_for;
     resolved.multi_target = def.multi_target.clone();
     // CR 115.1 + CR 601.2c: Carry the target-set constraints (e.g. combined

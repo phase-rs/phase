@@ -400,6 +400,14 @@ export class DraftPodHostAdapter {
     return this.host.submitHostPick(cardInstanceId);
   }
 
+  async submitPickWithDraftEffect(
+    effectCardInstanceId: string,
+    cardInstanceIds: string[],
+  ): Promise<DraftPlayerView> {
+    if (!this.host) throw new Error("Host not initialized");
+    return this.host.submitHostPickWithDraftEffect(effectCardInstanceId, cardInstanceIds);
+  }
+
   async submitDeck(mainDeck: string[]): Promise<DraftPlayerView> {
     if (!this.host) throw new Error("Host not initialized");
     return this.host.submitHostDeck(mainDeck);

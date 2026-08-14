@@ -163,6 +163,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::SourceController
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
@@ -435,6 +436,7 @@ pub(crate) fn target_filter_characteristic_reads_at(
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::SourceController
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
@@ -808,6 +810,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::SourceController
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
@@ -1546,6 +1549,7 @@ pub(crate) fn filter_contains(filter: &TargetFilter, leaf: &dyn Fn(&TargetFilter
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::SourceController
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
@@ -2897,6 +2901,7 @@ fn filter_inner_for_object(
         // CR 118.12a: unless-payer population — never matches an object.
         TargetFilter::AllPlayers => false,
         TargetFilter::Controller => false, // Controller is a player, not an object
+        TargetFilter::SourceController => false, // SourceController is a player, not an object
         // CR 102.3: Opponent is a player reference (used only as a slot announcer),
         // never an object.
         TargetFilter::Opponent => false,
@@ -3554,6 +3559,7 @@ fn zone_change_filter_inner(
         // CR 118.12a: unless-payer population — never matches an object.
         TargetFilter::AllPlayers => false,
         TargetFilter::Controller => false,
+        TargetFilter::SourceController => false,
         // CR 102.3: Opponent is a player reference, never an object.
         TargetFilter::Opponent => false,
         // CR 109.5: OriginalController is a player reference, not an object.
@@ -4059,6 +4065,7 @@ pub fn spell_record_matches_filter(
         // CR 118.12a: unless-payer population, never an object filter.
         | TargetFilter::AllPlayers
         | TargetFilter::Controller
+        | TargetFilter::SourceController
         // CR 102.3: Opponent is a player reference, never a spell-record filter.
         | TargetFilter::Opponent
         | TargetFilter::OriginalController
@@ -4376,6 +4383,7 @@ fn spell_object_matches_filter_inner(
         // CR 118.12a: unless-payer population, never an object filter.
         | TargetFilter::AllPlayers
         | TargetFilter::Controller
+        | TargetFilter::SourceController
         // CR 102.3: Opponent is a player reference, never a spell-record filter.
         | TargetFilter::Opponent
         | TargetFilter::OriginalController
@@ -14318,11 +14326,11 @@ mod characteristic_read_classification_tests {
         let mut carriers = Vec::new();
         let mut current: Option<&str> = None;
         for line in body.lines() {
+            // Doc comments name `ControllerRef` in prose; they declare nothing — and neither
+            // does a TRAILING comment on a field line, which the shared
+            // `crate::source_census::code` rule removes too.
+            let line = crate::source_census::code(line);
             let trimmed = line.trim_start();
-            // Doc comments name `ControllerRef` in prose; they declare nothing.
-            if trimmed.starts_with("//") {
-                continue;
-            }
             // A variant header is the only thing at one indent level that opens
             // with an uppercase letter; its fields sit one level deeper.
             if let Some(header) = line

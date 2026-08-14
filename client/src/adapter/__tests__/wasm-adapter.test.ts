@@ -57,6 +57,7 @@ const mockWorkerClient = {
   exportState: vi.fn().mockResolvedValue("{}"),
   restoreState: vi.fn().mockResolvedValue(undefined),
   resumeMultiplayerHostState: vi.fn().mockResolvedValue(undefined),
+  applySeatMutation: vi.fn().mockResolvedValue({ state: {}, delta: {} }),
   ping: vi.fn().mockResolvedValue("phase-rs engine ready"),
   takeLastPanic: vi.fn().mockResolvedValue(null),
   dispose: vi.fn(),
@@ -644,6 +645,23 @@ describe("WasmAdapter", () => {
         "resume failed",
       );
       expect(resumeMultiplayerHostState).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe("applySeatMutation", () => {
+    it("does not load the card database", async () => {
+      await adapter.initialize();
+
+      const mutation = JSON.stringify({ type: "AddAiSeat", difficulty: "Medium" });
+      await adapter.applySeatMutation("{}", mutation);
+
+      expect(mockWorkerClient.applySeatMutation).toHaveBeenCalledWith("{}", mutation);
+      // Seat mutations are a pure reducer over the passed-in seat state plus the
+      // static starter-deck table; the engine re-resolves against CARD_DB at
+      // `initializeGame`. Warming it here would put a second full card database
+      // in memory for every lobby seat change.
+      expect(mockWorkerClient.loadCardDbFromUrl).not.toHaveBeenCalled();
+      expect(adapter.cardDbLoaded).toBe(false);
     });
   });
 

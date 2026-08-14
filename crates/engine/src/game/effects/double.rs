@@ -352,6 +352,7 @@ mod tests {
             may_trigger_origin: None,
             optional_targeting: false,
             optional: false,
+            optional_player: None,
             optional_for: None,
             multi_target: None,
             target_constraints: Vec::new(),

@@ -168,6 +168,7 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         replacement_applied: Default::default(),
         optional_targeting: false,
         optional: false,
+        optional_player: None,
         optional_for: None,
         multi_target: None,
         target_constraints: Vec::new(),
