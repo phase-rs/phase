@@ -309,6 +309,11 @@ pub enum GameAction {
     ChooseReplacement {
         index: usize,
     },
+    /// CR 614.12a: choose which eligible opponent controls an entering
+    /// permanent. This is distinct from CR 616 replacement ordering.
+    ChooseEntryController {
+        opponent: PlayerId,
+    },
     /// CR 603.3b: Player submits the chosen order for their pending triggers.
     /// `order` is a permutation of indices into the `OrderTriggers.triggers`
     /// vec the player was prompted with; index 0 = first placed (bottom of
@@ -1687,6 +1692,7 @@ impl GameAction {
             | GameAction::SelectTargets { .. }
             | GameAction::ChooseTarget { .. }
             | GameAction::ChooseReplacement { .. }
+            | GameAction::ChooseEntryController { .. }
             | GameAction::OrderTriggers { .. }
             | GameAction::CancelCast
             | GameAction::BackToManaPayment

@@ -11,10 +11,10 @@ use crate::types::ability::{
     Comparator, ContinuousModification, ControllerRef, CopyChooseScope, CopyRetargetPermission,
     CountScope, DamageChannel, DamageModification, DamageSource, DelayedTriggerCondition,
     DiscardSelfScope, Duration, Effect, EffectScope, FilterProp, ManaContribution, ManaProduction,
-    ManaSpendPermission, ObjectScope, PerpetualModification, PlayerFilter, PlayerScope, PtStat,
-    PtValue, PtValueScope, QuantityExpr, QuantityRef, SeatDirection, SharedQuality,
-    SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter, TriggerCondition, TypeFilter,
-    TypedFilter, ZoneRef,
+    ManaSpendPermission, ModalChoice, ObjectScope, PerpetualModification, PlayerFilter,
+    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, SeatDirection,
+    SharedQuality, SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter,
+    TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -2472,6 +2472,100 @@ fn trigger_etb_subject_enters_untapped_attaches_negated_condition() {
             condition: Box::new(TriggerCondition::ZoneChangeObjectIsTapped)
         })
     );
+    let execute = def.execute.as_deref().expect("Charismatic execute ability");
+    assert!(execute.optional, "they may tap must remain optional");
+    assert_eq!(
+        execute.optional_player,
+        Some(TargetFilter::TriggeringPlayer),
+        "the parsed `they` subject, not the tap shape, names the optional actor"
+    );
+    assert!(matches!(
+        execute.effect.as_ref(),
+        Effect::SetTapState {
+            target: TargetFilter::TriggeringSource,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        }
+    ));
+    let decline = execute
+        .sub_ability
+        .as_deref()
+        .expect("decline token continuation");
+    assert_eq!(
+        decline.condition,
+        Some(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::effect_performed()),
+        }),
+        "the Vampire token must remain the optional tap's decline branch"
+    );
+}
+
+/// CR 608.2d: The controller's "you may" modal must not acquire the
+/// event-relative actor provenance reserved for an explicit "they may" subject.
+#[test]
+fn trigger_you_may_tap_does_not_stamp_triggering_player_as_optional_actor() {
+    let def = parse_trigger_line(
+        "Whenever a creature enters, you may tap that permanent.",
+        "Controller's Tap",
+    );
+    let execute = def.execute.as_deref().expect("execute ability");
+    assert!(execute.optional);
+    assert_eq!(execute.optional_player, None);
+}
+
+/// CR 603.4 + CR 608.2d: Actor provenance survives a supported intervening-if
+/// wrapper, so its `they may` body still prompts the player from the event.
+#[test]
+fn conditional_they_may_tap_stamps_triggering_player_as_optional_actor() {
+    let def = parse_trigger_line(
+        "Whenever a creature enters, if that creature is white, they may tap that permanent.",
+        "Conditional Tap",
+    );
+    let execute = def.execute.as_deref().expect("execute ability");
+    assert!(execute.optional);
+    assert_eq!(
+        execute.optional_player,
+        Some(TargetFilter::TriggeringPlayer)
+    );
+}
+
+/// CR 603.2 + CR 603.6 + CR 608.2k: Only a trigger's direct, untargeted
+/// "tap that permanent" instruction is rebound to the zone-change object.
+/// A reflexive selected tap and an untap anaphor retain their own referents.
+#[test]
+fn event_source_tap_lift_preserves_reflexive_and_untap_referents() {
+    fn first_tap(ability: &AbilityDefinition) -> Option<&Effect> {
+        if matches!(ability.effect.as_ref(), Effect::SetTapState { .. }) {
+            return Some(ability.effect.as_ref());
+        }
+        ability.sub_ability.as_deref().and_then(first_tap)
+    }
+
+    let snare = parse_trigger_line(
+        "When Snaremaster Sprite enters, you may pay {2}. When you do, tap target creature an opponent controls and put a stun counter on it.",
+        "Snaremaster Sprite",
+    );
+    assert!(matches!(
+        snare.execute.as_deref().and_then(first_tap),
+        Some(Effect::SetTapState {
+            target: TargetFilter::ParentTarget,
+            state: TapStateChange::Tap,
+            ..
+        })
+    ));
+
+    let howl = parse_trigger_line(
+        "When Howl of the Hunt enters, if enchanted creature is a Wolf or Werewolf, untap that creature.",
+        "Howl of the Hunt",
+    );
+    assert!(matches!(
+        howl.execute.as_deref().and_then(first_tap),
+        Some(Effect::SetTapState {
+            target: TargetFilter::ParentTarget,
+            state: TapStateChange::Untap,
+            ..
+        })
+    ));
 }
 
 // Guard: a bare "enters" (no tapped-state rider) must NOT attach a
@@ -28955,4 +29049,45 @@ fn synthetic_sentence_separated_mass_move_damage_keeps_event_context_amount() {
         } => {}
         other => panic!("expected DamageEachPlayer(EventContextAmount, Opponent), got {other:?}"),
     }
+}
+
+/// SHAPE — inline modal roots are independent of `sub_ability`, but a
+/// targetless top-level tap in each mode still refers to the zone-change event
+/// source. This pins the parser's event-source rewrite without widening it
+/// through an explicitly chosen target.
+#[test]
+fn event_source_lift_rewrites_inline_modal_tap_mode_roots() {
+    let mode = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::SetTapState {
+            target: TargetFilter::ParentTarget,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        },
+    );
+    let mut root = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::unimplemented("modal marker", "Choose one"),
+    )
+    .with_modal(
+        ModalChoice {
+            min_choices: 1,
+            max_choices: 1,
+            mode_count: 1,
+            mode_descriptions: vec!["Tap that permanent.".to_string()],
+            ..Default::default()
+        },
+        vec![mode],
+    );
+
+    lift_parent_target_to_triggering_source_in_ability(&mut root);
+
+    assert!(matches!(
+        root.mode_abilities[0].effect.as_ref(),
+        Effect::SetTapState {
+            target: TargetFilter::TriggeringSource,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        }
+    ));
 }

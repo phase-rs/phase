@@ -1809,6 +1809,10 @@
     "title": "Elegir destinatario del regalo",
     "subtitle": "Elige qué oponente recibe el regalo prometido."
   },
+  "entryController": {
+    "title": "Elegir controlador al entrar",
+    "subtitle": "Elige qué oponente controla este permanente al entrar."
+  },
   "optionalCost": {
     "gift": {
       "title": "¿Prometer un regalo?",

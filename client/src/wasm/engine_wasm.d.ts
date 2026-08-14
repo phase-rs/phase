@@ -206,7 +206,7 @@ export function get_legal_actions_for_viewer_js(player_id: number): any;
 
 /**
  * Get the legal actions, auto-pass recommendation, and spell costs for the current game state.
- * Returns `{ actions: GameAction[], autoPassRecommended: boolean, spellCosts: Record<ObjectId, ManaCost> }`.
+ * Returns `{ actions: GameAction[], autoPassRecommended: boolean, spellCosts: Record<string, ManaCost> }`.
  */
 export function get_legal_actions_js(): any;
 
@@ -509,7 +509,6 @@ export interface InitOutput {
     readonly evaluate_deck_compatibility_js: (a: any) => [number, number, number];
     readonly export_game_state_json: () => [number, number, number, number];
     readonly export_replay_log: () => [number, number, number, number];
-    readonly getFormatRegistry: () => any;
     readonly get_ai_action_proposal: (a: number, b: number, c: number) => [number, number, number];
     readonly get_ai_action_proposal_from_scores: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];
     readonly get_ai_action_proposal_from_scores_with_diagnostics: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];
@@ -556,6 +555,7 @@ export interface InitOutput {
     readonly replay_header_js: () => any;
     readonly list_token_presets_js: () => any;
     readonly create_initial_state: () => any;
+    readonly getFormatRegistry: () => any;
     readonly clear_replay_playback: () => void;
     readonly replay_length_js: () => number;
     readonly __wbindgen_malloc: (a: number, b: number) => number;

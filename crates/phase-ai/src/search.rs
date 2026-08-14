@@ -1537,6 +1537,10 @@ pub fn fallback_action(
 
         // Replacement choice: pick the first option.
         WaitingFor::ReplacementChoice { .. } => Some(GameAction::ChooseReplacement { index: 0 }),
+        WaitingFor::EntryControllerChoice { candidates, .. } => candidates
+            .first()
+            .copied()
+            .map(|opponent| GameAction::ChooseEntryController { opponent }),
 
         // Trigger order: keep the engine-provided order.
         WaitingFor::OrderTriggers { triggers, .. } => Some(GameAction::OrderTriggers {

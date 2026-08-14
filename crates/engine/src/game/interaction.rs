@@ -261,6 +261,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::ExertChoice { .. }
         | WaitingFor::EnlistChoice { .. }
         | WaitingFor::ReplacementChoice { .. }
+        | WaitingFor::EntryControllerChoice { .. }
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
         | WaitingFor::ReturnAsAuraTarget { .. }
@@ -488,6 +489,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::ExertChoice { .. }
         | WaitingFor::EnlistChoice { .. }
         | WaitingFor::ReplacementChoice { .. }
+        | WaitingFor::EntryControllerChoice { .. }
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
         | WaitingFor::ReturnAsAuraTarget { .. }
@@ -3438,6 +3440,7 @@ fn selection_projection(
         | WaitingFor::EnlistChoice { .. }
         | WaitingFor::GameOver { .. }
         | WaitingFor::ReplacementChoice { .. }
+        | WaitingFor::EntryControllerChoice { .. }
         | WaitingFor::OrderTriggers { .. }
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
@@ -4381,7 +4384,8 @@ fn project_action_payload(
         | GameAction::ChooseZoneOpponentChooser { opponent }
         | GameAction::ChoosePileOpponent { opponent }
         | GameAction::ChooseAnnouncingOpponent { opponent }
-        | GameAction::ChooseGiftRecipient { opponent } => {
+        | GameAction::ChooseGiftRecipient { opponent }
+        | GameAction::ChooseEntryController { opponent } => {
             push_player_surface(surfaces, *opponent, InteractionRoleCode::Opponent)
         }
         GameAction::ChooseAssistPlayer { player } => {
@@ -5106,6 +5110,7 @@ fn action_code(action: &GameAction) -> InteractionActionCode {
         GameAction::SelectTargets { .. } => InteractionActionCode::SelectTargets,
         GameAction::ChooseTarget { .. } => InteractionActionCode::ChooseTarget,
         GameAction::ChooseReplacement { .. } => InteractionActionCode::ChooseReplacement,
+        GameAction::ChooseEntryController { .. } => InteractionActionCode::ChooseEntryController,
         GameAction::OrderTriggers { .. } => InteractionActionCode::OrderTriggers,
         GameAction::CancelCast => InteractionActionCode::CancelCast,
         GameAction::Equip { .. } => InteractionActionCode::Equip,

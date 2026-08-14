@@ -68,6 +68,29 @@ cargo test -p probe-pin --test isolation_e2e -- --ignored
 the namespace is unavailable reports as **passed**, which is exactly the unmeasured-green this
 tool exists to refuse. An ignored test reports as ignored.
 
+### probe-pin is Linux-only, and says so rather than degrading
+
+probe-pin shells out to two binaries that only a Linux host has: `unshare` (util-linux) for the
+mount namespace, and `timeout` (GNU coreutils) for the target run. macOS ships neither, and has
+no unprivileged-mount-namespace equivalent to port to, so **every** probe aborts there with exit
+2 and the named refusal — never a fallback that writes your worktree.
+
+That splits the two tiers on a non-Linux host:
+
+- **Tier 1 (`pure_logic`) passes.** The arms that drive a real libtest child spawn `timeout`, so
+  they carry `#[cfg_attr(not(target_os = "linux"), ignore = "…")]` and report as **ignored** —
+  not compiled out. An invisible claim is the same failure as a falsely green one; `ignore` is
+  the vocabulary already used above for "this venue cannot measure it". `cargo test --workspace`
+  is green, with the skipped count visible.
+- **Tier 2 (`isolation_e2e`) runs nowhere.** CI cannot mount and Darwin has no `unshare`, so on a
+  macOS checkout the suite's claims rest entirely on whatever Linux venue last executed them.
+  Its tests are left un-`cfg`'d on purpose: a manual run still prints the named refusal instead
+  of a zero-test green.
+
+Both Tilt resources are `auto_init`'d off a non-Linux host (`IS_LINUX` in the `Tiltfile`) so they
+do not boot into a red they can never clear. They stay visible and clickable — the refusal is one
+click away, it just is not scheduled on every edit.
+
 ## Manifest
 
 ```toml

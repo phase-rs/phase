@@ -12,6 +12,7 @@ export interface DraftCardInstance {
   colors: string[];
   cmc: number;
   type_line: string;
+  draft_effect?: "additional_pick";
 }
 
 export type DraftPoolGroupKind =
@@ -80,6 +81,7 @@ export interface SeatPublicView {
   connected: boolean;
   has_submitted_deck: boolean;
   pick_status: "Pending" | "Picked" | "TimedOut" | "NotDrafting";
+  face_up_draft_cards: DraftCardInstance[];
 }
 
 export type DraftStatus =
@@ -169,6 +171,7 @@ export interface DraftPlayerView {
   pass_direction: "Left" | "Right";
   current_pack: DraftCardInstance[] | null;
   pool: DraftCardInstance[];
+  draft_effects: DraftCardInstance[];
   /** Engine-owned grouping, ordering, and duplicate counts for the pool. */
   pool_groups: DraftPoolGroups;
   /** Engine-provided sealed packs in opening order. Absent for draft events. */
@@ -291,6 +294,17 @@ export class DraftAdapter {
     return wasm.submit_pick(cardInstanceId) as DraftPlayerView;
   }
 
+  async submitPickWithDraftEffect(
+    effectCardInstanceId: string,
+    cardInstanceIds: string[],
+  ): Promise<DraftPlayerView> {
+    const wasm = await ensureDraftWasm();
+    return wasm.submit_pick_with_draft_effect(
+      effectCardInstanceId,
+      JSON.stringify(cardInstanceIds),
+    ) as DraftPlayerView;
+  }
+
   /** Let the bot AI pick the best card from the current pack for the player. */
   async autoPick(): Promise<DraftPlayerView> {
     const wasm = await ensureDraftWasm();
@@ -358,6 +372,19 @@ export class DraftAdapter {
   async submitPickForSeat(seat: number, cardInstanceId: string): Promise<DraftPlayerView> {
     const wasm = await ensureDraftWasm();
     return wasm.submit_pick_for_seat(seat, cardInstanceId) as DraftPlayerView;
+  }
+
+  async submitPickWithDraftEffectForSeat(
+    seat: number,
+    effectCardInstanceId: string,
+    cardInstanceIds: string[],
+  ): Promise<DraftPlayerView> {
+    const wasm = await ensureDraftWasm();
+    return wasm.submit_pick_with_draft_effect_for_seat(
+      seat,
+      effectCardInstanceId,
+      JSON.stringify(cardInstanceIds),
+    ) as DraftPlayerView;
   }
 
   async submitDeckForSeat(seat: number, mainDeck: string[]): Promise<DraftPlayerView> {

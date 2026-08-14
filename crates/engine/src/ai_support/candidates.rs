@@ -425,6 +425,17 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        WaitingFor::EntryControllerChoice { player, candidates } => candidates
+            .iter()
+            .copied()
+            .map(|opponent| {
+                candidate(
+                    GameAction::ChooseEntryController { opponent },
+                    TacticalClass::Replacement,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::MoveCountersDistribution {
             player,
             available,
@@ -873,6 +884,18 @@ pub fn candidate_actions_broad_with_probe(
                         opponent: *opponent,
                     },
                     TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
+        WaitingFor::EntryControllerChoice { player, candidates } => candidates
+            .iter()
+            .map(|opponent| {
+                candidate(
+                    GameAction::ChooseEntryController {
+                        opponent: *opponent,
+                    },
+                    TacticalClass::Replacement,
                     Some(*player),
                 )
             })

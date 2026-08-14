@@ -1809,6 +1809,10 @@
     "title": "Choisir le destinataire du cadeau",
     "subtitle": "Choisissez quel adversaire reçoit le cadeau promis."
   },
+  "entryController": {
+    "title": "Choisir le contrôleur à l'arrivée",
+    "subtitle": "Choisissez quel adversaire contrôle ce permanent à son arrivée."
+  },
   "optionalCost": {
     "gift": {
       "title": "Promettre un cadeau ?",

@@ -70,7 +70,7 @@ Spawn a `general-purpose` agent and instruct it to invoke `/engine-planner`. The
 
 **Spawn inputs:** task description; in-scope file/subsystem hints; any prior reviewer findings (none on first round).
 
-Do not author or edit the plan in this thread. If the returned plan is missing sections or is superficial, send the same inputs plus an explicit "missing sections" note to a **fresh** planning agent — do not patch it yourself.
+Do not author or edit the plan in this thread — surgical-fix mode (below) is the one exception, and only under its three measured conditions. If the returned plan is missing sections or is superficial, send the same inputs plus an explicit "missing sections" note to a **fresh** planning agent — do not patch it yourself.
 
 ### Step 2 — Review the plan until clean (unbounded loop)
 
@@ -87,6 +87,32 @@ If the reviewer returns gaps, spawn a **fresh** planning agent (Step 1 inputs pl
 - an environment blocker that makes review impossible.
 
 Each review must run in a fresh agent context — never reuse the previous reviewer's context.
+
+#### Surgical-fix mode — when the design is settled and the findings are spot drift
+
+The loop above assumes findings move the **design**. Once they stop doing that, re-running it makes the artifact worse: a fresh planner rewrites prose to absorb each finding, prose is where spot findings live, so every round manufactures the next round's findings.
+
+**When all three hold, switch modes** — measure them, do not judge them:
+
+1. The design is unchanged for ≥2 consecutive rounds (compare the named entries themselves — which steps, sub-steps, enum variants, and call sites each round names, because a 1:1 substitution holds every count constant; **not** a count and **not** line count; an in-place rewrite that preserves every name survives this comparison and is caught only by the whole-artifact re-review below).
+2. The last round's findings are all **spot** — a stale number, a stale coordinate, a claim contradicted by a neighbouring section, a missing restatement of a control the plan already specifies, a sentence never swept. None changes what the implementation does.
+3. Each finding names a coordinate **and** its replacement text. If any finding requires *deciding* something, it is a design finding: stay in the loop.
+
+**Do not add a fourth condition based on falling churn.** Round-over-round churn shrinks while a loop turns unproductive: smaller repairs to a growing record. It measures edit size, not convergence, and gating on it blocks the switch precisely when the switch is warranted.
+
+**The corroborating signal, if you want one, is the fraction of a round's findings whose defect originated in the *previous* round's repairs.** It climbs as the loop starts feeding on itself, but not monotonically — so treat a high fraction as evidence for the switch, never as the trigger.
+
+**In surgical-fix mode the orchestrator applies the findings itself**, as check-and-replace edits — the one narrow exception to "the orchestrator never authors content." It is *applying* adjudicated text, not authoring; the moment a fix needs a decision, dispatch a planner instead. Requirements:
+
+- **Two-sided verification per edit:** before the edit, the quoted old string is present at the finding's named coordinate — a quote that is not there is a stale coordinate, not an applicable fix; after the edit, the text the replacement adds is present exactly once and sits where the old string was, and the old string is absent — except that when the replacement contains the old string, that string survives by construction and the added text is the sole gate; count occurrences, not matching lines, 1:1 per fragment, not a lucky aggregate.
+- **State the sweep's boundary.** A changelog entry that quotes the struck text will match your own grep for it. Population, predicate, scan direction, and whether the matched line counts — write them down; every enumeration defect is an unstated predicate rather than a bad measurement.
+- **Fix the neighbours the fix breaks.** A finding's repair frequently contradicts a section that classified the old form. Sweep by mechanism, not by coordinate.
+- **Then re-review the WHOLE artifact**, fresh context — not just the repaired sections, per `$bug-triage`'s targeted-re-review rule. Repeat apply → whole-artifact re-review until a round returns zero gaps; any finding that requires *deciding* something ends surgical mode and returns to the unbounded loop above. Surgical mode replaces the planner-rewrite rounds, never the final independent check.
+- **Record the mode switch, its three measurements, the spot-vs-design classification of each round's findings, each attempted edit's two-sided verification result (pass or fail) and sweep boundary, and why the mode ends** in `<git-common-dir>/engine-implementer-runs/<run-id>/surgical-mode-switch`, never in the plan text the fresh re-reviewer and the executor read — recording it there hands the one remaining independent check a prior verdict. It is a process record of this loop, not provenance: it carries no candidate identity and duplicates no receipt field, so the canonical-receipt rule above does not reach it. Append one numbered entry per round, never overwrite: ending surgical mode and re-entering it later continues the same numbered sequence, and clobbering an earlier entry loses the exit that entry recorded. Every exit is then auditable rather than asserted. Each entry carries that round's classification, edit results, and sweep boundaries; only a round that enters the mode records the switch and its three measurements, and only a round that ends the mode records why.
+
+**This does not contradict `$bug-triage`'s fixpoint gate.** That gate requires whole-plan re-review because *"revisions routinely INTRODUCE new gaps in untouched-looking areas"* — planner **rewrites** do. A check-and-replace at a named coordinate does not rewrite, which is why it is the safe tool once the design has stopped moving. `$review-engine-plan` ends its loop with *"or the caller stops the process"* and states no criteria; this section is those criteria, and it lives here because the orchestrator is that caller.
+
+This is not a licence for "two rounds and ship". The unbounded loop remains the default and the burden of proof is on leaving it: no measurement, no switch. Surgical mode is scoped to this Step 2 plan-review loop only — Step 6's implementation-review loop never uses it, because there the artifact is a committed candidate that only an executor may edit under the frozen-scope and receipt contract.
 
 ### Step 3 — Dispatch implementation
 
@@ -129,7 +155,7 @@ Every round keeps the original `BASE_SHA` and frozen scope paths. Every checkpoi
 
 ### Step 7 — Final acceptance
 
-Accept only when the plan-review loop is clean, the reviewer emitted a matching external receipt SHA256, final acceptance independently revalidates the receipt and every recorded artifact, parser evidence and completion checks pass, and the fresh implementation review returns zero findings. The receipt validation/hash are acceptance evidence, never completion-check rows or receipt artifacts. Immediately run `git -C "$IMPLEMENTATION_WORKTREE" rev-parse HEAD` and compare its output to `CANDIDATE_SHA`; if it differs, the review is stale and the current head must repeat the checkpoint-to-review sequence. Do not treat review of an ancestor as review of current work.
+Accept only when the plan-review loop is clean, the reviewer emitted a matching external receipt SHA256, final acceptance independently revalidates the receipt and every recorded artifact, parser evidence and completion checks pass, every surgical-fix mode round has the complete numbered entry Step 2 requires, and the fresh implementation review returns zero findings. The receipt validation/hash and those entries are acceptance evidence, never completion-check rows or receipt artifacts. Immediately run `git -C "$IMPLEMENTATION_WORKTREE" rev-parse HEAD` and compare its output to `CANDIDATE_SHA`; if it differs, the review is stale and the current head must repeat the checkpoint-to-review sequence. Do not treat review of an ancestor as review of current work.
 
 ### Post-acceptance PR handoff (non-gating)
 
@@ -152,7 +178,7 @@ If later work invalidates the approved plan or architecture, return to plan revi
 
 Return after final acceptance:
 
-1. Plan-review rounds (count) and final clean result.
+1. Plan-review rounds (count), whether surgical-fix mode was used, and final clean result.
 2. What changed, grouped by subsystem and file.
 3. Key architectural decisions.
 4. `BASE_SHA`, accepted `CANDIDATE_SHA`, frozen scope paths, and run-artifact root.

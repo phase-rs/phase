@@ -463,7 +463,11 @@ export function DraftPage() {
               <div className="mb-4">
                 <DraftProgress />
               </div>
-              <PackDisplay onCardHover={setHoveredCard} showAutoPick />
+              <PackDisplay
+                onCardHover={setHoveredCard}
+                showAutoPick
+                enableDraftEffects
+              />
             </div>
             <PoolPanel onCardHover={setHoveredCard} />
           </div>

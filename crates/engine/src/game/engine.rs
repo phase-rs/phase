@@ -5758,7 +5758,6 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::ActivationMillPayment { .. }
                     | PendingCostMoveResume::LoyaltyActivation { .. }
                     | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
-                    | PendingCostMoveResume::RandomDiscardUnlessPayment { .. }
             )
         ),
         // CR 606.4 + CR 616.1: a fully-prevented loyalty counter add (e.g. an
@@ -5782,7 +5781,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::ActivationMillPayment { .. }
                     | PendingCostMoveResume::LoyaltyActivation { .. }
                     | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
-                    | PendingCostMoveResume::RandomDiscardUnlessPayment { .. }
+                    | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
             )
         ),
         CostMoveDrainBoundary::PriorityBoundary => matches!(
@@ -5865,16 +5864,11 @@ pub(crate) fn drain_pending_cost_move_resume(
         )?
     } else if matches!(
         state.pending_cost_move_resume,
-        Some(PendingCostMoveResume::RandomDiscardUnlessPayment { .. })
+        Some(PendingCostMoveResume::RandomDiscardUnlessPayment(..))
     ) {
-        // CR 118.12: unlike the counter-addition sibling directly above, the
-        // boundary is deliberately NOT passed in. The "if they do / don't"
-        // clause checks whether the player CHOSE to pay "regardless of what
-        // events actually occurred", and that choice was made — with the
-        // CR 118.3 resources already verified — before any replacement was
-        // consulted. Both boundaries therefore settle identically;
-        // `ReplacementPrevented` stays in the eligibility list above purely so
-        // a parked continuation is drained rather than stranded.
+        // CR 118.12: random discard pauses only after its Moved replacement
+        // returns a replacement choice; the delivered boundary resumes the
+        // payment through its already-authorized paid epilogue.
         engine_payment_choices::resume_random_discard_unless_payment(state, events)?
     } else {
         unreachable!("eligible cost-move root must remain parked")
@@ -6158,7 +6152,12 @@ fn drain_pending_deferred_life_cost_resume(
             }
         }
     })();
-    if result.is_err() && state.pending_deferred_life_cost_resume.is_none() {
+    if result.is_err()
+        && !result
+            .as_ref()
+            .is_err_and(super::casting_costs::is_abandoned_cast_finalization)
+        && state.pending_deferred_life_cost_resume.is_none()
+    {
         state.pending_deferred_life_cost_resume = Some(resume_for_restore);
     }
     result
@@ -9875,6 +9874,10 @@ fn apply_action(
         (WaitingFor::ReplacementChoice { .. }, GameAction::ChooseReplacement { index }) => {
             engine_replacement::handle_replacement_choice(state, index, &mut events)?
         }
+        (
+            WaitingFor::EntryControllerChoice { .. },
+            GameAction::ChooseEntryController { opponent },
+        ) => engine_replacement::handle_entry_controller_choice(state, opponent, &mut events)?,
         // CR 603.3b: Player submits the chosen order for their pending triggers.
         // `actor` is already authorized as the prompted player by
         // `check_actor_authorization` (via `WaitingFor::acting_player`).
@@ -16105,11 +16108,11 @@ mod stage2_injector_tests {
                 //     :12019`, +15, and ONLY the engine.rs entry moved — the four
                 //     effects/mod.rs + scoped_library_search entries did not, which is the
                 //     set-preservation evidence. `git diff -U0` on this file has exactly three
-                //     hunks, ALL inside `drain_pending_cost_move_resume` at `:5761`/`:5785`/
-                //     `:5865` (+1/+1/+13 = +15, zero deletions), i.e. entirely ABOVE this
-                //     producer; predicted `12004+15` equals the observed coordinate exactly.
-                //     They add the `RandomDiscardUnlessPayment` resume to the two drain
-                //     eligibility lists and its dispatch arm — a cost-payment continuation, not
+                //     hunks, ALL inside `drain_pending_cost_move_resume` at `:5761`/
+                //     `:5865` (+1/+13 = +14, zero deletions), i.e. entirely ABOVE this
+                //     producer; predicted `12004+14` equals the observed coordinate exactly.
+                //     They add the `RandomDiscardUnlessPayment` delivery resume and its
+                //     dispatch arm — a cost-payment continuation, not
                 //     a prompt mint: it RESUMES an already-minted `UnlessPayment` rather than
                 //     creating a recipient, so it is correctly absent from this census.
                 //     Identity re-established, not assumed: the producer at `:12019` is the
@@ -16145,9 +16148,11 @@ mod stage2_injector_tests {
                 // Current-main port: #7221's typed player-action completion seam and the
                 // contemporaneous upstream changes moved these three producers. Re-derived
                 // in the merged source, still in their named production functions.
+                // #7382's optional-player routing and pre-entry controller prompt move only
+                // the third and fifth coordinates; both named mints were re-read in place.
                 "game/effects/mod.rs:6640".to_string(),
                 "game/effects/mod.rs:6717".to_string(),
-                "game/effects/mod.rs:9922".to_string(),
+                "game/effects/mod.rs:9939".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
@@ -16467,8 +16472,8 @@ mod stage2_injector_tests {
                 // neither does this branch — total still 37, partition still 5/7/25.
                 //
                 // #7303 shifts this producer from `:12004` to `:12003` (-1), while this
-                // PR's random-discard continuation adds +15 lines above it. Re-derived in the
-                // merged tree by content: `12004 - 1 + 15 = 12018`; the line below is the
+                // PR's random-discard continuation adds +14 lines above it. Re-derived in the
+                // branch tree by content: `12004 - 1 + 14 = 12017`; the line below is the
                 // announcement-time optional-effect producer in
                 // `begin_pending_trigger_target_selection`.
                 //
@@ -16488,7 +16493,10 @@ mod stage2_injector_tests {
                 //   FIRST and both fired GREEN on the run that caught this — total still 37,
                 //   partition still 5/7/25. The change constructs no `WaitingFor` of any kind;
                 //   it threads an attachment-legality authority through an existing call.
-                "game/engine.rs:12018".to_string(),
+                // The PR's random-discard continuation and main's abandoned-cast
+                // finalization both shift this source coordinate. The merged
+                // announcement-time producer is re-derived at `:12021`.
+                "game/engine.rs:12021".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \

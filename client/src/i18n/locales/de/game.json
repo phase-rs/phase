@@ -1809,6 +1809,10 @@
     "title": "Geschenk-Empfänger wählen",
     "subtitle": "Wähle, welcher Gegner das versprochene Geschenk erhält."
   },
+  "entryController": {
+    "title": "Kontrolleur beim Eintreten wählen",
+    "subtitle": "Wähle, welcher Gegner diese bleibende Karte beim Eintreten kontrolliert."
+  },
   "optionalCost": {
     "gift": {
       "title": "Ein Geschenk versprechen?",

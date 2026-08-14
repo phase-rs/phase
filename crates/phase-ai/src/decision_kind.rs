@@ -203,7 +203,8 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::LoopShortcut { .. }
         | WaitingFor::RespondToShortcut { .. }
         | WaitingFor::PrecastCopyShortcutOffer { .. }
-        | WaitingFor::RespondToPrecastCopyShortcut { .. } => DecisionKind::ActivateAbility,
+        | WaitingFor::RespondToPrecastCopyShortcut { .. }
+        | WaitingFor::EntryControllerChoice { .. } => DecisionKind::ActivateAbility,
     }
 }
 

@@ -1249,20 +1249,14 @@ pub(super) fn handle_unless_payment(
             // CR 118.12a: "unless [target's controller] has [~] deal N damage to
             // them" — the payer takes damage from the ability source instead of
             // the primary effect (Blazing Salvo, Lava Blister, Barbarian Bully).
-            AbilityCost::EffectCost { effect } => match effect.as_ref() {
-                // CR 702.24a + CR 122.1: Cumulative upkeep can require a
-                // source-counter effect cost (Aboroth). Route it through the
-                // same resolution payment authority as its activation-cost
-                // form, including the replacement-aware continuation.
-                Effect::PutCounter {
-                    target: TargetFilter::SelfRef,
-                    ..
-                } => match costs::pay_ability_cost_for_resolution(
+            // CR 118.3: Deterministic effect-cost payments use the single
+            // resolution payment authority. Its shared support predicate
+            // covers source counters and fixed mana without a prompt.
+            AbilityCost::EffectCost { .. } if cost.supports_effect_cost_payment() => {
+                match costs::pay_ability_cost_for_resolution(
                     state,
                     player,
-                    &AbilityCost::EffectCost {
-                        effect: effect.clone(),
-                    },
+                    &cost,
                     pending_effect.as_ref(),
                     events,
                 )? {
@@ -1279,7 +1273,9 @@ pub(super) fn handle_unless_payment(
                             });
                         return Ok(action_result(events, state.waiting_for.clone()));
                     }
-                },
+                }
+            }
+            AbilityCost::EffectCost { effect } => match effect.as_ref() {
                 Effect::DealDamage { .. } => {
                     let mut damage_ability = pending_effect.as_ref().clone();
                     damage_ability.effect = *effect.clone();
@@ -1987,9 +1983,8 @@ pub(super) fn resume_counter_addition_unless_payment(
 /// under it, an applicable replacement preventing the first move would sacrifice
 /// Balduvian Horde out from under a player who had paid.
 ///
-/// Both drain boundaries therefore land here and settle identically; the
-/// `ReplacementPrevented` arm remains in the eligibility list purely so a parked
-/// continuation is DRAINED rather than stranded at that boundary.
+/// The Moved replacement path parks only for a replacement choice; once that
+/// choice resolves to delivery, this continuation settles the paid epilogue.
 pub(super) fn resume_random_discard_unless_payment(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,

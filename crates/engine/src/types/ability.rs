@@ -5145,6 +5145,16 @@ pub enum TargetFilter {
     Any,
     Player,
     Controller,
+    /// CR 608.2h + CR 113.7a: The controller of this ability's source object.
+    ///
+    /// Unlike [`Self::Controller`], which is the controller of the resolving
+    /// ability (and therefore the activator for an activated ability), this
+    /// follows the source's exact incarnation. Triggered abilities use their
+    /// [`TriggerSourceContext`] live-or-LKI authority; other stack abilities
+    /// use their captured `source_incarnation` and the incarnation-keyed LKI
+    /// history. This keeps "~'s controller" from rebinding to a later object
+    /// that reuses the same storage id.
+    SourceController,
     /// CR 615 + CR 614.1a: Compound damage recipient "you and [type] permanents
     /// you control" (Comeuppance's "you and planeswalkers you control"; Channel
     /// Harm's "you and permanents you control"). A PARSE-LAYER recipient
@@ -9492,22 +9502,7 @@ impl AbilityCost {
                 filter: None,
                 ..
             } => true,
-            // CR 702.24a + CR 122.1: The existing resolution payment
-            // authority can place a counter on the source through the
-            // replacement pipeline. This covers cumulative-upkeep costs such
-            // as Aboroth's "put a -1/-1 counter on this creature" without
-            // admitting arbitrary effect-as-cost shapes.
-            AbilityCost::EffectCost { effect }
-                if matches!(
-                    effect.as_ref(),
-                    Effect::PutCounter {
-                        target: TargetFilter::SelfRef,
-                        ..
-                    }
-                ) =>
-            {
-                true
-            }
+            AbilityCost::EffectCost { .. } if self.supports_effect_cost_payment() => true,
             // CR 118.12a: OneOf at the base must be a disjunction of mana
             // costs; mixed-shape disjunctions are not yet expanded into a
             // payable per-counter form.
@@ -9522,6 +9517,28 @@ impl AbilityCost {
             }
             _ => false,
         }
+    }
+
+    /// CR 118.3: Effect-as-cost forms the payment authority can resolve without
+    /// a player choice. This is shared by cumulative-upkeep synthesis and the
+    /// resolution-time payment gate so supported cards never install a trigger
+    /// whose cost will later be rejected.
+    pub fn supports_effect_cost_payment(&self) -> bool {
+        matches!(
+            self,
+            AbilityCost::EffectCost { effect }
+                if matches!(
+                    effect.as_ref(),
+                    Effect::PutCounter {
+                        target: TargetFilter::SelfRef,
+                        ..
+                    } | Effect::Mana {
+                        produced: ManaProduction::Fixed { .. },
+                        target: None,
+                        ..
+                    }
+                )
+        )
     }
 
     /// CR 118: Classify this cost into one or more `CostCategory` buckets.
@@ -15092,6 +15109,10 @@ impl TargetFilter {
                 | TargetFilter::SelfRef
                 | TargetFilter::SourceOrPaired
                 | TargetFilter::Controller
+                // CR 608.2h + CR 113.7a: "~'s controller" is resolved from
+                // the source's live-or-LKI incarnation, never chosen while
+                // announcing the ability.
+                | TargetFilter::SourceController
                 | TargetFilter::OriginalController
                 // CR 608.2c: the reanimator-Aura's pre-rebind source identity is
                 // resolved (concretized to SpecificObject) during resolution, never
@@ -18933,8 +18954,13 @@ pub struct AbilityDefinition {
     pub optional_targeting: bool,
     /// CR 608.2d: When true, the controller chooses whether to perform this effect ("You may X").
     pub optional: bool,
+    /// CR 608.2d: Event-relative player named by an optional subject (for example,
+    /// "they may"). Unlike `optional_for` and `target_chooser`, this selects the
+    /// resolution-time optional actor; `None` uses this ability's controller.
+    pub optional_player: Option<TargetFilter>,
     /// CR 608.2d: When set, an opponent (not the controller) chooses whether to perform this
-    /// optional effect. Requires `optional: true`. Opponents are prompted in APNAP order.
+    /// optional effect. Unlike `optional_player` and `target_chooser`, this is an
+    /// any-opponent permission. Requires `optional: true`; prompts use APNAP order.
     pub optional_for: Option<OpponentMayScope>,
     /// Variable-count targeting: min/max targets the player can choose.
     /// When present, resolution enters MultiTargetSelection instead of immediate resolve.
@@ -19014,8 +19040,8 @@ pub struct AbilityDefinition {
     /// CR 601.2c + CR 603.3d: When set, this player (not the controller) announces
     /// this ability's target(s) at stack placement. `None` = controller chooses
     /// (default). Mirrors `target_selection_mode` (the same "by-whom are targets
-    /// selected" axis). Distinct from CR 608.2d resolution-time "of their choice"
-    /// sacrifices.
+    /// selected" axis). Unlike `optional_player` and `optional_for`, this is a
+    /// stack-placement target choice, not a resolution-time optional actor.
     pub target_chooser: Option<TargetFilter>,
     /// CR 608.2c + CR 107.1c: per-iteration loop-continuation predicate, the
     /// non-count companion to `repeat_for`. When `Some`, the resolution chain
@@ -19076,6 +19102,8 @@ struct AbilityDefinitionRepr<'a> {
     condition: &'a Option<AbilityCondition>,
     optional_targeting: bool,
     optional: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    optional_player: &'a Option<TargetFilter>,
     #[serde(skip_serializing_if = "Option::is_none")]
     optional_for: &'a Option<OpponentMayScope>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -19143,6 +19171,7 @@ impl Serialize for AbilityDefinition {
             condition,
             optional_targeting,
             optional,
+            optional_player,
             optional_for,
             multi_target,
             target_constraints,
@@ -19184,6 +19213,7 @@ impl Serialize for AbilityDefinition {
             condition,
             optional_targeting: *optional_targeting,
             optional: *optional,
+            optional_player,
             optional_for,
             multi_target,
             target_constraints,
@@ -19275,6 +19305,8 @@ struct AbilityDefinitionDe {
     #[serde(default)]
     optional: bool,
     #[serde(default)]
+    optional_player: Option<TargetFilter>,
+    #[serde(default)]
     optional_for: Option<OpponentMayScope>,
     #[serde(default)]
     multi_target: Option<MultiTargetSpec>,
@@ -19347,6 +19379,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             condition: de.condition,
             optional_targeting: de.optional_targeting,
             optional: de.optional,
+            optional_player: de.optional_player,
             optional_for: de.optional_for,
             multi_target: de.multi_target,
             target_constraints: de.target_constraints,
@@ -19543,6 +19576,7 @@ impl AbilityDefinition {
             condition: None,
             optional_targeting: false,
             optional: false,
+            optional_player: None,
             optional_for: None,
             multi_target: None,
             target_constraints: Vec::new(),
@@ -24395,6 +24429,9 @@ pub struct ResolvedAbility {
     /// CR 608.2d: Optional effect — controller prompted before execution.
     #[serde(default)]
     pub optional: bool,
+    /// CR 608.2d: Event-relative player explicitly named by an optional subject.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optional_player: Option<TargetFilter>,
     /// CR 608.2d: When set, an opponent chooses whether to perform this optional effect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub optional_for: Option<OpponentMayScope>,
@@ -24635,6 +24672,7 @@ impl ResolvedAbility {
             context: SpellContext::default(),
             optional_targeting: false,
             optional: false,
+            optional_player: None,
             optional_for: None,
             multi_target: None,
             target_constraints: Vec::new(),

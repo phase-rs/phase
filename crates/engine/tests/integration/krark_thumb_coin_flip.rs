@@ -106,6 +106,10 @@ fn applier_doubles_controllers_flip() {
         }
         other => panic!("expected Execute(CoinFlip {{ count: 2 }}), got {other:?}"),
     }
+    assert!(
+        !runner.state().has_post_replacement_drain(),
+        "Krark's inline count replacement must not leave a dead post-replacement drain"
+    );
 }
 
 /// CR 614.1a: Krark is controller-scoped (B2). With Krark under P0, a flip by P1

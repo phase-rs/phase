@@ -645,6 +645,7 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::UnspendPoolMana { .. }
         | GameAction::ChooseTarget { .. }
         | GameAction::ChooseReplacement { .. }
+        | GameAction::ChooseEntryController { .. }
         | GameAction::CancelCast
         | GameAction::Equip { .. }
         | GameAction::ActivateStation { .. }

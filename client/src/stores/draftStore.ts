@@ -57,6 +57,7 @@ interface DraftStoreActions {
   resumeDraft: () => Promise<void>;
   abandonDraft: () => Promise<void>;
   pickCard: (cardInstanceId: string) => Promise<void>;
+  pickCardWithDraftEffect: (effectCardInstanceId: string, cardInstanceIds: string[]) => Promise<void>;
   autoPickCard: () => Promise<void>;
   selectCard: (cardInstanceId: string | null) => void;
   confirmPick: () => Promise<void>;
@@ -419,6 +420,14 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
       const { adapter } = get();
       if (!adapter) return;
       applyPickResult(await adapter.submitPick(cardInstanceId));
+    },
+
+    pickCardWithDraftEffect: async (effectCardInstanceId, cardInstanceIds) => {
+      const { adapter } = get();
+      if (!adapter) return;
+      applyPickResult(
+        await adapter.submitPickWithDraftEffect(effectCardInstanceId, cardInstanceIds),
+      );
     },
 
     autoPickCard: async () => {

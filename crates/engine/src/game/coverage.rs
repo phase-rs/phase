@@ -549,6 +549,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::Player => "player".into(),
         TargetFilter::AllPlayers => "any player".into(),
         TargetFilter::Controller => "controller".into(),
+        TargetFilter::SourceController => "source's controller".into(),
         TargetFilter::Opponent => "opponent".into(),
         TargetFilter::OriginalController => "original controller".into(),
         TargetFilter::ScopedPlayer => "scoped player".into(),
@@ -6996,6 +6997,7 @@ fn count_effective_oracle_lines(oracle_text: &str) -> usize {
         if is_deck_construction_copy_limit_sentence(stripped) {
             continue;
         }
+
         // Draft-time "draft matters" lines (CR 905) are consumed as no-ops by
         // the parser, so they produce no parse item — don't count them as
         // effective Oracle lines either, or the silent-drop guard would flag
@@ -9225,6 +9227,12 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
         // legitimately produce no `ParsedElement`. Skip them so they are not
         // falsely reported as `SilentDrop`.
         if is_deck_construction_copy_limit_sentence(stripped) {
+            continue;
+        }
+
+        // CR 905.1a + CR 905.2: Draft-procedure lines are handled by the
+        // Draft engine, not by constructed-game card abilities.
+        if is_draft_matters_sentence(stripped) {
             continue;
         }
 
@@ -13553,6 +13561,19 @@ mod tests {
                 .iter()
                 .any(|f| matches!(f, SemanticFinding::DroppedCondition { condition_text, .. } if condition_text == "as long as")),
             "Should detect dropped 'as long as' condition: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn test_audit_skips_draft_procedure_lines() {
+        let face = make_face();
+        let oracle = "Draft this card face up.\nAs you draft a card, you may draft an additional card from that booster pack.\nIf you do, put this card into that booster pack.";
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            findings.is_empty(),
+            "draft-procedure lines are owned by CR 905 draft handling: {findings:?}"
         );
     }
 

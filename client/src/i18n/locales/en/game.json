@@ -1853,6 +1853,10 @@
     "title": "Choose Gift Recipient",
     "subtitle": "Choose which opponent receives the promised gift."
   },
+  "entryController": {
+    "title": "Choose Entry Controller",
+    "subtitle": "Choose which opponent controls this permanent as it enters."
+  },
   "optionalCost": {
     "gift": {
       "title": "Promise a gift?",

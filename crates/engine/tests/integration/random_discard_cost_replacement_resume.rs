@@ -133,9 +133,9 @@ fn moved_out_of_hand(runner: &GameRunner, hand: &[ObjectId]) -> usize {
         .count()
 }
 
-/// CR 616.1 + CR 118.12a: the batch parks on the replacement choice, and
-/// ACCEPTING it (the card is redirected to exile — still discarded per
-/// CR 701.9c) resumes the preserved payment: the cost counts as paid, the
+/// CR 616.1 + CR 118.12: the batch parks on the replacement choice, and
+/// ACCEPTING it redirects the filler to exile and resumes the preserved
+/// payment: the cost counts as paid, the
 /// guarded unless-effect (sacrifice) does NOT happen, and no cost continuation
 /// is left parked.
 ///
@@ -196,6 +196,15 @@ fn random_discard_cost_resumes_its_payment_after_an_accepted_replacement() {
         1,
         "exactly one card left the hand as the payment"
     );
+    let moved_filler = hand
+        .iter()
+        .find(|id| runner.state().objects[id].zone != Zone::Hand)
+        .expect("exactly one filler must have moved");
+    assert_eq!(
+        runner.state().objects[moved_filler].zone,
+        Zone::Exile,
+        "accepting the replacement must redirect the paid filler to exile"
+    );
     assert_eq!(
         runner.state().objects[&horde].zone,
         Zone::Battlefield,
@@ -240,6 +249,15 @@ fn random_discard_cost_resumes_its_payment_after_a_declined_replacement() {
         moved_out_of_hand(&runner, &hand),
         1,
         "the card still leaves the hand — declining the redirect sends it to the graveyard"
+    );
+    let moved_filler = hand
+        .iter()
+        .find(|id| runner.state().objects[id].zone != Zone::Hand)
+        .expect("exactly one filler must have moved");
+    assert_eq!(
+        runner.state().objects[moved_filler].zone,
+        Zone::Graveyard,
+        "declining the replacement must send the paid filler to the graveyard"
     );
     assert_eq!(
         runner.state().objects[&horde].zone,

@@ -430,6 +430,7 @@ mod tests {
             colors: colors.iter().map(|s| s.to_string()).collect(),
             cmc,
             type_line: type_line.to_string(),
+            draft_effect: None,
         }
     }
 
