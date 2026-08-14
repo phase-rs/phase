@@ -5,12 +5,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
     additional_cost_instance_payment_count, additional_cost_instance_payment_count_for_ordinal,
-    AbilityBlockEntry, AbilityDefinition, AdditionalCost, AdditionalCostInstancePayment,
-    AdditionalCostOrigin, BasicLandType, CastTimingPermission, CastVariantPaid, CastingPermission,
-    CastingRestriction, ChosenAttribute, ChosenSubtypeKind, CostPaidObjectSnapshot,
-    ExiledSpellRider, ModalChoice, ReplacementDefinition, SeatDirection, SolveCondition,
-    SpellCastingOption, StaticDefinition, TriggerBaseSetInstanceRef, TriggerDefinition,
-    TriggerDefinitionOccurrenceRef, TriggerEntry, TriggerOccurrenceState,
+    materialize_legacy_printed_trigger_entries, AbilityBlockEntry, AbilityDefinition,
+    AdditionalCost, AdditionalCostInstancePayment, AdditionalCostOrigin, BasicLandType,
+    CastTimingPermission, CastVariantPaid, CastingPermission, CastingRestriction, ChosenAttribute,
+    ChosenSubtypeKind, CostPaidObjectSnapshot, ExiledSpellRider, ModalChoice,
+    ReplacementDefinition, SeatDirection, SolveCondition, SpellCastingOption, StaticDefinition,
+    TriggerBaseSetInstanceRef, TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerEntry,
+    TriggerOccurrenceState,
 };
 use crate::types::card::{LayoutKind, PrintedCardRef, PrintedLoyalty, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
@@ -1631,32 +1632,22 @@ impl GameObject {
     /// runtime payloads are rejected rather than guessed from equal definition
     /// bytes.
     pub fn migrate_legacy_trigger_definitions(&mut self) -> Result<(), &'static str> {
-        let has_legacy_entries = self.trigger_definitions.iter_all().any(|entry| {
-            matches!(
-                entry.occurrence,
-                TriggerDefinitionOccurrenceRef::Unmaterialized
-            )
-        });
-        if !has_legacy_entries {
-            return self.validate_trigger_definitions();
-        }
-        if self.base_trigger_definitions.is_empty()
-            || self.trigger_definitions.len() != self.base_trigger_definitions.len()
-            || !self.trigger_definitions.iter_all().all(|entry| {
-                matches!(
-                    entry.occurrence,
-                    TriggerDefinitionOccurrenceRef::Unmaterialized
-                )
-            })
-            || !self
+        let mut entries = self.trigger_definitions.iter_all().cloned().collect();
+        materialize_legacy_printed_trigger_entries(
+            &mut entries,
+            self.base_trigger_definitions.as_slice(),
+            self.trigger_base_set_instance,
+        )?;
+        if entries
+            == self
                 .trigger_definitions
                 .iter_all()
-                .zip(self.base_trigger_definitions.iter())
-                .all(|(entry, base)| entry.definition == *base)
+                .cloned()
+                .collect::<Vec<_>>()
         {
-            return Err("legacy runtime trigger payload has no provable producer or base slot");
+            return self.validate_trigger_definitions();
         }
-        self.materialize_base_trigger_definitions();
+        self.trigger_definitions = entries.into();
         self.validate_trigger_definitions()
     }
 

@@ -477,3 +477,204 @@ fn natural_balance_collects_two_local_x_searches_before_one_shuffle_each() {
         "each accepted searcher must shuffle exactly once; a duplicate completion would add another shuffle"
     );
 }
+
+/// **Row 2c′ — WIRE TIER.** CR 603.5 + CR 732.2a: two seats answering the SAME "may"
+/// source inside ONE loop-detection window keep two independent journal entries, so no
+/// seat's answer can fill another's slot and no two seats can manufacture a false
+/// disagreement.
+///
+/// # Why this board, and what it does and does not prove
+///
+/// This is a production path, not a storage-contract unit: Natural Balance's scoped
+/// acceptance cascade (`game::effects::scoped_library_search::advance_acceptance`) captures
+/// ONE `source_id` from the pending ability and mints one
+/// `WaitingFor::OptionalEffectChoice { player, source_id, .. }` per scoped seat, so both
+/// answers reach the reducer's `DecideOptionalEffect` arm — the journal's only write site —
+/// through `apply()`. Both land in ONE window: `OptionalEffectChoice` is a member of
+/// `WaitingFor::is_forced_cascade_window`, and `apply_action`'s pre-action clear is skipped
+/// for a forced window, so the ring (and with it the journal) is not cleared between them.
+/// This row asserts that chain rather than assuming it: the two prompts are asserted to
+/// carry the SAME `source_id` and DIFFERENT seats before either is answered.
+///
+/// **NOT CLAIMED:** that the seat component changes an OFFER. That additionally requires
+/// the publisher to publish a `MayChoice` point for this source in a bounded window, which
+/// this board does not do. WHAT IS MEASURED IS THE TERMINAL STATE AND ONLY THAT: the final
+/// assertion reads `runner.state().waiting_for` once, after the drive, so it says the drive does
+/// not END on a `WaitingFor::LoopShortcut`. It CANNOT exclude an offer minted and cleared at an
+/// earlier beat — no intermediate beat is sampled. The offer-level claim is
+/// therefore unmeasured in either direction and this row does not make it. The pair key is
+/// DEFENSE IN DEPTH PLUS A CODE DELETION, not a live-bug fix: the pin injector already
+/// aborts a replay whose prompt recipient differs from the template owner, so a
+/// source-only key's two harms are firewalled downstream even on a board that reached
+/// them. What this row proves is the storage invariant, on a production path.
+///
+/// # Discrimination
+///
+/// Collapse the journal key to the bare `DecisionSlot` (keep both signatures; build the
+/// key from `slot` alone in `record_loop_answer`/`loop_answer`) and the two writes land
+/// in ONE entry: `loop_answers_recorded()` is 1, not 2, and the second write's differing
+/// value latches `Conflicted`, so the per-seat lookups no longer hold either. The
+/// cardinality assertion is value-independent and is asserted FIRST, so an empty journal —
+/// what a missing `loop_detection` setting would produce — fails the row before any
+/// content assertion can pass vacuously.
+#[test]
+fn natural_balance_two_scoped_seats_journal_one_may_source_under_two_independent_keys() {
+    use engine::analysis::decision_template::{
+        DecisionSlot, LoopAnswer, LoopAnswerValue, MayChoiceOption,
+    };
+    use engine::types::game_state::{LoopDetectionMode, YieldTarget};
+
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let mut spell = scenario.add_spell_to_hand_from_oracle(
+        P0,
+        "Natural Balance",
+        false,
+        NATURAL_BALANCE_ORACLE,
+    );
+    spell.with_mana_cost(ManaCost::Cost {
+        shards: vec![ManaCostShard::Green, ManaCostShard::Green],
+        generic: 2,
+    });
+    let natural_balance = spell.id();
+
+    // P0 sacrifices down to exactly five lands, so P0 is never a searcher and the two
+    // prompts below belong to the scoped seats alone.
+    let kept: Vec<ObjectId> = (0..6)
+        .map(|_| scenario.add_basic_land(P0, engine::types::mana::ManaColor::Green))
+        .collect();
+    for _ in 0..4 {
+        scenario.add_basic_land(P1, engine::types::mana::ManaColor::Blue);
+    }
+    for _ in 0..3 {
+        scenario.add_basic_land(P2, engine::types::mana::ManaColor::White);
+    }
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+
+    let mut runner = scenario.build();
+    add_basic_land_to_library(runner.state_mut(), P1);
+    add_basic_land_to_library(runner.state_mut(), P2);
+    // The journal is written only while the detector samples; without this the board is
+    // identical and every journal assertion below would pass on an empty map.
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+
+    // ── the shared slot, captured at the prompt beats rather than reconstructed ──
+    // The CR 400.7 source half is still hand-rolled (`object_decision_source` is
+    // `pub(crate)`), but the CR 603.5 sub-index now routes through the engine's own
+    // `DecisionSlot::may`, so this key cannot drift from the publisher's.
+    let decision_source = |state: &GameState, id: ObjectId| {
+        DecisionSlot::may(YieldTarget::ThisObject {
+            source_id: id,
+            incarnation: Some(state.objects[&id].incarnation),
+            trigger_description: None,
+        })
+    };
+
+    let outcome = runner.cast(natural_balance).resolve();
+    assert!(
+        matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::KeepExactPermanentsChoice { .. }
+        ),
+        "reach-guard: the six-land seat's exact-keeper choice is the beat that precedes the \
+         scoped searches; got {:?}",
+        outcome.final_waiting_for()
+    );
+    drop(outcome);
+    runner
+        .act(GameAction::ChooseKeptPermanents {
+            kept: kept[..5].to_vec(),
+        })
+        .expect("five distinct controlled lands must be a legal exact keeper choice");
+
+    let WaitingFor::OptionalEffectChoice {
+        player: first_seat,
+        source_id: first_source,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "the first four-or-fewer-land player must receive the scoped optional search, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let first_key = decision_source(runner.state(), first_source);
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("the first scoped seat may accept its library search");
+
+    let WaitingFor::OptionalEffectChoice {
+        player: second_seat,
+        source_id: second_source,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "every scoped seat is prompted before any library is exposed, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let second_key = decision_source(runner.state(), second_source);
+
+    // ── the multi-seat premise, asserted before it is relied on ──
+    assert_eq!(
+        first_source, second_source,
+        "CR 101.4: the scoped acceptance cascade prompts every seat for ONE source; two \
+         source ids would make this row a two-key test and prove nothing about seats"
+    );
+    assert_eq!(
+        first_key, second_key,
+        "one source and no intervening zone change ⇒ one CR 400.7 incarnation ⇒ one \
+         DecisionSource, so the seat is the only axis separating the two entries"
+    );
+    assert_ne!(
+        first_seat, second_seat,
+        "the two prompts must go to DIFFERENT seats, else there is no seat axis to test"
+    );
+
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("the second scoped seat may decline its library search");
+
+    // ── cardinality first: this is the value-independent bar a collapsed key fails ──
+    assert_eq!(
+        runner.state().loop_answers_recorded(),
+        2,
+        "two seats answering one source must occupy TWO (source, seat) keys. A journal \
+         keyed by the source alone holds 1; an unsampled detector holds 0"
+    );
+    assert_eq!(
+        runner.state().loop_answer(&first_key, first_seat),
+        Some(LoopAnswer::Uniform(LoopAnswerValue::May(
+            MayChoiceOption::Take
+        ))),
+        "the accepting seat's own entry records Take"
+    );
+    assert_eq!(
+        runner.state().loop_answer(&second_key, second_seat),
+        Some(LoopAnswer::Uniform(LoopAnswerValue::May(
+            MayChoiceOption::Decline
+        ))),
+        "the declining seat's own entry records Decline, uncorrupted by the other seat's \
+         differing answer — under a source-only key this second write would instead latch \
+         Conflicted over the first"
+    );
+
+    // ── the offer-mint non-claim, measured rather than asserted in prose. TERMINAL STATE ONLY:
+    //    one read of `waiting_for` after the drive. It cannot exclude an offer minted and cleared
+    //    at an earlier beat, and the rustdoc's non-claim is scoped to match. ──
+    assert!(
+        !matches!(runner.state().waiting_for, WaitingFor::LoopShortcut { .. }),
+        "this board journals two seats and does not END on a CR 732.2a offer, which is why \
+         this row's claim stops at the journal"
+    );
+}

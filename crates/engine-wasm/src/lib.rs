@@ -2021,13 +2021,23 @@ fn load_minimal_test_card_database() {
 /// game on the wire. Undo is a single-player affordance only.
 #[wasm_bindgen]
 pub fn restore_game_state(json_str: &str) -> Result<(), JsValue> {
+    restore_game_state_inner(json_str).map_err(|error| JsValue::from_str(&error))
+}
+
+/// The natively-callable body of [`restore_game_state`].
+///
+/// Split for the same reason — and in the same shape — as `resolve_all_inner`
+/// and `scored_candidates_inner`: the `#[wasm_bindgen]` shell may only run on
+/// wasm32. Off-target, `JsValue::from_str` panics inside a function that cannot
+/// unwind, so a shell that merely RETURNS an error aborts the whole process with
+/// SIGABRT instead of failing the test. A native test that calls the shell is
+/// therefore only safe while restore succeeds; the moment it errors, the failure
+/// is unreadable. Tests call this function.
+fn restore_game_state_inner(json_str: &str) -> Result<(), String> {
     if MULTIPLAYER_MODE.with(|cell| cell.get()) {
-        return Err(JsValue::from_str(
-            "restore_game_state refused: undo is disabled in multiplayer sessions",
-        ));
+        return Err("restore_game_state refused: undo is disabled in multiplayer sessions".into());
     }
-    let restored = decode_and_rehydrate_restored_game_state(json_str)
-        .map_err(|error| JsValue::from_str(&error))?;
+    let restored = decode_and_rehydrate_restored_game_state(json_str)?;
     let mut state = restored.state;
     // Reseed the skipped `rng` and fast-forward it to the offset captured at
     // export (issue #5466) so the restored game draws the values that would have
@@ -2058,11 +2068,20 @@ pub fn restore_game_state(json_str: &str) -> Result<(), JsValue> {
 ///
 /// Differs from `restore_game_state` in two load-bearing ways:
 ///
-/// 1. **Fresh RNG seed.** `restore_game_state` re-seeds from the saved
-///    `rng_seed`, which rewinds the ChaCha20 stream to position 0 —
-///    correct for undo (replay from origin) but wrong for resume
-///    (subsequent draws would replay the pre-save sequence). This
-///    function stamps a fresh seed so continued play diverges.
+/// 1. **Fresh RNG seed.** `restore_game_state` re-seeds from the SAVED
+///    `rng_seed` and fast-forwards to the saved `rng_word_pos`, so the
+///    restored game continues the very stream the snapshot was taken on —
+///    correct for undo, wrong for resume, where continued play must not
+///    re-draw the values the pre-save timeline already committed to. This
+///    function stamps a FRESH seed and resets `rng_word_pos` to 0 so the
+///    resumed host diverges instead.
+///
+///    It does NOT rewind to position 0: that was true only before issue
+///    #5466 taught the restore path to carry the offset, and it survives
+///    today just for snapshots written back then, which carry
+///    `rng_word_pos == 0`. Both the shared decode chokepoint
+///    (`PersistedGameState::into_game_state`) and `restore_game_state`'s
+///    own repeat call `rehydrate_rng`.
 /// 2. **Atomic multiplayer-flag flip.** Sets `MULTIPLAYER_MODE` in the
 ///    same call that loads state, so there's no window where a stray
 ///    `restore_game_state` (undo) would be accepted on the resumed
@@ -2634,6 +2653,39 @@ pub fn get_ai_tactical_action_proposal_with_diagnostics(
     })?
 }
 
+/// Score one parallel-worker sample against the thread-local state.
+///
+/// Split out of [`get_ai_scored_candidates`] so native tests can drive the real
+/// scoring path: the `#[wasm_bindgen]` shell returns through `to_js`, which calls
+/// the real `JSON.parse` binding and panics outside a wasm32 runtime (same reason
+/// `resolve_all_inner` exists).
+fn scored_candidates_inner(
+    state: &mut GameState,
+    difficulty: AiDifficulty,
+    ai_player: PlayerId,
+    rng_seed: u64,
+) -> Vec<(GameAction, f64)> {
+    engine::game::layers::flush_layers(state);
+
+    // A pool worker scores on its OWN entropy stream so root-parallel samples
+    // diverge (`AiWorkerPool` passes `baseSeed + index`); `score_candidates_with_session`
+    // names this the WASM divergence channel. `rng` is `#[serde(skip)]`, so
+    // `rng_seed` + `rng_word_pos` are its only carriers: writing one without the
+    // others splits the stream identity in two. A fresh ChaCha20 stream starts at
+    // word 0, so a surviving high-water leaves `advance_rng_high_water` guarding a
+    // position the live cursor is BEHIND and the next `capture_rng_word_pos`
+    // `.expect`-panics `HighWaterRegression` — which every simulated library
+    // shuffle performs, and so does `export_game_state_json`. Overwrite all three,
+    // exactly as `resume_multiplayer_host_state` does.
+    state.rng_seed = rng_seed;
+    state.rng = ChaCha20Rng::seed_from_u64(rng_seed);
+    state.rng_word_pos = 0;
+
+    let config = create_config_for_players(difficulty, Platform::Wasm, state.players.len() as u8);
+    let session = ai_session_for(state);
+    score_candidates_for_parallel_worker(state, ai_player, &config, Some(&session))
+}
+
 /// Score candidates inside an isolated AI worker. These are plain,
 /// serializable hints rather than capabilities: they cannot cross the action
 /// boundary until the live main engine reissues an exact proposal.
@@ -2644,19 +2696,10 @@ pub fn get_ai_scored_candidates(
     rng_seed: u64,
 ) -> Result<JsValue, JsValue> {
     let difficulty = AiDifficulty::from_label(difficulty);
-    with_state_mut(|state| {
-        engine::game::layers::flush_layers(state);
-        state.rng = ChaCha20Rng::seed_from_u64(rng_seed);
-        let config =
-            create_config_for_players(difficulty, Platform::Wasm, state.players.len() as u8);
-        let session = ai_session_for(state);
-        Ok(to_js(&score_candidates_for_parallel_worker(
-            state,
-            PlayerId(player_id),
-            &config,
-            Some(&session),
-        )))
-    })?
+    let scores = with_state_mut(|state| {
+        scored_candidates_inner(state, difficulty, PlayerId(player_id), rng_seed)
+    })?;
+    Ok(to_js(&scores))
 }
 
 /// Convert score-only worker output into an authority-bound proposal.
@@ -5045,9 +5088,21 @@ mod rng_restore_bridge_tests {
         // fast-forward the reseeded stream to it, so a restored game draws the
         // values that would have come NEXT — not a replay from origin. This test
         // drives the real bridge entry points (nothing calls the engine seam
-        // directly): deleting `state.capture_rng_word_pos()` in export or
-        // `state.rehydrate_rng()` in restore turns it red. Asserts on consumed
-        // randomness, not the stored `rng_word_pos` integer.
+        // directly). Asserts on consumed randomness, not the stored
+        // `rng_word_pos` integer.
+        //
+        // REVERT-PROBES, all four RUN, not reasoned:
+        //   * delete `state.capture_rng_word_pos()` in `export_game_state_json`
+        //     ⇒ RED. That is the single-deletion discriminator.
+        //   * the restore-side rehydration is DOUBLE-COVERED and therefore has
+        //     no single-deletion discriminator: `restore_game_state` calls
+        //     `rehydrate_rng` itself AND its `decode_restored_game_state` now
+        //     routes through `PersistedGameState::into_game_state`, which
+        //     rehydrates first. Deleting the bridge's own call ⇒ GREEN;
+        //     deleting the chokepoint's ⇒ GREEN; deleting BOTH ⇒ RED.
+        // The bridge's own call is thus a harmless idempotent repeat, kept
+        // because `rehydrate_rng` is two absolute assignments from persisted
+        // fields. Do not read this test as covering it in isolation.
         clear_game_state();
         load_minimal_test_card_database();
 
@@ -5087,6 +5142,375 @@ mod rng_restore_bridge_tests {
             restored_draws, expected_draws,
             "restored stream must resume where export left off, not rewind to origin"
         );
+
+        clear_game_state();
+    }
+}
+
+/// Native coverage for the AI-scoring bridge's per-worker RNG re-seed.
+///
+/// These are `#[cfg(test)]`, not `#[cfg(all(test, target_arch = "wasm32"))]`: the
+/// `wasm32`-gated `mod tests` never executes in the native suite, and no Tilt
+/// resource or CI job runs `wasm-pack test`. They drive `scored_candidates_inner`
+/// rather than the `#[wasm_bindgen]` shell because the shell returns through
+/// `to_js`, which calls the real `JSON.parse` binding and panics outside a wasm32
+/// runtime.
+///
+/// The seam under test: `get_ai_scored_candidates` re-seeds the worker's entropy
+/// stream. `rng` is `#[serde(skip)]`, so `rng_seed` + `rng_word_pos` are its only
+/// carriers across a snapshot — writing one without the others splits the stream
+/// identity in two, and the resulting high-water regression `.expect`-panics in
+/// `GameState::capture_rng_word_pos`, which both `export_game_state_json` and
+/// every simulated library shuffle perform.
+#[cfg(test)]
+mod ai_scoring_rng_bridge_tests {
+    use super::*;
+    use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, ResolvedAbility};
+    use engine::types::game_state::{StackEntry, StackEntryKind};
+    use engine::types::identifiers::CardId;
+    use engine::types::zones::Zone;
+    use rand::RngCore;
+
+    /// Carried over verbatim from `server-core`'s `GameSession::from_persisted`
+    /// rows: deliberately NOT block-aligned (ChaCha20 block 18, word 3), so a
+    /// fast-forward that only lands on block boundaries cannot pass by accident.
+    const SAVED_WORD_POS: u128 = 291;
+    const ORIGINAL_SEED: u64 = 0x0C0D_5EED;
+    const WORKER_SEED: u64 = 0x0C0E_5EED;
+    /// Equal seeds would make the C1/C2 rows vacuous. Compile-time, at module
+    /// scope, so no row can bypass it by skipping a helper.
+    const _: () = assert!(ORIGINAL_SEED != WORKER_SEED);
+
+    /// Steps 1-7 of the fixture: plant the exact state a pool worker is handed.
+    /// Deliberately performs **no** scoring call, so the `#[should_panic]` row can
+    /// reuse it by omitting a call rather than by reconstructing setup.
+    fn plant_restored_worker_state() {
+        clear_game_state();
+
+        let mut state = GameState::new_two_player(ORIGINAL_SEED);
+        for offset in 0..3u64 {
+            engine::game::zones::create_object(
+                &mut state,
+                CardId(900 + offset),
+                PlayerId(0),
+                format!("Planted Library Card {offset}"),
+                Zone::Library,
+            );
+        }
+
+        // Premise 1: the planted high-water must be something a re-seed can
+        // regress past, or the rows below cannot discriminate.
+        assert!(
+            state.rng_word_pos < SAVED_WORD_POS,
+            "premise: a fresh state must start below the planted high-water"
+        );
+
+        // Plant it the way a shuffle does — advance the live stream, then capture
+        // it. Never a raw field write.
+        state.rng.set_word_pos(SAVED_WORD_POS);
+        state.capture_rng_word_pos();
+
+        // Scoreable position. This reproduces `resolve_all_tests::priority_state`'s
+        // recipe rather than calling it: that helper is a private `fn`, so a
+        // sibling test module cannot name it.
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_player = PlayerId(0);
+
+        GAME_STATE.with(|cell| cell.set(Some(state)));
+
+        // Restore REFUSES without a card database (`rehydrate_restored_state_from_card_db`
+        // errors on absence alone), and these rows are about the RNG triple, not card
+        // data: `rehydrate_game_from_card_db` returns `()` and treats an unknown name as
+        // a no-op, so an EMPTY database satisfies the requirement without inventing card
+        // rows this module would then have to keep true. `restored_card_db_requirements_tests`
+        // is the row that pins the requirement itself.
+        CARD_DB.with(|cell| {
+            *cell.borrow_mut() = Some(
+                engine::database::CardDatabase::from_json_str("{}")
+                    .expect("an empty card database must parse"),
+            );
+        });
+
+        // The exact shipped plant: `AiWorkerPool` calls `worker.restoreState(..)`
+        // before every scoring call, and `restore_game_state` rehydrates the full
+        // triple.
+        let json = export_game_state_json().expect("planting must be exportable");
+        clear_game_state();
+        // The INNER body, not the `#[wasm_bindgen]` shell: off-wasm32 the shell's
+        // error path builds a `JsValue` inside a non-unwinding fn and SIGABRTs, so
+        // calling it here would turn any restore failure into an unreadable abort.
+        restore_game_state_inner(&json).expect("planting must be restorable");
+
+        // Premise 2, measured: the production restore resumed the saved position,
+        // so a zero observed below is this entry point's own policy rather than a
+        // lost serde field.
+        with_state(|state| {
+            assert_eq!(
+                state.rng_word_pos, SAVED_WORD_POS,
+                "premise: restore must resume the saved high-water"
+            );
+            assert_eq!(
+                state.rng.get_word_pos(),
+                state.rng_word_pos,
+                "premise: restore must leave the live cursor on the saved high-water"
+            );
+        })
+        .expect("GAME_STATE must be initialized after restore");
+    }
+
+    /// Step 8 and nothing else: drive the real scoring path.
+    fn drive_scoring() -> Vec<(GameAction, f64)> {
+        with_state_mut(|state| {
+            scored_candidates_inner(state, AiDifficulty::VeryHard, PlayerId(0), WORKER_SEED)
+        })
+        .expect("GAME_STATE must be initialized by plant_restored_worker_state")
+    }
+
+    /// Row A. Revert-probe (RUN): deleting `state.rng_word_pos = 0;` — or the
+    /// whole commit — reds this row with
+    /// `HighWaterRegression { current: 291, requested: 0 }`.
+    #[test]
+    fn scoring_leaves_a_state_that_can_still_export() {
+        plant_restored_worker_state();
+        drive_scoring();
+
+        // A production entry point on the very worker objects the pool holds:
+        // `exportState` is a live `EngineWorkerClient` message type.
+        export_game_state_json().expect("a scored worker must still be exportable");
+
+        clear_game_state();
+    }
+
+    /// Row B. Same mutant column as Row A by construction — this row buys the
+    /// *second* production seam (the route the AI simulation itself takes), not
+    /// extra discrimination. It is its own `#[test]` on fresh state because both
+    /// seams reach the same `.expect`-ing `capture_rng_word_pos`: sharing a test,
+    /// whichever ran first would abort the other.
+    #[test]
+    fn scoring_leaves_a_state_that_can_still_shuffle() {
+        plant_restored_worker_state();
+        drive_scoring();
+
+        with_state_mut(|state| {
+            assert!(
+                !state.players[0].library.is_empty(),
+                "reach-guard: the shuffle below must have a library to act on"
+            );
+            engine::game::library::resolve_and_apply_library_shuffle(
+                state,
+                PlayerId(0),
+                &mut Vec::new(),
+            )
+            .expect("a scored worker must be able to shuffle");
+        })
+        .expect("GAME_STATE must be initialized by plant_restored_worker_state");
+
+        clear_game_state();
+    }
+
+    /// Row C1. Behavioral (consumed randomness), not a field read, so writing the
+    /// field without moving the stream cannot satisfy it.
+    ///
+    /// Revert-probe (RUN): this row's probe is the **partial** revert — deleting
+    /// `state.rng = ..` or all three statements. It is GREEN under the
+    /// whole-commit revert, which leaves the live stream at `WORKER_SEED`@0. Do
+    /// not read it as whole-commit coverage.
+    #[test]
+    fn the_caller_supplied_seed_reaches_the_live_stream() {
+        plant_restored_worker_state();
+        drive_scoring();
+
+        // `score_candidates_for_parallel_worker` takes `&GameState` and `GameState`
+        // carries no interior mutability, so nothing at or below the scoring call
+        // can advance the live stream: this reads back exactly what the entry
+        // point last wrote.
+        let mut expected = ChaCha20Rng::seed_from_u64(WORKER_SEED);
+        let expected_draws: Vec<u32> = (0..4).map(|_| expected.next_u32()).collect();
+
+        let live_draws: Vec<u32> =
+            with_state_mut(|state| (0..4).map(|_| state.rng.next_u32()).collect::<Vec<_>>())
+                .expect("GAME_STATE must be initialized by plant_restored_worker_state");
+
+        assert_eq!(
+            live_draws, expected_draws,
+            "the live stream must be the caller's seed from origin, not the restored snapshot's"
+        );
+
+        clear_game_state();
+    }
+
+    /// Row C2 — the universal discriminator: RED on every mutant and on the
+    /// whole-commit revert. Both C rows compare against a stream freshly built
+    /// from `WORKER_SEED`, never against a clone of the post-scoring live stream:
+    /// a live-vs-restored comparison only proves internal consistency, which the
+    /// "delete all three" mutant also satisfies.
+    #[test]
+    fn the_scored_triple_round_trips_through_the_bridge() {
+        plant_restored_worker_state();
+        drive_scoring();
+
+        let mut expected = ChaCha20Rng::seed_from_u64(WORKER_SEED);
+        let expected_draws: Vec<u32> = (0..4).map(|_| expected.next_u32()).collect();
+
+        let json = export_game_state_json().expect("a scored worker must still be exportable");
+        clear_game_state();
+        restore_game_state(&json).expect("a scored worker's export must be restorable");
+
+        let restored_draws: Vec<u32> =
+            with_state_mut(|state| (0..4).map(|_| state.rng.next_u32()).collect::<Vec<_>>())
+                .expect("GAME_STATE must be initialized after restore");
+
+        assert_eq!(
+            restored_draws, expected_draws,
+            "the round-tripped stream must be the caller's seed from origin"
+        );
+
+        clear_game_state();
+    }
+
+    /// Row 2 — the paired reach-guard. It does **not** red when the fix is
+    /// reverted and is not meant to: its job is to prove the panic is genuinely
+    /// reachable through the production shuffle seam from a triple of exactly this
+    /// shape, so the rows above are evidence rather than assertions about a call
+    /// that could never have failed.
+    ///
+    /// It deliberately omits `drive_scoring()` — calling the scoring entry point
+    /// first would let a panic from *that* call satisfy the `should_panic`.
+    /// Residual, stated rather than engineered away: `#[should_panic]` still
+    /// cannot prove which line panicked; the four sibling rows are what detect a
+    /// regression in the shared helper.
+    #[test]
+    #[should_panic(expected = "HighWaterRegression")]
+    fn an_incoherent_worker_triple_panics_on_its_next_shuffle() {
+        plant_restored_worker_state();
+
+        // Literally the pre-fix line, applied to the restored state.
+        with_state_mut(|state| state.rng = ChaCha20Rng::seed_from_u64(WORKER_SEED))
+            .expect("GAME_STATE must be initialized by plant_restored_worker_state");
+
+        with_state_mut(|state| {
+            engine::game::library::resolve_and_apply_library_shuffle(
+                state,
+                PlayerId(0),
+                &mut Vec::new(),
+            )
+            .expect("unreachable: the incoherent triple must panic before this");
+        })
+        .expect("GAME_STATE must be initialized by plant_restored_worker_state");
+    }
+
+    /// Row 3's extra fixture shape, applied to the already-restored state between
+    /// the plant and the scoring call. Ends by re-asserting the RNG triple is
+    /// untouched — object creation must not have moved the stream, or Row 3's
+    /// premise is gone.
+    fn shape_for_in_call_reach() {
+        with_state_mut(|state| {
+            state.active_player = PlayerId(0);
+            state.priority_passes.clear();
+
+            // The opponent needs a library for the resolved shuffle to act on.
+            for offset in 0..3u64 {
+                engine::game::zones::create_object(
+                    state,
+                    CardId(910 + offset),
+                    PlayerId(1),
+                    format!("Opponent Library Card {offset}"),
+                    Zone::Library,
+                );
+            }
+
+            // Two player-0 battlefield permanents, each carrying one zero-cost
+            // activated `Effect::NoOp` ability. Three issued candidates keeps
+            // `deterministic_choice`'s `actions.len() == 1` arm from firing.
+            for offset in 0..2u64 {
+                let id = engine::game::zones::create_object(
+                    state,
+                    CardId(920 + offset),
+                    PlayerId(0),
+                    format!("Idle Permanent {offset}"),
+                    Zone::Battlefield,
+                );
+                if let Some(object) = state.objects.get_mut(&id) {
+                    object.abilities = Arc::new(vec![AbilityDefinition::new(
+                        AbilityKind::Activated,
+                        Effect::NoOp,
+                    )]);
+                }
+            }
+
+            // The stack entry is OPPONENT-controlled: with an AI-owned stack,
+            // `low_value_priority_pass_from_actions` computes
+            // `owns_entire_stack == true` and `score_candidates_core` returns
+            // `[(PassPriority, 1.0)]` before any simulation runs.
+            let source_id = engine::game::zones::create_object(
+                state,
+                CardId(930),
+                PlayerId(1),
+                "Opponent Shuffle Source".to_string(),
+                Zone::Battlefield,
+            );
+            state.stack = vec![StackEntry {
+                id: source_id,
+                source_id,
+                controller: PlayerId(1),
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id,
+                    ability: Box::new(ResolvedAbility::new(
+                        Effect::Shuffle {
+                            target: engine::types::ability::TargetFilter::Controller,
+                        },
+                        vec![],
+                        source_id,
+                        PlayerId(1),
+                    )),
+                },
+            }]
+            .into_iter()
+            .collect();
+
+            assert_eq!(
+                state.rng_word_pos, SAVED_WORD_POS,
+                "premise: shaping the fixture must not move the saved high-water"
+            );
+            assert_eq!(
+                state.rng.get_word_pos(),
+                state.rng_word_pos,
+                "premise: shaping the fixture must not move the live cursor"
+            );
+        })
+        .expect("GAME_STATE must be initialized by plant_restored_worker_state");
+    }
+
+    /// Row 3 — the in-call reach: the panic fires *inside* the scoring call, which
+    /// is what makes the shipped symptom (a silently degraded AI via the worker
+    /// pool's failure fallback) real rather than a trap for the next caller.
+    #[test]
+    fn scoring_itself_survives_a_simulated_opponent_shuffle() {
+        plant_restored_worker_state();
+        shape_for_in_call_reach();
+
+        let issued = with_state_mut(|state| {
+            // Measure the list `score_candidates_core` will see, not the one it
+            // would have seen a flush ago: `scored_candidates_inner`'s FIRST
+            // statement is `flush_layers`, and `score_candidates_core` binds
+            // `build_decision_context_for_semantic_owner` downstream of it.
+            // `flush_layers` is idempotent (its `mem::replace` leaves the lattice
+            // `Clean`, and no arm re-dirties), so `drive_scoring()`'s own flush is
+            // a provable no-op and cannot move the candidate set between the two.
+            engine::game::layers::flush_layers(state);
+            engine::ai_support::build_decision_context_for_semantic_owner(state, PlayerId(0))
+                .candidates
+                .len()
+        })
+        .expect("GAME_STATE must be initialized by plant_restored_worker_state");
+        assert!(
+            issued >= 2,
+            "premise: gate #10's `actions.len() == 1` arm must not fire; engine issued {issued} candidates"
+        );
+
+        drive_scoring();
 
         clear_game_state();
     }

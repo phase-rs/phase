@@ -14280,11 +14280,11 @@ mod characteristic_read_classification_tests {
         let mut carriers = Vec::new();
         let mut current: Option<&str> = None;
         for line in body.lines() {
+            // Doc comments name `ControllerRef` in prose; they declare nothing — and neither
+            // does a TRAILING comment on a field line, which the shared
+            // `crate::source_census::code` rule removes too.
+            let line = crate::source_census::code(line);
             let trimmed = line.trim_start();
-            // Doc comments name `ControllerRef` in prose; they declare nothing.
-            if trimmed.starts_with("//") {
-                continue;
-            }
             // A variant header is the only thing at one indent level that opens
             // with an uppercase letter; its fields sit one level deeper.
             if let Some(header) = line

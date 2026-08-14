@@ -1,3 +1,12 @@
+// THE SHARED COMMENT RULE for every source census in this binary, compiled from the SAME FILE the
+// crate's own unit-test censuses use. `#[path]` rather than a copy: `src/source_census.rs` is
+// `#![cfg(test)]`, and `cfg(test)` HOLDS in this venue too (an integration target is built with
+// `--test`), so one implementation serves both without shipping guard code in a release build.
+// MEASURED, not assumed — the alternative already in this tree is `test_support.rs` / `support.rs`,
+// twin files kept equal by a comment asking a human to remember.
+#[path = "../../src/source_census.rs"]
+mod source_census;
+
 mod abigale_integration;
 mod abundance_optional_draw_replacement;
 mod ad_nauseam_repeat;
@@ -176,6 +185,7 @@ mod dig_impossible_keep_count;
 mod dig_rest_pile_stranding_on_etb_pause;
 mod diligent_farmhand_counts_as_named;
 mod diluvian_primordial_6754;
+mod dina_noff_turn5_loader;
 mod disjunctive_state_change_head_coverage_honesty;
 mod disorder_in_the_court_5955;
 mod divine_visitation_token_substitution;
@@ -1186,6 +1196,8 @@ mod loop_shortcut;
 mod loop_shortcut_activation;
 mod loop_shortcut_mana_engine;
 mod loop_shortcut_offer_writer_census;
+mod loop_shortcut_ranking;
+mod loop_shortcut_seat_pin_census;
 mod lose_control_this_turn_delayed_trigger;
 mod lost_mine_fungi_cavern_duration_runtime;
 mod lost_mine_storeroom_targeting_runtime;

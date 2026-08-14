@@ -969,10 +969,18 @@ pub enum InteractionResponseSpec {
         max: u32,
         confirm: ConfirmSemantics,
     },
+    /// CR 732.2a: the loop-shortcut declaration. `count` is the picker's window and
+    /// `preview` is what the count it states actually DOES, per axis — see
+    /// [`InteractionShortcutPreview`] for why the count travels with the magnitudes.
+    ///
+    /// The doc lives on the VARIANT rather than on `preview`: ts_rs emits field docs into
+    /// the generated bindings as JSDoc but drops variant docs, and a comment block in the
+    /// middle of a union keeps that file from being one declaration per line.
     Shortcut {
         count: InteractionShortcutCountSpec,
         points: Vec<InteractionShortcutPoint>,
         allow_decline: bool,
+        preview: Option<InteractionShortcutPreview>,
         confirm: ConfirmSemantics,
     },
     ShortcutReply {
@@ -997,6 +1005,72 @@ pub enum InteractionResponseSpec {
 pub enum InteractionShortcutCountSpec {
     Fixed { min: u32, max: u32, suggested: u32 },
     UntilLethal,
+}
+
+/// The display family one shortcut-preview magnitude belongs to — the projection-layer code
+/// for `game::derived_views::UnboundedFamily`, mapped by an exhaustive `match` in
+/// `game::interaction`.
+///
+/// A code rather than a mirror of `analysis::resource::ResourceAxis`, for this module's own
+/// stated reason: `ResourceAxis` carries `PlayerId`, `ManaType`, `CounterClass`,
+/// `ObjectClass` and `TriggerKind` payloads, and generating those would be the "second
+/// generated copy of the existing engine wire graph" this file exists to avoid. The client
+/// already labels these eleven families (glyph + i18n key per family), so a code is
+/// everything a renderer needs.
+///
+/// No CR governs a display grouping — the grouping authority is `derived_views::family_of`,
+/// and this enum tracks it variant-for-variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum InteractionShortcutPreviewFamily {
+    Mana,
+    Life,
+    Damage,
+    Mill,
+    Counters,
+    Tokens,
+    Cards,
+    Casts,
+    Combats,
+    Turns,
+    Triggers,
+}
+
+/// One axis of what a declared shortcut count finishes with: a signed magnitude, already
+/// multiplied out by the engine.
+///
+/// `amount` is the FINISHED total, not a per-cycle rate, and it is signed — a drain loop
+/// states its victim's life as negative. `player` is the seat the magnitude lands on for the
+/// per-seat families (life, damage, mill, and the poison term of counters) and `None` for the
+/// whole-game ones (mana, tokens, cards, casts, combats, turns, triggers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionShortcutPreviewEntry {
+    pub family: InteractionShortcutPreviewFamily,
+    pub player: Option<u8>,
+    pub amount: i32,
+}
+
+/// CR 732.2a: the engine-computed consequence of repeating a certified loop a stated number
+/// of times — "the predictable results of the sequence of choices", published as numbers.
+///
+/// `count` is carried WITH the entries, and that pairing is the point: every magnitude here
+/// is stated for exactly this count and for no other, so a renderer can never attach these
+/// numbers to a different one. The engine multiplies; the display layer reads.
+///
+/// Absent (`None` on the spec) when the offer states no per-period signature to multiply, or
+/// states no finite count to multiply it by.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionShortcutPreview {
+    pub count: u32,
+    pub entries: Vec<InteractionShortcutPreviewEntry>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

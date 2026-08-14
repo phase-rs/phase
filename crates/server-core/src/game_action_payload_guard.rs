@@ -477,8 +477,10 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         // ("`count` is a small enum — nothing unbounded") was FALSE: `IterationCount::Fixed`
         // wraps an unbounded `u32` and IS the real DoS vector — bounded here as a coarse
         // WS-level belt (mirrors `ChooseManaColor.count`; the engine's MAX_SHORTCUT_CYCLES is
-        // the authoritative cap). The nested template vecs (a `Targets` pin's `Vec<TargetPin>`
-        // and each `Scheduled` pin's schedule `Vec`) are bounded as DEFENSE-IN-DEPTH: the
+        // the authoritative cap). The nested template vecs (a `Targets` pin's `Vec<TargetPin>`,
+        // each `Scheduled` pin's schedule `Vec`, and each schedule step's `Ranking` — three
+        // levels, not two, since a step's subject became a list) are bounded as
+        // DEFENSE-IN-DEPTH: the
         // 8 KB inbound WS frame cap (phase-server/src/main.rs:409/1420) already keeps a remote
         // nested payload to a few hundred structs, and this guard runs POST-deserialize
         // (client_message_wire_guard.rs:50), so it bounds downstream compute/clone work — not
@@ -486,7 +488,7 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         // Exhaustive matches (no wildcard) force a future variant to be classified here.
         GameAction::DeclareShortcut { count, template } => {
             use engine::analysis::decision_template::{
-                IterationCount, PinnedDecision, TargetPin, TargetSchedule,
+                IterationCount, PinnedDecision, Ranking, TargetPin, TargetSchedule,
             };
             // Exhaustive (no wildcard): a future `IterationCount` count variant build-breaks
             // here so its wire bound is a conscious decision, not a silent gap.
@@ -501,16 +503,36 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
                         PinnedDecision::Targets { targets, .. } => {
                             bound_list("DeclareShortcut.template.targets", targets.len())?;
                             for target in targets {
+                                // CR 732.2a: each schedule STEP now carries a `Ranking` — its
+                                // own `Vec<AnnouncementSubject>` — so the outer schedule bound
+                                // no longer covers the whole payload. Every arm bounds its
+                                // rankings, INCLUDING `Constant`: it was a no-op only while it
+                                // carried no vector, and leaving it out would make the one arm
+                                // a hostile client can send unbounded. `Ranking::iter` is the
+                                // newtype's length surface (the field is private).
+                                let bound_ranking = |ranking: &Ranking| {
+                                    bound_list(
+                                        "DeclareShortcut.template.ranking",
+                                        ranking.iter().count(),
+                                    )
+                                };
                                 match target {
+                                    TargetPin::Scheduled(TargetSchedule::Constant(r)) => {
+                                        bound_ranking(r)?;
+                                    }
                                     TargetPin::Scheduled(TargetSchedule::RoundRobin(v)) => {
                                         bound_list("DeclareShortcut.template.schedule", v.len())?;
+                                        for ranking in v {
+                                            bound_ranking(ranking)?;
+                                        }
                                     }
                                     TargetPin::Scheduled(TargetSchedule::Piecewise(v)) => {
                                         bound_list("DeclareShortcut.template.schedule", v.len())?;
+                                        for (_, ranking) in v {
+                                            bound_ranking(ranking)?;
+                                        }
                                     }
-                                    TargetPin::Scheduled(TargetSchedule::Constant(_))
-                                    | TargetPin::ByIdentity(_)
-                                    | TargetPin::Player(_) => {}
+                                    TargetPin::ByIdentity(_) | TargetPin::Player(_) => {}
                                 }
                             }
                         }

@@ -8709,7 +8709,7 @@ pub(crate) fn filter_consumed_trigger_events(
 ///     CR 724 end-the-turn / end-the-combat-phase EFFECTS, and by elimination
 ///     — NOT by the turn boundary.
 ///   * R2 — deserialized states bypass the recorder.
-///     `PersistedGameState::into_game_state` (`types/game_state.rs:9024`)
+///     `PersistedGameState::into_game_state` (`types/game_state.rs`)
 ///     reconstructs `ZoneChanged` straight into live buffers with
 ///     `#[serde(default)]` indices, so a restored state can carry index `0` on
 ///     distinct occurrences. Pre-existing and out of scope here.

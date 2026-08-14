@@ -13,8 +13,8 @@ use crate::ai_support::{
     FilterPipeline, TacticalClass,
 };
 use crate::analysis::decision_template::{
-    predictability_gate, validate_pins, DecisionGroupKey, DecisionKind, DecisionTemplate,
-    IterationCount, PinnedDecision, ReplayMode, TargetPin,
+    declaration_conforms, AnnouncementSubject, DecisionGroupKey, DecisionKind, DecisionTemplate,
+    IterationCount, PinnedDecision, Ranking, ReplayMode, TargetPin, TargetSchedule,
 };
 use crate::types::ability::{
     AggregateFunction, ChoiceType, ChooseFromZoneConstraint, Comparator, CounterCostSelection,
@@ -49,7 +49,8 @@ use crate::types::interaction::{
     InteractionRelationConstraint, InteractionRelationSourceConstraint, InteractionResponse,
     InteractionResponseSpec, InteractionRoleCode, InteractionSessionId,
     InteractionShortcutCountSpec, InteractionShortcutDecision, InteractionShortcutPoint,
-    InteractionShortcutPointKind, InteractionShortcutReply, InteractionShortcutResponseCode,
+    InteractionShortcutPointKind, InteractionShortcutPreview, InteractionShortcutPreviewEntry,
+    InteractionShortcutPreviewFamily, InteractionShortcutReply, InteractionShortcutResponseCode,
     InteractionSlotKind, InteractionSubmission, InteractionSummaryCode, InteractionWaitingForCode,
     InteractionWaitingForKind, InteractionZoneCode, SelectionConstraint, SimultaneousDecisionKind,
     ViewerInteraction, MAX_INTERACTION_LIST_LEN,
@@ -63,6 +64,7 @@ use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
 use super::combat::AttackTarget;
+use super::derived_views::{family_of, payload_seat, UnboundedFamily};
 use super::dungeon::DungeonId;
 use super::engine::{
     apply_interaction, apply_interaction_for_simulation, EngineError, MAX_SHORTCUT_CYCLES,
@@ -1115,6 +1117,7 @@ struct LoopShortcutPointProjection {
 #[derive(Debug, Clone)]
 struct LoopShortcutProjection {
     count: InteractionShortcutCountSpec,
+    preview: Option<InteractionShortcutPreview>,
     points: Vec<LoopShortcutPointProjection>,
     candidates: Vec<LoopShortcutCandidateValue>,
 }
@@ -2430,12 +2433,96 @@ fn number_projection(waiting_for: &WaitingFor) -> Option<NumberProjection> {
     }
 }
 
+/// Rename `game::derived_views::UnboundedFamily` into its projection-layer code.
+///
+/// A pure rename on purpose: `family_of` stays the SINGLE authority for which axis groups
+/// into which family, so this function makes no grouping decision of its own and cannot
+/// drift from it. Exhaustive with no wildcard — a new family must choose a code here.
+///
+/// Mirrors `comparator_dto` above: the engine owns the fact, and the projection layer owns
+/// the name it crosses the wire under.
+fn preview_family(family: UnboundedFamily) -> InteractionShortcutPreviewFamily {
+    match family {
+        UnboundedFamily::Mana => InteractionShortcutPreviewFamily::Mana,
+        UnboundedFamily::Life => InteractionShortcutPreviewFamily::Life,
+        UnboundedFamily::Damage => InteractionShortcutPreviewFamily::Damage,
+        UnboundedFamily::Mill => InteractionShortcutPreviewFamily::Mill,
+        UnboundedFamily::Counters => InteractionShortcutPreviewFamily::Counters,
+        UnboundedFamily::Tokens => InteractionShortcutPreviewFamily::Tokens,
+        UnboundedFamily::Cards => InteractionShortcutPreviewFamily::Cards,
+        UnboundedFamily::Casts => InteractionShortcutPreviewFamily::Casts,
+        UnboundedFamily::Combats => InteractionShortcutPreviewFamily::Combats,
+        UnboundedFamily::Turns => InteractionShortcutPreviewFamily::Turns,
+        UnboundedFamily::Triggers => InteractionShortcutPreviewFamily::Triggers,
+    }
+}
+
+/// CR 732.2a: the finished magnitude of repeating `count` cycles of a measured per-period
+/// delta — "the predictable results of the sequence of choices", stated per display family
+/// and per affected seat.
+///
+/// **This is arithmetic over the certificate's `per_cycle.delta`, and nothing else.** It
+/// applies no game action, resolves nothing, and touches no `GameState`: the multiplication
+/// `n × δ` is the whole computation. In particular it is NOT
+/// `interaction::preview_interaction`, which answers a different question (is this response
+/// submittable) by cloning the state and applying to the clone. A clone-apply cannot answer
+/// this one anyway — the count may be up to `MAX_SHORTCUT_CYCLES`, and the point of a CR
+/// 732.2a shortcut is that the sequence is *not* played out.
+///
+/// The fold is over families, not axes: `ResourceVector` distinguishes mana by color and
+/// counters by `(kind, bearer class)`, and summing those into one labelled magnitude per seat
+/// is the aggregation the display layer is forbidden to do for itself. Losses are included
+/// (signed), which is why this reads `axis_components()` rather than `unbounded_components()` —
+/// the latter reports only what a cycle accrues, so a lethal drain would preview as nothing.
+///
+/// ponytail: magnitudes clamp to `i32`, so a per-cycle delta above ~2.1M would be reported
+/// short. No such delta exists — one period's delta is a difference of two game-state
+/// readings — and `i32` is exact in the JS number the binding generates, which `i64` is not.
+fn shortcut_preview_entries(
+    delta: &crate::analysis::resource::ResourceVector,
+    count: u32,
+) -> Vec<InteractionShortcutPreviewEntry> {
+    let mut per_cycle_totals: BTreeMap<(InteractionShortcutPreviewFamily, Option<u8>), i64> =
+        BTreeMap::new();
+    for (axis, magnitude) in delta.axis_components() {
+        // Both halves of the key are `derived_views`' decisions, not this layer's: `family_of`
+        // owns the grouping and `payload_seat` owns the seat. The seat in particular is NOT
+        // keyed from the proposer — a drain's magnitude belongs to the player LOSING the life
+        // — and sharing the authority with `attribution_player` is what keeps the offer from
+        // attributing a seat the HUD badge does not.
+        let key = (
+            preview_family(family_of(axis)),
+            payload_seat(axis).map(|player| player.0),
+        );
+        let total = per_cycle_totals.entry(key).or_insert(0);
+        *total = total.saturating_add(magnitude);
+    }
+    per_cycle_totals
+        .into_iter()
+        .filter_map(|((family, player), per_cycle)| {
+            // Families that cancel to zero across their axes (a cycle that gains and spends
+            // the same mana) state nothing and are dropped rather than shown as `0`.
+            let amount = per_cycle.saturating_mul(i64::from(count));
+            (amount != 0).then_some(InteractionShortcutPreviewEntry {
+                family,
+                player,
+                amount: amount.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+            })
+        })
+        .collect()
+}
+
 fn loop_shortcut_projection(
     waiting_for: &WaitingFor,
 ) -> Result<LoopShortcutProjection, InteractionReasonCode> {
     use crate::analysis::decision_template::DecisionPointKind;
 
-    let WaitingFor::LoopShortcut { schema, .. } = waiting_for else {
+    let WaitingFor::LoopShortcut {
+        schema,
+        certificate,
+        ..
+    } = waiting_for
+    else {
         return Err(InteractionReasonCode::UnsupportedResponse);
     };
     if schema.points.len() > MAX_INTERACTION_LIST_LEN {
@@ -2513,6 +2600,35 @@ fn loop_shortcut_projection(
         crate::analysis::decision_template::IterationCount::UntilLethal => {
             InteractionShortcutCountSpec::UntilLethal
         }
+    };
+    // CR 732.2a: state what the offer's own count DOES, so the picker's number carries its
+    // consequence instead of standing alone. Two authorities have to agree before there is
+    // anything to state, and both are the offer's own:
+    //
+    //   * `per_cycle` — published only by the producer that measured a per-period signature
+    //     (`certified_bounded_cycle_offer`). Every other mint carries `None`, and so does
+    //     every save written before the field existed.
+    //   * a FINITE count — `UntilLethal` names no number to multiply by. It is the
+    //     determinate-drain mode, where the count is the drain's own arithmetic, not a
+    //     player's choice.
+    //
+    // Those two coincide by construction rather than by luck: the bounded producer is the
+    // one that both narrows `max_iterations` and mints `Fixed(max_iterations)`, so a preview
+    // exists exactly on the offers whose count is worth picking.
+    //
+    // `suggested` is the stated count, and the ONLY count these magnitudes describe — which
+    // is why it travels with them in `InteractionShortcutPreview.count` rather than being
+    // left for a renderer to assume.
+    let preview = match (&count, &certificate.per_cycle) {
+        (InteractionShortcutCountSpec::Fixed { suggested, .. }, Some(periodic)) => {
+            let entries = shortcut_preview_entries(&periodic.delta, *suggested);
+            (!entries.is_empty()).then_some(InteractionShortcutPreview {
+                count: *suggested,
+                entries,
+            })
+        }
+        (InteractionShortcutCountSpec::Fixed { .. }, None)
+        | (InteractionShortcutCountSpec::UntilLethal, _) => None,
     };
     let mut candidates = Vec::new();
     let mut points = Vec::with_capacity(schema.points.len());
@@ -2667,6 +2783,7 @@ fn loop_shortcut_projection(
     }
     Ok(LoopShortcutProjection {
         count,
+        preview,
         points,
         candidates,
     })
@@ -7019,6 +7136,7 @@ fn opportunity_for_slot(
                             count: projection.count,
                             points,
                             allow_decline: true,
+                            preview: projection.preview.clone(),
                             confirm: ConfirmSemantics::Explicit,
                         },
                         candidates,
@@ -7831,13 +7949,21 @@ fn bound_outbound_spec(
                 }
             }
         }
-        InteractionResponseSpec::Shortcut { points, .. } => {
+        InteractionResponseSpec::Shortcut {
+            points, preview, ..
+        } => {
             budget.list(points.len())?;
             for point in points {
                 budget.list(point.candidate_ids.len())?;
                 for candidate_id in &point.candidate_ids {
                     budget.string(candidate_id.as_str())?;
                 }
+            }
+            // The preview's entries are a published outbound list like every other
+            // list on this spec (at most one per display family per seat), so they are charged
+            // to the same ceiling rather than crossing uncounted.
+            if let Some(preview) = preview {
+                budget.list(preview.entries.len())?;
             }
         }
         InteractionResponseSpec::Select { .. }
@@ -8829,8 +8955,18 @@ fn materialize_loop_shortcut_response(
                 let targets = candidate_indices
                     .iter()
                     .map(|index| match &projection.candidates[*index] {
+                        // CR 601.2c: the HUMAN ingress of the SAME point kind, so it emits
+                        // the SAME spelling as the engine's own producer
+                        // (`game::engine::record_trigger_target_answer`). A candidate on a
+                        // `Targets` point is an announced TARGET, so the seat is judged by
+                        // CR 702.11c hexproof / CR 702.18a shroud / CR 702.16b protection
+                        // through the announcement-subject arm — never by existence alone.
+                        // Emitting `TargetPin::Player` here instead would select the
+                        // authority by WHO SUBMITTED the answer rather than by WHAT IT IS.
                         LoopShortcutCandidateValue::Target(TargetRef::Player(player)) => {
-                            Ok(TargetPin::Player(*player))
+                            Ok(TargetPin::Scheduled(TargetSchedule::Constant(
+                                Ranking::one(AnnouncementSubject::Seat(*player)),
+                            )))
                         }
                         LoopShortcutCandidateValue::Target(TargetRef::Object(object_id)) => {
                             let object = authoritative_state
@@ -8919,26 +9055,30 @@ fn materialize_loop_shortcut_response(
         key: DecisionGroupKey::from_sources(&sources, DecisionKind::LoopChoice),
     });
     if let Some(template) = &template {
-        let required = authoritative_schema
-            .points
-            .iter()
-            .map(|point| point.slot.clone())
-            .collect::<Vec<_>>();
         // TRAP REMOVAL, NOT A BUG FIX — recorded so the next reader does not "correct" this
         // literal into `shortcut_validated_range(..)` and then wonder what changed. This
-        // decoder emits only `Player` and `ByIdentity` pins, both of which resolve
-        // INDEPENDENTLY of `iteration`, so validating at index 0 alone is correct by
-        // construction here: a wider range would re-resolve the same pin to the same value.
+        // decoder emits only ITERATION-INVARIANT pins, so validating at index 0 alone is
+        // correct by construction here: a wider range would re-resolve the same pin to the
+        // same value. That is the property doing the work, and it is stated as the property
+        // rather than as a list of variant names — the list has already moved once. Today
+        // the emitted set is `ByIdentity` (never reads `iteration` at all) and
+        // `Scheduled(TargetSchedule::Constant(..))`, whose arm in
+        // `decision_template::evaluate_schedule` selects its `Ranking` without consulting
+        // `iter` (unlike the `RoundRobin` / `Piecewise` arms beside it, which this decoder
+        // does not emit). Emitting a genuinely iteration-VARYING pin here would invalidate
+        // the literal, not just this comment.
         // It is also strictly weaker than the declare-path firewall rather than a second
         // hole — `1` is a prefix of any range that path validates. It cannot mint a
         // `Fixed(0)` either: the count-spec projection's `Fixed` arm hard-codes `min: 1`
         // beside its `debug_assert!(schema.max_iterations >= 1, ..)` and its clamp.
         // ⚠ Navigation trap: `shortcut_drive_period`'s doc enumerates its own consumers, and
-        // this site consumes `validate_pins` WITHOUT consuming that helper, so it is
+        // this site consumes the pin firewall WITHOUT consuming that helper, so it is
         // invisible from there.
-        if predictability_gate(template, &required).is_err()
-            || validate_pins(authoritative_schema, template, 1, authoritative_state).is_err()
-        {
+        //
+        // The `required` slot list is no longer derived here: `declaration_conforms` derives
+        // it from the SAME `authoritative_schema` this site already passed, so the coverage
+        // half and the value half can no longer drift apart per call site.
+        if !declaration_conforms(authoritative_schema, template, 1, authoritative_state) {
             return Err(InteractionReasonCode::ConstraintUnsatisfied);
         }
     }
@@ -9455,4 +9595,142 @@ pub fn submit_interaction(
         },
     )?;
     Ok(AppliedInteraction { action, result })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// F4 — the preview's entry list is budgeted like every other outbound list on the
+    /// shortcut spec.
+    ///
+    /// `bound_outbound_spec` counted `points` and each point's `candidate_ids` but not
+    /// `preview.entries`, so the one list added by the CR 732.2a preview crossed the boundary
+    /// uncounted. It is bounded small in practice (at most one entry per display family per
+    /// seat), so this is a CONSISTENCY row and not a live payload-exhaustion row — which is
+    /// why it drives the budget to its last free slot rather than building a giant preview.
+    ///
+    /// PAIRED CONTROL FIRST: the same spec at the same starting budget WITHOUT a preview must
+    /// fit. Without it, the failure below could come from the spec's other lists, or from a
+    /// budget that was already over before the preview was ever read.
+    ///
+    /// WHAT WRONG IMPLEMENTATION WOULD STILL PASS THIS ROW? One that budgets the preview's
+    /// entries but not a future second list added to the same spec — the row pins the field it
+    /// names, not "every field is budgeted". One that charged the entries to the STRING budget
+    /// instead would fail here, because the control proves the LIST budget is what moved.
+    ///
+    /// REVERT-PROBE, RUN: drop the `preview` budget call ⇒ the second assertion gets `Ok`.
+    #[test]
+    fn the_shortcut_preview_entry_list_is_counted_against_the_outbound_budget() {
+        let spec = |preview| InteractionResponseSpec::Shortcut {
+            count: InteractionShortcutCountSpec::Fixed {
+                min: 1,
+                max: 3,
+                suggested: 3,
+            },
+            points: Vec::new(),
+            allow_decline: true,
+            preview,
+            confirm: ConfirmSemantics::Explicit,
+        };
+        let preview = InteractionShortcutPreview {
+            count: 3,
+            entries: vec![
+                InteractionShortcutPreviewEntry {
+                    family: InteractionShortcutPreviewFamily::Life,
+                    player: Some(1),
+                    amount: -6,
+                },
+                InteractionShortcutPreviewEntry {
+                    family: InteractionShortcutPreviewFamily::Mana,
+                    player: None,
+                    amount: 9,
+                },
+            ],
+        };
+        let at_last_free_slot = || OutboundBudget {
+            entries: MAX_INTERACTION_LIST_LEN - 1,
+            string_bytes: 0,
+        };
+
+        let mut budget = at_last_free_slot();
+        assert!(
+            bound_outbound_spec(&spec(None), &mut budget).is_ok(),
+            "control: with one slot free and no preview, this spec's own lists fit — so the \
+             refusal below is the preview being counted, not the spec being oversized"
+        );
+
+        let mut budget = at_last_free_slot();
+        assert_eq!(
+            bound_outbound_spec(&spec(Some(preview)), &mut budget),
+            Err(InteractionReasonCode::PayloadTooLarge),
+            "CR 732.2a: the preview's entries are published outbound, so they are charged to \
+             the same ceiling as every other list on the spec"
+        );
+    }
+
+    /// F5 — the offer channel and the HUD channel must SPELL each display family identically.
+    ///
+    /// `InteractionShortcutPreviewFamily` is `rename_all = "camelCase"`; its grouping authority
+    /// `derived_views::UnboundedFamily` is `rename_all = "lowercase"`. All eleven variants are
+    /// single words today, so both spell `mana`, `life`, ... and the agreement reads as design
+    /// when it is coincidence. A future two-word family would cross as `extraTurns` on the
+    /// offer and `extraturns` on the HUD — one grouping published in two wire vocabularies,
+    /// and THIS row is what catches it. Nothing on the client does: no client code reads the
+    /// preview's `family` today (the generated `InteractionShortcutPreviewFamily` in
+    /// `client/src/adapter/generated/interaction/index.ts` has no consumer), and the HUD's
+    /// family-keyed lookups (`UNBOUNDED_FAMILY_GLYPH` / `UNBOUNDED_FAMILY_LABEL_KEY`, both
+    /// `Record<UnboundedFamily, _>` in `client/src/components/hud/HudBadges.tsx`) are keyed by
+    /// the SEPARATELY declared hand-written `UnboundedFamily` union — so a future consumer that
+    /// crossed the two would break as a TypeScript type error, not miss silently.
+    ///
+    /// `preview_family`'s exhaustive match pins the GROUPING, not the STRING — a new family
+    /// build-breaks it, a renamed WIRE STRING does not. This row pins the string.
+    ///
+    /// It takes its family list from `unbounded-family-tags.json`, the same golden the client's
+    /// `Record<ResourceAxisTag, UnboundedFamily>` is checked against, so one chain now runs
+    /// engine grouping ⇒ HUD string ⇒ offer string. That also makes the list forced rather than
+    /// hand-maintained: an 18th `ResourceAxis` reds `family_tag_table_matches_the_client_golden`
+    /// until the golden is regenerated, and a regenerated golden carries the new family here.
+    ///
+    /// THIS ROW PASSES TODAY BY CONSTRUCTION, AND THAT IS THE POINT — it is written to fail on
+    /// a two-word variant, which is the only way the divergence can ship.
+    ///
+    /// WHAT WRONG IMPLEMENTATION WOULD STILL PASS THIS ROW? One that mis-GROUPS an axis (that
+    /// is `family_tag_table_matches_the_client_golden`'s question, not this one), and one that
+    /// adds a family reachable from no `ResourceAxis` at all, which the golden cannot see and
+    /// no client lookup can receive.
+    ///
+    /// REVERT-PROBE, RUN: rename the `Turns` variant of BOTH enums to `ExtraTurns` and
+    /// regenerate the golden ⇒ `extraturns` vs `extraTurns` ⇒ this row FAILS.
+    #[test]
+    fn every_preview_family_spells_the_same_wire_string_as_its_unbounded_family() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../client/src/test/fixtures/unbounded-family-tags.json"
+        );
+        let golden: BTreeMap<String, UnboundedFamily> =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("committed family golden"))
+                .expect("the family golden parses as tag -> UnboundedFamily");
+        let families: std::collections::BTreeSet<UnboundedFamily> =
+            golden.values().copied().collect();
+        assert_eq!(
+            families.len(),
+            11,
+            "reach-guard: every display family must be reachable from the golden, else this \
+             row silently checks a subset of the wire surface"
+        );
+
+        for family in families {
+            let hud = serde_json::to_string(&family).expect("UnboundedFamily serializes");
+            let offer =
+                serde_json::to_string(&preview_family(family)).expect("preview family serializes");
+            assert_eq!(
+                hud, offer,
+                "the shortcut offer and the HUD badge must cross the wire under the SAME \
+                 string for this display family — the client keys both into one \
+                 `Record<UnboundedFamily, _>`, so a divergence is a silent lookup miss"
+            );
+        }
+    }
 }
