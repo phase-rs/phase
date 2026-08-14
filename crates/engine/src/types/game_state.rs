@@ -23018,19 +23018,21 @@ mod tests {
             "Legacy untap source".to_string(),
             Zone::Battlefield,
         );
-        state
-            .objects
-            .get_mut(&source)
-            .expect("test source exists")
-            .abilities
-            .push(AbilityDefinition::new(
-                AbilityKind::Activated,
-                Effect::SetTapState {
-                    target: TargetFilter::ParentTarget,
-                    scope: EffectScope::Single,
-                    state: TapStateChange::Untap,
-                },
-            ));
+        Arc::make_mut(
+            &mut state
+                .objects
+                .get_mut(&source)
+                .expect("test source exists")
+                .abilities,
+        )
+        .push(AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::SetTapState {
+                target: TargetFilter::ParentTarget,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
+            },
+        ));
 
         let mut persisted = serde_json::to_value(state).expect("state serializes");
         persisted["objects"][source.0.to_string()]["abilities"][0]["effect"] = serde_json::json!({
