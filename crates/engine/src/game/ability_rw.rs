@@ -1339,6 +1339,7 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::SourceController
         | TargetFilter::Opponent
         | TargetFilter::Typed(..)
         | TargetFilter::Not { .. }
@@ -2265,6 +2266,7 @@ fn legacy_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::SourceController
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
@@ -2476,6 +2478,7 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::AttachedTo
         | TargetFilter::Neighbor { .. }
         | TargetFilter::OriginalController
+        | TargetFilter::SourceController
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::PostReplacementSourceController
@@ -6466,6 +6469,9 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         }
         // CR 607.2d / CR 607.2m (by analogy): durable per-player anchor-label reads.
         TargetFilter::PlayerWhoChoseLabel { label: _ } => reads_player_of(StateKind::Other),
+        // CR 608.2h + CR 113.7a: source-controller resolution follows the
+        // source's exact live-or-LKI incarnation.
+        TargetFilter::SourceController => reads_src_of(StateKind::Other),
         TargetFilter::Typed(tf) => {
             if tf
                 .properties
