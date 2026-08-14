@@ -184,6 +184,55 @@ fn issue_2871_inverse_card_type_riders_create_treasure_for_land() {
     );
 }
 
+#[test]
+fn issue_2871_inverse_card_type_riders_create_rogue_for_nonland() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let source = scenario
+        .add_creature(P0, "Inverse Card Type Riders", 0, 0)
+        .as_artifact()
+        .from_oracle_text(INVERSE_CARD_TYPE_RIDER_ABILITY)
+        .id();
+
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    let nonland = create_object(
+        state,
+        CardId(103),
+        P0,
+        "Grizzly Bears".to_string(),
+        Zone::Exile,
+    );
+    {
+        let object = state.objects.get_mut(&nonland).expect("nonland exists");
+        object.card_types.core_types.push(CoreType::Creature);
+        object.base_card_types = object.card_types.clone();
+    }
+    state.exile_links.push(ExileLink {
+        source_id: source,
+        exiled_id: nonland,
+        kind: ExileLinkKind::TrackedBySource,
+    });
+
+    let treasure_before = count_battlefield_tokens(runner.state(), "Treasure");
+    let rogue_before = count_battlefield_tokens(runner.state(), "Rogue");
+
+    runner.activate(source, 0).resolve();
+
+    assert_eq!(runner.state().objects[&nonland].zone, Zone::Graveyard);
+    assert_eq!(
+        count_battlefield_tokens(runner.state(), "Treasure"),
+        treasure_before,
+        "a nonland does not create the second land rider's Treasure token"
+    );
+    assert_eq!(
+        count_battlefield_tokens(runner.state(), "Rogue"),
+        rogue_before + 1,
+        "the first negated rider creates one Rogue token for a nonland"
+    );
+}
+
 fn count_battlefield_tokens(state: &engine::types::game_state::GameState, subtype: &str) -> usize {
     state
         .battlefield
