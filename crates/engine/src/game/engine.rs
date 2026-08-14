@@ -16108,9 +16108,126 @@ mod stage2_injector_tests {
                 // Current-main port: #7221's typed player-action completion seam and the
                 // contemporaneous upstream changes moved these three producers. Re-derived
                 // in the merged source, still in their named production functions.
-                "game/effects/mod.rs:6640".to_string(),
-                "game/effects/mod.rs:6717".to_string(),
-                "game/effects/mod.rs:9922".to_string(),
+                //
+                // Fight for the Throne commander-gate unit (base 8035813e6):
+                // `:6640/:6717/:9922 ⇒ :6647/:6724/:9929`, uniform +7. LOCAL, not upstream,
+                // so the CI-vs-local diagnosis in the header does not apply. `git diff -U0`
+                // on effects/mod.rs has exactly four hunks: `@@ -12,7 +12,7 @@` (net 0 — the
+                // `CommanderOwnership` import reflow), `@@ -3238,0 +3239,3 @@` (+3, the
+                // `AbilityCondition::ControlsCommander` leaf arm in
+                // `condition_reads_filter_population`), `@@ -3639,0 +3643,4 @@` (+4, the same
+                // variant joining `should_resolve_subability_on_optional_decline`'s live-gate
+                // list), and `@@ -12474,0 +12482,23 @@` (+23, the `evaluate_condition`
+                // delegation to `game::commander`) which sits BELOW all three producers and
+                // therefore moves none of them. 3 + 4 = the whole +7, and predicted
+                // `6640+7`/`6717+7`/`9922+7` equal the observed coordinates exactly. None of
+                // the three arms mints a prompt — they are condition CLASSIFICATION arms plus
+                // one boolean predicate delegation. Identity re-established, not assumed: each
+                // producer at its new coordinate is sha256-identical to
+                // `8035813e6:effects/mod.rs` at its old one (`a8512b402f8675b7`,
+                // `82c6c569182ae4ed`, `c9d8e7ba3b9e29e2`) and still sits inside the enclosing
+                // function this row NAMES (`drive_sequential_repeated_optional_payment` ×2,
+                // `resolve_chain_body`). The diff instrument discriminates: the three OLD
+                // coordinates now hold a `PendingRepeatedOptionalPayment` field init, a
+                // `payment_unit` argument, and a `trigger_events` clone — none of which mints
+                // anything. Set preservation: the two asserts above this one ran FIRST and
+                // both fired GREEN on the run that caught this (total still 37, partition
+                // still 5/7/25), and the other two entries did not move.
+                //
+                // Fight for the Throne review-fix round (same base 8035813e6):
+                // `:6647/:6724/:9929 ⇒ :6680/:6757/:9964`, i.e. `+40/+40/+42` measured
+                // from BASE (`:6640/:6717/:9922`), not from the row above. LOCAL, not
+                // upstream, so the CI-vs-local diagnosis in the header does not apply.
+                // `git diff -U0 8035813e6` on effects/mod.rs now has eight hunks; the
+                // ones that move a producer are, in order: `@@ -2935,0 +2936,33 @@`
+                // (+33, `condition_survives_false_parent_gate` — the single authority
+                // the CR 603.4 delayed-hoist carve-out now shares with
+                // `resolve_chain_body`), `@@ -3238,0 +3272,3 @@` (+3) and
+                // `@@ -3639,0 +3676,4 @@` (+4) — the two condition-classification arms
+                // already logged above. 33 + 3 + 4 = the `+40` on the first two. The
+                // third takes a further `+2` from the two hunks INSIDE
+                // `resolve_chain_body` and above its own gate:
+                // `@@ -9679,4 +9719,10 @@` (+6, the twin sub-gate clauses collapsed
+                // into the shared `condition_survives_false_parent_gate` call) and
+                // `@@ -9701,5 +9747 @@` (−4, the corresponding conjunct removal); the
+                // remaining hunks (`@@ -12,7 +12,7 @@` net 0, the `evaluate_condition`
+                // delegation, and `mod tests`) are net-zero or BELOW all three.
+                // Predicted `6640+40`/`6717+40`/`9922+42` equal the observed
+                // coordinates exactly. None of the moved code mints a prompt: it is one
+                // boolean condition classifier plus the call sites that consume it.
+                // Identity re-established, not assumed: each producer at its new
+                // coordinate is sha256-identical to `8035813e6:effects/mod.rs` at its
+                // old one (`9869a19f28c791ee`, `2bc316e3aa0297f8`, `8df98486627bfe15`)
+                // and still sits inside the enclosing production function it always
+                // did — `drive_sequential_repeated_optional_payment` (6653-6687),
+                // `resolve_repeated_optional_payment_choice` (6695-6779) and
+                // `resolve_chain_body`. (The row above names the first two as
+                // `drive_sequential_repeated_optional_payment` ×2; re-derived here, the
+                // second is the `resolve_repeated_optional_payment_choice` resume arm,
+                // which is what the older entries called it.) The diff instrument
+                // discriminates: the three OLD coordinates now hold a blank line, an
+                // `.active_repeated_optional_payment_frame_mut()` call and a `//`
+                // comment, none of which mints anything. Set preservation: the two
+                // asserts above this one ran FIRST and both fired GREEN on the run that
+                // caught this (total still 37, partition still 5/7/25), and the other
+                // two entries did not move.
+                //
+                // Fight for the Throne review-fix round 2 (same base 8035813e6):
+                // `:6715/:6792/:9994`, i.e. `+75/+75/+72` measured from BASE
+                // (`:6640/:6717/:9922`), not from the row above. LOCAL, not upstream, so
+                // the CI-vs-local diagnosis in the header does not apply. `git diff -U0
+                // 8035813e6` on effects/mod.rs has eight hunks; above the first two
+                // producers are `@@ -2935,0 +2936,68 @@` (+68 — the condition classifier
+                // of the row above, now also carrying the shared
+                // `sub_outlives_false_parent_gate` authority the CR 603.4 delayed-hoist
+                // carve-out and `resolve_chain_body` both call), `@@ -3238,0 +3307,3 @@`
+                // (+3) and `@@ -3639,0 +3711,4 @@` (+4): 68 + 3 + 4 = the `+75`. The third
+                // producer nets `−3` more from the two hunks INSIDE `resolve_chain_body`
+                // and above its own gate — `@@ -9679,4 +9753,0 @@` (−4, the twin
+                // `sub_survives_false_parent_gate` / `sub_is_replicated_or_branch` locals
+                // collapsed into the one shared call) and `@@ -9698,9 +9769,10 @@` (+1) —
+                // giving `+72`; the remaining hunks (`@@ -12,7 +12,7 @@` net 0, the
+                // `evaluate_condition` delegation, and `mod tests`) are net-zero or BELOW
+                // all three. Predicted `6640+75`/`6717+75`/`9922+72` equal the observed
+                // coordinates exactly. None of the moved code mints a prompt: it is one
+                // boolean sub-classification predicate plus the call site that consumes it.
+                // Identity re-established, not assumed: each producer at its new coordinate
+                // is sha256-identical to `8035813e6:effects/mod.rs` at its old one
+                // (`9869a19f28c791ee`, `2bc316e3aa0297f8`, `8df98486627bfe15`) and still
+                // sits inside the enclosing production function this row NAMES —
+                // `drive_sequential_repeated_optional_payment` (opens 6702),
+                // `resolve_repeated_optional_payment_choice` (opens 6730) and
+                // `resolve_chain_body`. The diff instrument discriminates: the three OLD
+                // coordinates now hold a `return Ok(());`, an
+                // `optional_cost_payments_this_resolution` binding and a
+                // `resolve_optional_effect_decision(` call, none of which mints anything.
+                // Set preservation: the two asserts above this one ran FIRST and both
+                // fired GREEN on the run that caught this (total still 37, partition still
+                // 5/7/25), and the other two entries did not move.
+                //   Fight for the Throne, same branch, same base `8035813e6`:
+                //   `:6715/:6792/:9994 ⇒ :6722/:6799/:10001`, a UNIFORM `+7` on all three,
+                //   i.e. `+82/+82/+79` measured from the base. The row above measured
+                //   `+75/+75/+72` from that same base, so the delta is `+7` and its sole
+                //   cause is that the FIRST hunk GREW: `@@ -2935,0 +2936,68 @@ ⇒
+                //   @@ -2935,0 +2936,75 @@`, the `condition_survives_false_parent_gate`
+                //   doc/authority block picking up seven more lines. No hunk was added or
+                //   removed and none changed size: the other four are byte-for-byte the
+                //   sizes the row above names (`+3` at `:3307 ⇒ :3314`, `+4` at
+                //   `:3711 ⇒ :3718`, `−4` at `:9753 ⇒ :9760`, `+1` at `:9769 ⇒ :9776`) and
+                //   merely shifted by the same `+7`, which is what makes the shift uniform
+                //   even for the third producer (its `−4/+1` pair still nets the same `−3`
+                //   below the other two). Predicted `6640+82`/`6717+82`/`9922+79` against
+                //   `8035813e6` equal the observed coordinates exactly. Identity
+                //   re-established, not assumed: each producer at its new coordinate is
+                //   sha256-identical to `8035813e6:effects/mod.rs` at its old one
+                //   (`7067db50922da31f`, `975791a569b1f587`, `967e35eb66a5780b` over the
+                //   15-line mint expression at each site). This card's own effects/mod.rs
+                //   edits — the two `AbilityCondition::ControlsCommander` registrations at
+                //   `:3314`/`:3718` and the `evaluate_condition` arm below all three — mint
+                //   nothing: they are classifier list entries and one condition evaluator.
+                "game/effects/mod.rs:6722".to_string(),
+                "game/effects/mod.rs:6799".to_string(),
+                "game/effects/mod.rs:10001".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.

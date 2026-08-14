@@ -223,6 +223,7 @@ mod fevered_visions;
 mod fewer_than_existential_threshold;
 mod field_marshal_soldier_anthem_first_strike;
 mod field_of_ruin_search;
+mod fight_for_the_throne_monarch_gated_on_commander;
 mod finality_counter_death_to_exile;
 mod fireball_x_cost_surcharge_timing;
 mod flashback_nonmana_payability;

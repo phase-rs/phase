@@ -10,8 +10,9 @@ use crate::parser::parse_oracle_text;
 use crate::types::ability::CardPlayMode::{Cast, Play};
 use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermission};
 use crate::types::ability::{
-    AttachmentKind, CardSelectionMode, CastManaObjectScope, CastManaSpentMetric, DigRestOrder,
-    ExcessRecipient, ForEachCategoryAction, ModalChoice, PerpetualModification, SeatDirection,
+    AttachmentKind, CardSelectionMode, CastManaObjectScope, CastManaSpentMetric,
+    CommanderOwnership, DigRestOrder, ExcessRecipient, ForEachCategoryAction, ModalChoice,
+    PerpetualModification, SeatDirection,
 };
 use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
@@ -51490,6 +51491,86 @@ fn instead_override_lowers_the_typed_completed_dungeon_condition() {
     assert!(
         !matches!(&*branch.effect, Effect::Unimplemented { .. }),
         "the override body must be the real second copy, not Unimplemented"
+    );
+}
+
+/// CR 603.4 + CR 608.2c + CR 903.3: Fight for the Throne's delayed triggered
+/// ability carries an intervening-`if` — "When the creature an opponent
+/// controls dies this turn, *if you control your commander*, you become the
+/// monarch." The gate must survive lowering as a TYPED `AbilityCondition`.
+///
+/// This is the same vocabulary asymmetry the `CompletedADungeon` test above
+/// pins, one variant over: `parse_inner_condition` produced
+/// `StaticCondition::ControlsCommander` all along, but the StaticCondition ->
+/// AbilityCondition bridge declared it had "no effect-resolution equivalent",
+/// so `strip_leading_general_conditional` dropped it on the floor and the
+/// delayed trigger made you the monarch UNCONDITIONALLY.
+///
+/// SHAPE test — it pins the parsed AST only. The runtime semantics, including
+/// the `Own`-vs-`Any` stolen-commander discrimination, are covered by
+/// `tests/integration/fight_for_the_throne_monarch_gated_on_commander.rs`,
+/// which drives the real cast pipeline.
+#[test]
+fn delayed_trigger_intervening_if_retains_the_commander_control_gate() {
+    let parsed = parse_oracle_text(
+        "Put a +1/+1 counter on target creature you control. Then it fights target \
+         creature an opponent controls. When the creature an opponent controls dies \
+         this turn, if you control your commander, you become the monarch.",
+        "Fight for the Throne",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let ability = parsed.abilities.first().expect("expected a spell ability");
+
+    // Reach-guard: every clause must lower for real, so the assertions below are
+    // read off a fully-parsed chain rather than off an honest-failure stub.
+    let _ = crate::types::ability_visit::visit_ability_def(ability, &mut |effect| {
+        assert!(
+            !matches!(effect, Effect::Unimplemented { .. }),
+            "no clause of Fight for the Throne may lower to Unimplemented: {effect:#?}"
+        );
+        std::ops::ControlFlow::Continue(())
+    });
+
+    let mut delayed = None;
+    let _ = crate::types::ability_visit::visit_ability_def(ability, &mut |effect| {
+        if let Effect::CreateDelayedTrigger {
+            condition, effect, ..
+        } = effect
+        {
+            delayed = Some((condition.clone(), (**effect).clone()));
+            return std::ops::ControlFlow::Break(());
+        }
+        std::ops::ControlFlow::Continue(())
+    });
+    let (delayed_condition, delayed_body) =
+        delayed.expect("the third sentence must lower to a CreateDelayedTrigger");
+
+    // CR 603.7c unchanged-behaviour guard: the fought creature stays the trigger's
+    // referent. Restoring the gate must not disturb the already-correct binding.
+    assert_eq!(
+        delayed_condition,
+        DelayedTriggerCondition::WhenDies {
+            filter: TargetFilter::ParentTarget
+        },
+        "the delayed trigger must still watch the fought creature"
+    );
+    assert_eq!(
+        *delayed_body.effect,
+        Effect::BecomeMonarch,
+        "the delayed body must still be the monarch effect"
+    );
+    // CR 903.3 + CR 109.5: the regression assertion. Reverting the bridge arm in
+    // `static_condition_to_ability_condition` makes this `None`, which is exactly
+    // the shipped misparse — an unconditional monarch grant.
+    assert_eq!(
+        delayed_body.condition,
+        Some(AbilityCondition::ControlsCommander {
+            ownership: CommanderOwnership::Own,
+        }),
+        "the intervening-if must ride the delayed body as a typed OWNER-scoped \
+         commander gate"
     );
 }
 

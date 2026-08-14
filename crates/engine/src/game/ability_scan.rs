@@ -2681,6 +2681,21 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
         }
         AbilityCondition::HasMaxSpeed => Axes::NONE,
         AbilityCondition::IsMonarch => Axes::NONE,
+        // CR 903.3d: "controlling a commander" is a permanent ON THE BATTLEFIELD
+        // that is a commander — a live board census (`game::commander` scans
+        // `state.battlefield` for `is_commander && controller == you [&& owner ==
+        // you] && is_phased_in`), so a sibling copy that moves, steals or phases a
+        // commander can flip this gate (CR 603.3b ordering-relevance). Self-asserts
+        // its own `sibling: true` literal, as the ⛔ INVARIANT on
+        // `scan_target_filter`'s `Typed` arm requires of every board-aggregate
+        // caller. `event` stays false: the census reads no triggering-event
+        // characteristic. `ownership: _` is destructured explicitly (as the
+        // `TriggerCondition` mirror does) so a future field forces a re-audit here.
+        AbilityCondition::ControlsCommander { ownership: _ } => Axes {
+            event: false,
+            sibling: true,
+            projected: false,
+        },
         // CR 309.7: controller-state predicate — touches no scan axis.
         AbilityCondition::CompletedDungeon { .. } => Axes::NONE,
         AbilityCondition::IsInitiative => Axes::NONE,
@@ -3368,7 +3383,13 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
             sibling: true,
             projected: false,
         },
-        TriggerCondition::ControlsCommander { ownership: _ } => Axes::NONE,
+        // CR 903.3d: live battlefield census — same self-asserted board read as the
+        // `AbilityCondition` / `StaticCondition` mirrors of this printed clause.
+        TriggerCondition::ControlsCommander { ownership: _ } => Axes {
+            event: false,
+            sibling: true,
+            projected: false,
+        },
         TriggerCondition::IsRenowned { subject: _ } => Axes::NONE,
         TriggerCondition::HasCounters { .. } => Axes {
             event: false,
@@ -3642,7 +3663,13 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes {
         StaticCondition::WasCast { zone: _ } => Axes::NONE,
         StaticCondition::IsRingBearer => Axes::NONE,
         StaticCondition::RingLevelAtLeast { level: _ } => Axes::NONE,
-        StaticCondition::ControlsCommander { ownership: _ } => Axes::NONE,
+        // CR 903.3d: live battlefield census — same self-asserted board read as the
+        // `AbilityCondition` / `TriggerCondition` mirrors of this printed clause.
+        StaticCondition::ControlsCommander { ownership: _ } => Axes {
+            event: false,
+            sibling: true,
+            projected: false,
+        },
         StaticCondition::SourceIsTapped => Axes::NONE,
         StaticCondition::IsTapped { scope, .. } => {
             let mut acc = Axes::NONE;
