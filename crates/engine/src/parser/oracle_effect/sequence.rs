@@ -2765,6 +2765,39 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         value((), tag("you search ")),
         value((), tag("you surveil ")),
         value((), tag("you get ")),
+        // CR 725.1: "There is no monarch in a game until an effect instructs a
+        // player to become the monarch" — becoming the monarch is its own
+        // instruction, never a noun-phrase continuation of the conjunct before
+        // it. CR 608.2c: the controller follows the printed instructions "in
+        // the order written", so a trailing "… and you become the monarch" is
+        // the NEXT instruction and must reach the clause dispatcher on its own.
+        //
+        // Exactly two lines in the whole corpus contain " and you become " —
+        // both were broken, in different ways:
+        //   Heart-Shaped Herb: "…with three +1/+1 counters on it AND YOU BECOME
+        //     THE MONARCH" — dropped SILENTLY (reported supported, zero gaps),
+        //     because the return-destination counter-suffix truncation in
+        //     `strip_return_destination_ext_with_remainder` (lower.rs) cuts the
+        //     remainder at the counter clause's START offset, discarding the
+        //     tail before any guard could see it.
+        //   Fall from Favor: "tap enchanted creature AND YOU BECOME THE
+        //     MONARCH" — isolated by `try_split_targeted_compound` (mod.rs) but
+        //     dispatched through `parse_imperative_effect`, which never tries
+        //     the subject-predicate path for a bare "you" subject, so it
+        //     surfaced as `Unimplemented { name: "you" }`.
+        // Splitting at the chunk level runs BEFORE both of those seams, so this
+        // one arm recovers both cards.
+        //
+        // The tag is the SUBJECT+VERB boundary, not the designation: "become"
+        // is a registered `PREDICATE_VERBS` member (subject.rs) and
+        // `build_become_clause` (subject.rs) is the single authority that
+        // adjudicates WHICH become (monarch / life total / day-night / color /
+        // animation). Matching "you become the monarch" here would put
+        // card-specific knowledge in the sentence-chunking layer. Mirrors the
+        // `it becomes ` arm below — same predicate, different subject. A
+        // blanket "you <PREDICATE_VERB>" rule is NOT safe: " and you control"
+        // (22 corpus lines) is a relative clause, never a clause start.
+        value((), tag("you become ")),
         value((), tag("you may ")),
         // CR 614.1b + CR 603.7a: "Effects that use the word 'skip' are
         // replacement effects" — a skip is its own instruction, never a
@@ -12405,6 +12438,71 @@ mod tests {
         assert!(starts_bare_and_clause(
             "this creature can't be blocked this turn"
         ));
+    }
+
+    /// CR 725.1 + CR 608.2c: "… and you become <designation>" is a subject +
+    /// predicate clause, never a noun-phrase continuation. The splitter arm is
+    /// deliberately VERB-level (`"you become "`), not designation-level, so
+    /// `build_become_clause` (subject.rs) stays the single authority over which
+    /// become is meant.
+    #[test]
+    fn bare_and_clause_starts_on_you_become_subject_predicate() {
+        // The two real corpus lines this fixes (Heart-Shaped Herb, Fall from
+        // Favor) both use the monarch designation.
+        assert!(starts_bare_and_clause("you become the monarch"));
+        assert!(starts_bare_and_clause("You become the Monarch"));
+
+        // Generalization guard: the arm is designation-agnostic, so a future
+        // non-monarch `become` conjunct is carried too. These are SYNTHETIC
+        // inputs to the predicate — both phrases are real Oracle text, but
+        // neither currently occurs after a bare " and ", so this is not an
+        // end-to-end reachability claim. Downstream, `build_become_clause`
+        // declines the monarch arm and falls through to the animation path,
+        // which is the honest-defer route.
+        assert!(starts_bare_and_clause("you become the starting player"));
+        assert!(starts_bare_and_clause(
+            "you become a card until you leave your library or that library is shuffled"
+        ));
+
+        // Negative: " and you control …" is a RELATIVE clause (22 corpus
+        // lines), never a clause start. A blanket "you <PREDICATE_VERB>" rule
+        // would have split these and changed unrelated cards.
+        assert!(!starts_bare_and_clause("you control"));
+        assert!(!starts_bare_and_clause("you control a Swamp"));
+        assert!(!starts_bare_and_clause(
+            "you control a legendary creature or planeswalker"
+        ));
+    }
+
+    /// CR 725.1 + CR 608.2c: the bare-and split must peel the monarch conjunct
+    /// off Heart-Shaped Herb's activated ability into its OWN chunk, and
+    /// `push_clause_chunk`'s `trim_end_matches(['.', ','])` must strip the
+    /// sentence-final period. The period is load-bearing: `build_become_clause`
+    /// gates on the exact match `become_text.eq_ignore_ascii_case("the
+    /// monarch")` (subject.rs), which a surviving "." would defeat, silently
+    /// falling through to the animation path.
+    #[test]
+    fn you_become_monarch_conjunct_splits_without_trailing_period() {
+        // Verbatim Oracle text (data/mtgjson/AtomicCards.json), effect body of
+        // the "{2}, {T}, Sacrifice this artifact:" ability.
+        let chunks = clause_texts(
+            "return that card to the battlefield under its owner's control with three +1/+1 counters on it and you become the monarch.",
+        );
+        assert_eq!(
+            chunks.last().map(String::as_str),
+            Some("you become the monarch"),
+            "monarch conjunct must be its own chunk with no trailing period, got {chunks:?}"
+        );
+        // Paired positive reach-guard: the leading return clause must survive
+        // intact, so a passing split assertion cannot be an artifact of the
+        // sentence being mangled.
+        assert_eq!(
+            chunks.first().map(String::as_str),
+            Some(
+                "return that card to the battlefield under its owner's control with three +1/+1 counters on it"
+            ),
+            "return clause must remain whole, got {chunks:?}"
+        );
     }
 
     /// CR 608.2c: Anaphoric back-reference conjuncts. Nalia de'Arnise's third

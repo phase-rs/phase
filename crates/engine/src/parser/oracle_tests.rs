@@ -13073,6 +13073,220 @@ fn you_become_the_monarch_subject() {
     );
 }
 
+/// Walks an ability chain looking for any clause that failed closed to
+/// [`Effect::Unimplemented`]. Used by the monarch conjunct tests as a
+/// non-vacuous guard: recovering a clause is only a fix if it produces a real
+/// typed effect rather than a differently-shaped gap.
+///
+/// Traverses every nested-definition field on `AbilityDefinition` —
+/// `sub_ability`, `else_ability` (CR 608.2c "Otherwise, …" branch) and
+/// `mode_abilities` (CR 700.2 modal) — mirroring
+/// `AbilityDefinition::normalize_parsed_replacement_flags` (types/ability.rs),
+/// the existing authority for "walk this definition's nested chain". Partial
+/// traversal would reintroduce the exact vacuous-negative class this guard
+/// exists to prevent: a `you become <designation>` conjunct that landed in an
+/// unvisited branch still carrying `Effect::Unimplemented` would pass
+/// silently. Neither Heart-Shaped Herb nor Fall from Favor produces an
+/// else-branch or modes today, so this is forward protection, not a live fix.
+fn monarch_chain_has_unimplemented(def: &AbilityDefinition) -> bool {
+    if matches!(*def.effect, Effect::Unimplemented { .. }) {
+        return true;
+    }
+    def.sub_ability
+        .as_deref()
+        .is_some_and(monarch_chain_has_unimplemented)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(monarch_chain_has_unimplemented)
+        || def
+            .mode_abilities
+            .iter()
+            .any(monarch_chain_has_unimplemented)
+}
+
+/// CR 725.1 + CR 608.2c: Heart-Shaped Herb's activated ability ends with
+/// "… with three +1/+1 counters on it and you become the monarch". Before the
+/// `"you become "` bare-and splitter arm, the trailing conjunct was dropped
+/// SILENTLY — the return-destination counter-suffix truncation in
+/// `strip_return_destination_ext_with_remainder` (lower.rs) cut the remainder
+/// at the counter clause's start offset, so the card reported as fully
+/// supported with zero gaps while discarding a printed instruction.
+///
+/// The monarch grant must land NESTED under the `EffectOutcome`-gated
+/// `ChangeZone`, not as a sibling of the `Sacrifice`: CR 608.2c means
+/// declining "You may sacrifice a creature" must skip the monarch grant too.
+/// A `SequentialSibling` placement would wrongly hand out the monarch on
+/// decline, so the link is the load-bearing assertion here.
+#[test]
+fn heart_shaped_herb_activated_ability_grants_monarch_as_continuation() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::{AbilityCondition, AbilityKind, SubAbilityLink};
+
+    // Verbatim Oracle text (data/mtgjson/AtomicCards.json), effect body of the
+    // "{2}, {T}, Sacrifice this artifact:" ability.
+    let def = parse_effect_chain(
+        "You may sacrifice a creature. If you do, return that card to the battlefield under its owner's control with three +1/+1 counters on it and you become the monarch.",
+        AbilityKind::Activated,
+    );
+
+    // Paired positive reach-guard: the leading sacrifice and the gated return
+    // must both still be present, so a passing monarch assertion cannot be an
+    // artifact of the sentence being re-parsed into something else.
+    assert!(
+        matches!(*def.effect, Effect::Sacrifice { .. }),
+        "head effect must remain Sacrifice, got {:?}",
+        def.effect,
+    );
+    let change_zone = def
+        .sub_ability
+        .as_ref()
+        .expect("sacrifice must carry the gated return as its sub-ability");
+    assert!(
+        matches!(
+            *change_zone.effect,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        ),
+        "gated sub must remain the battlefield return, got {:?}",
+        change_zone.effect,
+    );
+    assert_eq!(
+        change_zone.condition,
+        Some(AbilityCondition::EffectOutcome {
+            signal: crate::types::ability::EffectOutcomeSignal::OptionalEffectPerformed,
+        }),
+        "the return must stay gated on the optional sacrifice being performed"
+    );
+
+    // The fix: the monarch conjunct is recovered as the return's continuation.
+    let monarch = change_zone
+        .sub_ability
+        .as_ref()
+        .expect("the 'and you become the monarch' conjunct must be recovered");
+    assert!(
+        matches!(*monarch.effect, Effect::BecomeMonarch),
+        "expected BecomeMonarch, got {:?}",
+        monarch.effect,
+    );
+    // CR 608.2c: a ContinuationStep under the gated return is skipped when the
+    // optional sacrifice is declined. This is the assertion that flips if the
+    // splitter arm is reverted (the node disappears entirely).
+    assert_eq!(
+        monarch.sub_link,
+        SubAbilityLink::ContinuationStep,
+        "monarch grant must be a continuation of the gated return, not an \
+         independent sibling — a sibling would grant the monarch even when the \
+         optional sacrifice is declined"
+    );
+    assert!(
+        !monarch_chain_has_unimplemented(&def),
+        "no clause may fail closed to Unimplemented"
+    );
+}
+
+/// CR 725.1 + CR 608.2c: Fall from Favor — "When this Aura enters, tap
+/// enchanted creature and you become the monarch." Before the splitter arm the
+/// conjunct was isolated by `try_split_targeted_compound` (mod.rs) but
+/// dispatched through `parse_imperative_effect`, which never tries the
+/// subject-predicate path for a bare "you" subject, so it surfaced as
+/// `Effect::Unimplemented { name: "you" }` and the card was reported as
+/// unsupported. Splitting at the chunk level runs first, so the conjunct
+/// reaches `try_parse_subject_become_clause` → `build_become_clause`.
+#[test]
+fn fall_from_favor_trigger_body_grants_monarch_not_unimplemented() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::AbilityKind;
+
+    // Verbatim Oracle text (data/mtgjson/AtomicCards.json), trigger body.
+    let def = parse_effect_chain(
+        "tap enchanted creature and you become the monarch",
+        AbilityKind::Spell,
+    );
+
+    // Paired positive reach-guard: the tap clause must survive. A chain that
+    // lost the tap half must not pass this test.
+    assert!(
+        matches!(
+            *def.effect,
+            Effect::SetTapState {
+                state: TapStateChange::Tap,
+                ..
+            }
+        ),
+        "tap clause must remain intact, got {:?}",
+        def.effect,
+    );
+    let monarch = def
+        .sub_ability
+        .as_ref()
+        .expect("the 'and you become the monarch' conjunct must be recovered");
+    assert!(
+        matches!(*monarch.effect, Effect::BecomeMonarch),
+        "expected BecomeMonarch, got {:?}",
+        monarch.effect,
+    );
+    assert!(
+        !monarch_chain_has_unimplemented(&def),
+        "the bare 'you' subject must no longer fail closed to Unimplemented"
+    );
+}
+
+/// CR 608.2c: the `sub_link` on a recovered `you become …` conjunct comes from
+/// the printed BOUNDARY, not from the verb. A sentence boundary must yield
+/// `SequentialSibling` (the monarch grant is then independent of the preceding
+/// instruction), while the bare-and conjunct above yields `ContinuationStep`.
+#[test]
+fn you_become_monarch_sub_link_tracks_boundary_not_verb() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::{AbilityKind, SubAbilityLink};
+
+    let sentence = parse_effect_chain(
+        "Tap enchanted creature. You become the monarch.",
+        AbilityKind::Spell,
+    );
+    let monarch = sentence
+        .sub_ability
+        .as_ref()
+        .expect("sentence-boundary monarch clause must be present");
+    assert!(
+        matches!(*monarch.effect, Effect::BecomeMonarch),
+        "expected BecomeMonarch, got {:?}",
+        monarch.effect,
+    );
+    assert_eq!(
+        monarch.sub_link,
+        SubAbilityLink::SequentialSibling,
+        "a sentence boundary must produce an independent sibling"
+    );
+
+    // Hostile fixture: swap the become-verb conjunct for an already-supported
+    // `you gain ` conjunct at the SAME bare-and boundary. The link must be
+    // identical, proving it is derived from the boundary rather than the verb.
+    let gain = parse_effect_chain(
+        "tap enchanted creature and you gain 2 life",
+        AbilityKind::Spell,
+    );
+    let gain_sub = gain
+        .sub_ability
+        .as_ref()
+        .expect("bare-and 'you gain' conjunct must be present");
+    let become_chain = parse_effect_chain(
+        "tap enchanted creature and you become the monarch",
+        AbilityKind::Spell,
+    );
+    let become_sub = become_chain
+        .sub_ability
+        .as_ref()
+        .expect("bare-and 'you become' conjunct must be present");
+    assert_eq!(
+        become_sub.sub_link, gain_sub.sub_link,
+        "the bare-and boundary must produce the same link for both verbs"
+    );
+}
+
 // ── Coverage batch: prevent damage ────────────────────────────────
 
 #[test]

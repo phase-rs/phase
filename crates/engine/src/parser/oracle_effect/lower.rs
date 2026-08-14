@@ -10813,14 +10813,65 @@ pub(crate) fn parse_with_counters_suffix(lower: &str) -> Vec<(CounterType, Quant
 
 /// Like [`parse_with_counters_suffix`], but also reports the byte offset in
 /// `lower` at which the matched `"with N <type> counter(s) [on it]"` clause
-/// begins (the start of the `"with "` token). Callers that need to excise the
+/// BEGINS (the start of the `"with "` token). Callers that need to excise the
 /// consumed counter clause from a larger remainder — e.g.
-/// `strip_return_destination_ext_with_remainder`, so "return it to the
-/// battlefield tapped and with two stun counters under its owner's control"
-/// does not leave a dangling "and with two stun counters …" clause once the
-/// counters are lifted onto `enter_with_counters` (Unstoppable Slasher) — use
-/// this offset to truncate. Returns `None` for the offset when no counter
-/// clause matched.
+/// `strip_return_destination_ext_with_remainder` — use this offset to
+/// truncate. Returns `None` for the offset when no counter clause matched.
+///
+/// CR 122.1: counters are the marker this clause places.
+///
+/// CONTRACT LIMITATION — read before relying on this. The offset marks only
+/// the clause's START, not its end, so a caller that truncates at it also
+/// discards everything AFTER the clause. `strip_return_destination_ext_with_remainder`
+/// does exactly that: it keeps `text[entry_offset..entry_offset + off]`.
+///
+/// That is NOT sound "because counter suffixes are clause-final" — they
+/// frequently are not. Two printed counterexamples, both verbatim from
+/// `data/mtgjson/AtomicCards.json`:
+///   * Heart-Shaped Herb — "… return that card to the battlefield under its
+///     owner's control with three +1/+1 counters on it AND YOU BECOME THE
+///     MONARCH."
+///   * Cosima, God of the Voyage — "… return Cosima to the battlefield with X
+///     +1/+1 counters on it AND DRAW X CARDS, where X is the number of voyage
+///     counters on it."
+///
+/// What makes the truncation safe is UPSTREAM, not the corpus: the chunk-level
+/// bare-and splitter `starts_bare_and_clause_lower` (sequence.rs) peels
+/// recognized verb-headed tails into their own clause chunks before this
+/// function ever sees the remainder. Heart-Shaped Herb's tail is peeled by the
+/// `"you become "` arm — pinned end-to-end by
+/// `you_become_monarch_conjunct_splits_without_trailing_period` (sequence.rs),
+/// which asserts the counter clause and the monarch conjunct land in separate
+/// chunks. Cosima's tail heads with `"draw "`, which has its own arm in the
+/// same list. A tail whose head verb has NO arm there is still dropped
+/// SILENTLY. The fix for the next such card is therefore to add the splitter
+/// arm (or widen this to a real start..end span) — never to assume
+/// clause-finality.
+///
+/// The one corpus invariant that does hold is narrower: no printed Oracle text
+/// puts a control/attach/tap clause after the counters. Reproduce it with jq
+/// over Oracle text — NOT with a raw `grep -c` on the file, which cannot work:
+/// `AtomicCards.json` is a single JSON line (`wc -l` reports 0), so `grep -c`
+/// can only ever return 0 or 1, and it matches rulings/flavor/metadata rather
+/// than `.text` (the previously cited
+/// `grep -cE "counters? (under|attached|tapped)"` returns 1, and its sole hit
+/// is ruling text, not a card).
+///
+/// ```text
+/// jq -r '[.data[][].text // empty
+///         | select(test("counters? (under|attached|tapped)"))] | length' \
+///   data/mtgjson/AtomicCards.json     # => 0
+/// ```
+///
+/// An earlier version of this comment cited Unstoppable Slasher as a
+/// mid-clause example, with the text "return it to the battlefield tapped and
+/// with two stun counters under its owner's control". THAT TEXT IS NOT REAL.
+/// The printed card reads "…return it to the battlefield tapped under its
+/// owner's control with two stun counters on it." The fabricated example
+/// propagated into a downstream implementation plan before it was caught; if
+/// this contract is ever widened to a full start..end span, verify the
+/// motivating card against `data/mtgjson/AtomicCards.json` first (CLAUDE.md,
+/// "Verify the card, not just the rule").
 pub(crate) fn parse_with_counters_suffix_spanned(
     lower: &str,
 ) -> (Vec<(CounterType, QuantityExpr)>, Option<usize>) {
@@ -10905,11 +10956,25 @@ pub(crate) fn parse_counter_suffix_body_combinator(
     let (rest, _) = tag(" counter").parse(rest)?;
     // Optional plural "s".
     let (rest, _) = nom::combinator::opt(tag::<_, _, OracleError<'_>>("s")).parse(rest)?;
-    // CR 614.1c: "on it" is grammatical filler — present in "return it to the
-    // battlefield with two +1/+1 counters on it" but absent when a controller
-    // clause follows ("return it to the battlefield tapped and with two stun
-    // counters under its owner's control", Unstoppable Slasher). Optional so
-    // both shapes lift the counters onto `enter_with_counters`.
+    // CR 614.1c: "on it" is grammatical filler and BOTH spellings are printed,
+    // so the terminator must be optional. Filler PRESENT: "…with two stun
+    // counters on it." (Unstoppable Slasher), "…with a +1/+1 counter on it."
+    // Filler ABSENT: "…with six +1/+1 counters.", "…with a first strike
+    // counter.", "…with three dread counters." Optional so both shapes lift
+    // the counters onto `enter_with_counters`.
+    //
+    // NOTE: this comment previously justified the optional filler with
+    // "absent when a controller clause follows", attributed to Unstoppable
+    // Slasher. That attribution was fabricated — Unstoppable Slasher reads
+    // "…return it to the battlefield tapped under its owner's control with two
+    // stun counters on it.", i.e. filler PRESENT. Presence or absence of the
+    // filler does NOT correlate with what follows the clause; it is free
+    // variation in the printed wording, which is why the terminator is
+    // `opt` rather than conditioned on a lookahead. (No printed card does put
+    // a control/attach/tap clause after the counters — see the CONTRACT
+    // LIMITATION note on `parse_with_counters_suffix_spanned` for the jq that
+    // reproduces that, and for why the truncation's real safety argument is
+    // upstream rather than corpus-based.)
     let (rest, _) = nom::combinator::opt(tag::<_, _, OracleError<'_>>(" on it")).parse(rest)?;
 
     Ok((
@@ -11721,12 +11786,18 @@ mod tests {
         ));
     }
 
-    /// CR 614.1c + issue #1498: "return it to the battlefield tapped and with
-    /// two stun counters under its owner's control" (Unstoppable Slasher) must
-    /// lift the stun counters onto `enter_with_counters` and excise the counter
-    /// clause from the returned remainder so no dangling follow-up clause is
-    /// re-parsed. The `" on it"` filler is absent here (a controller clause
-    /// follows the counters), which the optional terminator now tolerates.
+    /// CR 614.1c + issue #1498: a counter clause with no `" on it"` filler must
+    /// still lift its counters onto `enter_with_counters` and be excised from
+    /// the returned remainder, so no dangling follow-up clause is re-parsed.
+    ///
+    /// SYNTHETIC INPUT — not a printed card. This text was previously
+    /// attributed to Unstoppable Slasher; that attribution was fabricated. The
+    /// real card reads "…return it to the battlefield tapped under its owner's
+    /// control with two stun counters on it." (filler present, clause-final).
+    /// The filler-less shape this test pins IS real, but only clause-finally
+    /// ("… with six +1/+1 counters."); the trailing controller clause here is
+    /// an artificial stress case for the excision path. See the CONTRACT
+    /// LIMITATION note on `parse_with_counters_suffix_spanned`.
     #[test]
     fn return_to_battlefield_lifts_stun_counters_without_on_it_filler() {
         let (target, dest, remainder) = strip_return_destination_ext_with_remainder(
