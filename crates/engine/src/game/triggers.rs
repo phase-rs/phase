@@ -9381,8 +9381,21 @@ fn delayed_intervening_if(ability: &ResolvedAbility) -> Option<TriggerCondition>
 ///   `TargetFilter::names_bound_single_object`). The bound object departs once
 ///   per incarnation, and an object that returns is a NEW object (CR 400.7 /
 ///   CR 603.7c), so a retained ability could never match it anyway;
-/// * a CR 603.12 reflexive, which is checked ONLY against its creation batch and
-///   must not be left to fire on a later same-turn event.
+/// * EVERY `WhenNextEvent`, whatever its `DelayedTriggerLifetime`. Each shape the
+///   parser builds for this variant names ONE occurrence, so the matched event
+///   has spent it:
+///   - `ThisTurn` is only ever built from "when you **next** [event] this turn"
+///     (`try_parse_when_next_generic_event` / `build_when_next_delayed_trigger`).
+///     "Next" is the ability's own single-occurrence wording; the stated duration
+///     bounds only how long it WAITS for that one occurrence, and CR 603.7b's
+///     "unless it has a stated duration" clause lifts the once-only cap for
+///     "whenever … this turn" (`WheneverEvent`), not for a "next";
+///   - `Persistent` has NO stated duration (The Pandorica's "when ~ becomes
+///     untapped or leaves the battlefield", "when a player planeswalks"), so
+///     CR 603.7b's unqualified "will trigger only once — the next time its
+///     trigger event occurs" applies directly;
+///   - `Reflexive` (CR 603.12) is checked ONLY against its creation batch and must
+///     not be left to fire on a later same-turn event.
 ///
 /// A BROAD-FILTER event form ("when a creature dies this turn, if X, …") is
 /// exactly what CR 603.7b's "unless it has a stated duration" clause keeps
@@ -9406,10 +9419,13 @@ fn false_gate_consumes_one_shot(condition: &DelayedTriggerCondition) -> bool {
         | DelayedTriggerCondition::WhenDiesOrExiled { filter } => {
             filter.names_bound_single_object()
         }
-        // CR 603.12: a reflexive gets exactly one shot on its creation batch —
-        // the same rule the unmatched-reflexive discard below enforces. Every
-        // other `WhenNextEvent` watches a broad event predicate.
-        DelayedTriggerCondition::WhenNextEvent { .. } => is_reflexive_lifetime(condition),
+        // CR 603.4 + CR 603.7b (+ CR 603.12 for `Reflexive`): every lifetime this
+        // variant carries names ONE occurrence, and the matched event has now
+        // spent it — see the per-lifetime breakdown above. Retaining it would
+        // silently rewrite "when you next X, if C" into "when you next X for
+        // which C holds", letting a later X fire an ability CR 603.4 already
+        // resolved as doing nothing.
+        DelayedTriggerCondition::WhenNextEvent { .. } => true,
         // Never one-shot (`effects::delayed_trigger` computes `one_shot` as
         // "not `WheneverEvent`"), so this arm is unreachable from the caller;
         // spelled out rather than wildcarded to keep the match exhaustive.
@@ -19018,6 +19034,142 @@ pub mod tests {
         assert_eq!(
             fired_remaining, 0,
             "the fired one-shot is removed as before"
+        );
+    }
+
+    /// CR 603.4 + CR 603.7b for the `WhenNextEvent` one-shot class, driven through
+    /// the production `check_delayed_triggers` path over TWO separate event
+    /// batches.
+    ///
+    /// "When you next [event] this turn, if [gate], …" names ONE occurrence. When
+    /// that occurrence arrives with the gate false the ability "does nothing"
+    /// (CR 603.4) and its single shot is spent (CR 603.7b) — making the gate true
+    /// afterwards must NOT let a second matching event resurrect it. Retaining it
+    /// would silently rewrite the ability into "when you next [event] for which
+    /// [gate] holds".
+    ///
+    /// REVERT-TO-RED: restore `is_reflexive_lifetime(condition)` on the
+    /// `WhenNextEvent` arm of `false_gate_consumes_one_shot` and this
+    /// non-reflexive `ThisTurn` trigger survives batch one, so `after_first`
+    /// is `1` and the second batch puts the ability on the stack.
+    #[test]
+    fn when_next_event_one_shot_is_consumed_by_a_false_intervening_if() {
+        use crate::types::ability::DelayedTriggerLifetime;
+        use crate::types::triggers::TriggerMode;
+
+        /// Installs "when you next play a land this turn, if you control your
+        /// commander, you become the monarch" and returns the land whose play is
+        /// the matching event.
+        fn install(state: &mut GameState) -> ObjectId {
+            let controller = PlayerId(0);
+            state.active_player = controller;
+            state.priority_player = controller;
+
+            let source = create_object(
+                state,
+                CardId(0x0603_0407),
+                controller,
+                "Next Land Rider".to_string(),
+                Zone::Battlefield,
+            );
+            let land = create_object(
+                state,
+                CardId(0x0603_0408),
+                controller,
+                "Played Land".to_string(),
+                Zone::Battlefield,
+            );
+
+            // CR 305.1 + CR 603.2: scope the delayed event to the controller's
+            // own land drop, exactly as the parser's `WhenNextEvent` builders do.
+            let mut trigger_def = TriggerDefinition::new(TriggerMode::LandPlayed);
+            trigger_def.valid_target = Some(TargetFilter::Controller);
+
+            let mut ability =
+                ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+            ability.condition = Some(AbilityCondition::ControlsCommander {
+                ownership: CommanderOwnership::Own,
+            });
+            // `WhenNextEvent` matching requires the delayed ability's CR 400.7
+            // source context; without it `delayed_trigger_event_with_index`
+            // returns `None` and the fixture would prove nothing.
+            let source_object = state.objects.get(&source).expect("installed source");
+            ability.trigger_source = Some(trigger_source_context_for_latch(state, source_object));
+
+            state.delayed_triggers.push(DelayedTrigger {
+                condition: DelayedTriggerCondition::WhenNextEvent {
+                    trigger: Box::new(trigger_def),
+                    or_trigger: None,
+                    lifetime: DelayedTriggerLifetime::ThisTurn,
+                },
+                ability: Box::new(ability),
+                controller,
+                source_id: source,
+                one_shot: true,
+                provenance: DelayedInstallIdentity::LegacyDelayed,
+            });
+
+            land
+        }
+
+        fn stage_commander(state: &mut GameState) {
+            // CR 903.3 + CR 903.3d: owned AND controlled, on the battlefield.
+            let commander = make_creature(state, PlayerId(0), "Your Commander", 2, 2);
+            state
+                .objects
+                .get_mut(&commander)
+                .expect("staged commander")
+                .is_commander = true;
+        }
+
+        fn land_played(land: ObjectId) -> GameEvent {
+            GameEvent::LandPlayed {
+                object_id: land,
+                player_id: PlayerId(0),
+                from_zone: Zone::Hand,
+            }
+        }
+
+        // Reachability proof: the same fixture with the gate TRUE on the first
+        // matching event does reach the stack, so the assertions below are about
+        // the gate and not about a trigger that never matched `LandPlayed`.
+        let mut reachable = setup();
+        let reachable_land = install(&mut reachable);
+        stage_commander(&mut reachable);
+        check_delayed_triggers(&mut reachable, &[land_played(reachable_land)]);
+        assert_eq!(
+            reachable.stack.len(),
+            1,
+            "reachability proof: with the gate TRUE the first land drop fires the delayed ability"
+        );
+
+        let mut state = setup();
+        let land = install(&mut state);
+
+        // Batch one: the ability's single named occurrence, gate FALSE.
+        check_delayed_triggers(&mut state, &[land_played(land)]);
+        assert_eq!(
+            state.stack.len(),
+            0,
+            "CR 603.4: a false intervening-`if` means the ability never triggers, so it must \
+             not be put onto the stack"
+        );
+        let after_first = state.delayed_triggers.len();
+        assert_eq!(
+            after_first, 0,
+            "CR 603.7b: \"when you NEXT play a land this turn\" names ONE occurrence, and that \
+             occurrence has now happened — the one-shot is consumed, not left installed"
+        );
+
+        // Batch two: the gate is now TRUE and another land is played. A consumed
+        // one-shot must stay consumed; a retained one would fire here.
+        stage_commander(&mut state);
+        check_delayed_triggers(&mut state, &[land_played(land)]);
+        assert_eq!(
+            state.stack.len(),
+            0,
+            "CR 603.4 + CR 603.7b: the ability already spent its single occurrence with the \
+             gate false; making the gate true afterwards must not let a LATER land drop fire it"
         );
     }
 
