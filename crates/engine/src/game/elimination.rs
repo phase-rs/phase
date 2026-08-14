@@ -1179,6 +1179,7 @@ fn retire_pending_zone_change_contexts_owned_by(state: &mut GameState, player: P
 fn abandon_source_bound_resolution_prompt(state: &mut GameState, player: PlayerId) {
     let abandon = match &state.waiting_for {
         WaitingFor::NamedChoice {
+            free_entry: None,
             player: chooser,
             source,
             persist_player,
@@ -1806,6 +1807,7 @@ mod tests {
         );
         let context = source_context(&state, source);
         state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(1),
             choice_type: crate::types::ability::ChoiceType::Labeled {
                 options: vec!["chosen".to_string()],
@@ -1845,6 +1847,7 @@ mod tests {
     fn leaving_persisted_named_choice_player_abandons_the_whole_family() {
         let mut state = setup_three_player();
         state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(0),
             choice_type: crate::types::ability::ChoiceType::Labeled {
                 options: vec!["chosen".to_string()],

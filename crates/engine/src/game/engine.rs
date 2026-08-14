@@ -18185,14 +18185,71 @@ mod stage2_injector_tests {
                 // shifts combine with #6958's paid-cast outcome exclusion and
                 // #6976's conditional-branch exclusions. None creates an
                 // `OptionalEffect` prompt. Re-pinned against the merged source.
-                // Current-main port: #7221's typed player-action completion seam and the
-                // contemporaneous upstream changes moved these three producers. Re-derived
-                // in the merged source, still in their named production functions.
-                // #7382's optional-player routing and pre-entry controller prompt move only
-                // the third and fifth coordinates; both named mints were re-read in place.
-                "game/effects/mod.rs:6640".to_string(),
-                "game/effects/mod.rs:6717".to_string(),
-                "game/effects/mod.rs:9939".to_string(),
+                // Wheel of Misfortune (#7266), MEASURED ON THE MERGE TREE. This row's
+                // own header warns that a fork branch's pins are correct for the branch
+                // and wrong for `refs/pull/<n>/merge`; both sides of this conflict were
+                // that kind of local-correct. `origin/main` carried `:6306/:6383/:9578`
+                // and the branch carried `:6261/:6338/:9550`; NEITHER is right here, so
+                // the merged file was re-measured rather than either side taken:
+                // `:6306/:6383/:9578 => :6315/:6392/:9606`, i.e. `+9/+9/+28`.
+                //
+                // The asymmetry IS the measurement. This branch's non-test additions to
+                // effects/mod.rs, in file order:
+                //   `pub mod reveal_chosen_numbers;` — 1 line, above all three.
+                //   the `Effect::RevealChosenNumbers` dispatch arm — 3 lines, above all
+                //     three (the dispatch table precedes every producer).
+                //   the `QuantityRef::PlayerChosenNumber` arm in
+                //     `candidate_player_scalar` — 5 lines, above all three.
+                // 1 + 3 + 5 = the uniform `+9` the first two producers take. The third
+                // takes a further `+19` from the depth-0 per-player secret-number ledger
+                // reset in `resolve_ability_chain` (16 lines, plus 3 widening the clear
+                // to retain both `Number` and `RevealedNumber`), which sits above it and
+                // below the first two: 9 + 19 = 28. Predicted and observed agree.
+                //
+                // Nothing added here raises a `WaitingFor`: the two clears and the scalar
+                // read are pure state reads/writes, and the dispatch arm delegates to
+                // `reveal_chosen_numbers::resolve`, which converts
+                // `ChosenAttribute::Number` to `RevealedNumber` and emits an event. The
+                // census set is therefore still exactly 5.
+                //
+                // NOTE for the next drift: upstream refactored the third producer from a
+                // `state.waiting_for = …` assignment form into a bare struct-literal value
+                // inside a returned tuple. It is still one producer and still matches this
+                // row's assembled needle, but a grep for the old assignment form now finds
+                // only two — measure with the needle, not with the assignment.
+                //
+                // And do NOT spell the needle literally in this comment. It is assembled
+                // at the top of this row precisely so the row cannot count itself, but the
+                // walker reads every line of this file: writing the struct-literal form
+                // out in prose here adds a phantom `in_test` hit per mention. Two such
+                // mentions in an earlier draft of this very note pushed the partition to
+                // 27 and reded the row — the instrument working exactly as intended.
+                //
+                // SECOND merge with main (#7221's typed player-action completion seam and
+                // its contemporaries). Same rule, applied again: `main` re-derived these to
+                // `:6640/:6717/:9922` for ITS tree and the branch carried `:6315/:6392/:9606`
+                // for its own; the merged file measures `:6653/:6730/:9954`, a uniform `+13`
+                // over main's coordinates. That `+13` is exactly this branch's four
+                // additions above all three producers: `pub mod reveal_chosen_numbers;` (1),
+                // the `Effect::RevealChosenNumbers` dispatch arm (3), the
+                // `QuantityRef::PlayerChosenNumber` arm in `candidate_player_scalar` (5),
+                // and its arm in main's new `quantity_ref_counts_population_matching` (4).
+                // It is uniform this time — unlike the first merge — because main's own
+                // churn moved the depth-0 ledger reset and the third producer together, so
+                // the branch's extra offset there is already inside main's baseline rather
+                // than stacked on top of it.
+                //
+                // Measure AFTER the last edit to effects/mod.rs, not during: an earlier
+                // pass here recorded `+9` from a measurement taken before that fourth arm
+                // was added, and the row caught the 4-line discrepancy.
+                // Unbounded-number round (same PR): `:6653/:6730/:9954 =>
+                // `:6655/:6732/:9956`, a uniform `+2` — the unbounded-range arm
+                // added to `compute_options`' sibling classifier in this file,
+                // which sits above all three producers. Nothing added raises a
+                // `WaitingFor`; the census set is still exactly 5.
+                "game/effects/mod.rs:6656".to_string(),
+                "game/effects/mod.rs:6733".to_string(),
+                "game/effects/mod.rs:9974".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.

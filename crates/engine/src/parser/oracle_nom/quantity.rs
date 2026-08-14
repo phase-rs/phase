@@ -841,6 +841,78 @@ fn parse_paid_energy_this_way_ref(input: &str) -> OracleResult<'_, QuantityRef> 
     .parse(input)
 }
 
+/// CR 101.4 + CR 608.2d: which cross-player extremum a "chosen number" phrase
+/// names. The two words are the only leaves of this axis; the aggregation is the
+/// existing [`AggregateFunction`], so no extremum enum is minted. Shared with the
+/// subject-side restriction grammar (`oracle_effect::lower`) so the two sites
+/// cannot drift.
+pub fn parse_chosen_number_extremum(input: &str) -> OracleResult<'_, AggregateFunction> {
+    alt((
+        value(AggregateFunction::Max, tag("highest")),
+        value(AggregateFunction::Min, tag("lowest")),
+    ))
+    .parse(input)
+}
+
+/// CR 101.4: the singular head noun of a chosen-number phrase, with a
+/// word-boundary guard so `" number"` cannot match the prefix of `" numbers"`.
+/// The plural ("the highest and lowest numbers revealed this way") is the
+/// bookkeeping sentence's noun, not a value reference, and belongs to the
+/// reveal-clause combinator instead.
+pub fn parse_chosen_number_noun(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        terminated(
+            tag(" number"),
+            nom::combinator::not(nom::character::complete::satisfy(|c: char| {
+                c.is_ascii_alphanumeric()
+            })),
+        ),
+    )
+    .parse(input)
+}
+
+/// CR 101.4 + CR 608.2d: "the highest number" / "the lowest number" — the
+/// cross-player extremum of the numbers players secretly chose during this
+/// resolution (Wheel of Misfortune, Menacing Ogre, Life at Stake).
+/// `QuantityRef::PlayerChosenNumber` under `PlayerScope::AllPlayers { aggregate }`
+/// folds `Player::chosen_attributes` over the players who actually chose.
+///
+/// DELIBERATELY NOT REGISTERED in the context-free `parse_quantity_ref` alt.
+/// The wording alone does not identify the concept: Custodi Peacekeeper's "power
+/// less than or equal to the highest number YOU NOTED for cards named Custodi
+/// Peacekeeper" is a draft-time noted value with no choice behind it, and a
+/// wording-only match silently reinterpreted it as a secretly-chosen number.
+/// The only caller is the context-gated arm in
+/// `oracle_quantity::parse_cda_quantity_with_context`, which fires solely when
+/// `ParseContext::pending_choice_type` proves a preceding `NumberRange` choice in
+/// the same ability — the same provenance gate `try_parse_guess_clause` uses for
+/// "guesses which number you chose".
+///
+/// Two further guards keep it off phrases that only look alike:
+/// `parse_chosen_number_noun`'s word boundary rejects the PLURAL bookkeeping noun
+/// ("the highest and lowest numberS revealed this way"), and the trailing
+/// `not(tag(" of "))` rejects the counting phrase "the highest number OF
+/// &lt;things&gt;" ("… of cards in hand among players").
+pub(crate) fn parse_extreme_chosen_number_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    map(
+        terminated(
+            terminated(
+                preceded(tag("the "), parse_chosen_number_extremum),
+                parse_chosen_number_noun,
+            ),
+            nom::combinator::not(tag(" of ")),
+        ),
+        |aggregate| QuantityRef::PlayerChosenNumber {
+            player: crate::types::ability::PlayerScope::AllPlayers {
+                aggregate,
+                exclude: None,
+            },
+        },
+    )
+    .parse(input)
+}
+
 pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         alt((
@@ -9071,6 +9143,75 @@ mod tests {
         assert!(type_filters.contains(&TypeFilter::Creature));
         assert!(properties.contains(&FilterProp::NonToken));
         assert_eq!(controller, Some(ControllerRef::You));
+    }
+
+    /// CR 101.4 + CR 608.2d: "the highest number" / "the lowest number" reads as
+    /// the cross-player extremum of the secretly-chosen numbers — and NOT any of
+    /// the look-alike phrases that share its opening words.
+    #[test]
+    fn parse_extreme_chosen_number_ref_shape() {
+        for (text, aggregate) in [
+            ("the highest number", AggregateFunction::Max),
+            ("the lowest number", AggregateFunction::Min),
+        ] {
+            let (rest, q) = parse_extreme_chosen_number_ref(text).unwrap();
+            assert_eq!(rest, "");
+            assert_eq!(
+                q,
+                QuantityRef::PlayerChosenNumber {
+                    player: PlayerScope::AllPlayers {
+                        aggregate,
+                        exclude: None,
+                    },
+                },
+                "{text}"
+            );
+        }
+
+        // The clause continues past the noun — still the same reference, with
+        // the remainder handed back (Wheel of Misfortune's "… to each player").
+        let (rest, q) =
+            parse_extreme_chosen_number_ref("the highest number to each player").unwrap();
+        assert_eq!(rest, " to each player");
+        assert!(matches!(q, QuantityRef::PlayerChosenNumber { .. }));
+
+        // A COUNTING phrase ("the highest number OF cards …") belongs to the
+        // object-count grammar; a PLURAL bookkeeping noun ("the highest and
+        // lowest numberS revealed this way") is not a value reference at all.
+        for unrelated in [
+            "the highest number of cards in hand among players",
+            "the highest numbers revealed this way",
+            "the lowest numbers revealed this way",
+        ] {
+            assert!(
+                parse_extreme_chosen_number_ref(unrelated).is_err(),
+                "{unrelated} must not read as a chosen-number extremum"
+            );
+        }
+    }
+
+    /// The extremum reference is NOT reachable from the context-free
+    /// `parse_quantity_ref` grammar. Wording alone does not identify the concept —
+    /// Custodi Peacekeeper's "the highest number you noted for cards named …" is a
+    /// draft-time noted value with no choice behind it — so the only route in is
+    /// the provenance-gated arm in `parse_cda_quantity_with_context`, which
+    /// requires a preceding `NumberRange` choice in the same ability.
+    ///
+    /// Fail-on-revert: re-registering the combinator in the context-free alt makes
+    /// every one of these read as a secretly-chosen number.
+    #[test]
+    fn context_free_quantity_grammar_never_yields_a_chosen_number_extremum() {
+        for text in [
+            "the highest number",
+            "the lowest number",
+            "the highest number you noted for cards named Custodi Peacekeeper",
+        ] {
+            let parsed = parse_quantity_ref(text).ok().map(|(_, q)| q);
+            assert!(
+                !matches!(parsed, Some(QuantityRef::PlayerChosenNumber { .. })),
+                "{text} must not resolve to a chosen number without proven provenance, got {parsed:?}"
+            );
+        }
     }
 
     #[test]

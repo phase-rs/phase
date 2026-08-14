@@ -358,6 +358,10 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::Renown { .. }
         | Effect::ReturnAsAura { .. }
         | Effect::Reveal { .. }
+        // CR 101.4: publishing already-chosen numbers moves no card and changes
+        // no board state, so it is neither good nor bad on its own — the damage
+        // and wheel clauses that READ those numbers carry the polarity.
+        | Effect::RevealChosenNumbers { .. }
         | Effect::RevealFromHand { .. }
         | Effect::RevealHand { .. }
         | Effect::RevealTop { .. }

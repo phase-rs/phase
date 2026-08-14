@@ -2051,6 +2051,7 @@
     "searchPlaceholder": "Buscar por nombre...",
     "noCardsFound": "No se encontraron cartas",
     "buttonSubtitle": "Selecciona una opción",
+    "numberSubtitle": "Introduce un número entero mayor o igual que {{min}}",
     "filterPlaceholder": "Filtrar opciones...",
     "noOptionsMatch": "Ninguna opción coincide"
   },
