@@ -1317,6 +1317,7 @@ mod tests {
                     card_id: CardId(100),
                     controller: PlayerId(0),
                     object_id: cast_obj,
+                    cast_mana_value: None,
                 }],
                 log_entries: Vec::new(),
             },

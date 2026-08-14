@@ -2672,6 +2672,22 @@ impl<'a> CastCommit<'a> {
         &self.runner.state
     }
 
+    /// Submit an action while this cast remains committed on the stack.
+    ///
+    /// This keeps response tests on the same `apply()` pipeline as the live
+    /// game, while preserving the committed cast's hand and target baselines.
+    pub fn act(&mut self, action: GameAction) -> Result<ActionResult, EngineError> {
+        self.runner.act(action)
+    }
+
+    /// Start another fluent cast while this committed spell waits on the stack.
+    ///
+    /// Used by response tests to cast a counterspell or other instant before
+    /// resolving the committed spell and its triggers.
+    pub fn cast(&mut self, spell: ObjectId) -> SpellCast<'_> {
+        self.runner.cast(spell)
+    }
+
     /// Mutate the board WHILE the committed spell is still on the stack.
     ///
     /// The spell has been announced (CR 601.2a-i) but not resolved (CR 608.2), which

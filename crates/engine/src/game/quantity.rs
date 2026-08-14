@@ -6005,26 +6005,20 @@ where
 /// CR 601.2i + CR 202.3e: a `SpellCast` event's cast-time record preserves the
 /// announced X value after the spell leaves the stack, where the live object's
 /// mana value correctly treats X as zero.
-fn spell_cast_record_mana_value_for_event(state: &GameState, event: &GameEvent) -> Option<i32> {
+fn spell_cast_mana_value_for_event(event: &GameEvent) -> Option<i32> {
     let GameEvent::SpellCast {
-        controller,
-        object_id,
+        cast_mana_value: Some(value),
         ..
     } = event
     else {
         return None;
     };
 
-    state
-        .spells_cast_this_turn_by_player
-        .get(controller)
-        .and_then(|records| {
-            records
-                .iter()
-                .rev()
-                .find(|record| record.spell_object_id == Some(*object_id))
-                .map(|record| u32_to_i32_saturating(record.mana_value))
-        })
+    // CR 603.7c: the event-bound value is the authority for the exact cast that
+    // caused this trigger. It remains distinct when the same object id is cast
+    // again before an earlier trigger resolves. Legacy/synthetic events without
+    // this snapshot retain the existing live/LKI fallback below.
+    Some(u32_to_i32_saturating(*value))
 }
 
 /// CR 202.3: Resolve an object's mana value through the same ObjectScope axis
@@ -6208,7 +6202,7 @@ fn resolve_object_mana_value(
             .or_else(|| {
                 current_or_detection_trigger_event(state)
                     .as_ref()
-                    .and_then(|event| spell_cast_record_mana_value_for_event(state, event))
+                    .and_then(spell_cast_mana_value_for_event)
             })
             .or_else(|| {
                 object_id_for_scope(state, ObjectScope::EventSource, ctx, targets).and_then(|id| {
@@ -13589,6 +13583,7 @@ mod tests {
             card_id: CardId(11),
             controller: PlayerId(0),
             object_id: triggering_spell,
+            cast_mana_value: None,
         });
 
         let expr = QuantityExpr::Ref {
@@ -13977,6 +13972,68 @@ mod tests {
             resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)),
             2,
             "second Approach cast must satisfy `another spell named ~ this game` (count >= 2)"
+        );
+    }
+
+    /// CR 603.7c + CR 202.3e: an event-bound cast-time mana value must win over
+    /// later same-id history records, while a legacy event with no bound value
+    /// must not guess between ambiguous records.
+    #[test]
+    fn event_bound_spell_mana_value_survives_same_id_recast() {
+        let spell_id = ObjectId(77);
+        let mut state = GameState::new_two_player(42);
+        state.spells_cast_this_turn_by_player.insert(
+            PlayerId(0),
+            crate::im::Vector::from(vec![
+                SpellCastRecord {
+                    mana_value: 6,
+                    spell_object_id: Some(spell_id),
+                    ..SpellCastRecord::default()
+                },
+                SpellCastRecord {
+                    mana_value: 4,
+                    spell_object_id: Some(spell_id),
+                    ..SpellCastRecord::default()
+                },
+            ]),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Demonstrative,
+            },
+        };
+
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            card_id: CardId(77),
+            controller: PlayerId(0),
+            object_id: spell_id,
+            cast_mana_value: Some(6),
+        });
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &expr, &ability),
+            6,
+            "the earlier trigger must use its event-bound cast value, not the later X"
+        );
+
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            card_id: CardId(77),
+            controller: PlayerId(0),
+            object_id: spell_id,
+            cast_mana_value: None,
+        });
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &expr, &ability),
+            0,
+            "an ambiguous legacy event must fail closed rather than guess a history record"
         );
     }
 
@@ -14513,6 +14570,7 @@ mod tests {
             card_id: CardId(2),
             controller: PlayerId(0),
             object_id: target,
+            cast_mana_value: None,
         });
         let event_source_expr = QuantityExpr::Ref {
             qty: QuantityRef::ObjectColorCount {

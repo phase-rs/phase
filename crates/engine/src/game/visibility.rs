@@ -1602,6 +1602,7 @@ pub fn filter_events_for_viewer(
                     card_id: CardId(0),
                     controller: *controller,
                     object_id: *object_id,
+                    cast_mana_value: None,
                 }
             }
             other => other.clone(),
@@ -2657,16 +2658,19 @@ mod tests {
                 card_id: CardId(701),
                 controller: PlayerId(1),
                 object_id: face_down_spell,
+                cast_mana_value: None,
             },
             GameEvent::SpellCast {
                 card_id: CardId(702),
                 controller: PlayerId(0),
                 object_id: own_spell,
+                cast_mana_value: None,
             },
             GameEvent::SpellCast {
                 card_id: CardId(703),
                 controller: PlayerId(1),
                 object_id: opponent_face_up_spell,
+                cast_mana_value: None,
             },
         ];
 
@@ -2678,6 +2682,7 @@ mod tests {
                     card_id: CardId(0),
                     controller: PlayerId(1),
                     object_id,
+                    ..
                 },
                 GameEvent::SpellCast {
                     card_id: CardId(702),
@@ -2688,6 +2693,7 @@ mod tests {
                     card_id: CardId(703),
                     controller: PlayerId(1),
                     object_id: face_up_object_id,
+                    ..
                 },
             ] if *object_id == face_down_spell && *face_up_object_id == opponent_face_up_spell
         ));
