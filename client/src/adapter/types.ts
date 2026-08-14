@@ -3515,6 +3515,15 @@ export const AdapterErrorCode = {
   /** Engine rejected game init because one or more decks are not bracket 5 at a cEDH table. */
   BRACKET_VIOLATION: "BRACKET_VIOLATION",
   /**
+   * Engine refused game init because another session already owns it. On a
+   * memory-constrained device the P2P host shares the tab's single engine
+   * worker with local play, so the engine refuses in both directions — a
+   * hosted game starting on top of a live local game, and a local game
+   * starting on top of a hosted one. Not recoverable by retry: the user has to
+   * finish or leave the other game first.
+   */
+  ENGINE_OCCUPIED: "ENGINE_OCCUPIED",
+  /**
    * The engine's actor-authorization guards (`check_actor_authorization` /
    * priority checks, CR 117 priority / CR 500 turn structure) rejected the
    * action because the submitting seat is no longer the authorized submitter
