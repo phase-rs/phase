@@ -91,7 +91,8 @@ fn abandon_pending_spell_casts(
             | PendingCostMoveResume::UnlessBouncePayment { .. }
             | PendingCostMoveResume::ManaAbilityPayment { .. }
             | PendingCostMoveResume::LoyaltyActivation { .. }
-            | PendingCostMoveResume::CounterAdditionUnlessPayment { .. } => false,
+            | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+            | PendingCostMoveResume::RandomDiscardUnlessPayment(..) => false,
         };
         if !abandons_spell {
             state.pending_cost_move_resume = Some(resume);
