@@ -1446,9 +1446,8 @@ impl TryFrom<LegacyManaSpellGrantRepr> for ManaSpellGrant {
                 restriction,
                 ability,
             } => Ok(Self::TriggerOnSpend {
-                filter: restriction.map_or(Ok(TargetFilter::Any), |value| {
-                    value.try_into_event_filter()
-                })?,
+                filter: restriction
+                    .map_or(Ok(TargetFilter::Any), |value| value.try_into_event_filter())?,
                 ability,
             }),
         }
@@ -2536,8 +2535,8 @@ mod tests {
                 "ability": ability.clone(),
             }
         });
-        let grant: ManaSpellGrant =
-            serde_json::from_value(without_restriction).expect("unrestricted legacy grant deserializes");
+        let grant: ManaSpellGrant = serde_json::from_value(without_restriction)
+            .expect("unrestricted legacy grant deserializes");
         assert_eq!(
             grant,
             ManaSpellGrant::TriggerOnSpend {
