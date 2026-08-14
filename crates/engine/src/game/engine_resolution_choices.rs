@@ -6126,6 +6126,14 @@ pub(super) fn handle_resolution_choice(
                 choice_type,
                 mut source,
                 persist_player,
+                // MUST stay a wildcard. The published contract is a projection of
+                // `choice_type`, and validation below consults that single
+                // authority directly (`accepts_free_entry_answer`) — so a client
+                // cannot widen its own domain by echoing back a different one.
+                // Binding this to a literal instead would make the arm miss every
+                // prompt that HAS a contract, i.e. every free-entry answer would
+                // fall through to "action not allowed".
+                free_entry: _,
             },
             GameAction::ChooseOption { choice },
         ) => {
@@ -10111,6 +10119,7 @@ mod tests {
             Zone::Battlefield,
         );
         let waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(1),
             choice_type: ChoiceType::CardPredicateGuess {
                 options: ChoiceType::land_or_nonland_card_predicate_options(),
@@ -10162,6 +10171,7 @@ mod tests {
             Zone::Battlefield,
         );
         let waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(0),
             choice_type: ChoiceType::CardPredicate {
                 options: ChoiceType::land_or_nonland_card_predicate_options(),

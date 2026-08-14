@@ -296,6 +296,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         options,
         source,
         persist_player,
+        free_entry,
     } = &state.waiting_for
     {
         let mut source = source.clone();
@@ -308,6 +309,10 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             options: options.clone(),
             source,
             persist_player: *persist_player,
+            // The free-entry contract is what the prompt PUBLISHES; it carries no
+            // hidden information (it is a function of `choice_type`, which is
+            // already public here), so the projection forwards it intact.
+            free_entry: *free_entry,
         };
     }
 
@@ -2211,6 +2216,7 @@ mod tests {
             options: vec!["Anchor".to_string()],
         };
         state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(0),
             choice_type: choice_type.clone(),
             options: vec!["Anchor".to_string()],
@@ -2223,6 +2229,7 @@ mod tests {
         assert!(matches!(
             source_less_view.waiting_for,
             WaitingFor::NamedChoice {
+                free_entry: _,
                 player: PlayerId(0),
                 ref choice_type,
                 ref options,
@@ -2250,6 +2257,7 @@ mod tests {
         );
         let expected_prompt = source.prompt.clone();
         state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(0),
             choice_type,
             options: vec!["Anchor".to_string()],
@@ -2261,6 +2269,7 @@ mod tests {
         assert!(source_bound_view.resolution_stack.is_empty());
         match source_bound_view.waiting_for {
             WaitingFor::NamedChoice {
+                free_entry: None,
                 source: Some(source),
                 persist_player,
                 ..
@@ -5584,6 +5593,7 @@ mod tests {
         // P0 has already answered; P1 is the pending chooser.
         state.players[0].chosen_attributes = vec![ChosenAttribute::Number(4)];
         state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(1),
             choice_type: ChoiceType::NumberRange {
                 min: 0,

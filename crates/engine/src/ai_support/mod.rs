@@ -6022,6 +6022,7 @@ mod tests {
         // A "choose a player" prompt (CR 601.2b) with NO offered options — the
         // engine can produce no legal `ChooseOption`, so no submitter can act.
         state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(0),
             choice_type: ChoiceType::Labeled { options: vec![] },
             options: vec![],

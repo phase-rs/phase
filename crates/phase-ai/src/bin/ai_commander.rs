@@ -1191,6 +1191,7 @@ mod tests {
         );
 
         state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(1),
             choice_type: ChoiceType::CardName,
             options: Vec::new(),

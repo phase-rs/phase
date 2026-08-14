@@ -517,6 +517,7 @@ fn random_card_predicate_guess(
     use rand::seq::IndexedRandom;
 
     let WaitingFor::NamedChoice {
+        free_entry: _,
         player,
         choice_type,
         options,
@@ -9317,6 +9318,7 @@ mod tests {
             Zone::Battlefield,
         );
         state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(1),
             choice_type: ChoiceType::CardPredicateGuess {
                 options: ChoiceType::land_or_nonland_card_predicate_options(),
@@ -9416,6 +9418,7 @@ mod tests {
             Zone::Battlefield,
         );
         state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(1),
             choice_type: ChoiceType::CardPredicate {
                 options: ChoiceType::land_or_nonland_card_predicate_options(),
@@ -9453,6 +9456,7 @@ mod tests {
         );
         state.all_card_names = vec!["Forest".to_string(), "Island".to_string()].into();
         state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(0),
             choice_type: ChoiceType::CardName,
             options: Vec::new(),
@@ -9472,6 +9476,7 @@ mod tests {
         let mut state = make_state();
         state.all_card_names = vec!["Forest".to_string()].into();
         state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: P0,
             choice_type: ChoiceType::CardName,
             options: Vec::new(),
@@ -9504,6 +9509,7 @@ mod tests {
         let mut state = make_state();
         state.all_card_names = Vec::new().into();
         state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(0),
             choice_type: ChoiceType::CardName,
             options: Vec::new(),
@@ -12221,6 +12227,7 @@ mod tests {
             Zone::Battlefield,
         );
         guess.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(1),
             choice_type: ChoiceType::CardPredicateGuess {
                 options: ChoiceType::land_or_nonland_card_predicate_options(),

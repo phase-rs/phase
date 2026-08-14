@@ -24,9 +24,10 @@ use crate::parser::oracle_ir::effect_chain::{
 use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::OracleError;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CastFromZoneDriver,
-    CastingPermission, ControllerRef, Effect, PlayerFilter, QuantityExpr, QuantityRef,
-    StaticCondition, SubAbilityLink, TapStateChange, TargetFilter,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
+    CastFromZoneDriver, CastingPermission, ChoiceType, Comparator, ControllerRef, DamageChannel,
+    Effect, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, StaticCondition, SubAbilityLink,
+    TapStateChange, TargetFilter,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -1329,6 +1330,134 @@ fn damage_amount_reads_event_context(effect: &Effect) -> bool {
     reads
 }
 
+/// The recipient of a single-recipient scalar instruction — the position a
+/// "… to them" / "… they lose" player anaphor occupies. Paired with
+/// [`scalar_amount_mut`], which reads the "that much" position of the same
+/// instruction; split in two because the binding below needs the recipient
+/// immutably to decide, then the amount mutably to rewrite.
+fn scalar_recipient(effect: &Effect) -> Option<&TargetFilter> {
+    match effect {
+        Effect::DealDamage { target, .. } => Some(target),
+        Effect::GainLife { player, .. } => Some(player),
+        Effect::LoseLife { target, .. } => target.as_ref(),
+        _ => None,
+    }
+}
+
+fn scalar_amount_mut(effect: &mut Effect) -> Option<&mut QuantityExpr> {
+    match effect {
+        Effect::DealDamage { amount, .. }
+        | Effect::GainLife { amount, .. }
+        | Effect::LoseLife { amount, .. } => Some(amount),
+        _ => None,
+    }
+}
+
+/// CR 109.4: the chain index of the `Choose(Player)` clause a recipient anaphor
+/// names, if it names one. A resolution-time chosen player is carried as a
+/// player-only `Typed` filter whose controller is `ChosenPlayer { index }` —
+/// the shape `subject::chosen_player_anaphor_filter` is the sole producer of.
+fn chosen_player_anaphor_index(filter: &TargetFilter) -> Option<u8> {
+    match filter {
+        TargetFilter::Typed(tf) => match tf.controller {
+            Some(ControllerRef::ChosenPlayer { index }) => Some(index),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// CR 101.4 + CR 107.1a: The extremum a "choose a player with the highest/lowest
+/// number" restriction selected by, if that is what this player filter is.
+///
+/// Recognizes exactly the shape `lower::chosen_number_player_filter` emits, and
+/// only under `EQ` — under `NE` ("an opponent who DIDN'T choose the highest
+/// number") the extremum is provably *not* the chosen player's number, so there
+/// is nothing to bind and this returns `None`.
+fn chosen_number_selection_extremum(filter: &PlayerFilter) -> Option<AggregateFunction> {
+    let PlayerFilter::PlayerAttribute {
+        attr,
+        comparator: Comparator::EQ,
+        value,
+        ..
+    } = filter
+    else {
+        return None;
+    };
+    if !matches!(
+        **attr,
+        QuantityRef::PlayerChosenNumber {
+            player: PlayerScope::ScopedPlayer
+        }
+    ) {
+        return None;
+    }
+    match &**value {
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::PlayerChosenNumber {
+                    player:
+                        PlayerScope::AllPlayers {
+                            aggregate,
+                            exclude: None,
+                        },
+                },
+        } => Some(*aggregate),
+        _ => None,
+    }
+}
+
+/// CR 608.2c + CR 101.4: Bind the "that much" of a
+/// *"Choose an opponent with the highest number. ~ deals that much damage to
+/// them."* continuation (Itazura, Lingering Wick) to the number that selection
+/// was made by.
+///
+/// `EventContextAmount` means "the amount the surrounding event supplies", and a
+/// resolving spell supplies none — left alone the instruction silently deals 0.
+/// The antecedent is provable from the assembled chain rather than guessable at
+/// lowering time, which is why this runs here: the recipient anaphor names a
+/// specific `Choose(Player)` clause by index, and that clause's own restriction
+/// says which extremum it selected by. Both halves must agree, so an
+/// intervening unrestricted player choice (which would shift the index) simply
+/// fails to match and nothing is rebound.
+///
+/// The bound reference is the chain-wide extremum, not a read of the chosen
+/// player's own number: the `EQ` restriction guarantees the chosen player HOLDS
+/// that extremum, so the two are equal by construction, and expressing it this
+/// way reuses the `PlayerChosenNumber` scalar the restriction itself is built
+/// from instead of minting a resolution-scoped `PlayerScope::ChosenPlayer` whose
+/// only consumer would be this binding.
+fn bind_chosen_number_anaphor(def: &mut AbilityDefinition, prior: &[AbilityDefinition]) {
+    let Some(index) = scalar_recipient(&def.effect).and_then(chosen_player_anaphor_index) else {
+        return;
+    };
+    let mut player_choices = prior.iter().filter_map(|d| match &*d.effect {
+        Effect::Choose {
+            choice_type: choice_type @ (ChoiceType::Player { .. } | ChoiceType::Opponent { .. }),
+            ..
+        } => Some(choice_type),
+        _ => None,
+    });
+    let Some(ChoiceType::Opponent {
+        restriction: Some(restriction),
+        ..
+    }) = player_choices.nth(index as usize)
+    else {
+        return;
+    };
+    let Some(aggregate) = chosen_number_selection_extremum(restriction) else {
+        return;
+    };
+    if let Some(amount) = scalar_amount_mut(def.effect.as_mut()) {
+        amount.rebind_event_context_amount(&QuantityRef::PlayerChosenNumber {
+            player: PlayerScope::AllPlayers {
+                aggregate,
+                exclude: None,
+            },
+        });
+    }
+}
+
 pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     let kind = ir.kind;
     let continuation_kind = ir.continuation_kind.unwrap_or(AbilityKind::Spell);
@@ -2074,6 +2203,9 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // not a different per-recipient event-context amount. Bind only this
         // explicit continuation relationship; event-fed and per-player-scoped
         // `EventContextAmount` consumers retain their ordinary meaning.
+        // CR 608.2c + CR 101.4: bind a "that much … to them" pair back to the
+        // number the earlier player selection was made by (Itazura).
+        bind_chosen_number_anaphor(&mut def, &defs);
         if let Some(prev) = defs.last() {
             if def.sub_link == SubAbilityLink::ContinuationStep
                 && prev.sub_ability.is_none()
@@ -2082,7 +2214,9 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 && damage_amount_reads_event_context(&def.effect)
             {
                 if let Effect::DamageEachPlayer { amount, .. } = def.effect.as_mut() {
-                    amount.rebind_event_context_amount_to_previous_effect();
+                    amount.rebind_event_context_amount(&QuantityRef::PreviousEffectAmount {
+                        channel: DamageChannel::Total,
+                    });
                 }
             }
         }

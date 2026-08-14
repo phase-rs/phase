@@ -5120,44 +5120,62 @@ fn strip_player_attribute_clause(
 /// permutations, so a new phrasing on any one axis costs one `tag`. `anaphor`
 /// supplies the referent for "that number"; `None` disables that arm, which is
 /// correct wherever no extremum is in scope to anaphor back to.
+/// A trailing `" of "` disqualifies EVERY arm: "the highest number OF cards in
+/// hand" is a counting phrase over a population, not a reference to a chosen
+/// number. This is the same guard the quantity-side `parse_extreme_chosen_number_ref`
+/// carries — without it here, "choose an opponent with the highest number of
+/// cards in hand" binds a chosen-number comparison to a card that has no choice
+/// in it, the Custodi Peacekeeper failure one layer over.
 pub(crate) fn parse_chosen_number_restriction(
     i: &str,
     anaphor: Option<AggregateFunction>,
 ) -> OracleResult<'_, (Comparator, AggregateFunction)> {
-    alt((
-        map(
-            (
-                tag("who "),
-                alt((
-                    value(
-                        Comparator::NE,
-                        alt((tag("didn't "), tag("did not "), tag("doesn't "))),
-                    ),
-                    nom::combinator::success(Comparator::EQ),
-                )),
-                alt((tag("chose "), tag("chooses "), tag("choose "))),
-                tag("the "),
-                nom_quantity::parse_chosen_number_extremum,
-                nom_quantity::parse_chosen_number_noun,
-            ),
-            |(_, comparator, _, _, aggregate, ())| (comparator, aggregate),
-        ),
-        map(
-            terminated(
-                preceded(tag("with the "), nom_quantity::parse_chosen_number_extremum),
-                nom_quantity::parse_chosen_number_noun,
-            ),
-            |aggregate| (Comparator::EQ, aggregate),
-        ),
-        nom::combinator::map_opt(
-            terminated(
-                tag("who chose that"),
-                nom_quantity::parse_chosen_number_noun,
-            ),
-            move |_| anaphor.map(|aggregate| (Comparator::EQ, aggregate)),
-        ),
-    ))
+    terminated(
+        parse_chosen_number_restriction_body(anaphor),
+        not(tag(" of ")),
+    )
     .parse(i)
+}
+
+fn parse_chosen_number_restriction_body(
+    anaphor: Option<AggregateFunction>,
+) -> impl FnMut(&str) -> OracleResult<'_, (Comparator, AggregateFunction)> {
+    move |i: &str| {
+        alt((
+            map(
+                (
+                    tag("who "),
+                    alt((
+                        value(
+                            Comparator::NE,
+                            alt((tag("didn't "), tag("did not "), tag("doesn't "))),
+                        ),
+                        nom::combinator::success(Comparator::EQ),
+                    )),
+                    alt((tag("chose "), tag("chooses "), tag("choose "))),
+                    tag("the "),
+                    nom_quantity::parse_chosen_number_extremum,
+                    nom_quantity::parse_chosen_number_noun,
+                ),
+                |(_, comparator, _, _, aggregate, ())| (comparator, aggregate),
+            ),
+            map(
+                terminated(
+                    preceded(tag("with the "), nom_quantity::parse_chosen_number_extremum),
+                    nom_quantity::parse_chosen_number_noun,
+                ),
+                |aggregate| (Comparator::EQ, aggregate),
+            ),
+            nom::combinator::map_opt(
+                terminated(
+                    tag("who chose that"),
+                    nom_quantity::parse_chosen_number_noun,
+                ),
+                move |_| anaphor.map(|aggregate| (Comparator::EQ, aggregate)),
+            ),
+        ))
+        .parse(i)
+    }
 }
 
 /// CR 101.4 + CR 608.2d: the `PlayerFilter` selecting the players whose
@@ -8397,6 +8415,17 @@ fn resolve_player_anaphor_damage_recipient(
     // them"), not just the subject verb forms handled in subject.rs.
     if let Some(filter) =
         super::subject::enchanted_player_anaphor_filter(ctx.relative_player_scope.as_ref())
+    {
+        return Some(filter);
+    }
+    // CR 608.2c + CR 109.4: "Choose an opponent …. ~ deals that much damage to
+    // them." — the recipient is the player the earlier `Choose(Player)` clause
+    // selected, carried on `relative_player_scope` across the sentence boundary.
+    // Same single-authority binding the subject-position "they" anaphor uses
+    // (`resolve_they_pronoun`), so both pronoun positions in this card class
+    // (Itazura, Lingering Wick; Gluntch, the Bestower) name the same player.
+    if let Some(filter) =
+        super::subject::chosen_player_anaphor_filter(ctx.relative_player_scope.as_ref())
     {
         return Some(filter);
     }

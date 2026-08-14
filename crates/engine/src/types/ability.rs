@@ -823,19 +823,58 @@ impl ChoiceType {
     /// accepts cannot be rejected by the other. Returns `None` for choice kinds
     /// whose answers are validated by membership instead.
     ///
-    /// The upper bound is `i32::MAX` — not a UI cap, but the engine's own
-    /// arithmetic domain: every quantity resolves through `i32`, so a number
-    /// beyond it could not be dealt as damage or compared against a life total.
-    /// Within that domain every value the rules permit is accepted.
+    /// Delegates to [`ChoiceType::free_entry`] so the rule this enforces and the
+    /// contract published to clients are the same value, not two statements of
+    /// the same intent.
     pub fn accepts_free_entry_answer(&self, answer: &str) -> Option<bool> {
-        match self {
-            Self::NumberRange { min, max: None, .. } => {
+        match self.free_entry()? {
+            FreeEntry::Number { min, max } => {
                 let parsed = answer.trim().parse::<u32>();
-                Some(parsed.is_ok_and(|n| n >= *min && n <= i32::MAX as u32))
+                Some(parsed.is_ok_and(|n| n >= min && n <= max))
             }
+        }
+    }
+
+    /// CR 107.1a/b: The free-entry contract for this choice, or `None` when the
+    /// answer is picked from an option list instead.
+    ///
+    /// This is the ONE definition of what a free-entry answer may be. It is what
+    /// [`ChoiceType::accepts_free_entry_answer`] validates against, what the AI's
+    /// legal-action enumeration samples within, and — published on
+    /// `WaitingFor::NamedChoice` — what a client renders and bounds its input by.
+    /// A client that reads this contract cannot reject a value the engine accepts,
+    /// because there is no second statement of the domain to drift from.
+    pub fn free_entry(&self) -> Option<FreeEntry> {
+        match self {
+            // CR 107.1a/b: an unbounded number choice cannot be enumerated, so
+            // the player supplies the value. Bounded ranges keep their option
+            // list and are validated by membership.
+            Self::NumberRange { min, max: None, .. } => Some(FreeEntry::Number {
+                min: *min,
+                // Not a UI cap, but the engine's own arithmetic domain: every
+                // quantity resolves through `i32`, so a number beyond this could
+                // not be dealt as damage or compared against a life total.
+                // Within that domain every value the rules permit is accepted.
+                max: i32::MAX as u32,
+            }),
             _ => None,
         }
     }
+}
+
+/// CR 107.1a/b: A choice whose answer the player supplies rather than picks from
+/// an enumerated list, together with the bounds that make an answer legal.
+///
+/// Published on the prompt (`WaitingFor::NamedChoice::free_entry`) so a client
+/// renders and bounds the input from engine-stated values instead of
+/// re-deriving them from the choice's own shape. `Number`'s bounds are both
+/// INCLUSIVE. `CardName` and the other unbounded-string choices are deliberately
+/// absent: their answers are validated against the card corpus, not a range, so
+/// they have no contract of this form to publish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum FreeEntry {
+    Number { min: u32, max: u32 },
 }
 
 impl Serialize for ChoiceType {
@@ -7629,22 +7668,25 @@ impl QuantityExpr {
         }
     }
 
-    /// CR 608.2c: Rebind a later clause's generic event-context amount to the
-    /// scalar result of the immediately preceding resolved instruction.
+    /// CR 608.2c: Rebind a later clause's generic event-context amount ("that
+    /// much", "that many") to the `antecedent` the surrounding grammar names.
     ///
-    /// Parser chain assembly uses this only when grammar proves that the
-    /// antecedent is the prior effect, rather than a triggering event or a
-    /// per-player iteration. The recursive walk preserves arithmetic wrappers
-    /// such as "twice that much".
-    pub fn rebind_event_context_amount_to_previous_effect(&mut self) {
+    /// `EventContextAmount` is the *unbound* demonstrative: it means "the amount
+    /// from the surrounding event context", which is correct only when a
+    /// triggering event or a per-player iteration supplies one. When chain
+    /// assembly can PROVE a different antecedent from the printed grammar — the
+    /// preceding instruction's scalar result, or a number a preceding clause had
+    /// a player choose — it rebinds the leaf here. The antecedent is a parameter
+    /// rather than one method per referent, so every provable binding shares one
+    /// recursive walk (which preserves arithmetic wrappers such as "twice that
+    /// much"); callers must not use it for merely plausible antecedents.
+    pub fn rebind_event_context_amount(&mut self, antecedent: &QuantityRef) {
         match self {
             QuantityExpr::Ref {
                 qty: QuantityRef::EventContextAmount,
             } => {
                 *self = QuantityExpr::Ref {
-                    qty: QuantityRef::PreviousEffectAmount {
-                        channel: DamageChannel::Total,
-                    },
+                    qty: antecedent.clone(),
                 };
             }
             QuantityExpr::Offset { inner, .. }
@@ -7654,15 +7696,15 @@ impl QuantityExpr {
             | QuantityExpr::UpTo { max: inner }
             | QuantityExpr::Power {
                 exponent: inner, ..
-            } => inner.rebind_event_context_amount_to_previous_effect(),
+            } => inner.rebind_event_context_amount(antecedent),
             QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
                 for expr in exprs {
-                    expr.rebind_event_context_amount_to_previous_effect();
+                    expr.rebind_event_context_amount(antecedent);
                 }
             }
             QuantityExpr::Difference { left, right } => {
-                left.rebind_event_context_amount_to_previous_effect();
-                right.rebind_event_context_amount_to_previous_effect();
+                left.rebind_event_context_amount(antecedent);
+                right.rebind_event_context_amount(antecedent);
             }
             QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => {}
         }

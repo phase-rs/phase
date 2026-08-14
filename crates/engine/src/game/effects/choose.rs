@@ -78,6 +78,9 @@ pub fn resolve(
 
     state.waiting_for = WaitingFor::NamedChoice {
         player: ability.controller,
+        // CR 107.1a/b: publish the free-entry contract alongside the choice it
+        // belongs to, so a client never has to re-derive it from `choice_type`.
+        free_entry: choice_type.free_entry(),
         choice_type,
         options,
         source,
@@ -1001,6 +1004,7 @@ mod tests {
 
         match &state.waiting_for {
             WaitingFor::NamedChoice {
+                free_entry: _,
                 player,
                 choice_type,
                 options,
@@ -1047,6 +1051,7 @@ mod tests {
 
         match &state.waiting_for {
             WaitingFor::NamedChoice {
+                free_entry: None,
                 choice_type,
                 options,
                 ..
@@ -1161,6 +1166,7 @@ mod tests {
 
         match &state.waiting_for {
             WaitingFor::NamedChoice {
+                free_entry: None,
                 choice_type,
                 options,
                 ..
@@ -1317,6 +1323,7 @@ mod tests {
 
         match &state.waiting_for {
             WaitingFor::NamedChoice {
+                free_entry: _,
                 player,
                 choice_type,
                 options,

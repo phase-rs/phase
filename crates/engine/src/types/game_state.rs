@@ -10653,6 +10653,17 @@ pub enum WaitingFor {
         /// object-scoped binding used by Khans Sieges and every other named choice.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         persist_player: Option<PlayerId>,
+        /// CR 107.1a/b: the free-entry contract for `choice_type`, when its
+        /// answer is supplied by the player rather than picked from `options`.
+        ///
+        /// Published so a client renders the right control and bounds its input
+        /// from engine-stated values, instead of inspecting `choice_type`'s
+        /// serialized shape and restating the domain itself — a second authority
+        /// that could reject a value the engine accepts. Always
+        /// `choice_type.free_entry()`; `named_choice_free_entry_matches_choice_type`
+        /// pins that across every prompt the engine raises.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        free_entry: Option<crate::types::ability::FreeEntry>,
     },
     /// CR 608.2d + CR 608.2e: a player other than the controller (an opponent /
     /// the defending player) guesses a committed value or proposition during

@@ -11,7 +11,7 @@ import {
   getPlayerDisplayName,
   useMultiplayerStore,
 } from "../../stores/multiplayerStore.ts";
-import type { PlayerId, WaitingFor } from "../../adapter/types.ts";
+import type { FreeEntry, PlayerId, WaitingFor } from "../../adapter/types.ts";
 
 type OptionChoice = Extract<
   WaitingFor,
@@ -49,37 +49,33 @@ function getChoiceTypeKey(choiceType: string | Record<string, unknown>): string 
 
 const MAX_RESULTS = 10;
 
-/** CR 107.1a/b: the minimum of an unbounded number choice, or null when this is
- *  not one. The engine omits `max` entirely for "choose a number 0 or greater",
- *  so an absent max — not an empty option list — is what identifies the
- *  free-entry numeric form. A bounded range keeps its options and its grid. */
-function unboundedNumberMin(
-  choiceType: string | Record<string, unknown>,
-): number | null {
-  if (typeof choiceType === "string") return null;
-  const payload = (choiceType as Record<string, unknown>).NumberRange;
-  if (payload == null || typeof payload !== "object") return null;
-  const fields = payload as { min?: unknown; max?: unknown };
-  if (fields.max != null) return null;
-  return typeof fields.min === "number" ? fields.min : 0;
-}
-
 export function NamedChoiceModal({ data }: { data: OptionChoice["data"] }) {
   const typeKey = getChoiceTypeKey(data.choice_type);
   if (typeKey === "CardName") {
     return <CardNameSearch />;
   }
-  const unboundedMin = unboundedNumberMin(data.choice_type);
-  if (unboundedMin !== null) {
-    return <NumberEntry min={unboundedMin} />;
+  // CR 107.1a/b: the engine publishes a free-entry contract when the answer is
+  // typed rather than picked from `options`. Its PRESENCE — not any reading of
+  // `choice_type`'s serialized shape — selects the numeric form; an enumerated
+  // choice carries no contract and keeps its grid.
+  const freeEntry = "free_entry" in data ? data.free_entry : undefined;
+  if (freeEntry?.kind === "Number") {
+    return <NumberEntry contract={freeEntry} />;
   }
   return <ButtonGrid data={data} typeKey={typeKey} />;
 }
 
-/** CR 107.1a/b: free-entry numeric prompt for a choice with no stated maximum.
- *  The engine validates the answer authoritatively (`accepts_free_entry_answer`);
- *  this only keeps the player from submitting something it would reject. */
-function NumberEntry({ min }: { min: number }) {
+/** CR 107.1a/b: free-entry numeric prompt, rendered and bounded entirely from
+ *  the engine's published contract.
+ *
+ *  The engine validates the submitted answer authoritatively
+ *  (`ChoiceType::accepts_free_entry_answer`) against the same bounds it
+ *  published here, so this check can only ever agree with it. Deriving the
+ *  bounds locally instead — from the choice type's shape, or from a hard-coded
+ *  numeric ceiling — would make the client a second authority, free to reject a
+ *  value the engine accepts and to drift when the engine's domain changes. */
+function NumberEntry({ contract }: { contract: FreeEntry }) {
+  const { min, max } = contract;
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const [value, setValue] = useState(String(min));
@@ -90,11 +86,12 @@ function NumberEntry({ min }: { min: number }) {
     inputRef.current?.select();
   }, []);
 
-  // Mirrors the engine's rule: a nonnegative integer at least `min`, within the
-  // i32 quantity domain the rest of the engine can represent.
   const parsed = /^\d+$/.test(value.trim()) ? Number(value.trim()) : null;
   const valid =
-    parsed !== null && Number.isSafeInteger(parsed) && parsed >= min && parsed <= 2147483647;
+    parsed !== null &&
+    Number.isSafeInteger(parsed) &&
+    parsed >= min &&
+    parsed <= max;
 
   const confirm = useCallback(() => {
     if (valid) {

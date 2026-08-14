@@ -608,6 +608,9 @@ pub(crate) fn begin_variable_speed_payment(
             max: Some(u32::from(max)),
             distinctness: crate::types::ability::NumberDistinctness::Repeatable,
         },
+        // A stated maximum means the options above enumerate the domain; there
+        // is no free entry to contract for.
+        free_entry: None,
         source: None,
         persist_player: None,
     }

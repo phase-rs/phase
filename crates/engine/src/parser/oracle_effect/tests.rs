@@ -28121,20 +28121,103 @@ fn secret_number_provenance_invariant_holds_across_the_class() {
     // secret number and reads the extremum back, so it must appear here or the
     // sweep is measuring nothing.
     //
-    // Itazura is deliberately NOT expected. It creates the choice but its "Choose
-    // an opponent with the highest number" does not currently bind to it — the
-    // restriction lowers without a `PlayerChosenNumber` threshold. That is a real
-    // partial-support gap, not a regression: on `main` the whole card died at
-    // `Unimplemented { secretly }`. Pinning the reader set exactly means closing
-    // that gap will fail this assertion and force the list to be updated
-    // deliberately rather than drifting.
+    // Itazura joined the readers when "Choose an opponent with the highest
+    // number" was bound to the restriction seam. It was previously listed here as
+    // a known gap, and this assertion is what forced that to be closed
+    // deliberately rather than drifting: the fix made the sweep RED until the
+    // expected set was updated with the card confirmed correct.
     assert_eq!(
         readers,
-        vec!["Menacing Ogre"],
+        vec!["Menacing Ogre", "Itazura, Lingering Wick"],
         "the sweep's positive side changed. If a card gained a chosen-number read, \
-         confirm it is correct and add it here; if Menacing Ogre stopped reading one, \
-         the grammar regressed and the implication above is now vacuous"
+         confirm it is correct and add it here; if one stopped reading, the grammar \
+         regressed and the implication above is now vacuous"
     );
+}
+
+/// CR 608.2c + CR 101.4: *"Choose an opponent with the highest number. ~ deals
+/// that much damage to them."* — the anaphor pair, and the guards that keep it
+/// from firing where the antecedent isn't provable.
+///
+/// "That much" is `EventContextAmount` — "whatever amount the surrounding event
+/// supplies" — and a resolving spell supplies none, so an unbound anaphor here
+/// deals 0 rather than failing loudly. `bind_chosen_number_anaphor` rewrites it
+/// only when the recipient anaphor names a `Choose(Player)` clause that selected
+/// BY the chosen number.
+///
+/// The two declines are the point of the test: a chosen player selected without
+/// a number restriction, and one selected by NOT holding the extremum, both have
+/// a "highest number" in scope but neither makes it that player's number.
+/// Fail-on-revert: drop either guard and a decline case starts binding.
+#[test]
+fn that_much_damage_to_them_binds_only_to_a_provable_chosen_number() {
+    const SELECT: &str = "Each opponent secretly chooses a number 0 or greater. \
+                          Then those numbers are revealed. ";
+
+    // BINDS: the selection was made BY the number, so the chosen player holds
+    // the extremum and "that much" is that extremum.
+    let bound = format!(
+        "{SELECT}Choose an opponent with the highest number. \
+         Wick deals that much damage to them."
+    );
+    let rendered = format!(
+        "{:?}",
+        parse_oracle_text(&bound, "Wick", &[], &["Instant".to_string()], &[])
+    );
+    assert!(
+        rendered.contains("PlayerChosenNumber"),
+        "the damage amount must bind to the chosen number, not stay an \
+         unbound event-context amount: {rendered}"
+    );
+    assert!(
+        rendered.contains("ChosenPlayer"),
+        "the recipient \"them\" must name the chosen player: {rendered}"
+    );
+
+    // DECLINES. Both still parse a chosen player and still say "that much"; what
+    // they lack is a restriction proving that player's number IS the extremum.
+    for (label, oracle) in [
+        (
+            "no restriction — any opponent may be chosen, so no extremum is theirs",
+            format!("{SELECT}Choose an opponent. Wick deals that much damage to them."),
+        ),
+        (
+            "negated restriction — the chosen player provably does NOT hold it",
+            format!(
+                "{SELECT}Choose an opponent who didn't choose the highest number. \
+                 Wick deals that much damage to them."
+            ),
+        ),
+    ] {
+        let rendered = format!(
+            "{:?}",
+            parse_oracle_text(&oracle, "Wick", &[], &["Instant".to_string()], &[])
+        );
+        // Non-vacuity: the decline must be a decline to BIND, not a failure to
+        // parse the damage clause at all — otherwise the assertion below holds
+        // for the wrong reason.
+        assert!(
+            rendered.contains("DealDamage"),
+            "{label}: the damage clause must still parse, or the decline below \
+             is vacuous: {rendered}"
+        );
+        // Scope the assertion to the damage amount: the SELECTION clause of the
+        // negated case legitimately carries a `PlayerChosenNumber` in its
+        // restriction, so a whole-tree "contains" check would be vacuous there.
+        assert!(
+            !damage_amount_reads_chosen_number(&rendered),
+            "{label}: the damage amount must stay unbound: {rendered}"
+        );
+    }
+}
+
+/// Whether a rendered ability's `DealDamage` amount reads a chosen number,
+/// ignoring chosen-number references anywhere else in the tree.
+fn damage_amount_reads_chosen_number(rendered: &str) -> bool {
+    rendered.split("DealDamage").skip(1).any(|tail| {
+        let amount = tail.split("target").next().unwrap_or(tail);
+        amount.contains("PlayerChosenNumber")
+    })
 }
 
 /// CR 608.2d: "the highest number" is only a secretly-chosen number when a

@@ -893,6 +893,24 @@ fn definition_reads_player_chosen_number(def: &AbilityDefinition) -> bool {
             return true;
         }
     }
+    // CR 608.2d: a `Choose(Opponent)`'s RESTRICTION is a read site too — "choose
+    // an opponent with the highest number" narrows the option list by comparing
+    // each candidate's chosen number, so the choice it reads must persist. The
+    // filter lives inside the `ChoiceType`, which no quantity walk reaches; this
+    // is the same class of miss as the condition arm below.
+    if let Effect::Choose {
+        choice_type:
+            ChoiceType::Opponent {
+                restriction: Some(restriction),
+                ..
+            },
+        ..
+    } = def.effect.as_ref()
+    {
+        if player_filter_reads_player_chosen_number(restriction) {
+            return true;
+        }
+    }
     // CR 608.2c: a link's CONDITION is a read site too. "If you are one of those
     // players …" gates on the chosen number just as surely as an amount does, and
     // the condition is evaluated DURING the same resolution — so a chain whose
@@ -7993,13 +8011,52 @@ fn try_parse_choose_player_to_verb(
     // restriction to the `Opponent` choice so it stays a single pick (CR 608.2d
     // resolves ties) rather than fanning out. Consume the qualifier so it is not
     // left dangling on the verb tail.
+    //
+    // CR 101.4 + CR 608.2c: the same seam carries "choose an opponent WITH THE
+    // HIGHEST NUMBER" (Itazura, Lingering Wick), which narrows the pick to the
+    // opponent(s) who chose the cross-player maximum. Dropping that qualifier
+    // would let the controller pick an opponent who did NOT choose the highest
+    // and then damage that illegal choice, so it is bound, not discarded. It
+    // reuses the same restriction grammar and `PlayerFilter` builder as the
+    // "each player who chose the highest number" subject path, and is gated on
+    // provenance — with no preceding secret-number choice in this ability there
+    // is nothing for "the highest number" to refer to.
+    let has_number_choice = matches!(
+        ctx.pending_choice_type,
+        Some(ChoiceType::NumberRange { .. })
+    );
     let after_player = if let ChoiceType::Opponent { restriction, .. } = &mut choice_type {
         match parse_opponent_most_life_restriction(after_player) {
             Ok((rest, filter)) => {
                 *restriction = Some(Box::new(filter));
                 rest
             }
-            Err(_) => after_player,
+            Err(_) => {
+                let chosen_number = has_number_choice
+                    .then(|| {
+                        let after = after_player.strip_prefix(' ').unwrap_or(after_player);
+                        lower::parse_chosen_number_restriction(after, None)
+                            .ok()
+                            .map(|(rest, (comparator, aggregate))| {
+                                (
+                                    rest,
+                                    lower::chosen_number_player_filter(
+                                        crate::types::ability::PlayerRelation::Opponent,
+                                        comparator,
+                                        aggregate,
+                                    ),
+                                )
+                            })
+                    })
+                    .flatten();
+                match chosen_number {
+                    Some((rest, filter)) => {
+                        *restriction = Some(Box::new(filter));
+                        rest
+                    }
+                    None => after_player,
+                }
+            }
         }
     } else {
         after_player
@@ -25462,13 +25519,28 @@ fn parse_number_distinctness(tail: &str) -> NumberDistinctness {
 }
 
 pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
+    try_parse_named_choice_with_provenance(lower, false)
+}
+
+/// CR 608.2d + CR 107.1a/b: `try_parse_named_choice`, told whether a
+/// secretly-chosen number already exists in this ability.
+///
+/// Only the imperative dispatcher can answer that (it holds `ParseContext`), and
+/// only one phrase needs it: "choose an opponent WITH THE HIGHEST NUMBER"
+/// (Itazura). Without the provenance flag that restriction would be bound by
+/// wording alone — the failure mode that rewrote Custodi Peacekeeper — so the
+/// default entry point passes `false` and the restriction simply is not offered.
+pub(crate) fn try_parse_named_choice_with_provenance(
+    lower: &str,
+    has_number_choice: bool,
+) -> Option<ChoiceType> {
     let (rest, _) = alt((
         tag::<_, _, OracleError<'_>>("choose "),
         nom::sequence::preceded(tag("secretly "), tag("choose ")),
     ))
     .parse(lower)
     .ok()?;
-    parse_named_choice_object(rest)
+    parse_named_choice_object_with_provenance(rest, has_number_choice)
 }
 
 /// The object phrase of a named choice, with any leading "choose "/"secretly
@@ -25478,6 +25550,13 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
 /// Paper) can re-dispatch each conjunct through this same phrase table instead
 /// of duplicating it or reconstructing a "choose "-prefixed string.
 pub(crate) fn parse_named_choice_object(rest: &str) -> Option<ChoiceType> {
+    parse_named_choice_object_with_provenance(rest, false)
+}
+
+pub(crate) fn parse_named_choice_object_with_provenance(
+    rest: &str,
+    has_number_choice: bool,
+) -> Option<ChoiceType> {
     type E<'a> = OracleError<'a>;
     if tag::<_, _, E>("a creature type").parse(rest).is_ok() {
         Some(ChoiceType::creature_type())
@@ -25587,9 +25666,38 @@ pub(crate) fn parse_named_choice_object(rest: &str) -> Option<ChoiceType> {
         .is_ok()
     {
         Some(ChoiceType::LandType)
-    } else if tag::<_, _, E>("an opponent").parse(rest).is_ok() {
-        // CR 800.4a: Choose an opponent from among players in the game.
-        Some(ChoiceType::opponent())
+    } else if let Ok((after_opponent, _)) = tag::<_, _, E>("an opponent").parse(rest) {
+        // CR 608.2c + CR 608.2d: "choose an opponent WITH THE HIGHEST NUMBER"
+        // (Itazura, Lingering Wick). The restriction is part of the instruction
+        // and cannot be discarded — dropping it lets the controller pick an
+        // opponent who did not choose the highest number and then damage that
+        // illegal choice.
+        //
+        // Reuses the same restriction grammar and `PlayerFilter` builder the
+        // "each player who chose the highest number" subject path uses, so the
+        // two phrasings cannot drift. Gated on provenance: without a preceding
+        // secret-number choice in this ability there is nothing for "the highest
+        // number" to refer to, and binding it by wording alone is the Custodi
+        // Peacekeeper failure.
+        let restriction = has_number_choice
+            .then(|| {
+                let after = after_opponent.strip_prefix(' ').unwrap_or(after_opponent);
+                lower::parse_chosen_number_restriction(after, None)
+                    .ok()
+                    .map(|(_, (comparator, aggregate))| {
+                        lower::chosen_number_player_filter(
+                            crate::types::ability::PlayerRelation::Opponent,
+                            comparator,
+                            aggregate,
+                        )
+                    })
+            })
+            .flatten();
+        match restriction {
+            Some(restriction) => Some(ChoiceType::opponent_with_restriction(restriction)),
+            // CR 800.4a: Choose an opponent from among players in the game.
+            None => Some(ChoiceType::opponent()),
+        }
     } else if tag::<_, _, E>("a player").parse(rest).is_ok() {
         Some(ChoiceType::player())
     } else if tag::<_, _, E>("two colors").parse(rest).is_ok() {
