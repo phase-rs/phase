@@ -8034,7 +8034,8 @@ fn try_parse_choose_player_to_verb(
             Err(_) => {
                 let chosen_number = has_number_choice
                     .then(|| {
-                        let after = after_player.strip_prefix(' ').unwrap_or(after_player);
+                        let (after, _) =
+                            tag::<_, _, OracleError<'_>>(" ").parse(after_player).ok()?;
                         lower::parse_chosen_number_restriction(after, None)
                             .ok()
                             .map(|(rest, (comparator, aggregate))| {
@@ -25682,7 +25683,7 @@ pub(crate) fn parse_named_choice_object_with_provenance(
         // Peacekeeper failure.
         let restriction = has_number_choice
             .then(|| {
-                let after = after_opponent.strip_prefix(' ').unwrap_or(after_opponent);
+                let (after, _) = tag::<_, _, E>(" ").parse(after_opponent).ok()?;
                 lower::parse_chosen_number_restriction(after, None)
                     .ok()
                     .map(|(_, (comparator, aggregate))| {
