@@ -9445,6 +9445,56 @@ fn migrate_legacy_mana_target_roles_in_value(
     Ok(())
 }
 
+/// Upgrade the pre-`SetTapState` tap-family effects at the persisted-state
+/// boundary. This is deliberately scoped to `effect` payloads: `Untap` is
+/// still meaningful in other serialized enums (for example, a phase or a
+/// target property), and current card data must continue to reject obsolete
+/// effect variants rather than silently accepting them.
+fn migrate_legacy_tap_effects(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                migrate_legacy_tap_effects(value);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            if let Some(effect) = object.get_mut("effect") {
+                migrate_legacy_tap_effect(effect);
+            }
+            for value in object.values_mut() {
+                migrate_legacy_tap_effects(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn migrate_legacy_tap_effect(effect: &mut serde_json::Value) {
+    let Some(effect) = effect.as_object_mut() else {
+        return;
+    };
+    let Some((scope, state)) = effect
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|effect_type| match effect_type {
+            "Tap" => Some(("Single", "Tap")),
+            "Untap" => Some(("Single", "Untap")),
+            "TapAll" => Some(("All", "Tap")),
+            "UntapAll" => Some(("All", "Untap")),
+            _ => None,
+        })
+    else {
+        return;
+    };
+
+    effect.insert(
+        "type".to_string(),
+        serde_json::Value::String("SetTapState".to_string()),
+    );
+    effect.insert("scope".to_string(), serde_json::json!({ "type": scope }));
+    effect.insert("state".to_string(), serde_json::json!({ "type": state }));
+}
+
 fn delayed_trigger_install_command(
     entry: &serde_json::Value,
 ) -> Option<&serde_json::Map<String, serde_json::Value>> {
@@ -16300,7 +16350,9 @@ impl GameStateDecode {
             value,
             matches!(mode, GameStateDecodeMode::ResolutionWireV1),
         )?;
-        migrate_legacy_mana_target_roles(value)
+        migrate_legacy_mana_target_roles(value)?;
+        migrate_legacy_tap_effects(value);
+        Ok(())
     }
 
     pub(crate) fn materialize_prepared(value: serde_json::Value) -> Result<GameState, String> {
@@ -22901,15 +22953,103 @@ mod tests {
     use crate::game::triggers::{PendingTrigger, PendingTriggerContext};
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, PostReplacementContinuation, QuantityExpr,
-        ResolvedAbility, TargetFilter, TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef,
-        TriggerEntry, TriggerGrantInstanceRef,
+        AbilityDefinition, AbilityKind, Effect, EffectScope, PostReplacementContinuation,
+        QuantityExpr, ResolvedAbility, TapStateChange, TargetFilter, TriggerBaseSetInstanceRef,
+        TriggerDefinitionOccurrenceRef, TriggerEntry, TriggerGrantInstanceRef,
     };
     use crate::types::deterministic_serde::test_support::ReverseBuildHasher;
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
     };
     use crate::types::resolved_commands::ResolvedDelayedTriggerCommand;
+
+    #[test]
+    fn persisted_legacy_tap_effects_migrate_only_effect_payloads() {
+        let mut persisted = serde_json::json!({
+            "objects": {
+                "3": {
+                    "abilities": [{
+                        "effect": { "type": "Untap", "target": { "type": "ParentTarget" } },
+                        "sub_ability": {
+                            "effect": { "type": "TapAll", "target": { "type": "Typed" } }
+                        }
+                    }]
+                }
+            },
+            "unrelated": { "type": "Untap" }
+        });
+
+        migrate_legacy_tap_effects(&mut persisted);
+
+        assert_eq!(
+            persisted["objects"]["3"]["abilities"][0]["effect"],
+            serde_json::json!({
+                "type": "SetTapState",
+                "target": { "type": "ParentTarget" },
+                "scope": { "type": "Single" },
+                "state": { "type": "Untap" }
+            }),
+            "legacy single-target Untap maps to the parameterized effect"
+        );
+        assert_eq!(
+            persisted["objects"]["3"]["abilities"][0]["sub_ability"]["effect"],
+            serde_json::json!({
+                "type": "SetTapState",
+                "target": { "type": "Typed" },
+                "scope": { "type": "All" },
+                "state": { "type": "Tap" }
+            }),
+            "nested legacy mass effects retain their population scope"
+        );
+        assert_eq!(
+            persisted["unrelated"],
+            serde_json::json!({ "type": "Untap" }),
+            "only serialized Effect payloads are migrated"
+        );
+    }
+
+    #[test]
+    fn persisted_legacy_untap_effect_restores_as_set_tap_state() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Legacy untap source".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .expect("test source exists")
+            .abilities
+            .push(AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::SetTapState {
+                    target: TargetFilter::ParentTarget,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
+                },
+            ));
+
+        let mut persisted = serde_json::to_value(state).expect("state serializes");
+        persisted["objects"][source.0.to_string()]["abilities"][0]["effect"] = serde_json::json!({
+            "type": "Untap",
+            "target": { "type": "ParentTarget" }
+        });
+
+        let restored = serde_json::from_value::<PersistedGameState>(persisted)
+            .expect("legacy effect save restores through the persisted boundary")
+            .into_game_state();
+        assert!(matches!(
+            restored.objects[&source].abilities[0].effect.as_ref(),
+            Effect::SetTapState {
+                target: TargetFilter::ParentTarget,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
+            }
+        ));
+    }
 
     /// The `LiminalEntrant` witness is a compile-time distinction with no wire
     /// footprint: it serializes as the bare projected object, exactly as this
