@@ -3,7 +3,8 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
-    AbilityTag, Comparator, QuantityExpr, TargetFilter, TriggerDefinitionOccurrenceRef,
+    AbilityTag, Comparator, FilterProp, QuantityExpr, TargetFilter, TriggerDefinitionOccurrenceRef,
+    TypeFilter, TypedFilter,
 };
 use super::counter::CounterType;
 use super::events::GameEvent;
@@ -1391,6 +1392,63 @@ enum ManaSpellGrantRepr {
     },
 }
 
+/// Wire form written before spend-trigger predicates moved from the CR 106.6
+/// mana-restriction axis to the CR 603.3 event-filter axis.
+#[derive(Deserialize)]
+enum LegacyManaSpellGrantRepr {
+    TriggerOnSpend {
+        #[serde(default)]
+        restriction: Option<LegacyManaSpendTriggerRestriction>,
+        ability: Box<crate::types::ability::AbilityDefinition>,
+    },
+}
+
+#[derive(Deserialize)]
+enum LegacyManaSpendTriggerRestriction {
+    OnlyForSpellWithManaValue { comparator: Comparator, value: u32 },
+    OnlyForCreatureType(String),
+    SharesCreatureTypeWithCommander,
+}
+
+impl LegacyManaSpendTriggerRestriction {
+    /// CR 603.3: A historical mana-spend trigger's old restriction selected the
+    /// spell event that makes the trigger fire, so preserve it as that event's
+    /// object filter rather than as a current CR 106.6 spend restriction.
+    fn into_event_filter(self) -> TargetFilter {
+        match self {
+            Self::OnlyForSpellWithManaValue { comparator, value } => {
+                TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Cmc {
+                    comparator,
+                    value: QuantityExpr::Fixed {
+                        value: value as i32,
+                    },
+                }]))
+            }
+            Self::OnlyForCreatureType(subtype) => {
+                TargetFilter::Typed(TypedFilter::creature().subtype(subtype))
+            }
+            Self::SharesCreatureTypeWithCommander => TargetFilter::Typed(
+                TypedFilter::creature()
+                    .properties(vec![FilterProp::SharesCreatureTypeWithCommander]),
+            ),
+        }
+    }
+}
+
+impl From<LegacyManaSpellGrantRepr> for ManaSpellGrant {
+    fn from(value: LegacyManaSpellGrantRepr) -> Self {
+        match value {
+            LegacyManaSpellGrantRepr::TriggerOnSpend {
+                restriction,
+                ability,
+            } => Self::TriggerOnSpend {
+                filter: restriction.map_or(TargetFilter::Any, |value| value.into_event_filter()),
+                ability,
+            },
+        }
+    }
+}
+
 impl From<ManaSpellGrantRepr> for ManaSpellGrant {
     fn from(value: ManaSpellGrantRepr) -> Self {
         match value {
@@ -1432,9 +1490,12 @@ impl<'de> Deserialize<'de> for ManaSpellGrant {
             });
         }
 
-        serde_json::from_value::<ManaSpellGrantRepr>(value)
-            .map(Into::into)
-            .map_err(serde::de::Error::custom)
+        match serde_json::from_value::<ManaSpellGrantRepr>(value.clone()) {
+            Ok(value) => Ok(value.into()),
+            Err(current_error) => serde_json::from_value::<LegacyManaSpellGrantRepr>(value)
+                .map(Into::into)
+                .map_err(|_| serde::de::Error::custom(current_error)),
+        }
     }
 }
 
@@ -2403,6 +2464,7 @@ pub fn apply_empty_mana_pool_decisions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::{AbilityDefinition, AbilityKind, Effect};
 
     #[test]
     fn mana_spell_grant_accepts_legacy_unqualified_counter_protection() {
@@ -2419,6 +2481,49 @@ mod tests {
         let round_tripped: ManaSpellGrant =
             serde_json::from_str(&serialized).expect("current grant deserializes");
         assert_eq!(round_tripped, grant);
+    }
+
+    #[test]
+    fn mana_spell_grant_migrates_legacy_spend_trigger_restrictions() {
+        let ability = AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp);
+        let cases = [
+            (
+                serde_json::json!("SharesCreatureTypeWithCommander"),
+                TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .properties(vec![FilterProp::SharesCreatureTypeWithCommander]),
+                ),
+            ),
+            (
+                serde_json::json!({"OnlyForCreatureType": "Dragon"}),
+                TargetFilter::Typed(TypedFilter::creature().subtype("Dragon".to_string())),
+            ),
+            (
+                serde_json::json!({"OnlyForSpellWithManaValue": {"comparator": "GE", "value": 4}}),
+                TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Cmc {
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Fixed { value: 4 },
+                }])),
+            ),
+        ];
+
+        for (restriction, filter) in cases {
+            let legacy = serde_json::json!({
+                "TriggerOnSpend": {
+                    "restriction": restriction,
+                    "ability": ability,
+                }
+            });
+            let grant: ManaSpellGrant =
+                serde_json::from_value(legacy).expect("legacy grant deserializes");
+            assert_eq!(
+                grant,
+                ManaSpellGrant::TriggerOnSpend {
+                    filter,
+                    ability: Box::new(ability.clone()),
+                }
+            );
+        }
     }
 
     /// CR 702.143: `reduced_generic_by` reduces only the generic component,
