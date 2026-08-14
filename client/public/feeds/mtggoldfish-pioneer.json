@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-08-13T00:00:00Z",
+  "updated": "2026-08-14T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -846,7 +846,7 @@
           "name": "Abandon Attachments"
         },
         {
-          "count": 2,
+          "count": 3,
           "name": "Accumulate Wisdom"
         },
         {
@@ -866,7 +866,7 @@
           "name": "Divide by Zero"
         },
         {
-          "count": 3,
+          "count": 2,
           "name": "Firebending Lesson"
         },
         {
@@ -887,19 +887,23 @@
         },
         {
           "count": 2,
-          "name": "Shivan Reef"
+          "name": "Ral, Crackling Wit"
         },
         {
           "count": 4,
           "name": "Riverglide Pathway"
         },
         {
-          "count": 2,
-          "name": "Riverpyre Verge"
+          "count": 4,
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 1,
+          "name": "Shivan Reef"
         },
         {
           "count": 4,
-          "name": "Spirebluff Canal"
+          "name": "Island"
         },
         {
           "count": 4,
@@ -910,33 +914,33 @@
           "name": "Stormchaser's Talent"
         },
         {
-          "count": 1,
-          "name": "Torch the Tower"
+          "count": 2,
+          "name": "Riverpyre Verge"
         },
         {
           "count": 2,
           "name": "Vivi Ornitier"
         },
         {
-          "count": 4,
-          "name": "Island"
-        },
-        {
           "count": 1,
           "name": "Spell Pierce"
         },
         {
-          "count": 2,
-          "name": "Ral, Crackling Wit"
+          "count": 1,
+          "name": "Firebending Lesson"
+        },
+        {
+          "count": 1,
+          "name": "Shivan Reef"
         }
       ],
       "sideboard": [
         {
-          "count": 2,
+          "count": 1,
           "name": "Abrade"
         },
         {
-          "count": 2,
+          "count": 1,
           "name": "Accumulate Wisdom"
         },
         {
@@ -972,8 +976,16 @@
           "name": "Ral, Crackling Wit"
         },
         {
+          "count": 1,
+          "name": "Abrade"
+        },
+        {
           "count": 2,
           "name": "Soul-Guide Lantern"
+        },
+        {
+          "count": 1,
+          "name": "Torch the Tower"
         }
       ]
     },
@@ -1251,24 +1263,16 @@
       ],
       "main": [
         {
+          "count": 4,
+          "name": "Abandon Attachments"
+        },
+        {
           "count": 3,
           "name": "Accumulate Wisdom"
         },
         {
-          "count": 4,
-          "name": "Gran-Gran"
-        },
-        {
-          "count": 4,
-          "name": "It'll Quench Ya!"
-        },
-        {
-          "count": 4,
-          "name": "Firebending Lesson"
-        },
-        {
-          "count": 2,
-          "name": "Island"
+          "count": 3,
+          "name": "Combustion Technique"
         },
         {
           "count": 4,
@@ -1276,11 +1280,39 @@
         },
         {
           "count": 4,
-          "name": "Tablet of Discovery"
+          "name": "Firebending Lesson"
+        },
+        {
+          "count": 4,
+          "name": "Gran-Gran"
         },
         {
           "count": 1,
-          "name": "Mountain"
+          "name": "Iroh's Demonstration"
+        },
+        {
+          "count": 1,
+          "name": "Island"
+        },
+        {
+          "count": 4,
+          "name": "It'll Quench Ya!"
+        },
+        {
+          "count": 3,
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 2,
+          "name": "Pop Quiz"
+        },
+        {
+          "count": 3,
+          "name": "Questing Druid"
+        },
+        {
+          "count": 4,
+          "name": "Riverglide Pathway"
         },
         {
           "count": 4,
@@ -1288,35 +1320,15 @@
         },
         {
           "count": 1,
-          "name": "Riverglide Pathway"
-        },
-        {
-          "count": 4,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 3,
-          "name": "Combustion Technique"
+          "name": "Mountain"
         },
         {
           "count": 1,
-          "name": "Iroh's Demonstration"
-        },
-        {
-          "count": 3,
-          "name": "Spirebluff Canal"
-        },
-        {
-          "count": 3,
-          "name": "Riverglide Pathway"
-        },
-        {
-          "count": 2,
-          "name": "Pop Quiz"
+          "name": "Island"
         },
         {
           "count": 4,
-          "name": "Abandon Attachments"
+          "name": "Tablet of Discovery"
         },
         {
           "count": 2,
@@ -1327,38 +1339,26 @@
           "name": "Willowrush Verge"
         },
         {
-          "count": 3,
-          "name": "Questing Druid"
+          "count": 4,
+          "name": "Steam Vents"
         }
       ],
       "sideboard": [
-        {
-          "count": 1,
-          "name": "Boomerang Basics"
-        },
-        {
-          "count": 1,
-          "name": "Environmental Sciences"
-        },
-        {
-          "count": 2,
-          "name": "Sokka's Haiku"
-        },
-        {
-          "count": 1,
-          "name": "Price of Freedom"
-        },
-        {
-          "count": 1,
-          "name": "Iroh's Demonstration"
-        },
         {
           "count": 1,
           "name": "Accumulate Wisdom"
         },
         {
           "count": 1,
-          "name": "Mascot Exhibition"
+          "name": "Boomerang Basics"
+        },
+        {
+          "count": 1,
+          "name": "Combustion Technique"
+        },
+        {
+          "count": 1,
+          "name": "Environmental Sciences"
         },
         {
           "count": 2,
@@ -1370,15 +1370,27 @@
         },
         {
           "count": 1,
+          "name": "Iroh's Demonstration"
+        },
+        {
+          "count": 1,
+          "name": "Mascot Exhibition"
+        },
+        {
+          "count": 1,
           "name": "Origin of Metalbending"
         },
         {
           "count": 1,
-          "name": "True Ancestry"
+          "name": "Price of Freedom"
+        },
+        {
+          "count": 2,
+          "name": "Sokka's Haiku"
         },
         {
           "count": 1,
-          "name": "Combustion Technique"
+          "name": "True Ancestry"
         }
       ]
     }
