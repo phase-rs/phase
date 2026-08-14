@@ -38,7 +38,6 @@ use engine::types::resolution::ResolutionFrame;
 
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::ability::EffectKind;
-use engine::types::identifiers::ObjectId;
 
 /// CR 614.1a: a counter-placement replacement in the Hardened Scales / Doubling
 /// Season class. Two of these are simultaneously applicable to the same
@@ -110,8 +109,8 @@ fn issue_7384_proliferate_paused_by_counter_replacement_keeps_the_stack_clean() 
     let mut runner = scenario.build();
     let starting_counters = runner.state().objects[&grown].counters[&CounterType::Plus1Plus1];
 
-    // CR 701.34a: the proliferate replacement doubles the action count, so the
-    // first action opens a choice with `remaining: 1` parked behind it.
+    // Tekuthal's proliferate replacement makes two actions. CR 701.34a defines
+    // each action; the first opens a choice with `remaining: 1` parked behind it.
     let ability = ResolvedAbility::new(Effect::Proliferate, vec![], tekuthal, P0);
     let mut events = Vec::new();
     engine::game::effects::proliferate::resolve(runner.state_mut(), &ability, &mut events).unwrap();
@@ -168,8 +167,8 @@ fn issue_7384_proliferate_paused_by_counter_replacement_keeps_the_stack_clean() 
     );
     assert_eq!(
         proliferate_choices, 2,
-        "CR 701.34a: a doubled proliferate performs TWO actions, each with its own \
-         target choice (pre-fix the second never opened)"
+        "Tekuthal's replacement makes two proliferate actions; CR 701.34a defines \
+         each action's target choice (pre-fix the second never opened)"
     );
 
     // The panic's precondition, stated directly: nothing proliferate-shaped may
