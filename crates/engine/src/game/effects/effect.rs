@@ -1380,6 +1380,7 @@ mod tests {
             card_id: CardId(2),
             controller: PlayerId(0),
             object_id: cast_spell,
+            cast_mana_value: None,
         });
 
         let static_def = StaticDefinition::continuous()
@@ -1538,6 +1539,7 @@ mod tests {
             card_id: CardId(11),
             controller: PlayerId(0),
             object_id: cast_spell,
+            cast_mana_value: None,
         });
 
         let static_def = StaticDefinition::continuous()

@@ -2936,6 +2936,7 @@ mod tests {
             card_id: CardId(1),
             object_id: spell_id,
             controller: PlayerId(0),
+            cast_mana_value: None,
         });
         assert_eq!(
             resolve_event_context_target(&state, &TargetFilter::StackSpell, ObjectId(20)),
