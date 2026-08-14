@@ -2936,6 +2936,16 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             chain.kind = continuation_kind;
             // R2 — a SHAPE REPAIR, not materialization.
             normalize_linked_exile_cast_pair(&mut prev, &mut chain);
+            if prev.else_ability.is_none()
+                && are_complementary_revealed_card_type_conditions(
+                    prev.condition.as_ref(),
+                    chain.condition.as_ref(),
+                )
+            {
+                prev.else_ability = Some(Box::new(chain));
+                chain = prev;
+                continue;
+            }
             // CR 608.2c: an independent sentence after an if/otherwise choice
             // resolves after either branch (for example, Wedding Announcement's
             // three-counter transform also follows its Human-token branch).
@@ -3145,6 +3155,35 @@ fn merge_search_tail_into_additional_cost_else(
         }
     }
     false
+}
+
+// CR 608.2c: A positive card-type rider and its matching negated rider are
+// complementary branches of the same instruction, not independent siblings.
+fn are_complementary_revealed_card_type_conditions(
+    current: Option<&AbilityCondition>,
+    next: Option<&AbilityCondition>,
+) -> bool {
+    let Some(AbilityCondition::RevealedHasCardType {
+        card_types: current_types,
+        additional_filter: current_filter,
+        subtype_filter: current_subtype,
+    }) = current
+    else {
+        return false;
+    };
+    let Some(AbilityCondition::Not { condition }) = next else {
+        return false;
+    };
+    let AbilityCondition::RevealedHasCardType {
+        card_types: next_types,
+        additional_filter: next_filter,
+        subtype_filter: next_subtype,
+    } = condition.as_ref()
+    else {
+        return false;
+    };
+
+    current_types == next_types && current_filter == next_filter && current_subtype == next_subtype
 }
 
 /// R2 — CR 608.2c + CR 401.4: linked-exile-cast bottom cleanup.
