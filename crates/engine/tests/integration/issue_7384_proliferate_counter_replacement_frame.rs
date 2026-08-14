@@ -209,26 +209,16 @@ fn issue_7384_proliferate_paused_by_counter_replacement_keeps_the_stack_clean() 
         all_events
             .iter()
             .filter(|event| matches!(
-                event,
-                GameEvent::EffectResolved {
-                    kind: EffectKind::Proliferate,
-                    ..
-                }
-            ))
-            .count(),
-        1,
-        "the whole doubled proliferate resolves exactly once, after its last action"
-    );
-    assert!(
-        !all_events.iter().any(|event| matches!(
             event,
             GameEvent::EffectResolved {
                 kind: EffectKind::Proliferate,
-                source_id: ObjectId(0),
+                source_id,
                 ..
-            }
-        )),
-        "the completion must carry the real proliferate source, not ObjectId(0)"
+            } if *source_id == tekuthal
+        ))
+            .count(),
+        1,
+        "the whole doubled proliferate resolves exactly once with Tekuthal as its source, after its last action"
     );
 }
 
@@ -317,10 +307,10 @@ fn issue_7384_tutor_after_paused_proliferate_does_not_panic() {
     );
 }
 
-/// CR 122.1 + CR 614.1a: `Effect::ProliferateTarget` (Skyship Plunderer's forced
-/// single-target form) spells out the counter-add rather than using the
-/// proliferate keyword action, so it must NEVER publish
-/// `PlayerActionKind::Proliferate` — publishing it would fire "whenever you
+/// `Effect::ProliferateTarget` (Skyship Plunderer's forced single-target form)
+/// directly instructs the engine to add another counter of each kind; it does
+/// not use the proliferate keyword action defined by CR 701.34a. It must NEVER
+/// publish `PlayerActionKind::Proliferate`, which would fire "whenever you
 /// proliferate" triggers off a card that does not proliferate.
 ///
 /// It shares `apply_proliferate` with the chooser-driven form, and before this
@@ -390,7 +380,7 @@ fn issue_7384_proliferate_target_paused_by_counter_replacement_emits_no_keyword_
     assert_eq!(
         count_events(&all_events, PlayerActionKind::Proliferate),
         0,
-        "CR 122.1: the forced-target form must never publish the proliferate \
+        "CR 701.34a: the forced-target form does not use the proliferate \
          keyword action, or it fires 'whenever you proliferate' triggers"
     );
     assert_eq!(
@@ -400,12 +390,13 @@ fn issue_7384_proliferate_target_paused_by_counter_replacement_emits_no_keyword_
                 event,
                 GameEvent::EffectResolved {
                     kind: EffectKind::ProliferateTarget,
+                    source_id,
                     ..
-                }
+                } if *source_id == plunderer
             ))
             .count(),
         1,
-        "exactly one EffectResolved, carrying this effect's own kind"
+        "exactly one EffectResolved, carrying Skyship Plunderer and this effect's own kind"
     );
     assert!(
         !all_events.iter().any(|event| matches!(
