@@ -16117,9 +16117,11 @@ mod stage2_injector_tests {
                 // Current-main port: #7221's typed player-action completion seam and the
                 // contemporaneous upstream changes moved these three producers. Re-derived
                 // in the merged source, still in their named production functions.
+                // #7382's optional-player routing and pre-entry controller prompt move only
+                // the third and fifth coordinates; both named mints were re-read in place.
                 "game/effects/mod.rs:6640".to_string(),
                 "game/effects/mod.rs:6717".to_string(),
-                "game/effects/mod.rs:9932".to_string(),
+                "game/effects/mod.rs:9939".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
@@ -16457,7 +16459,7 @@ mod stage2_injector_tests {
                 // #4155 adds seven lines above this producer for abandoned-cast
                 // finalization, while its deferred-resume cleanup removes two;
                 // the net +5 moves this coordinate to `:12008`.
-                "game/engine.rs:12008".to_string(),
+                "game/engine.rs:12012".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \
