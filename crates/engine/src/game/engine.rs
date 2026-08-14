@@ -8,12 +8,13 @@ use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::actions::{
     DebugAction, GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp, TriggerOrderTemplateOp,
 };
-use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState, PlayerActionKind};
+use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState};
 use crate::types::game_state::{
     ActionResult, AssistState, AutoMayChoice, AutoPassMode, AutoPassRequest, CastOfferKind,
     CastingVariant, ConvokeMode, CostResume, GameState, LandPlayRecord, LoopDetectionMode,
-    ManaAbilityResume, MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveResume, RetargetScope,
-    StackEntry, StackEntryKind, WaitingFor,
+    ManaAbilityResume, MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveResume,
+    PendingCounterPostAction, PendingEffectResolved, RetargetScope, StackEntry, StackEntryKind,
+    WaitingFor,
 };
 use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIncarnationRef};
 use crate::types::match_config::MatchType;
@@ -11597,21 +11598,14 @@ fn apply_action(
                     ));
                 }
             }
-            if !effects::proliferate::apply_proliferate(state, p, &targets, &mut events) {
-                return Ok(ActionResult {
-                    events,
-                    waiting_for: state.waiting_for.clone(),
-                    log_entries: vec![],
-                });
-            }
-            // CR 701.34a: Emit player-action event so proliferate triggers fire.
-            events.push(GameEvent::PlayerPerformedAction {
-                player_id: p,
-                action: PlayerActionKind::Proliferate,
-                look_count: None,
-                scry_bottom_count: None,
-                scry_top_count: None,
-            });
+            // CR 701.34a + issue #7384: take the frame BEFORE applying counters.
+            // A counter-placement replacement can pause mid-application, and any
+            // path that returns while this direct-choice frame is still resident
+            // strands it on the resolution stack — every later frame transition
+            // then fails `ResolutionStack::validate` against a prompt that has
+            // long since moved on. A wrong stack top degrades to a rejected
+            // action here rather than to silent corruption, because
+            // `take_active_proliferate_frame` reports `UnexpectedTop`.
             let pending = state
                 .take_active_proliferate_frame()
                 .map_err(|error| EngineError::InvalidAction(error.to_string()))?
@@ -11624,6 +11618,15 @@ fn apply_action(
             // (Pentad's charge) — never "all eligible", which could grow an opponent's
             // counters/poison and introduce a loss axis. Slot source = the trigger source (Kilo);
             // `index: 0` (distinct source from the Relic tap-cost/color pins).
+            //
+            // Recorded BEFORE the counters are applied: a counter-placement
+            // replacement can pause `apply_proliferate`, and that path returns
+            // early. Leaving the pin below it would silently drop the pin on
+            // exactly the proliferate this fix made complete, falling back to
+            // the "all eligible" replay this comment rules out. Everything read
+            // here — `state`, `targets`, `p`, `completion_source` — is already
+            // settled, and `object_decision_source` resolves card identity,
+            // which the pending counters do not affect.
             if let Some(source) = object_decision_source(state, completion_source) {
                 let target_pins: Vec<crate::analysis::decision_template::TargetPin> = targets
                     .iter()
@@ -11651,17 +11654,37 @@ fn apply_action(
                     );
                 }
             }
-            if !effects::proliferate::resume_proliferate_actions(state, pending, &mut events) {
+            // The player-action event and any remaining actions are owed once
+            // the counters land, so they ride the completion rather than being
+            // emitted here — `continue_proliferate_actions` is the single
+            // authority for both, on the synchronous and paused paths alike.
+            let completion = PendingEffectResolved::with_post_actions_without_effect(
+                crate::types::ability::EffectKind::Proliferate,
+                completion_source,
+                vec![PendingCounterPostAction::ContinueProliferateActions {
+                    pending: pending.clone(),
+                }],
+            );
+            if !effects::proliferate::apply_proliferate(
+                state,
+                p,
+                &targets,
+                completion,
+                &mut events,
+            ) {
                 return Ok(ActionResult {
                     events,
                     waiting_for: state.waiting_for.clone(),
                     log_entries: vec![],
                 });
             }
-            events.push(GameEvent::EffectResolved {
-                kind: crate::types::ability::EffectKind::Proliferate,
-                source_id: completion_source,
-            subject: None,});
+            if !effects::proliferate::continue_proliferate_actions(state, pending, &mut events) {
+                return Ok(ActionResult {
+                    events,
+                    waiting_for: state.waiting_for.clone(),
+                    log_entries: vec![],
+                });
+            }
             state.waiting_for = WaitingFor::Priority { player: p };
             state.priority_player = p;
             resume_pending_continuation_if_priority(state, &mut events)?;
@@ -18938,7 +18961,36 @@ mod stage2_injector_tests {
                 // #7320's random-discard continuation adds ten lines above this producer in the
                 // merged tree. Re-derived by the exact producer text at `:12773`, not by carrying
                 // the prior coordinate.
-                "game/engine.rs:12773".to_string(),
+                // Proliferate frame-orphan fix (#7384): `:12773 ⇒ :12796`, +23, and ONLY this
+                //   engine.rs entry moved — the four `effects/mod.rs` +
+                //   `scoped_library_search` entries were re-read byte-identical AND in
+                //   place, which is the set-preservation evidence. `git diff -U0` on this
+                //   file has exactly seven hunks; six sit at `:11`–`:11687`, entirely ABOVE
+                //   this producer: net `0` (a dropped `PlayerActionKind` import), `+1` (the
+                //   `game_state` import list gaining a line), `-7` and `+9` (the
+                //   `ProliferateChoice` handler taking its frame BEFORE applying counters),
+                //   `+24` (the loop-pin block moved above `apply_proliferate`, plus the
+                //   completion construction) and `-4` (the terminal `EffectResolved` push
+                //   moving into `continue_proliferate_actions`). `0+1-7+9+24-4 = +23`, and
+                //   predicted `12773+23` equals the observed coordinate exactly. The seventh
+                //   and only remaining hunk is THIS drift note, which sits at `:18964` —
+                //   below the producer — so nothing that moved it is unaccounted for.
+                //   Deliberately stated WITHOUT pinning that hunk's own line count or the
+                //   whole-file delta: this note is self-referential, its length feeds any
+                //   such total, and the previous revision of this row asserted a
+                //   whole-file figure that its own next wording edit falsified by exactly
+                //   the size of that edit. The six above-producer hunks are the whole
+                //   load-bearing claim; the seventh is identified by position, which no
+                //   rewording can invalidate.
+                //   None of it mints a prompt: the handler consumes an ALREADY-minted
+                //   `ProliferateChoice`, and the completion defers a keyword action rather
+                //   than creating a recipient, so the census set is still exactly 5.
+                //   Identity re-established, not assumed, on BOTH controls this row uses:
+                //   the line at `:12796` is sha256-identical (`8a544e87…5cc7d63`) to
+                //   `origin/main:crates/engine/src/game/engine.rs:12773`, and its offset from
+                //   `begin_pending_trigger_target_selection` (`:12662`) is STILL 134 — the
+                //   control that caught this row's one historical SILENT drift.
+                "game/engine.rs:12796".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \

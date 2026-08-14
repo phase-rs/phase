@@ -101,19 +101,11 @@ fn drive_single_proliferate_action(
         return true;
     }
 
-    if remaining_after_this > 0 {
-        state.push_proliferate_frame(PendingProliferateActions {
-            actor,
-            source_id,
-            remaining: remaining_after_this,
-        });
-    } else {
-        state.push_proliferate_frame(PendingProliferateActions {
-            actor,
-            source_id,
-            remaining: 0,
-        });
-    }
+    state.push_proliferate_frame(PendingProliferateActions {
+        actor,
+        source_id,
+        remaining: remaining_after_this,
+    });
 
     state.waiting_for = WaitingFor::ProliferateChoice {
         player: actor,
@@ -178,6 +170,48 @@ pub fn resume_proliferate_actions(
         pending.remaining,
         events,
     )
+}
+
+/// CR 701.34a + CR 608.2c: The single authority for finishing one proliferate
+/// action and continuing to the next.
+///
+/// Publishes the player-action event for the action that just completed — so
+/// "whenever you proliferate" triggers observe each action in the order it
+/// happened — then drives the actions still owed, emitting `EffectResolved`
+/// only once every one of them has finished.
+///
+/// Returns `false` when a further `ProliferateChoice` is now open, in which case
+/// the fresh frame owns finishing the resolution on its own handler cycle.
+///
+/// Both the direct `ProliferateChoice` handler and the
+/// `ContinueProliferateActions` post-action route through here, so a PROMPTED
+/// action's ordering is stated exactly once (issue #7384). CR 701.34a is that
+/// every action emits exactly one player-action event, from one of two sites:
+/// an action with no eligible permanents or players never prompts and is
+/// published by `emit_empty_proliferate_action` instead — do not delete that
+/// emit on the strength of this one.
+pub(crate) fn continue_proliferate_actions(
+    state: &mut GameState,
+    pending: PendingProliferateActions,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let source_id = pending.source_id;
+    events.push(GameEvent::PlayerPerformedAction {
+        player_id: pending.actor,
+        action: PlayerActionKind::Proliferate,
+        look_count: None,
+        scry_bottom_count: None,
+        scry_top_count: None,
+    });
+    if !resume_proliferate_actions(state, pending, events) {
+        return false;
+    }
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::Proliferate,
+        source_id,
+        subject: None,
+    });
+    true
 }
 
 /// CR 614.6 + CR 614.11: Single authority for propose → replace → apply.
@@ -249,9 +283,23 @@ pub fn resolve_target(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    apply_proliferate(state, ability.controller, &ability.targets, events);
+    let kind = EffectKind::from(&ability.effect);
+    // CR 614.1a: a counter-placement replacement may pause mid-application. The
+    // completion carries this effect's own identity so the paused path emits the
+    // same single `EffectResolved` the synchronous path does — and no
+    // `PlayerActionKind::Proliferate`, which this forced-target form must never
+    // publish.
+    if !apply_proliferate(
+        state,
+        ability.controller,
+        &ability.targets,
+        PendingEffectResolved::new(kind, ability.source_id),
+        events,
+    ) {
+        return Ok(());
+    }
     events.push(GameEvent::EffectResolved {
-        kind: EffectKind::from(&ability.effect),
+        kind,
         source_id: ability.source_id,
         subject: None,
     });
@@ -260,10 +308,22 @@ pub fn resolve_target(
 
 /// Apply proliferate to the selected targets — adds one counter of each kind
 /// already present. Called from the engine handler after player makes their choice.
+///
+/// `completion` is the work owed once every counter has landed. It is supplied
+/// by the caller rather than assumed here because the two callers owe different
+/// things: the chooser-driven `Proliferate` continues its remaining actions and
+/// publishes `PlayerActionKind::Proliferate`, while `Effect::ProliferateTarget`
+/// must do neither (CR 122.1 — the card spells out the counter-add instead of
+/// using the keyword action, so it must not fire "whenever you proliferate").
+///
+/// Returns `false` when a counter-placement replacement opened a choice; the
+/// remaining additions and `completion` are parked on a `CounterAdditions` frame
+/// and resume through `drain_pending_counter_additions`.
 pub fn apply_proliferate(
     state: &mut GameState,
     actor: PlayerId,
     selected: &[TargetRef],
+    completion: PendingEffectResolved,
     events: &mut Vec<GameEvent>,
 ) -> bool {
     for target in selected {
@@ -275,12 +335,6 @@ pub fn apply_proliferate(
     }
 
     let additions = proliferate_addition_plan(state, actor, selected);
-    let completion = PendingEffectResolved::with_player_action(
-        EffectKind::Proliferate,
-        crate::types::identifiers::ObjectId(0),
-        actor,
-        PlayerActionKind::Proliferate,
-    );
 
     for (index, addition) in additions.iter().cloned().enumerate() {
         if !apply_counter_addition_plan_item(state, addition, events) {
@@ -402,6 +456,7 @@ mod tests {
         Effect, QuantityModification, ReplacementDefinition, ReplacementPlayerScope, TargetFilter,
         TypedFilter,
     };
+    use crate::types::game_state::{PendingCounterPostAction, PendingEffectResolutionEvent};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
@@ -409,6 +464,13 @@ mod tests {
 
     fn make_proliferate_ability() -> ResolvedAbility {
         ResolvedAbility::new(Effect::Proliferate, vec![], ObjectId(100), PlayerId(0))
+    }
+
+    /// A completion for rows that exercise counter placement only and never
+    /// reach the paused path. Rows that assert the parked completion's shape
+    /// build the real chooser-driven one instead.
+    fn proliferate_test_completion() -> PendingEffectResolved {
+        PendingEffectResolved::new(EffectKind::Proliferate, ObjectId(100))
     }
 
     /// CR 701.34a + CR 614.1a: Tekuthal-style proliferate replacement doubles
@@ -533,6 +595,7 @@ mod tests {
             &mut state,
             PlayerId(0),
             &[TargetRef::Object(obj1)],
+            proliferate_test_completion(),
             &mut events,
         );
 
@@ -567,6 +630,7 @@ mod tests {
             &mut state,
             PlayerId(0),
             &[TargetRef::Object(obj)],
+            proliferate_test_completion(),
             &mut events,
         );
 
@@ -599,6 +663,7 @@ mod tests {
             &mut state,
             PlayerId(0),
             &[TargetRef::Object(obj)],
+            proliferate_test_completion(),
             &mut events,
         );
 
@@ -756,6 +821,7 @@ mod tests {
             &mut state,
             PlayerId(0),
             &[TargetRef::Player(PlayerId(1))],
+            proliferate_test_completion(),
             &mut events,
         );
 
@@ -839,11 +905,26 @@ mod tests {
         object.counters.insert(CounterType::Plus1Plus1, 1);
         object.counters.insert(CounterType::Stun, 1);
 
+        // The completion the `ProliferateChoice` handler actually supplies: the
+        // player-action event and the remaining actions both ride
+        // `ContinueProliferateActions`, so the completion itself owes neither.
+        let pending_frame = PendingProliferateActions {
+            actor: PlayerId(0),
+            source_id: ObjectId(77),
+            remaining: 1,
+        };
         let mut events = Vec::new();
         assert!(!apply_proliferate(
             &mut state,
             PlayerId(0),
             &[TargetRef::Object(obj)],
+            PendingEffectResolved::with_post_actions_without_effect(
+                EffectKind::Proliferate,
+                pending_frame.source_id,
+                vec![PendingCounterPostAction::ContinueProliferateActions {
+                    pending: pending_frame.clone(),
+                }],
+            ),
             &mut events,
         ));
 
@@ -851,19 +932,36 @@ mod tests {
             state.waiting_for,
             WaitingFor::ReplacementChoice { .. }
         ));
-        let pending = state
+        let queued = state
             .active_counter_additions()
             .expect("remaining proliferate additions should be queued");
-        assert_eq!(pending.remaining.len(), 1);
+        assert_eq!(queued.remaining.len(), 1);
+        let completion = queued
+            .completion
+            .as_ref()
+            .expect("the paused proliferate must park its completion");
+        assert_eq!(completion.kind, EffectKind::Proliferate);
+        assert_eq!(
+            completion.source_id, pending_frame.source_id,
+            "the completion must carry the real source, not ObjectId(0)"
+        );
+        assert!(
+            completion.player_action.is_none(),
+            "the proliferate player action is published by ContinueProliferateActions, \
+             so parking it here too would double-fire proliferate triggers"
+        );
         assert!(matches!(
-            pending.completion,
-            Some(PendingEffectResolved {
-                kind: EffectKind::Proliferate,
-                source_id: ObjectId(0),
-                player_action: Some(_),
-                ..
-            })
+            completion.resolution_event,
+            PendingEffectResolutionEvent::Suppress
         ));
+        assert_eq!(
+            completion.post_actions,
+            vec![PendingCounterPostAction::ContinueProliferateActions {
+                pending: pending_frame
+            }],
+            "the parked completion must carry the resume that keeps the remaining \
+             proliferate actions alive across the replacement choice"
+        );
     }
 
     #[test]
@@ -904,6 +1002,7 @@ mod tests {
             &mut state,
             PlayerId(0),
             &[TargetRef::Object(obj)],
+            proliferate_test_completion(),
             &mut events,
         );
 
@@ -941,6 +1040,7 @@ mod tests {
             &mut state,
             PlayerId(0),
             &[TargetRef::Player(PlayerId(1))],
+            proliferate_test_completion(),
             &mut events,
         );
 
@@ -978,6 +1078,7 @@ mod tests {
             &mut state,
             PlayerId(0),
             &[TargetRef::Player(PlayerId(1))],
+            proliferate_test_completion(),
             &mut events,
         );
 
@@ -1071,6 +1172,7 @@ mod tests {
             &mut state,
             PlayerId(0),
             &[TargetRef::Object(obj)],
+            proliferate_test_completion(),
             &mut events,
         );
 
@@ -1130,6 +1232,7 @@ mod tests {
             &mut state,
             PlayerId(0),
             &[TargetRef::Object(obj)],
+            proliferate_test_completion(),
             &mut events,
         );
 

@@ -20,6 +20,7 @@ use crate::types::game_state::{
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{CounterMoveStage, CounterPlacement, ProposedEvent};
+use crate::types::resolution::FrameGate;
 use crate::types::resolved_commands::{
     ResolvedObjectCounterCommand, ResolvedObjectCounterEdit,
     ResolvedObjectCounterReplayInvariantError,
@@ -336,7 +337,7 @@ fn merge_pending_counter_completion_after_nested_pause(
     completion: PendingEffectResolved,
 ) {
     let Some(queue) = state.active_counter_additions_mut() else {
-        stash_pending_counter_additions(state, Vec::new(), completion);
+        park_counter_completion_outside_active_direct_choice(state, completion);
         return;
     };
 
@@ -366,6 +367,70 @@ fn merge_pending_counter_completion_after_nested_pause(
                 player_id: action.player_id,
                 action: action.action,
             });
+    }
+}
+
+/// CR 608.2c + CR 616.1: Park a completion that outlived a paused post-action
+/// when no counter-additions queue is active to absorb it.
+///
+/// The default is unchanged — push the completion as the active inner frame.
+/// The one exception is a pause that installed a direct-choice owner (a fresh
+/// `ProliferateChoice`, say). That owner must stay at the stack top until its
+/// action handler consumes it — `ResolutionStack::validate` rejects a buried
+/// direct-choice owner — so pushing on top of it would corrupt the stack exactly
+/// the way issue #7384 did. There the completion becomes the owner's PARENT
+/// instead and runs once the owner is consumed, preserving the instruction
+/// order; and when it owes nothing at all it is dropped rather than parked, so
+/// no empty frame is installed above a live prompt.
+///
+/// Note that a completion parked as a parent is no longer the ACTIVE queue, so a
+/// later `append_pending_counter_post_actions` would not find it. No such
+/// appender is reachable while a direct-choice prompt is live, and the ordering
+/// caveat on `ContinueProliferateActions` records the condition that would
+/// change that.
+fn park_counter_completion_outside_active_direct_choice(
+    state: &mut GameState,
+    completion: PendingEffectResolved,
+) {
+    let active_owns_prompt = state
+        .resolution_stack
+        .last()
+        .is_some_and(|frame| matches!(frame.gate(), FrameGate::DirectChoice(_)));
+    if !active_owns_prompt {
+        // Every non-direct-choice pause keeps its historical shape, including
+        // the empty placeholder frame that a later
+        // `append_pending_counter_post_actions` may still land work on.
+        stash_pending_counter_additions(state, Vec::new(), completion);
+        return;
+    }
+    if completion.is_noop() {
+        return;
+    }
+    let queue = PendingCounterAdditionQueue {
+        remaining: Vec::new(),
+        completion: Some(completion),
+    };
+    if state
+        .insert_counter_additions_parent_of_active(queue)
+        .is_err()
+    {
+        // Unreachable from a valid stack: the guard above proves an active child
+        // exists, and inserting BELOW the top leaves the top — and so the prompt
+        // gate — untouched. The insert validates a CLONE and assigns only on
+        // success, so a failure leaves both stack and journal untouched.
+        //
+        // A failure therefore means the stack was ALREADY invalid, and the two
+        // recoveries are not symmetric. Pushing the queue instead would stack an
+        // owner above a live prompt, adding a SECOND validate violation to a
+        // stack that already has one; dropping the completion forfeits its
+        // terminal event but leaves the stack no worse than it was found. The
+        // drop is the deliberate choice: compounding stack corruption is what
+        // makes this class unrecoverable, and panicking is the very failure mode
+        // #7384 reported.
+        debug_assert!(
+            false,
+            "inserting a counter-additions parent below a direct-choice owner must validate"
+        );
     }
 }
 
@@ -483,6 +548,14 @@ fn apply_pending_counter_post_action(
                 scry_top_count: None,
             });
             true
+        }
+        // CR 701.34a: The interrupted proliferate action is now complete —
+        // publish it and drive whatever actions the effect still owes. Returns
+        // `false` when another `ProliferateChoice` is open; the completion this
+        // ran from is empty by construction, so nothing is re-parked and the
+        // fresh direct-choice frame is left owning the stack top.
+        PendingCounterPostAction::ContinueProliferateActions { pending } => {
+            super::proliferate::continue_proliferate_actions(state, pending, events)
         }
         PendingCounterPostAction::AddSubtype { object_id, subtype } => {
             if let Some(obj) = state.objects.get_mut(&object_id) {
@@ -6847,6 +6920,110 @@ mod tests {
                  destroys the guarded ledger. The survivor row must stay 1: the drain still runs \
                  and still publishes, which is what makes the two zeros a measurement of the guard \
                  rather than of a drain that never happened"
+            );
+        }
+    }
+
+    /// Building-block rows for `park_counter_completion_outside_active_direct_choice`
+    /// (issue #7384). A post-action may pause having installed a direct-choice
+    /// owner; `ResolutionStack::validate` rejects a buried direct-choice owner,
+    /// so the completion that outlives the pause may not simply be pushed on top
+    /// of it.
+    mod parking_a_completion_after_a_paused_post_action {
+        use super::*;
+        use crate::types::game_state::{PendingEffectResolutionEvent, PendingEffectResolved};
+        use crate::types::resolution::{FrameKind, PendingProliferateActions};
+
+        fn live_proliferate_prompt() -> GameState {
+            let mut state = GameState::new_two_player(42);
+            state
+                .install_direct_choice_frame(
+                    ResolutionFrame::Proliferate(PendingProliferateActions {
+                        actor: PlayerId(0),
+                        source_id: ObjectId(77),
+                        remaining: 1,
+                    }),
+                    WaitingFor::ProliferateChoice {
+                        player: PlayerId(0),
+                        eligible: vec![TargetRef::Player(PlayerId(0))],
+                    },
+                )
+                .expect("a proliferate owner installs with its own prompt");
+            state
+        }
+
+        fn owed_completion() -> PendingEffectResolved {
+            PendingEffectResolved::new(EffectKind::Proliferate, ObjectId(77))
+        }
+
+        /// THE row this branch exists for: the completion goes BELOW the live
+        /// prompt, and the resulting stack still validates. Pushing it on top
+        /// instead is exactly the corruption #7384 reported.
+        #[test]
+        fn a_completion_owed_behind_a_live_prompt_becomes_its_parent() {
+            let mut state = live_proliferate_prompt();
+
+            merge_pending_counter_completion_after_nested_pause(&mut state, owed_completion());
+
+            let frames: Vec<_> = state.resolution_stack.iter().map(|f| f.kind()).collect();
+            assert_eq!(
+                frames,
+                vec![FrameKind::CounterAdditions, FrameKind::Proliferate],
+                "the owed completion parks BELOW the direct-choice owner, which keeps \
+                 the stack top — and so the prompt gate — untouched"
+            );
+            state
+                .resolution_stack
+                .validate(&state.waiting_for)
+                .expect("a direct-choice owner with a parent completion is a valid stack");
+        }
+
+        /// A pause that owes nothing installs no frame at all — an empty owner
+        /// above a live prompt would bury it for no benefit.
+        #[test]
+        fn a_completion_owing_nothing_behind_a_live_prompt_is_dropped() {
+            let mut state = live_proliferate_prompt();
+            let spent = PendingEffectResolved {
+                resolution_event: PendingEffectResolutionEvent::Suppress,
+                post_actions: Vec::new(),
+                player_action: None,
+                ..owed_completion()
+            };
+            assert!(spent.is_noop(), "the row's premise: nothing is owed");
+
+            merge_pending_counter_completion_after_nested_pause(&mut state, spent);
+
+            let frames: Vec<_> = state.resolution_stack.iter().map(|f| f.kind()).collect();
+            assert_eq!(
+                frames,
+                vec![FrameKind::Proliferate],
+                "nothing owed means nothing parked"
+            );
+        }
+
+        /// The historical shape is preserved for every pause that did NOT
+        /// install a direct-choice owner — including an empty completion, whose
+        /// placeholder frame a later `append_pending_counter_post_actions` may
+        /// still land work on.
+        #[test]
+        fn a_pause_without_a_live_prompt_still_pushes_its_placeholder_frame() {
+            let mut state = GameState::new_two_player(42);
+            let spent = PendingEffectResolved {
+                resolution_event: PendingEffectResolutionEvent::Suppress,
+                post_actions: Vec::new(),
+                player_action: None,
+                ..owed_completion()
+            };
+            assert!(spent.is_noop());
+
+            merge_pending_counter_completion_after_nested_pause(&mut state, spent);
+
+            let frames: Vec<_> = state.resolution_stack.iter().map(|f| f.kind()).collect();
+            assert_eq!(
+                frames,
+                vec![FrameKind::CounterAdditions],
+                "a non-direct-choice pause keeps the placeholder frame it has always \
+                 pushed, so a later append still has a queue to land on"
             );
         }
     }
