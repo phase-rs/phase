@@ -1414,13 +1414,15 @@ impl LegacyManaSpendTriggerRestriction {
     /// CR 603.3: A historical mana-spend trigger's old restriction selected the
     /// spell event that makes the trigger fire, so preserve it as that event's
     /// object filter rather than as a current CR 106.6 spend restriction.
-    fn into_event_filter(self) -> TargetFilter {
-        match self {
+    fn try_into_event_filter(self) -> Result<TargetFilter, String> {
+        Ok(match self {
             Self::OnlyForSpellWithManaValue { comparator, value } => {
                 TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Cmc {
                     comparator,
                     value: QuantityExpr::Fixed {
-                        value: value as i32,
+                        value: i32::try_from(value).map_err(|_| {
+                            "legacy mana spend trigger value exceeds i32 range".to_string()
+                        })?,
                     },
                 }]))
             }
@@ -1431,20 +1433,24 @@ impl LegacyManaSpendTriggerRestriction {
                 TypedFilter::creature()
                     .properties(vec![FilterProp::SharesCreatureTypeWithCommander]),
             ),
-        }
+        })
     }
 }
 
-impl From<LegacyManaSpellGrantRepr> for ManaSpellGrant {
-    fn from(value: LegacyManaSpellGrantRepr) -> Self {
+impl TryFrom<LegacyManaSpellGrantRepr> for ManaSpellGrant {
+    type Error = String;
+
+    fn try_from(value: LegacyManaSpellGrantRepr) -> Result<Self, Self::Error> {
         match value {
             LegacyManaSpellGrantRepr::TriggerOnSpend {
                 restriction,
                 ability,
-            } => Self::TriggerOnSpend {
-                filter: restriction.map_or(TargetFilter::Any, |value| value.into_event_filter()),
+            } => Ok(Self::TriggerOnSpend {
+                filter: restriction.map_or(Ok(TargetFilter::Any), |value| {
+                    value.try_into_event_filter()
+                })?,
                 ability,
-            },
+            }),
         }
     }
 }
@@ -1493,8 +1499,8 @@ impl<'de> Deserialize<'de> for ManaSpellGrant {
         match serde_json::from_value::<ManaSpellGrantRepr>(value.clone()) {
             Ok(value) => Ok(value.into()),
             Err(current_error) => serde_json::from_value::<LegacyManaSpellGrantRepr>(value)
-                .map(Into::into)
-                .map_err(|_| serde::de::Error::custom(current_error)),
+                .map_err(|_| serde::de::Error::custom(current_error))
+                .and_then(|value| value.try_into().map_err(serde::de::Error::custom)),
         }
     }
 }
@@ -2511,7 +2517,7 @@ mod tests {
             let legacy = serde_json::json!({
                 "TriggerOnSpend": {
                     "restriction": restriction,
-                    "ability": ability,
+                    "ability": ability.clone(),
                 }
             });
             let grant: ManaSpellGrant =
@@ -2524,6 +2530,37 @@ mod tests {
                 }
             );
         }
+
+        let without_restriction = serde_json::json!({
+            "TriggerOnSpend": {
+                "ability": ability.clone(),
+            }
+        });
+        let grant: ManaSpellGrant =
+            serde_json::from_value(without_restriction).expect("unrestricted legacy grant deserializes");
+        assert_eq!(
+            grant,
+            ManaSpellGrant::TriggerOnSpend {
+                filter: TargetFilter::Any,
+                ability: Box::new(ability.clone()),
+            }
+        );
+
+        let out_of_range = serde_json::json!({
+            "TriggerOnSpend": {
+                "restriction": {
+                    "OnlyForSpellWithManaValue": {
+                        "comparator": "GE",
+                        "value": 2_147_483_648u64,
+                    }
+                },
+                "ability": ability,
+            }
+        });
+        assert!(
+            serde_json::from_value::<ManaSpellGrant>(out_of_range).is_err(),
+            "an out-of-range legacy threshold must not wrap into a negative value"
+        );
     }
 
     /// CR 702.143: `reduced_generic_by` reduces only the generic component,
