@@ -6005,9 +6005,11 @@ where
 /// CR 601.2i + CR 202.3e: a `SpellCast` event's cast-time record preserves the
 /// announced X value after the spell leaves the stack, where the live object's
 /// mana value correctly treats X as zero.
-fn spell_cast_mana_value_for_event(event: &GameEvent) -> Option<i32> {
+fn spell_cast_mana_value_for_event(state: &GameState, event: &GameEvent) -> Option<i32> {
     let GameEvent::SpellCast {
-        cast_mana_value: Some(value),
+        cast_mana_value,
+        controller,
+        object_id,
         ..
     } = event
     else {
@@ -6016,9 +6018,24 @@ fn spell_cast_mana_value_for_event(event: &GameEvent) -> Option<i32> {
 
     // CR 603.7c: the event-bound value is the authority for the exact cast that
     // caused this trigger. It remains distinct when the same object id is cast
-    // again before an earlier trigger resolves. Legacy/synthetic events without
-    // this snapshot retain the existing live/LKI fallback below.
-    Some(u32_to_i32_saturating(*value))
+    // again before an earlier trigger resolves.
+    if let Some(value) = cast_mana_value {
+        return Some(u32_to_i32_saturating(*value));
+    }
+
+    // CR 400.7: retain compatibility with legacy/synthetic events that lack the
+    // snapshot, but never guess between multiple same-id casts.
+    let mut matching_records = state
+        .spells_cast_this_turn_by_player
+        .get(controller)
+        .into_iter()
+        .flat_map(|records| records.iter())
+        .filter(|record| record.spell_object_id == Some(*object_id));
+    let record = matching_records.next()?;
+    matching_records
+        .next()
+        .is_none()
+        .then(|| u32_to_i32_saturating(record.mana_value))
 }
 
 /// CR 202.3: Resolve an object's mana value through the same ObjectScope axis
@@ -6202,7 +6219,7 @@ fn resolve_object_mana_value(
             .or_else(|| {
                 current_or_detection_trigger_event(state)
                     .as_ref()
-                    .and_then(spell_cast_mana_value_for_event)
+                    .and_then(|event| spell_cast_mana_value_for_event(state, event))
             })
             .or_else(|| {
                 object_id_for_scope(state, ObjectScope::EventSource, ctx, targets).and_then(|id| {
@@ -14034,6 +14051,20 @@ mod tests {
             resolve_quantity_with_targets(&state, &expr, &ability),
             0,
             "an ambiguous legacy event must fail closed rather than guess a history record"
+        );
+
+        state.spells_cast_this_turn_by_player.insert(
+            PlayerId(0),
+            crate::im::Vector::from(vec![SpellCastRecord {
+                mana_value: 5,
+                spell_object_id: Some(spell_id),
+                ..SpellCastRecord::default()
+            }]),
+        );
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &expr, &ability),
+            5,
+            "an unambiguous legacy event should retain its history fallback"
         );
     }
 
