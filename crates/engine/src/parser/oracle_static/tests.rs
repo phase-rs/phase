@@ -9053,8 +9053,8 @@ fn galactus_forced_attack_static_parses_with_flavor_label() {
     .expect("Galactus forced-attack static must parse");
     assert_eq!(
         def.mode,
-        StaticMode::MustAttackPlayer {
-            player: RequiredDefender::Matching {
+        StaticMode::MustAttackDefender {
+            defender: RequiredDefender::Matching {
                 filter: expected_most_life_defender(),
             },
         },
@@ -9082,8 +9082,8 @@ fn forced_attack_defender_static_flavor_label_is_optional() {
     .expect("unlabeled forced-attack static must parse");
     assert_eq!(
         def.mode,
-        StaticMode::MustAttackPlayer {
-            player: RequiredDefender::Matching {
+        StaticMode::MustAttackDefender {
+            defender: RequiredDefender::Matching {
                 filter: expected_most_life_defender(),
             },
         },
@@ -9100,8 +9100,8 @@ fn forced_attack_defender_static_bare_opponent_selector() {
         .expect("bare-opponent forced-attack static must parse");
     assert_eq!(
         def.mode,
-        StaticMode::MustAttackPlayer {
-            player: RequiredDefender::Matching {
+        StaticMode::MustAttackDefender {
+            defender: RequiredDefender::Matching {
                 filter: PlayerFilter::Opponent,
             },
         },
@@ -9172,7 +9172,7 @@ fn flavor_labeled_non_forced_attack_line_is_not_hijacked() {
     assert!(
         super::evasion::parse_forced_attack_defender_static("Insatiable Hunger — ~ gets +1/+1.")
             .is_none(),
-        "a flavor-labeled non-forced-attack line must not become a MustAttackPlayer static",
+        "a flavor-labeled non-forced-attack line must not become a MustAttackDefender static",
     );
 }
 

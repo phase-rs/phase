@@ -12353,27 +12353,49 @@ fn self_etb_sacrifice_it_anaphor_binds_to_self_ref() {
     );
 }
 
+/// CR 701.9b + CR 118.12a: Balduvian Horde — "sacrifice it unless you discard a
+/// card at random". The clause is now fully supported, and this test tracks the
+/// third state it has been in.
+///
+/// Originally it asserted a `Chosen` discard: the clause lowered, but the payer
+/// got to pick, which made the printed cost strictly cheaper. It was then
+/// changed to assert `Unimplemented` — honest, but it dropped the card. Now the
+/// unless-payment resolver honors `CardSelectionMode::Random`
+/// (`effects::discard::discard_at_random`), so the clause lowers truthfully:
+/// a real unless-cost whose selection mode is `Random`.
+///
+/// `selection` is the load-bearing assertion. A `Chosen` here would be the
+/// original bug back again, and the test would still otherwise pass.
 #[test]
-fn trigger_unless_you_discard_a_card_at_random_preserves_unsupported_clause() {
-    // Balduvian Horde's random discard cannot be lowered as a player-chosen
-    // unless payment: the payment resolver currently ignores selection mode.
-    // Keep the entire clause visible as unsupported until it can honor random
-    // discard rather than silently changing the card's behavior.
+fn trigger_unless_you_discard_a_card_at_random_lowers_as_random_cost() {
     let def = parse_trigger_line(
         "When ~ enters, sacrifice it unless you discard a card at random.",
         "Balduvian Horde",
     );
-    assert!(
-        def.unless_pay.is_none(),
-        "random discard must not lower to a player-chosen unless payment"
-    );
-    let execute = def
-        .execute
+
+    let unless_pay = def
+        .unless_pay
         .as_ref()
-        .expect("should preserve the unsupported clause");
+        .expect("the random discard must lower to a real unless cost");
+    assert_eq!(unless_pay.payer, TargetFilter::Controller);
     assert!(
-        matches!(*execute.effect, Effect::Unimplemented { .. }),
-        "random-discard unless clause must remain visible as unimplemented, got {:?}",
+        matches!(
+            unless_pay.cost,
+            AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: None,
+                selection: CardSelectionMode::Random,
+                self_scope: DiscardSelfScope::FromHand
+            }
+        ),
+        "cost must be a one-card RANDOM discard, got {:?}",
+        unless_pay.cost
+    );
+
+    let execute = def.execute.as_ref().expect("should have execute");
+    assert!(
+        matches!(*execute.effect, Effect::Sacrifice { .. }),
+        "the unless-effect is the self-sacrifice, got {:?}",
         execute.effect
     );
 }
@@ -13655,18 +13677,80 @@ fn unless_discard_cost_phrase_rejects_zero_count() {
     );
 }
 
-/// CR 701.9b: random discard is distinct from a player-selected discard. Until
-/// the unless-payment resolver preserves `CardSelectionMode::Random`, this
-/// phrase must remain unsupported rather than being lowered dishonestly.
+/// CR 701.9b: random discard is distinct from a player-selected discard, and
+/// the phrase now lowers TRUTHFULLY as `CardSelectionMode::Random` instead of
+/// having to pick between two wrong answers. This test previously asserted the
+/// clause stayed unsupported — the right call only while the unless-payment
+/// resolver ignored `selection`. It now honors it
+/// (`effects::discard::discard_at_random`), so the honest lowering is the typed
+/// one. The mode must be `Random`, not `Chosen`, on BOTH payer forms, or a
+/// Balduvian Horde-class cost silently gets cheaper than printed.
 #[test]
-fn unless_discard_cost_phrase_rejects_random_discard() {
+fn unless_discard_cost_phrase_lowers_random_discard_as_random() {
+    let (they_cost, rest) =
+        parse_unless_they_discard_cost("a card at random").expect("the they form must lower");
     assert!(
-        parse_unless_they_discard_cost("a card at random").is_none(),
-        "the anaphoric-payer form must not lower random discard as chosen"
+        rest.trim().is_empty(),
+        "the whole branch should be consumed, left {rest:?}"
+    );
+    let you_cost =
+        parse_unless_alt_cost("you discard a card at random").expect("the you form must lower");
+    assert_eq!(
+        they_cost, you_cost,
+        "both payer forms must agree on the random tail"
     );
     assert!(
-        parse_unless_alt_cost("you discard a card at random").is_none(),
-        "the controller form must not lower random discard as chosen"
+        matches!(
+            they_cost,
+            AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: None,
+                selection: CardSelectionMode::Random,
+                ..
+            }
+        ),
+        "expected a one-card RANDOM discard, got {they_cost:?}"
+    );
+}
+
+/// The random tail must be FULLY consumed. A prefix match would swallow
+/// "at randomly" and "at random foo" and lower an unrecognized clause as a
+/// random discard, which is the coverage-dishonesty failure mode in the other
+/// direction — claiming support for text the grammar never understood.
+#[test]
+fn unless_discard_cost_phrase_rejects_partial_random_suffix() {
+    for tail in [
+        "a card at randomly",
+        "a card at random foo",
+        "a card atrandom",
+    ] {
+        assert!(
+            parse_unless_they_discard_cost(tail).is_none(),
+            "{tail:?} is not the random-discard grammar and must not lower"
+        );
+        assert!(
+            parse_unless_alt_cost(&format!("you discard {tail}")).is_none(),
+            "{tail:?} must not lower on the controller form either"
+        );
+    }
+}
+
+/// NO-REGRESSION twin: without an "at random" tail the discard stays
+/// player-chosen. Guards against the randomness axis leaking onto every
+/// unless-discard — which would make Court of Ambition pick for the opponent
+/// instead of letting them choose what to pitch.
+#[test]
+fn unless_discard_cost_phrase_without_random_tail_stays_chosen() {
+    let cost = parse_unless_alt_cost("you discard a card").expect("plain discard must lower");
+    assert!(
+        matches!(
+            cost,
+            AbilityCost::Discard {
+                selection: CardSelectionMode::Chosen,
+                ..
+            }
+        ),
+        "a plain discard must remain player-chosen, got {cost:?}"
     );
 }
 

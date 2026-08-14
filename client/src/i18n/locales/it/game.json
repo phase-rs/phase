@@ -2051,6 +2051,7 @@
     "searchPlaceholder": "Cerca per nome...",
     "noCardsFound": "Nessuna carta trovata",
     "buttonSubtitle": "Seleziona un'opzione",
+    "numberSubtitle": "Inserisci un numero intero maggiore o uguale a {{min}}",
     "filterPlaceholder": "Filtra opzioni...",
     "noOptionsMatch": "Nessuna opzione corrisponde"
   },

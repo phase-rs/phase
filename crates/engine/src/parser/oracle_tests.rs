@@ -1703,6 +1703,224 @@ fn parse(
     parse_oracle_text(text, name, &keyword_names, &types, &subtypes)
 }
 
+/// CR 506.3 + CR 508.1d + CR 611.2c + CR 615: Gideon Jura (verbatim MTGJSON
+/// Oracle text) parses all three loyalty abilities with zero residual
+/// `Unimplemented`, and each lands on the exact shape its rules text requires.
+///
+/// The three seams this pins, each of which was independently wrong before:
+///
+/// 1. **+2 — the defender is the PLANESWALKER, not a player.** CR 506.3 makes
+///    "a player, a planeswalker, or a battle" one defender category, so the
+///    requirement rides `Effect::ForceAttack` with `required_defender: SelfRef`.
+///    Before, the whole line was `Effect::Unimplemented { name: "during" }`.
+/// 2. **+2 — the affected creatures belong to the TARGETED OPPONENT.** "that
+///    player controls" is an anaphor to the player the leading "During target
+///    opponent's next turn," window declared. Without the scope publication, the
+///    documented `parse_controller_suffix` fallback bound it to
+///    `ControllerRef::You` — pointing the requirement at the ACTIVATING player's
+///    own creatures, i.e. the exact opposite of the card.
+/// 3. **0 — the damage shield is scoped to Gideon.** "dealt to him" is the
+///    printed-name self-reference; it must reach `TargetFilter::SelfRef`. As
+///    `TargetFilter::Any` (the old fallback) the shield carried NO recipient
+///    constraint, making a turn-long Fog over every damage event in the game.
+///
+/// Reverting any of the three fails this test.
+#[test]
+fn gideon_jura_full_parse() {
+    let r = parse(
+        "+2: During target opponent's next turn, creatures that player controls attack Gideon Jura if able.\n\u{2212}2: Destroy target tapped creature.\n0: Until end of turn, Gideon Jura becomes a 6/6 Human Soldier creature that's still a planeswalker. Prevent all damage that would be dealt to him this turn.",
+        "Gideon Jura",
+        &[],
+        &["Planeswalker"],
+        &["Gideon"],
+    );
+    assert_eq!(
+        r.abilities.len(),
+        3,
+        "three loyalty abilities, got {:#?}",
+        r.abilities
+    );
+    // Positive reach guard for every assertion below: nothing fell back to a
+    // residual, so each shape asserted here was genuinely produced.
+    for def in &r.abilities {
+        assert!(
+            !has_unimplemented(def),
+            "no residual Unimplemented node, got {def:#?}"
+        );
+    }
+
+    // --- +2 (CR 508.1d + CR 506.3 + CR 611.2c) ---------------------------
+    let Effect::ForceAttack {
+        target,
+        required_defender,
+        scope,
+        ..
+    } = &*r.abilities[0].effect
+    else {
+        panic!(
+            "the +2 is a forced-attack requirement, got {:?}",
+            r.abilities[0].effect
+        );
+    };
+    assert_eq!(
+        required_defender,
+        &TargetFilter::SelfRef,
+        "CR 506.3: the required defender is Gideon Jura itself, not a player"
+    );
+    // CR 611.2c + CR 115.1: the subject is a live POPULATION, not a chosen
+    // target. `Single` here would both surface a spurious creature target slot
+    // and send `force_attack::resolve` down the per-object graft path, freezing
+    // the affected set at resolution against the card's own ruling.
+    assert_eq!(
+        scope,
+        &EffectScope::All,
+        "the +2's subject is a broadcast population"
+    );
+    let TargetFilter::Typed(typed) = target else {
+        panic!("the affected subject is a typed creature population, got {target:?}");
+    };
+    assert!(
+        typed.type_filters.contains(&TypeFilter::Creature),
+        "the requirement affects creatures: {typed:?}"
+    );
+    assert_eq!(
+        typed.controller,
+        Some(ControllerRef::TargetOpponent),
+        "CR 608.2c: \"that player\" is the targeted opponent, NOT the activator"
+    );
+    // CR 508.1d (final sentence) + the card's own ruling: the window is the
+    // whole of that player's next turn, so it must survive to every declare-
+    // attackers step in it — `UntilNextTurnOf` (which expires at the BEGINNING
+    // of that turn) would make the requirement inert.
+    assert_eq!(
+        r.abilities[0].duration,
+        Some(Duration::UntilEndOfNextTurnOf {
+            player: PlayerScope::Target
+        }),
+        "the window spans the targeted opponent's entire next turn"
+    );
+
+    // --- −2 (CR 701.8: Destroy) ------------------------------------------
+    let Effect::Destroy { target, .. } = &*r.abilities[1].effect else {
+        panic!("the −2 destroys, got {:?}", r.abilities[1].effect);
+    };
+    let TargetFilter::Typed(typed) = target else {
+        panic!("expected a typed destroy target, got {target:?}");
+    };
+    assert!(
+        typed.type_filters.contains(&TypeFilter::Creature)
+            && typed.properties.contains(&FilterProp::Tapped),
+        "the −2 targets a TAPPED creature: {typed:?}"
+    );
+
+    // --- 0 (CR 306.1 + CR 615) -------------------------------------------
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*r.abilities[2].effect
+    else {
+        panic!("the 0 animates, got {:?}", r.abilities[2].effect);
+    };
+    let mods = &static_abilities[0].modifications;
+    assert!(
+        mods.contains(&ContinuousModification::SetPower { value: 6 })
+            && mods.contains(&ContinuousModification::SetToughness { value: 6 })
+            && mods.contains(&ContinuousModification::AddType {
+                core_type: crate::types::card_type::CoreType::Creature
+            }),
+        "the 0 makes Gideon a 6/6 creature: {mods:?}"
+    );
+    // CR 306.1: "that's still a planeswalker" — the animation ADDS the creature
+    // type and never removes Planeswalker, so no RemoveType is emitted.
+    assert!(
+        !mods
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::RemoveType { .. })),
+        "Gideon stays a planeswalker — nothing removes a card type: {mods:?}"
+    );
+    let sub = r.abilities[2]
+        .sub_ability
+        .as_ref()
+        .expect("the 0 carries the damage-prevention rider");
+    let Effect::PreventDamage { target, amount, .. } = &*sub.effect else {
+        panic!("the rider prevents damage, got {:?}", sub.effect);
+    };
+    assert_eq!(
+        target,
+        &TargetFilter::SelfRef,
+        "CR 615: \"dealt to him\" scopes the shield to Gideon — an `Any` \
+         recipient would Fog the whole turn"
+    );
+    assert_eq!(amount, &PreventionAmount::All, "\"prevent ALL damage\"");
+}
+
+/// CR 201.5 + CR 109.5: the building block behind Gideon Jura's shield fix —
+/// a source-anaphoric GENDERED pronoun recipient binds to the source with NO
+/// `parent_target_available` gate, because Magic templating uses "him"/"her"
+/// only as the printed-name self-reference. Tested at the building-block level
+/// (both genders, reflexive and bare, gate open and closed) rather than through
+/// one card, so any prevent-damage clause in the class is covered.
+///
+/// The singular-they "them" is asserted to be EXCLUDED: it is
+/// recipient-anaphoric for player-enchanting Auras, so binding it to the source
+/// would name the wrong object.
+#[test]
+fn prevent_damage_gendered_self_anaphor_recipient_binds_to_source() {
+    for pronoun in ["him", "her", "himself", "herself"] {
+        let effect = parse_effect_chain(
+            &format!("Prevent all damage that would be dealt to {pronoun} this turn."),
+            AbilityKind::Spell,
+        );
+        let Effect::PreventDamage { target, .. } = &*effect.effect else {
+            panic!(
+                "expected PreventDamage for {pronoun:?}, got {:?}",
+                effect.effect
+            );
+        };
+        assert_eq!(
+            target,
+            &TargetFilter::SelfRef,
+            "{pronoun:?} must bind to the ability's source"
+        );
+    }
+
+    // The `parent_target_available` gate is genuinely OPEN here: the leading
+    // clause declares a chosen target, so the neuter-anaphor tier would bind
+    // `ParentTarget`. A gendered pronoun must still reach `SelfRef` — being
+    // ungated is the whole point of tier 0, and it is what Gideon Jura's "0"
+    // depends on, since its animate clause precedes the shield.
+    let chained = parse_effect_chain(
+        "Destroy target creature. Prevent all damage that would be dealt to him this turn.",
+        AbilityKind::Spell,
+    );
+    let shield = chained
+        .sub_ability
+        .as_ref()
+        .expect("the prevent clause chains as a sub-ability");
+    let Effect::PreventDamage { target, .. } = &*shield.effect else {
+        panic!("expected a PreventDamage rider, got {:?}", shield.effect);
+    };
+    assert_eq!(
+        target,
+        &TargetFilter::SelfRef,
+        "a gendered pronoun outranks the chosen-target anaphor even with the gate open"
+    );
+
+    // Reach guard: the recognizer is not simply returning `SelfRef` for every
+    // recipient. "them" is deliberately outside the gendered family.
+    let effect = parse_effect_chain(
+        "Prevent all damage that would be dealt to them this turn.",
+        AbilityKind::Spell,
+    );
+    let Effect::PreventDamage { target, .. } = &*effect.effect else {
+        panic!("expected PreventDamage, got {:?}", effect.effect);
+    };
+    assert_ne!(
+        target,
+        &TargetFilter::SelfRef,
+        "the singular-they \"them\" is recipient-anaphoric, not source-anaphoric"
+    );
+}
+
 /// Cluster 97 (CR 603.7a + CR 311.2 + CR 701.31): The Doctor's Childhood Barn —
 /// a Planechase plane — parses its "Whenever chaos ensues …" trigger chain with
 /// ZERO `Effect::Unimplemented` and ZERO `StaticCondition::Unrecognized`, and

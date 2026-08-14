@@ -280,6 +280,12 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::OpponentGuess { .. }
         | Effect::SwapChosenLabels { .. }
+        // CR 101.4: `RevealChosenNumbers` publishes an ALREADY-made choice and
+        // raises no `WaitingFor` of its own. It is nonetheless left in the
+        // fail-closed group: claiming choice-free is a soundness claim that
+        // requires a resolver trace and a pinned-guard update, and the only cost
+        // of `MayPrompt` here is a conservative probe verdict.
+        | Effect::RevealChosenNumbers { .. }
         | Effect::Pump { .. }
         | Effect::PairWith { .. }
         | Effect::Destroy { .. }

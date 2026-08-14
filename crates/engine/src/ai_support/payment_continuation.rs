@@ -414,6 +414,11 @@ fn classify_parked_cost_move_root(state: &GameState) -> PaymentContinuationState
         | PendingCostMoveResume::Foretell { .. }
         | PendingCostMoveResume::UnlessBouncePayment { .. }
         | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+        // CR 701.9b: a parked random unless-discard holds no pending cast and
+        // no mana-ability cursor — the game picks the cards with no player
+        // input — so like its counter-addition sibling it affiliates with no
+        // payment-continuation root.
+        | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
         | PendingCostMoveResume::LoyaltyActivation { .. } => {
             PaymentContinuationState::NotAffiliated
         }
@@ -659,6 +664,8 @@ fn pending_cost_move_contains_root(
         | Some(PendingCostMoveResume::DelveManaPayment { .. })
         | Some(PendingCostMoveResume::UnlessBouncePayment { .. })
         | Some(PendingCostMoveResume::CounterAdditionUnlessPayment { .. })
+        // CR 701.9b: holds no pending cast, so it can contain no root.
+        | Some(PendingCostMoveResume::RandomDiscardUnlessPayment(..))
         | Some(PendingCostMoveResume::LoyaltyActivation { .. })
         | None => false,
     }

@@ -23,10 +23,10 @@
 //! - **Per-opponent must-attack, not enters-attacking.** Encore is activated at
 //!   sorcery speed (typically in a main phase, outside combat), so the tokens
 //!   are *not* created already attacking. Instead each token gains a
-//!   `MustAttackPlayer { player }` requirement (CR 508.1d) bound to the opponent
+//!   `MustAttackDefender { defender }` requirement (CR 508.1d) bound to the opponent
 //!   it was created for, lasting until end of turn (CR 702.141a "this turn").
 //!   Binding the requirement per opponent — instead of via the generic
-//!   `Effect::ForceAttack`, whose `required_player` context ref has no
+//!   `Effect::ForceAttack`, whose `required_defender` context ref has no
 //!   "the opponent" resolution and would fall back to the controller — is the
 //!   reason Encore needs a dedicated resolver.
 //! - **Haste is baked into the copy** via `extra_keywords` (CR 707.2, the
@@ -85,7 +85,7 @@ pub fn resolve(
         crate::game::effects::token_copy::resolve(state, &copy_ability, events)?;
 
         // CR 702.141a + CR 508.1d: each token created for this opponent "attacks
-        // that opponent this turn if able." Bind a `MustAttackPlayer` requirement
+        // that opponent this turn if able." Bind a `MustAttackDefender` requirement
         // to the freshly-created token(s) for the rest of the turn.
         for token_id in state.last_created_token_ids.clone() {
             state.add_transient_continuous_effect(
@@ -95,8 +95,8 @@ pub fn resolve(
                 TargetFilter::SpecificObject { id: token_id },
                 vec![ContinuousModification::AddStaticMode {
                     // CR 611.2: snapshot the specific opponent at resolution.
-                    mode: StaticMode::MustAttackPlayer {
-                        player: RequiredDefender::Fixed { player: opponent },
+                    mode: StaticMode::MustAttackDefender {
+                        defender: RequiredDefender::Fixed { player: opponent },
                     },
                 }],
                 None,

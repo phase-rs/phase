@@ -1218,7 +1218,7 @@ impl LegalityPoisonGates {
                 StaticMode::CantAttack
                     | StaticMode::CantAttackOrBlock
                     | StaticMode::MustAttack
-                    | StaticMode::MustAttackPlayer { .. }
+                    | StaticMode::MustAttackDefender { .. }
                     | StaticMode::Goaded
                     | StaticMode::MustAttackAwayFromSource
                     | StaticMode::CanAttackWithDefender

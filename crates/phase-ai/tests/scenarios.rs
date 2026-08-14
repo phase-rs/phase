@@ -1626,8 +1626,8 @@ fn ai_declare_attackers_completion_returns_apply_accepted_legal_action() {
         let mut scenario = GameScenario::new();
         let attacker = {
             let mut b = scenario.add_creature(P0, "Lured Bear", 2, 2);
-            b.with_static_definition(StaticDefinition::new(StaticMode::MustAttackPlayer {
-                player: P1.into(),
+            b.with_static_definition(StaticDefinition::new(StaticMode::MustAttackDefender {
+                defender: P1.into(),
             }));
             b.id()
         };
@@ -1687,5 +1687,131 @@ fn ai_declare_attackers_completion_returns_apply_accepted_legal_action() {
     assert!(
         !results.is_empty(),
         "the host AI loop must take at least one action for the declare step"
+    );
+}
+
+/// CR 506.3 + CR 508.1d: the AI must obey a forced-attack requirement whose
+/// required defender is a PLANESWALKER, not just one naming a player.
+///
+/// The mandatory-attacker sweep in `combat_ai` records only `ObjectId`s, so the
+/// required `AttackTarget` is not carried into target assignment. That is safe
+/// only because every production path routes its heuristic proposal through
+/// `validated_declare_attackers` -> `combat::complete_attacker_proposal`, the
+/// engine's single CR 508.1d authority, which replaces an under-max declaration
+/// with the deterministic maximum-requirement witness. This test is the evidence
+/// for that claim rather than an argument for it: it drives the real
+/// `choose_action` seam on Gideon Jura's "+2" and asserts BOTH that the chosen
+/// action attacks the planeswalker and that the reducer accepts it.
+///
+/// Sibling of `ai_declare_attackers_completion_returns_apply_accepted_legal_action`
+/// (the player-directed lure). If the AI ever returned its raw heuristic
+/// assignment instead of the completed proposal, it would attack P0 here and the
+/// reducer would reject the declaration — both halves fail.
+#[test]
+fn ai_obeys_planeswalker_directed_attack_requirement() {
+    const GIDEON_JURA_ORACLE: &str = concat!(
+        "+2: During target opponent's next turn, creatures that player controls ",
+        "attack Gideon Jura if able.\n",
+        "\u{2212}2: Destroy target tapped creature.\n",
+        "0: Until end of turn, Gideon Jura becomes a 6/6 Human Soldier creature ",
+        "that's still a planeswalker. Prevent all damage that would be dealt to ",
+        "him this turn.",
+    );
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let gideon = scenario
+        .add_planeswalker_from_oracle(P0, "Gideon Jura", "Gideon", 6, GIDEON_JURA_ORACLE)
+        .id();
+    let bear = scenario.add_creature(P1, "Bear", 2, 2).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.turn_number = 2;
+        state.layers_dirty.mark_full();
+    }
+    engine::game::layers::evaluate_layers(runner.state_mut());
+
+    // Resolve the "+2" targeting P1 through the production activation path.
+    runner.activate(gideon, 0).target_player(P1).resolve();
+
+    // Hand the turn to P1 and park at their declare-attackers step.
+    {
+        let state = runner.state_mut();
+        state.active_player = P1;
+        state.priority_player = P1;
+        state.phase = Phase::DeclareAttackers;
+        state.turn_number = 3;
+        // CR 302.6: everything has been under its controller's control since
+        // before this turn began.
+        for id in state.battlefield.clone() {
+            if let Some(obj) = state.objects.get_mut(&id) {
+                obj.summoning_sick = false;
+            }
+        }
+        state.layers_dirty.mark_full();
+    }
+    engine::game::layers::evaluate_layers(runner.state_mut());
+
+    let valid = engine::game::combat::get_valid_attacker_ids(runner.state());
+    assert!(
+        valid.contains(&bear),
+        "reach-guard: P1's creature is an eligible attacker"
+    );
+    let targets = engine::game::combat::get_valid_attack_targets(runner.state());
+    assert!(
+        targets.contains(&AttackTarget::Planeswalker(gideon)),
+        "reach-guard: the engine offers Gideon as an attackable defender: {targets:?}"
+    );
+    runner.state_mut().waiting_for = WaitingFor::DeclareAttackers {
+        player: P1,
+        valid_attacker_ids: valid,
+        valid_attack_targets: targets,
+        valid_attack_targets_by_attacker: None,
+        attacker_constraints: Default::default(),
+    };
+
+    // NON-VACUITY PIN: the raw heuristic genuinely gets this wrong. It records
+    // the creature as mandatory but discards the required `AttackTarget`, so it
+    // proposes the defending PLAYER. This assertion is what makes the
+    // `choose_action` check below meaningful — without it, the test would still
+    // pass if the heuristic happened to pick Gideon for value reasons, and would
+    // prove nothing about the completion seam.
+    //
+    // If a future change teaches the policy to carry the defender itself, this
+    // assertion flips to the planeswalker and should simply be updated — the
+    // seam below is the invariant, not the heuristic's raw answer.
+    let raw = phase_ai::combat_ai::choose_attackers_with_targets(runner.state(), P1);
+    assert_eq!(
+        raw,
+        vec![(bear, AttackTarget::Player(P0))],
+        "the raw policy proposes the defending player — the engine completion is \
+         what repairs it, and that is exactly what this test guards"
+    );
+
+    let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+    let mut rng = SmallRng::seed_from_u64(7);
+    let action = choose_action(runner.state(), P1, &config, &mut rng)
+        .expect("AI must choose a declare-attackers action");
+    let GameAction::DeclareAttackers { attacks, .. } = &action else {
+        panic!("expected DeclareAttackers, got {action:?}");
+    };
+    assert_eq!(
+        attacks,
+        &vec![(bear, AttackTarget::Planeswalker(gideon))],
+        "CR 508.1d: the only maximum-requirement declaration attacks the planeswalker"
+    );
+
+    runner
+        .act(action)
+        .expect("the AI's declaration must be reducer-legal (apply-accepted)");
+    assert!(
+        runner.state().combat.as_ref().is_some_and(|c| c
+            .attackers
+            .iter()
+            .any(|a| a.object_id == bear && a.attack_target == AttackTarget::Planeswalker(gideon))),
+        "combat commits with the creature attacking Gideon"
     );
 }

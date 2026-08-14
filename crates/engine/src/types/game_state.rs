@@ -1,3 +1,4 @@
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
@@ -6,7 +7,8 @@ use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
-    default_target_filter_permanent, AbilityCost, AbilityDefinition, AdditionalCost,
+    default_target_filter_permanent, legacy_trigger_entry_list,
+    materialize_legacy_printed_trigger_entries, AbilityCost, AbilityDefinition, AdditionalCost,
     AdditionalCostInstance, AdditionalCostInstancePayment, AttackSubject, BeholdCostAction,
     CastTimingPermission, CastVariantPaid, CategoryChooserScope, ChoiceType, ChoiceValue,
     ChooseFromZoneConstraint, ChosenAttribute, CoinFlipResult, Comparator, ContinuousModification,
@@ -15,8 +17,8 @@ use super::ability::{
     EffectKind, FaceDownProfile, GameRestriction, KeywordAction, KickerVariant, LibraryPosition,
     ModalChoice, PermanentEntryMode, PileSource, QuantityExpr, ResolvedAbility,
     SearchDestinationSplit, SearchSelectionConstraint, StaticCondition, TapCreaturesAggregate,
-    TargetFilter, TargetRef, ThisWayCause, TriggerCondition, TriggerDefinition,
-    TriggerDefinitionRef, TriggerEntry,
+    TargetFilter, TargetRef, ThisWayCause, TriggerBaseSetInstanceRef, TriggerCondition,
+    TriggerDefinition, TriggerDefinitionRef, TriggerEntry,
 };
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, PrintedCardRef, TokenImageRef};
@@ -6311,6 +6313,50 @@ pub enum PendingCostMoveResume {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         remaining: Vec<PlayerId>,
     },
+    /// CR 701.9b + CR 118.12 + CR 616.1: a RANDOM unless-discard that paused on
+    /// a replacement choice (Library of Leng, Madness) partway through its batch.
+    ///
+    /// Two things would otherwise be lost, because both live only in the paying
+    /// stack frame that returns when the choice is raised:
+    ///
+    ///   * the unless-payment itself — nothing else records
+    ///     `pending_effect` / `trigger_event` / `effect_description` /
+    ///     `remaining`, so the guarded ability is left neither paid nor unpaid
+    ///     and the game resets to bare priority with its fate undetermined;
+    ///   * the batch cursor — the picks still owed after the paused card.
+    ///
+    /// The player-CHOSEN sibling needs no analogue: it parks in
+    /// `WaitingFor::WardDiscardChoice`, whose own re-prompt loop owns the
+    /// remainder. A random discard raises no prompt, so nothing else can own it.
+    ///
+    /// Boxed deliberately. `GameState` is moved by value through the
+    /// phase-server action + AI path and is guarded by a hard size budget
+    /// (`game_state_size.rs`); this payload is large and populated only during
+    /// a replacement pause, which is exactly the shape that guard says to box
+    /// rather than widen the budget for.
+    RandomDiscardUnlessPayment(Box<RandomDiscardUnlessPaymentResume>),
+}
+
+/// CR 701.9b + CR 118.12 + CR 616.1: payload of
+/// [`PendingCostMoveResume::RandomDiscardUnlessPayment`]. Split into its own
+/// boxed struct purely to keep `PendingCostMoveResume` — and therefore
+/// `GameState` — inside its stack budget.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RandomDiscardUnlessPaymentResume {
+    pub pending_effect: Box<ResolvedAbility>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_event: Option<GameEvent>,
+    /// The paying player — the unless-payer, not necessarily the ability's
+    /// controller.
+    pub payer: PlayerId,
+    /// Discard source, so resumed picks keep their replacement provenance.
+    pub source_id: ObjectId,
+    /// Cards still un-picked when the batch paused.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remaining_eligible: Vec<ObjectId>,
+    /// Picks still owed after the paused card settles.
+    #[serde(default)]
+    pub remaining_count: u32,
 }
 
 /// CR 601.2h + CR 616.1: Resume paying a sequential cost after a replacement
@@ -7964,6 +8010,384 @@ fn migrate_legacy_batched_zone_change_trigger_fired(
                 );
             }
         }
+    }
+    Ok(())
+}
+
+/// CR 400.7 + CR 603.10a: zone-change triggers use the exact source at the
+/// event, rather than a same-id object from a later zone change. Promotes
+/// legacy payload-only trigger lists carried by persisted zone-change snapshots
+/// before the typed state can expose them to a serializer. A record's own
+/// source context is authoritative; an absent live-record context can use only
+/// the exact initial printed base set of the persisted object with the same map
+/// key and object id. Journal snapshots never receive that fallback.
+pub(crate) fn migrate_legacy_zone_change_trigger_provenance(
+    value: &mut serde_json::Value,
+    additional_live_event_roots: &[&str],
+) -> Result<(), String> {
+    let state = value
+        .as_object_mut()
+        .ok_or_else(|| "persisted game state must be a JSON object".to_string())?;
+    if !state
+        .get("objects")
+        .and_then(serde_json::Value::as_object)
+        .is_some()
+    {
+        return Err("persisted game state objects must be an object".to_string());
+    }
+    // Keep the serialized object map in place without cloning it. Removing it
+    // temporarily lets the mutable record walk borrow `state` while fallback
+    // lookups retain an immutable view of the original persisted objects.
+    let objects_value = state
+        .remove("objects")
+        .expect("the checked persisted game state retains its object map");
+    let migration = {
+        let objects = objects_value
+            .as_object()
+            .expect("the checked persisted object map remains an object");
+        let mut trigger_bases = HashMap::new();
+
+        (|| {
+            prune_ceased_source_legacy_trigger_payloads(state, objects)?;
+
+            for field in [
+                "created_tokens_this_turn",
+                "sacrificed_permanents_this_turn",
+                "zone_changes_this_turn",
+            ] {
+                let Some(records) = state.get_mut(field) else {
+                    continue;
+                };
+                let records = records
+                    .as_array_mut()
+                    .ok_or_else(|| format!("{field} must be an array"))?;
+                for record in records {
+                    migrate_persisted_zone_change_trigger_record(
+                        record,
+                        objects,
+                        &mut trigger_bases,
+                        true,
+                    )?;
+                }
+            }
+
+            visit_persisted_live_zone_changed_records(
+                state,
+                additional_live_event_roots,
+                &mut |record| {
+                    migrate_persisted_zone_change_trigger_record(
+                        record,
+                        objects,
+                        &mut trigger_bases,
+                        true,
+                    )
+                },
+            )?;
+
+            if let Some(journal) = state.get_mut("resolved_rules_journal") {
+                visit_persisted_journal_zone_change_trigger_records(
+                    journal,
+                    objects,
+                    &mut trigger_bases,
+                )?;
+            }
+            Ok(())
+        })()
+    };
+    state.insert("objects".to_string(), objects_value);
+    migration
+}
+
+/// CR 400.7 + CR 603.3: a ceased source cannot be reconstructed through a
+/// same-id object lookup, while an already-stacked triggered ability keeps its
+/// captured ability independently of that source. Historical ledgers and stack
+/// entries may therefore discard only an all-payload legacy trigger list for a
+/// source which no longer exists. Live event carriers remain strict below: they
+/// can still need the exact trigger occurrence to finish trigger collection.
+fn prune_ceased_source_legacy_trigger_payloads(
+    state: &mut serde_json::Map<String, serde_json::Value>,
+    objects: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    for field in [
+        "created_tokens_this_turn",
+        "sacrificed_permanents_this_turn",
+        "zone_changes_this_turn",
+    ] {
+        let Some(records) = state.get_mut(field) else {
+            continue;
+        };
+        let records = records
+            .as_array_mut()
+            .ok_or_else(|| format!("{field} must be an array"))?;
+        for record in records {
+            prune_ceased_source_legacy_trigger_payload(record, objects)?;
+        }
+    }
+
+    for field in ["stack", "resolving_stack_entry"] {
+        let Some(entries) = state.get_mut(field) else {
+            continue;
+        };
+        visit_persisted_triggered_stack_entry_records(entries, &mut |record| {
+            prune_ceased_source_legacy_trigger_payload(record, objects)
+        })?;
+    }
+    Ok(())
+}
+
+fn prune_ceased_source_legacy_trigger_payload(
+    record: &mut serde_json::Value,
+    objects: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    let record = record
+        .as_object_mut()
+        .ok_or_else(|| "persisted zone-change record must be an object".to_string())?;
+    if !matches!(
+        record.get("trigger_source_context"),
+        Some(serde_json::Value::Null) | None
+    ) {
+        return Ok(());
+    }
+    let object_id: ObjectId = record
+        .get("object_id")
+        .cloned()
+        .ok_or_else(|| "persisted zone-change record has no object id".to_string())
+        .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()))?;
+    if objects.contains_key(&object_id.0.to_string()) {
+        return Ok(());
+    }
+    let entries = record
+        .get("trigger_definitions")
+        .cloned()
+        .map(serde_json::from_value::<Vec<TriggerEntry>>)
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .unwrap_or_default();
+    if legacy_trigger_entry_list(&entries).map_err(str::to_string)? {
+        record.insert(
+            "trigger_definitions".to_string(),
+            serde_json::Value::Array(Vec::new()),
+        );
+    }
+    Ok(())
+}
+
+/// Visits `ZoneChanged` records held by a current triggered stack entry. This
+/// intentionally does not recurse through generic live carriers: only a
+/// triggered ability already on the stack has completed trigger collection.
+fn visit_persisted_triggered_stack_entry_records(
+    value: &mut serde_json::Value,
+    visit: &mut impl FnMut(&mut serde_json::Value) -> Result<(), String>,
+) -> Result<(), String> {
+    match value {
+        serde_json::Value::Array(entries) => {
+            for entry in entries {
+                visit_persisted_triggered_stack_entry_records(entry, visit)?;
+            }
+        }
+        serde_json::Value::Object(entry) => {
+            let Some(kind) = entry
+                .get_mut("kind")
+                .and_then(serde_json::Value::as_object_mut)
+            else {
+                return Ok(());
+            };
+            if kind.get("type").and_then(serde_json::Value::as_str) != Some("TriggeredAbility") {
+                return Ok(());
+            }
+            let Some(event) = kind
+                .get_mut("data")
+                .and_then(serde_json::Value::as_object_mut)
+                .and_then(|data| data.get_mut("trigger_event"))
+            else {
+                return Ok(());
+            };
+            let Some(event) = event.as_object_mut() else {
+                return Ok(());
+            };
+            if let Some(record) = serialized_zone_changed_record_mut(event) {
+                visit(record)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// The only persisted object fields that can prove a context-free legacy
+/// record was one of its initial printed trigger slots.
+#[derive(Deserialize)]
+struct PersistedTriggerBase {
+    id: ObjectId,
+    #[serde(default = "initial_trigger_base_set_instance")]
+    trigger_base_set_instance: TriggerBaseSetInstanceRef,
+    #[serde(default)]
+    base_trigger_definitions: Vec<TriggerDefinition>,
+}
+
+const fn initial_trigger_base_set_instance() -> TriggerBaseSetInstanceRef {
+    TriggerBaseSetInstanceRef::INITIAL
+}
+
+fn migrate_persisted_zone_change_trigger_record(
+    record: &mut serde_json::Value,
+    objects: &serde_json::Map<String, serde_json::Value>,
+    trigger_bases: &mut HashMap<ObjectId, PersistedTriggerBase>,
+    allow_object_fallback: bool,
+) -> Result<(), String> {
+    let record = record
+        .as_object_mut()
+        .ok_or_else(|| "persisted zone-change record must be an object".to_string())?;
+    let object_id: ObjectId = record
+        .get("object_id")
+        .cloned()
+        .ok_or_else(|| "persisted zone-change record has no object id".to_string())
+        .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()))?;
+    let mut entries = record
+        .get("trigger_definitions")
+        .cloned()
+        .map(serde_json::from_value::<Vec<TriggerEntry>>)
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .unwrap_or_default();
+    let has_legacy_entries = legacy_trigger_entry_list(&entries).map_err(str::to_string)?;
+
+    let migrated = match record.get("trigger_source_context") {
+        Some(serde_json::Value::Null) | None => {
+            if !has_legacy_entries {
+                return Ok(());
+            }
+            if !allow_object_fallback {
+                return Err(
+                    "legacy journal zone-change record has no record-owned trigger source context"
+                        .to_string(),
+                );
+            }
+            let object_key = object_id.0.to_string();
+            let object_value = objects.get(&object_key).ok_or_else(|| {
+                "legacy zone-change record has no same-id persisted object base set".to_string()
+            })?;
+            let object = match trigger_bases.entry(object_id) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => entry.insert(
+                    serde_json::from_value(object_value.clone())
+                        .map_err(|error| error.to_string())?,
+                ),
+            };
+            if object.id != object_id {
+                return Err(
+                    "legacy zone-change record object map key does not match serialized object id"
+                        .to_string(),
+                );
+            }
+            if object.trigger_base_set_instance != TriggerBaseSetInstanceRef::INITIAL {
+                return Err(
+                    "legacy zone-change record requires the initial printed trigger base set"
+                        .to_string(),
+                );
+            }
+            materialize_legacy_printed_trigger_entries(
+                &mut entries,
+                object.base_trigger_definitions.as_slice(),
+                TriggerBaseSetInstanceRef::INITIAL,
+            )
+            .map_err(str::to_string)?;
+            entries
+        }
+        Some(context_value) => {
+            let context: TriggerSourceContext =
+                serde_json::from_value(context_value.clone()).map_err(|error| error.to_string())?;
+            if context.identity.reference.object_id != object_id {
+                return Err(
+                    "zone-change trigger source context object id does not match its record"
+                        .to_string(),
+                );
+            }
+            if legacy_trigger_entry_list(&context.trigger_entries).map_err(str::to_string)? {
+                return Err(
+                    "zone-change trigger source context has unmaterialized trigger entries"
+                        .to_string(),
+                );
+            }
+            if entries.len() != context.trigger_entries.len() {
+                return Err(
+                    "zone-change record trigger list disagrees with its source context".to_string(),
+                );
+            }
+            if has_legacy_entries {
+                if !entries.iter().zip(&context.trigger_entries).all(
+                    |(record_entry, context_entry)| {
+                        record_entry.definition == context_entry.definition
+                    },
+                ) {
+                    return Err(
+                        "zone-change record trigger list disagrees with its source context"
+                            .to_string(),
+                    );
+                }
+                context.trigger_entries
+            } else {
+                if entries != context.trigger_entries {
+                    return Err(
+                        "zone-change record trigger occurrence does not match its source context"
+                            .to_string(),
+                    );
+                }
+                return Ok(());
+            }
+        }
+    };
+
+    record.insert(
+        "trigger_definitions".to_string(),
+        serde_json::to_value(migrated).map_err(|error| error.to_string())?,
+    );
+    Ok(())
+}
+
+/// CR 400.7 + CR 603.10a: journal snapshots are immutable historical
+/// authority. They may use only an exact record-owned context, never a current
+/// object's printed base set.
+fn visit_persisted_journal_zone_change_trigger_records(
+    value: &mut serde_json::Value,
+    objects: &serde_json::Map<String, serde_json::Value>,
+    trigger_bases: &mut HashMap<ObjectId, PersistedTriggerBase>,
+) -> Result<(), String> {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                visit_persisted_journal_zone_change_trigger_records(value, objects, trigger_bases)?;
+            }
+        }
+        serde_json::Value::Object(object) => {
+            if let Some(record) = serialized_zone_changed_record_mut(object) {
+                migrate_persisted_zone_change_trigger_record(
+                    record,
+                    objects,
+                    trigger_bases,
+                    false,
+                )?;
+                return Ok(());
+            }
+            if let Some(record) = object.get_mut("zone_change_record") {
+                migrate_persisted_zone_change_trigger_record(
+                    record,
+                    objects,
+                    trigger_bases,
+                    false,
+                )?;
+            }
+            for (key, value) in object {
+                if key != "zone_change_record" {
+                    visit_persisted_journal_zone_change_trigger_records(
+                        value,
+                        objects,
+                        trigger_bases,
+                    )?;
+                }
+            }
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -10805,6 +11229,17 @@ pub enum WaitingFor {
         /// object-scoped binding used by Khans Sieges and every other named choice.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         persist_player: Option<PlayerId>,
+        /// CR 107.1a/b: the free-entry contract for `choice_type`, when its
+        /// answer is supplied by the player rather than picked from `options`.
+        ///
+        /// Published so a client renders the right control and bounds its input
+        /// from engine-stated values, instead of inspecting `choice_type`'s
+        /// serialized shape and restating the domain itself — a second authority
+        /// that could reject a value the engine accepts. Always
+        /// `choice_type.free_entry()`; `named_choice_free_entry_matches_choice_type`
+        /// pins that across every prompt the engine raises.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        free_entry: Option<crate::types::ability::FreeEntry>,
     },
     /// CR 608.2d + CR 608.2e: a player other than the controller (an opponent /
     /// the defending player) guesses a committed value or proposition during
@@ -27137,7 +27572,7 @@ mod tests {
         );
     }
 
-    /// CR 104.4b + CR 611.2c + CR 400.7: a materialized `MustAttackPlayer`
+    /// CR 104.4b + CR 611.2c + CR 400.7: a materialized `MustAttackDefender`
     /// static's `source_object` provenance is a layer-DERIVED characteristic that
     /// `object_content_eq` deliberately omits (like the whole `static_definitions`
     /// vec). Two states differing ONLY in a grafted requirement's directing-source
@@ -27160,8 +27595,8 @@ mod tests {
             Zone::Battlefield,
         );
         object.static_definitions.push(
-            StaticDefinition::new(StaticMode::MustAttackPlayer {
-                player: PlayerId(1).into(),
+            StaticDefinition::new(StaticMode::MustAttackDefender {
+                defender: PlayerId(1).into(),
             })
             .affected(TargetFilter::SelfRef)
             .source_object(ObjectId(800)),
@@ -27175,8 +27610,8 @@ mod tests {
         b.objects
             .get_mut(&ObjectId(500))
             .unwrap()
-            .static_definitions = vec![StaticDefinition::new(StaticMode::MustAttackPlayer {
-            player: PlayerId(1).into(),
+            .static_definitions = vec![StaticDefinition::new(StaticMode::MustAttackDefender {
+            defender: PlayerId(1).into(),
         })
         .affected(TargetFilter::SelfRef)
         .source_object(ObjectId(801))]

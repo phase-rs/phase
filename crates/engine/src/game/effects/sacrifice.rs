@@ -110,6 +110,8 @@ fn resolve_sacrifice_scope(
         .unwrap_or_default(),
         // CR 102.1: the active player, read live.
         Some(ControllerRef::ActivePlayer) => vec![state.active_player],
+        // CR 109.4 + CR 611.2: a snapshotted id names exactly one sacrificer.
+        Some(ControllerRef::SpecificPlayer { id }) => vec![id],
     }
 }
 

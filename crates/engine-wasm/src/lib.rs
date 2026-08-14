@@ -332,10 +332,13 @@ thread_local! {
     /// Cell::take() + Cell::set() has no borrow guard, making it panic-resilient.
     static GAME_STATE: Cell<Option<GameState>> = const { Cell::new(None) };
     static CARD_DB: RefCell<Option<CardDatabase>> = const { RefCell::new(None) };
-    /// When set, the engine is running inside a multiplayer session (online
-    /// WebSocket, P2P host, or P2P guest). Undo-style state rollback is
-    /// refused in this mode because rewinding a single client's view would
-    /// desync from the authoritative game on the wire. See `restore_game_state`.
+    /// When set, this engine is claimed by a multiplayer host session. The
+    /// engine claims it itself, in the same call that installs the game
+    /// (`initialize_multiplayer_host_game`, `resume_multiplayer_host_state`),
+    /// so there is never a window in which the flag and the game it describes
+    /// disagree. Undo-style state rollback is refused while it is set because
+    /// rewinding a single client's view would desync from the authoritative
+    /// game on the wire. See `restore_game_state`.
     static MULTIPLAYER_MODE: Cell<bool> = const { Cell::new(false) };
     /// Per-thread cache of the last-built `AiSession`, keyed by deck-composition
     /// fingerprint. The WASM bridge cannot hold the session on the stack across
@@ -468,10 +471,14 @@ enum AiProposalSubmission {
     },
 }
 
-/// Toggle the multiplayer enforcement flag. Called by multiplayer adapters
-/// (P2P host/guest, WS) after the engine is initialized so subsequent
-/// `restore_game_state` calls fail fast with a clear error instead of
-/// silently rewriting the local view.
+/// Set the multiplayer enforcement flag directly.
+///
+/// Entering multiplayer is *not* done here: the engine claims the flag itself,
+/// in the same call that installs the game (`initialize_multiplayer_host_game`,
+/// `resume_multiplayer_host_state`), so no client can leave the flag and the
+/// game it describes out of step. This entry point serves the release side —
+/// `releaseHostSession` clears the flag when a host session ends, so the next
+/// local game on a shared worker may undo again.
 #[wasm_bindgen]
 pub fn set_multiplayer_mode(enabled: bool) {
     MULTIPLAYER_MODE.with(|cell| cell.set(enabled));
@@ -1034,7 +1041,73 @@ fn estimate_bracket_inner(deck: &PlayerDeckList) -> Option<BracketEstimate> {
     })
 }
 
-/// Initialize a new game.
+/// Which client-side session is installing this game. Selects the
+/// debug-permission posture and whether the multiplayer flag is claimed in the
+/// same call.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InitSessionKind {
+    Local,
+    MultiplayerHost,
+}
+
+/// Is a game installed in this engine right now?
+///
+/// `GAME_STATE` is a `Cell<Option<GameState>>` for panic-resilience (see the
+/// thread-local's own doc) and `GameState` is not `Copy`, so take-peek-set is
+/// the only way to read it.
+fn game_state_present() -> bool {
+    GAME_STATE.with(|cell| {
+        let state = cell.take();
+        let present = state.is_some();
+        cell.set(state);
+        present
+    })
+}
+
+/// May a session of `kind` install a game into this engine right now?
+///
+/// Pure over the two thread-locals and free of `JsValue`, so it runs in the
+/// native test suite.
+fn init_guard(kind: InitSessionKind) -> Result<(), &'static str> {
+    match kind {
+        // On a memory-constrained device the P2P host shares the tab's single
+        // engine worker with local play, so an unguarded local initialize would
+        // silently destroy the hosted game. Mirrors `restore_game_state`'s
+        // refusal on the same flag.
+        InitSessionKind::Local if is_multiplayer_mode() => {
+            Err("a multiplayer host session owns this engine")
+        }
+        // The other direction: refuse rather than overwrite a resident local
+        // game.
+        InitSessionKind::MultiplayerHost if game_state_present() => {
+            Err("engine already holds a game")
+        }
+        // A local game may always replace another local game — that is how a
+        // rematch starts, and nothing clears `GAME_STATE` in between.
+        _ => Ok(()),
+    }
+}
+
+/// Claim the engine for `kind`. Called immediately after the state install so
+/// the flag and the game it describes are set in one uninterruptible step.
+fn claim_engine_for(kind: InitSessionKind) {
+    if kind == InitSessionKind::MultiplayerHost {
+        MULTIPLAYER_MODE.with(|cell| cell.set(true));
+    }
+}
+
+/// Envelope for an `init_guard` refusal. Carries the typed `engine_occupied`
+/// discriminator — like `cedh_bracket_violation` below — so the adapter raises
+/// a dedicated error instead of matching on a raw string substring.
+fn occupied_refusal(reason: &str) -> JsValue {
+    to_js(&serde_json::json!({
+        "error": true,
+        "engine_occupied": true,
+        "reasons": [reason],
+    }))
+}
+
+/// Initialize a new game for local (single-player / AI) play.
 /// Accepts deck_data as a DeckList (name-only) or null/undefined for empty libraries.
 /// format_config_js: optional FormatConfig JSON — defaults to Standard if null/undefined.
 /// match_config_js: optional MatchConfig JSON — defaults to BO1 if null/undefined.
@@ -1042,6 +1115,11 @@ fn estimate_bracket_inner(deck: &PlayerDeckList) -> Option<BracketEstimate> {
 /// first_player: 0 = human plays first (CR 103.1), 1 = opponent plays first, None = random.
 /// Names are resolved against the card database loaded via load_card_database().
 /// Returns the initial ActionResult (events + waiting_for).
+///
+/// Refuses with an `engine_occupied` envelope when a multiplayer host session
+/// holds this engine — on a memory-constrained device that host shares this
+/// very worker, and overwriting its game would destroy the authoritative state
+/// its guests are playing against.
 #[wasm_bindgen]
 pub fn initialize_game(
     deck_data: JsValue,
@@ -1050,6 +1128,70 @@ pub fn initialize_game(
     match_config_js: JsValue,
     player_count: Option<u8>,
     first_player: Option<u8>,
+) -> JsValue {
+    if let Err(reason) = init_guard(InitSessionKind::Local) {
+        return occupied_refusal(reason);
+    }
+    initialize_game_impl(
+        deck_data,
+        seed,
+        format_config_js,
+        match_config_js,
+        player_count,
+        first_player,
+        InitSessionKind::Local,
+    )
+}
+
+/// Initialize a new game *and* claim this engine for a multiplayer host
+/// session, in one call.
+///
+/// Same parameters and same return envelope as `initialize_game`. The P2P host
+/// uses this instead, for two reasons that only a single call can satisfy:
+///
+/// 1. **Refuses an occupied engine.** A hosted game must never start on top of
+///    a live local game. A client-side probe followed by an install is two
+///    round-trips with a window between them; this guard runs inside the same
+///    synchronous worker task as the install, so nothing can interleave.
+/// 2. **Atomic multiplayer-flag claim.** The flag is set on the line after the
+///    state install (see `claim_engine_for`), so there is no window where a
+///    stray `restore_game_state` (undo) would be accepted, and no window where
+///    a failed init leaves the flag set on an engine it never took. Mirrors
+///    `resume_multiplayer_host_state`, the resume-side sibling of this call.
+#[wasm_bindgen]
+pub fn initialize_multiplayer_host_game(
+    deck_data: JsValue,
+    seed: Option<f64>,
+    format_config_js: JsValue,
+    match_config_js: JsValue,
+    player_count: Option<u8>,
+    first_player: Option<u8>,
+) -> JsValue {
+    if let Err(reason) = init_guard(InitSessionKind::MultiplayerHost) {
+        return occupied_refusal(reason);
+    }
+    initialize_game_impl(
+        deck_data,
+        seed,
+        format_config_js,
+        match_config_js,
+        player_count,
+        first_player,
+        InitSessionKind::MultiplayerHost,
+    )
+}
+
+/// Shared body of both initialize entry points. The guard lives in the shells
+/// (they are where `JsValue` envelopes are produced); this function assumes it
+/// has already passed and installs unconditionally.
+fn initialize_game_impl(
+    deck_data: JsValue,
+    seed: Option<f64>,
+    format_config_js: JsValue,
+    match_config_js: JsValue,
+    player_count: Option<u8>,
+    first_player: Option<u8>,
+    kind: InitSessionKind,
 ) -> JsValue {
     let seed = seed.map(|s| s as u64).unwrap_or(42);
 
@@ -1074,7 +1216,11 @@ pub fn initialize_game(
     }
 
     let mut state = GameState::new(format_config.clone(), count, seed);
-    initialize_debug_permissions(&mut state, is_multiplayer_mode());
+    // Read the posture from `kind`, not from `is_multiplayer_mode()`: the flag
+    // is claimed *after* this install (see `claim_engine_for`), so the
+    // thread-local is still clear here and a host game would otherwise be given
+    // local debug permissions.
+    initialize_debug_permissions(&mut state, kind == InitSessionKind::MultiplayerHost);
     let match_config = if !match_config_js.is_null() && !match_config_js.is_undefined() {
         serde_wasm_bindgen::from_value::<MatchConfig>(match_config_js)
             .unwrap_or_else(|_| MatchConfig::default())
@@ -1292,6 +1438,9 @@ pub fn initialize_game(
     bind_interaction_session(&mut state);
 
     GAME_STATE.with(|cell| cell.set(Some(state)));
+    // Adjacent to the install, exactly as `resume_multiplayer_host_state` does:
+    // the flag and the game it describes are set in one uninterruptible step.
+    claim_engine_for(kind);
     clear_ai_session_cache();
     invalidate_ai_proposals();
 
@@ -2096,13 +2245,7 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<(), JsValue> {
             "resume_multiplayer_host_state refused: multiplayer mode already set",
         ));
     }
-    let already_has_state = GAME_STATE.with(|cell| {
-        let s = cell.take();
-        let present = s.is_some();
-        cell.set(s);
-        present
-    });
-    if already_has_state {
+    if game_state_present() {
         return Err(JsValue::from_str(
             "resume_multiplayer_host_state refused: engine already initialized; call clear_game_state first",
         ));
@@ -5513,5 +5656,95 @@ mod ai_scoring_rng_bridge_tests {
         drive_scoring();
 
         clear_game_state();
+    }
+}
+
+/// Native coverage for the engine-claim guard. `init_guard` and
+/// `claim_engine_for` are plain Rust functions over the two thread-locals, so —
+/// unlike the `wasm32`-gated `mod tests`, whose assertions never execute in the
+/// native suite — these really run under `cargo test`/nextest. The
+/// `#[wasm_bindgen]` shells that call them take and return `JsValue` and cannot
+/// run natively; the frontend suite covers that wiring.
+///
+/// Each case establishes both thread-locals it reads: nextest's
+/// process-per-test execution keeps them isolated, and the setup makes each
+/// case independent of ordering regardless.
+#[cfg(test)]
+mod engine_claim_guard_tests {
+    use super::*;
+
+    fn install_resident_game() {
+        GAME_STATE.with(|cell| cell.set(Some(GameState::new_two_player(0x0C1A_13ED))));
+    }
+
+    #[test]
+    fn a_multiplayer_host_is_refused_when_the_engine_already_holds_a_game() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        install_resident_game();
+
+        assert_eq!(
+            init_guard(InitSessionKind::MultiplayerHost),
+            Err("engine already holds a game"),
+            "a hosted game must never overwrite the live local game it shares a worker with"
+        );
+
+        clear_game_state();
+    }
+
+    #[test]
+    fn a_multiplayer_host_may_claim_an_empty_engine() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+
+        assert_eq!(init_guard(InitSessionKind::MultiplayerHost), Ok(()));
+    }
+
+    #[test]
+    fn a_local_game_is_refused_while_a_multiplayer_host_owns_the_engine() {
+        clear_game_state();
+        set_multiplayer_mode(true);
+
+        assert_eq!(
+            init_guard(InitSessionKind::Local),
+            Err("a multiplayer host session owns this engine"),
+            "starting local play on the host's shared worker would destroy the hosted game"
+        );
+
+        set_multiplayer_mode(false);
+    }
+
+    #[test]
+    fn a_local_game_may_still_replace_another_local_game() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        install_resident_game();
+
+        // The rematch guarantee: a local rematch is a fresh `initialize_game`
+        // with no intervening `clear_game_state`, so refusing an occupied
+        // engine here would break ordinary single-player play.
+        assert_eq!(init_guard(InitSessionKind::Local), Ok(()));
+
+        clear_game_state();
+    }
+
+    #[test]
+    fn only_a_multiplayer_host_claims_the_engine() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+
+        claim_engine_for(InitSessionKind::Local);
+        assert!(
+            !is_multiplayer_mode(),
+            "a local game must leave the flag clear, or undo would be refused for the rest of the tab"
+        );
+
+        claim_engine_for(InitSessionKind::MultiplayerHost);
+        assert!(
+            is_multiplayer_mode(),
+            "the host claim is what refuses a later local initialize and undo"
+        );
+
+        set_multiplayer_mode(false);
     }
 }

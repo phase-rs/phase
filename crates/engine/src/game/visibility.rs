@@ -409,6 +409,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         options,
         source,
         persist_player,
+        free_entry,
     } = &state.waiting_for
     {
         let mut source = source.clone();
@@ -421,7 +422,32 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             options: options.clone(),
             source,
             persist_player: *persist_player,
+            // The free-entry contract is what the prompt PUBLISHES; it carries no
+            // hidden information (it is a function of `choice_type`, which is
+            // already public here), so the projection forwards it intact.
+            free_entry: *free_entry,
         };
+    }
+
+    // CR 101.4 + CR 101.4b + CR 608.2d: A number a player chose but has not yet
+    // REVEALED is that player's secret. Wheel of Misfortune, Menacing Ogre and
+    // Life at Stake all say "secretly", and The Toymaker's Trap's committed
+    // number must survive an opponent's guess unseen — CR 101.4b would otherwise
+    // let a later chooser read the earlier answers.
+    //
+    // The redaction keys on the ATTRIBUTE KIND, not on the current `waiting_for`:
+    // `ChosenAttribute::Number` is private, `RevealedNumber` is public, and
+    // `Effect::RevealChosenNumbers` converts one into the other when the card's
+    // reveal instruction resolves (CR 608.2c, in written order). Making privacy a
+    // property of the type means no call path can open a window where a still-
+    // secret value leaks, and no reveal can be forgotten — a value is visible
+    // exactly when the game has published it.
+    for player in filtered.players.iter_mut() {
+        if !can_view_private_for_player(player.id) {
+            player.chosen_attributes.retain(|attribute| {
+                !matches!(attribute, crate::types::ability::ChosenAttribute::Number(_))
+            });
+        }
     }
 
     // CR 608.2d: While an `OpponentGuess` is pending, strip the secret the
@@ -2358,6 +2384,7 @@ mod tests {
             options: vec!["Anchor".to_string()],
         };
         state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(0),
             choice_type: choice_type.clone(),
             options: vec!["Anchor".to_string()],
@@ -2370,6 +2397,7 @@ mod tests {
         assert!(matches!(
             source_less_view.waiting_for,
             WaitingFor::NamedChoice {
+                free_entry: _,
                 player: PlayerId(0),
                 ref choice_type,
                 ref options,
@@ -2397,6 +2425,7 @@ mod tests {
         );
         let expected_prompt = source.prompt.clone();
         state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(0),
             choice_type,
             options: vec!["Anchor".to_string()],
@@ -2408,6 +2437,7 @@ mod tests {
         assert!(source_bound_view.resolution_stack.is_empty());
         match source_bound_view.waiting_for {
             WaitingFor::NamedChoice {
+                free_entry: None,
                 source: Some(source),
                 persist_player,
                 ..
@@ -5810,6 +5840,120 @@ mod tests {
         ));
     }
 
+    /// CR 101.4b + CR 608.2d: a number a player chose is that player's secret.
+    /// The per-player ledger behind `QuantityRef::PlayerChosenNumber` (Wheel of
+    /// Misfortune's "each player secretly chooses a number 0 or greater") is
+    /// redacted from every other viewer — and, because it is an engine ledger
+    /// rather than a rendered fact, it stays redacted regardless of what the game
+    /// is currently waiting on. A window-scoped rule would leak the moment the
+    /// prompt closed but the secret was still live (The Toymaker's Trap's
+    /// committed number, guessed at during an `OpponentGuess`).
+    ///
+    /// Fail-on-revert: without the redaction the second chooser's client shows
+    /// the first chooser's number and the "secret" is free information.
+    #[test]
+    fn player_chosen_number_is_private_to_that_player() {
+        use crate::types::ability::{ChoiceType, ChosenAttribute, NumberDistinctness};
+        let mut state = GameState::new_two_player(42);
+        // P0 has already answered; P1 is the pending chooser.
+        state.players[0].chosen_attributes = vec![ChosenAttribute::Number(4)];
+        state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
+            player: PlayerId(1),
+            choice_type: ChoiceType::NumberRange {
+                min: 0,
+                max: Some(20),
+                distinctness: NumberDistinctness::Repeatable,
+            },
+            options: (0..=20u8).map(|n| n.to_string()).collect(),
+            source: None,
+            persist_player: None,
+        };
+
+        let chooser_view = filter_state_for_viewer(&state, PlayerId(1));
+        assert!(
+            chooser_view.players[0].chosen_attributes.is_empty(),
+            "the pending chooser must not see the number already chosen by P0"
+        );
+        let owner_view = filter_state_for_viewer(&state, PlayerId(0));
+        assert!(
+            owner_view.players[0]
+                .chosen_attributes
+                .contains(&ChosenAttribute::Number(4)),
+            "a player always sees their own chosen number"
+        );
+
+        // Still redacted once the prompt window has closed — the secret can
+        // outlive the prompt (a pending guess against it, CR 608.2d).
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        assert!(
+            filter_state_for_viewer(&state, PlayerId(1)).players[0]
+                .chosen_attributes
+                .is_empty(),
+            "privacy is a property of the attribute kind, not of the current prompt"
+        );
+
+        // CR 101.4 + CR 608.2c: the OTHER side of the contract. Once the card's
+        // reveal instruction publishes the number (`Number` → `RevealedNumber`,
+        // performed by `Effect::RevealChosenNumbers`), every viewer sees it —
+        // otherwise the engine would keep information secret after the
+        // instruction that makes it public.
+        state.players[0].reveal_chosen_number();
+        assert!(
+            filter_state_for_viewer(&state, PlayerId(1)).players[0]
+                .chosen_attributes
+                .contains(&ChosenAttribute::RevealedNumber(4)),
+            "a revealed number must be visible to every player"
+        );
+        assert!(
+            filter_state_for_viewer(&state, PlayerId(0)).players[0]
+                .chosen_attributes
+                .contains(&ChosenAttribute::RevealedNumber(4)),
+            "revealing must not hide the number from its own chooser"
+        );
+    }
+
+    /// CR 101.4: `reveal_chosen_number` is the single typed transition — it
+    /// preserves the VALUE (every rules read must agree across the reveal),
+    /// is idempotent, and is a no-op for a player who chose nothing (CR 609.3),
+    /// which is what lets a card name every player when only some chose.
+    #[test]
+    fn revealing_a_chosen_number_preserves_value_and_tolerates_non_choosers() {
+        use crate::types::ability::ChosenAttribute;
+        let mut state = GameState::new_two_player(42);
+        state.players[0].chosen_attributes = vec![ChosenAttribute::Number(7)];
+
+        assert_eq!(state.players[0].reveal_chosen_number(), Some(7));
+        assert_eq!(
+            state.players[0].chosen_number(),
+            Some(7),
+            "the value a rules read sees is unchanged by the reveal"
+        );
+        assert_eq!(
+            state.players[0].reveal_chosen_number(),
+            Some(7),
+            "revealing an already-revealed number is idempotent"
+        );
+        assert_eq!(
+            state.players[0]
+                .chosen_attributes
+                .iter()
+                .filter(|a| matches!(
+                    a,
+                    ChosenAttribute::Number(_) | ChosenAttribute::RevealedNumber(_)
+                ))
+                .count(),
+            1,
+            "a player holds exactly one chosen number, in exactly one state"
+        );
+
+        // A player who chose nothing reveals nothing, and gains no attribute.
+        assert_eq!(state.players[1].reveal_chosen_number(), None);
+        assert!(state.players[1].chosen_attributes.is_empty());
+    }
+
     /// CR 608.2d: For a `GuessSubject::CommittedChoice` (The Toymaker's Trap),
     /// only the MOST-RECENTLY committed number is hidden from the guesser — it is
     /// the secret of the pending guess. Numbers chosen on earlier upkeeps were
@@ -5840,7 +5984,7 @@ mod tests {
             options: (1..=5).map(|n| n.to_string()).collect(),
             choice_type: ChoiceType::NumberRange {
                 min: 1,
-                max: 5,
+                max: Some(5),
                 distinctness: NumberDistinctness::DistinctFromSourceHistory,
             },
             source: crate::types::game_state::OpponentGuessSource {

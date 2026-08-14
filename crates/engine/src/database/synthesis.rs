@@ -9011,7 +9011,9 @@ pub fn synthesize_read_ahead(face: &mut CardFace) {
         Effect::Choose {
             choice_type: ChoiceType::NumberRange {
                 min: 1,
-                max: final_chapter.min(u8::MAX as u32) as u8,
+                // CR 702.155b: the Saga states its own upper bound (the final
+                // chapter), so this range is genuinely bounded.
+                max: Some(final_chapter),
                 distinctness: crate::types::ability::NumberDistinctness::Repeatable,
             },
             persist: true,
@@ -23010,7 +23012,7 @@ mod devour_synthesis_tests {
             panic!("read-ahead ETB should choose a number");
         };
         // CR 702.155b + CR 714.2d: between one and the final chapter number (3).
-        assert_eq!((*min, *max), (1, 3));
+        assert_eq!((*min, *max), (1, Some(3)));
         assert!(*persist, "chosen number must persist for ChosenNumber");
 
         let sub = execute

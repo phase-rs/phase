@@ -240,7 +240,7 @@ export function has_replay_recording(): boolean;
 export function init_panic_hook(): void;
 
 /**
- * Initialize a new game.
+ * Initialize a new game for local (single-player / AI) play.
  * Accepts deck_data as a DeckList (name-only) or null/undefined for empty libraries.
  * format_config_js: optional FormatConfig JSON — defaults to Standard if null/undefined.
  * match_config_js: optional MatchConfig JSON — defaults to BO1 if null/undefined.
@@ -248,8 +248,32 @@ export function init_panic_hook(): void;
  * first_player: 0 = human plays first (CR 103.1), 1 = opponent plays first, None = random.
  * Names are resolved against the card database loaded via load_card_database().
  * Returns the initial ActionResult (events + waiting_for).
+ *
+ * Refuses with an `engine_occupied` envelope when a multiplayer host session
+ * holds this engine — on a memory-constrained device that host shares this
+ * very worker, and overwriting its game would destroy the authoritative state
+ * its guests are playing against.
  */
 export function initialize_game(deck_data: any, seed: number | null | undefined, format_config_js: any, match_config_js: any, player_count?: number | null, first_player?: number | null): any;
+
+/**
+ * Initialize a new game *and* claim this engine for a multiplayer host
+ * session, in one call.
+ *
+ * Same parameters and same return envelope as `initialize_game`. The P2P host
+ * uses this instead, for two reasons that only a single call can satisfy:
+ *
+ * 1. **Refuses an occupied engine.** A hosted game must never start on top of
+ *    a live local game. A client-side probe followed by an install is two
+ *    round-trips with a window between them; this guard runs inside the same
+ *    synchronous worker task as the install, so nothing can interleave.
+ * 2. **Atomic multiplayer-flag claim.** The flag is set on the line after the
+ *    state install (see `claim_engine_for`), so there is no window where a
+ *    stray `restore_game_state` (undo) would be accepted, and no window where
+ *    a failed init leaves the flag set on an engine it never took. Mirrors
+ *    `resume_multiplayer_host_state`, the resume-side sibling of this call.
+ */
+export function initialize_multiplayer_host_game(deck_data: any, seed: number | null | undefined, format_config_js: any, match_config_js: any, player_count?: number | null, first_player?: number | null): any;
 
 /**
  * Whether the named card can serve as this format's command-zone leader.
@@ -430,10 +454,14 @@ export function resume_multiplayer_host_state(json_str: string): void;
 export function search_cards_js(query: any): any;
 
 /**
- * Toggle the multiplayer enforcement flag. Called by multiplayer adapters
- * (P2P host/guest, WS) after the engine is initialized so subsequent
- * `restore_game_state` calls fail fast with a clear error instead of
- * silently rewriting the local view.
+ * Set the multiplayer enforcement flag directly.
+ *
+ * Entering multiplayer is *not* done here: the engine claims the flag itself,
+ * in the same call that installs the game (`initialize_multiplayer_host_game`,
+ * `resume_multiplayer_host_state`), so no client can leave the flag and the
+ * game it describes out of step. This entry point serves the release side —
+ * `releaseHostSession` clears the flag when a host session ends, so the next
+ * local game on a shared worker may undo again.
  */
 export function set_multiplayer_mode(enabled: boolean): void;
 
@@ -524,6 +552,7 @@ export interface InitOutput {
     readonly get_viewer_snapshot_js: (a: number) => any;
     readonly has_replay_recording: () => number;
     readonly initialize_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number) => any;
+    readonly initialize_multiplayer_host_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number) => any;
     readonly isCardCommanderEligibleForFormat: (a: number, b: number, c: any) => number;
     readonly is_card_commander_eligible: (a: number, b: number) => number;
     readonly is_multiplayer_mode: () => number;

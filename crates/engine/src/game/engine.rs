@@ -6448,6 +6448,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::ActivationMillPayment { .. }
                     | PendingCostMoveResume::LoyaltyActivation { .. }
                     | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+                    | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
             )
         ),
         // CR 606.4 + CR 616.1: a fully-prevented loyalty counter add (e.g. an
@@ -6471,6 +6472,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::ActivationMillPayment { .. }
                     | PendingCostMoveResume::LoyaltyActivation { .. }
                     | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+                    | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
             )
         ),
         CostMoveDrainBoundary::PriorityBoundary => matches!(
@@ -6551,6 +6553,14 @@ pub(crate) fn drain_pending_cost_move_resume(
             events,
             matches!(boundary, CostMoveDrainBoundary::ReplacementDelivered { .. }),
         )?
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::RandomDiscardUnlessPayment(..))
+    ) {
+        // CR 118.12: random discard pauses only after its Moved replacement
+        // returns a replacement choice; the delivered boundary resumes the
+        // payment through its already-authorized paid epilogue.
+        engine_payment_choices::resume_random_discard_unless_payment(state, events)?
     } else {
         unreachable!("eligible cost-move root must remain parked")
     };
@@ -18166,6 +18176,28 @@ mod stage2_injector_tests {
                 //     with a delegation; it sits above this producer and below the first two.
                 //     The merge tree therefore retains main's first two coordinates
                 //     (`:6177`/`:6254`) and shifts this one by −16 to `:9442`.
+                //   Random-discard-as-a-cost (#7320, review round 1): `engine.rs:12004 ⇒
+                //     :12019`, +15, and ONLY the engine.rs entry moved — the four
+                //     effects/mod.rs + scoped_library_search entries did not, which is the
+                //     set-preservation evidence. `git diff -U0` on this file has exactly three
+                //     hunks, ALL inside `drain_pending_cost_move_resume` at `:5761`/
+                //     `:5865` (+1/+13 = +14, zero deletions), i.e. entirely ABOVE this
+                //     producer; predicted `12004+14` equals the observed coordinate exactly.
+                //     They add the `RandomDiscardUnlessPayment` delivery resume and its
+                //     dispatch arm — a cost-payment continuation, not
+                //     a prompt mint: it RESUMES an already-minted `UnlessPayment` rather than
+                //     creating a recipient, so it is correctly absent from this census.
+                //     Identity re-established, not assumed: the producer at `:12019` is the
+                //     same announcement-time modal mint this row NAMES — an `Ok(Some(..))` of
+                //     the optional-effect prompt over `player` / `source_id` /
+                //     `trigger_description` / `may_trigger_key` — still inside
+                //     `begin_pending_trigger_target_selection`. (Spelled out rather than
+                //     quoted: the needle above is ASSEMBLED so this row cannot be counted by
+                //     its own instrument, and a verbatim quote here re-introduces exactly the
+                //     self-count that defends against — it inflates `in_test` and reds the
+                //     TOTAL assert instead of this one.) The two asserts
+                //     above this one fired GREEN on the run that caught it — total still 37,
+                //     partition still 5/7/25 — so no producer was added or lost.
                 //
                 // ⚠ THIS ROW FAILS IN CI BEFORE IT FAILS LOCALLY, and that is not a bug in the
                 // row. CI checks out `refs/pull/<n>/merge` — this branch merged with CURRENT
@@ -18185,14 +18217,106 @@ mod stage2_injector_tests {
                 // shifts combine with #6958's paid-cast outcome exclusion and
                 // #6976's conditional-branch exclusions. None creates an
                 // `OptionalEffect` prompt. Re-pinned against the merged source.
-                // Current-main port: #7221's typed player-action completion seam and the
-                // contemporaneous upstream changes moved these three producers. Re-derived
-                // in the merged source, still in their named production functions.
-                // #7382's optional-player routing and pre-entry controller prompt move only
-                // the third and fifth coordinates; both named mints were re-read in place.
-                "game/effects/mod.rs:6648".to_string(),
-                "game/effects/mod.rs:6725".to_string(),
-                "game/effects/mod.rs:9947".to_string(),
+                // Wheel of Misfortune (#7266), MEASURED ON THE MERGE TREE. This row's
+                // own header warns that a fork branch's pins are correct for the branch
+                // and wrong for `refs/pull/<n>/merge`; both sides of this conflict were
+                // that kind of local-correct. `origin/main` carried `:6306/:6383/:9578`
+                // and the branch carried `:6261/:6338/:9550`; NEITHER is right here, so
+                // the merged file was re-measured rather than either side taken:
+                // `:6306/:6383/:9578 => :6315/:6392/:9606`, i.e. `+9/+9/+28`.
+                //
+                // The asymmetry IS the measurement. This branch's non-test additions to
+                // effects/mod.rs, in file order:
+                //   `pub mod reveal_chosen_numbers;` — 1 line, above all three.
+                //   the `Effect::RevealChosenNumbers` dispatch arm — 3 lines, above all
+                //     three (the dispatch table precedes every producer).
+                //   the `QuantityRef::PlayerChosenNumber` arm in
+                //     `candidate_player_scalar` — 5 lines, above all three.
+                // 1 + 3 + 5 = the uniform `+9` the first two producers take. The third
+                // takes a further `+19` from the depth-0 per-player secret-number ledger
+                // reset in `resolve_ability_chain` (16 lines, plus 3 widening the clear
+                // to retain both `Number` and `RevealedNumber`), which sits above it and
+                // below the first two: 9 + 19 = 28. Predicted and observed agree.
+                //
+                // Nothing added here raises a `WaitingFor`: the two clears and the scalar
+                // read are pure state reads/writes, and the dispatch arm delegates to
+                // `reveal_chosen_numbers::resolve`, which converts
+                // `ChosenAttribute::Number` to `RevealedNumber` and emits an event. The
+                // census set is therefore still exactly 5.
+                //
+                // NOTE for the next drift: upstream refactored the third producer from a
+                // `state.waiting_for = …` assignment form into a bare struct-literal value
+                // inside a returned tuple. It is still one producer and still matches this
+                // row's assembled needle, but a grep for the old assignment form now finds
+                // only two — measure with the needle, not with the assignment.
+                //
+                // And do NOT spell the needle literally in this comment. It is assembled
+                // at the top of this row precisely so the row cannot count itself, but the
+                // walker reads every line of this file: writing the struct-literal form
+                // out in prose here adds a phantom `in_test` hit per mention. Two such
+                // mentions in an earlier draft of this very note pushed the partition to
+                // 27 and reded the row — the instrument working exactly as intended.
+                //
+                // SECOND merge with main (#7221's typed player-action completion seam and
+                // its contemporaries). Same rule, applied again: `main` re-derived these to
+                // `:6640/:6717/:9922` for ITS tree and the branch carried `:6315/:6392/:9606`
+                // for its own; the merged file measures `:6653/:6730/:9954`, a uniform `+13`
+                // over main's coordinates. That `+13` is exactly this branch's four
+                // additions above all three producers: `pub mod reveal_chosen_numbers;` (1),
+                // the `Effect::RevealChosenNumbers` dispatch arm (3), the
+                // `QuantityRef::PlayerChosenNumber` arm in `candidate_player_scalar` (5),
+                // and its arm in main's new `quantity_ref_counts_population_matching` (4).
+                // It is uniform this time — unlike the first merge — because main's own
+                // churn moved the depth-0 ledger reset and the third producer together, so
+                // the branch's extra offset there is already inside main's baseline rather
+                // than stacked on top of it.
+                //
+                // Measure AFTER the last edit to effects/mod.rs, not during: an earlier
+                // pass here recorded `+9` from a measurement taken before that fourth arm
+                // was added, and the row caught the 4-line discrepancy.
+                // Unbounded-number round (same PR): `:6653/:6730/:9954 =>
+                // `:6655/:6732/:9956`, a uniform `+2` — the unbounded-range arm
+                // added to `compute_options`' sibling classifier in this file,
+                // which sits above all three producers. Nothing added raises a
+                // `WaitingFor`; the census set is still exactly 5.
+                //
+                // MERGE OF `origin/main` (`59f5a51e`) INTO THIS BRANCH (First Family's
+                // characteristic-set union). This array conflicted, and the header's rule
+                // applied a third time: `origin/main` carried `:6656/:6733/:9974` and this
+                // branch carried `:6648/:6725/:9947`, each correct for its own tree and
+                // neither correct for the merge. NEITHER SIDE WAS TAKEN — the merged file
+                // was re-measured: `:6656/:6733/:9974 => :6664/:6741/:9982`, a uniform
+                // `+8` over main's coordinates.
+                //
+                // The `+8` is exactly this branch's net insertion into effects/mod.rs, and
+                // all of it sits above the FIRST producer, which is why the shift is
+                // uniform rather than staggered. `git diff -U0 origin/main` on that file
+                // has exactly four hunks, ALL between `:2966` and `:3047`:
+                //   `filter_contains_last_created`'s characteristic-source arm (+1),
+                //   `card_type_set_source_counts_population_matching`'s zone/tracked-set/
+                //     union population cases (+7),
+                //   the `quantity_ref_counts_population_matching` arm the union folds
+                //     into the shared helper (-1), and
+                //   its replacement delegation (+1).
+                // 1 + 7 - 1 + 1 = 8, with nothing below `:3047` — predicted and observed
+                // agree. None of the four raises a prompt: they are population COUNTS
+                // (pure reads over zones, tracked sets and unions), so the census set is
+                // still exactly 5.
+                //
+                // Identity re-established at the new coordinates rather than assumed. Each
+                // producer line is byte-identical by sha256 to the same producer on BOTH
+                // parents — `9869a19f…`, `2bc316e3…` and `8df98486…` respectively, the
+                // same three digests the line carries at `:6656/:6733/:9974` on main and
+                // at `:6648/:6725/:9947` on this branch. The two asserts above this one
+                // fired GREEN on the merged tree — total still 38, partition still 5/8/25
+                // — and the other two entries did not move (`scoped_library_search.rs:452`
+                // unmoved, `engine.rs:12773` unmoved, both re-read and sha256-confirmed in
+                // place). A merge that had gained or lost a producer could not leave two
+                // entries byte-identical AND at their coordinates while moving the other
+                // three by a figure the diff predicts exactly.
+                "game/effects/mod.rs:6664".to_string(),
+                "game/effects/mod.rs:6741".to_string(),
+                "game/effects/mod.rs:9982".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
@@ -18846,7 +18970,10 @@ mod stage2_injector_tests {
                 // This rebase raised the literal as a CONFLICT twice and then drifted it SILENTLY a
                 // third time at the tip; only the offset control caught the silent one. That is the
                 // drift class FU-4 (content-hash coordinate anchor) exists to end.
-                "game/engine.rs:12763".to_string(),
+                // #7320's random-discard continuation adds ten lines above this producer in the
+                // merged tree. Re-derived by the exact producer text at `:12773`, not by carrying
+                // the prior coordinate.
+                "game/engine.rs:12773".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \

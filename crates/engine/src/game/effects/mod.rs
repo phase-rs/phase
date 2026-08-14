@@ -10,12 +10,13 @@ use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode, CardTypeSetSource,
-    ControllerRef, CopyRetargetPermission, CostPaidObjectSnapshot, EachDamageRecipient, Effect,
-    EffectError, EffectKind, EffectOutcomeSignal, EffectResolutionResult, EffectScope, FilterProp,
-    ManaProduction, OpponentMayScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
-    RepeatContinuation, ResolvedAbility, RevealUntilDisposition, SacrificeCost,
-    SacrificeRequirement, SharedQuality, SharedQualityRelation, SiblingCondition, SubAbilityLink,
-    TapStateChange, TargetChoiceTiming, TargetFilter, TargetRef, ThisWayCause,
+    ChosenAttribute, ControllerRef, CopyRetargetPermission, CostPaidObjectSnapshot,
+    EachDamageRecipient, Effect, EffectError, EffectKind, EffectOutcomeSignal,
+    EffectResolutionResult, EffectScope, FilterProp, ManaProduction, OpponentMayScope,
+    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
+    RevealUntilDisposition, SacrificeCost, SacrificeRequirement, SharedQuality,
+    SharedQualityRelation, SiblingCondition, SubAbilityLink, TapStateChange, TargetChoiceTiming,
+    TargetFilter, TargetRef, ThisWayCause,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -185,6 +186,7 @@ pub mod remove_from_combat;
 pub mod renown;
 pub mod return_as_aura;
 pub mod reveal;
+pub mod reveal_chosen_numbers;
 pub mod reveal_from_hand;
 pub mod reveal_hand;
 pub mod reveal_top;
@@ -645,6 +647,13 @@ pub(crate) fn candidate_player_scalar(p: &Player, attr: &QuantityRef) -> Option<
         QuantityRef::CardsDrawnThisTurn { .. } => {
             Some(u32_to_i32_saturating(p.cards_drawn_this_turn))
         }
+        // CR 101.4 + CR 608.2d: the number this candidate secretly chose during
+        // the current resolution. `None` for a player who chose nothing, which
+        // fails the candidate predicate CLOSED — "each player who didn't choose
+        // the lowest number" must not sweep in a player who never chose at all.
+        QuantityRef::PlayerChosenNumber { .. } => p
+            .chosen_number()
+            .map(crate::game::arithmetic::u32_to_i32_saturating),
         _ => None,
     }
 }
@@ -3052,6 +3061,10 @@ fn quantity_ref_counts_population_matching(
         | QuantityRef::PlayerCount { .. }
         | QuantityRef::CountersOn { .. }
         | QuantityRef::PlayerCounter { .. }
+        // CR 101.4: reads a per-player scalar off `Player::chosen_attributes`.
+        // It counts no POPULATION of objects — its `PlayerScope` selects which
+        // players contribute and how they fold, never a `TargetFilter`.
+        | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::TargetControllerCounter { .. }
         | QuantityRef::Variable { .. }
         | QuantityRef::Power { .. }
@@ -4693,6 +4706,9 @@ pub fn resolve_effect(
         Effect::RevealHand { .. } => reveal_hand::resolve(state, ability, events),
         Effect::RevealFromHand { .. } => reveal_from_hand::resolve(state, ability, events),
         Effect::Reveal { .. } => reveal::resolve(state, ability, events),
+        Effect::RevealChosenNumbers { .. } => {
+            reveal_chosen_numbers::resolve(state, ability, events)
+        }
         Effect::RevealTop { .. } => reveal_top::resolve(state, ability, events),
         Effect::ExileTop { .. } => exile_top::resolve(state, ability, events),
         Effect::ExileFaceDownPile { .. } => exile_face_down_pile::resolve(state, ability, events),
@@ -5488,7 +5504,7 @@ fn affected_objects_from_events(
         // Mirrors the broadcast-static binding in `effect.rs` (`Some(filter)`
         // arm). Broader than the parser-side `is_mass_coerce_static`
         // (oracle_effect/mod.rs), which still gates only the MustAttack/
-        // MustAttackPlayer coercion pair for its own (unrelated)
+        // MustAttackDefender coercion pair for its own (unrelated)
         // ParentTarget-rewrite purpose.
         Effect::GenericEffect {
             static_abilities,
@@ -5502,7 +5518,7 @@ fn affected_objects_from_events(
                 matches!(
                     sd.mode,
                     crate::types::statics::StaticMode::MustAttack
-                        | crate::types::statics::StaticMode::MustAttackPlayer { .. }
+                        | crate::types::statics::StaticMode::MustAttackDefender { .. }
                         | crate::types::statics::StaticMode::Continuous
                 )
             }) else {
@@ -8738,6 +8754,25 @@ pub fn resolve_ability_chain(
         // alongside `last_zone_changed_ids` so cross-resolution leakage is
         // impossible.
         state.last_vote_ballots = crate::im::Vector::new();
+        // CR 101.4 + CR 608.2d: Per-resolution secret-number ledger. A per-player
+        // `Effect::Choose { NumberRange }` fan-out records each answer as
+        // `ChosenAttribute::Number` on the chooser (`bind_named_choice`), and
+        // `QuantityRef::PlayerChosenNumber` folds those into "the highest/lowest
+        // number". `Player::chosen_attributes` is otherwise DURABLE (players never
+        // change zones), so without this reset a later card whose choosers are a
+        // SUBSET of the table — Life at Stake's "you and target creature's
+        // controller" — would fold in bystanders' numbers left over from an
+        // earlier Wheel of Misfortune. Cleared alongside `last_vote_ballots`, the
+        // sibling per-player choice ledger, for the same reason. The player axis
+        // stores no other `Number`, so nothing else is disturbed.
+        for player in state.players.iter_mut() {
+            player.chosen_attributes.retain(|attribute| {
+                !matches!(
+                    attribute,
+                    ChosenAttribute::Number(_) | ChosenAttribute::RevealedNumber(_)
+                )
+            });
+        }
         state.last_effect_amount = None;
         // CR 120.10: resolution-local excess channel resets with its total twin.
         state.last_effect_excess_amount = None;
@@ -13332,6 +13367,9 @@ fn resolve_grant_next_spell_ability(
         | PlayerScope::AllPlayers { .. }
         | PlayerScope::RecipientController
         | PlayerScope::AnyTurn
+        // CR 611.2 + CR 514.2: duration-timing-only, like `AnyTurn` — never reached
+        // from a value/quantity/player-selection position.
+        | PlayerScope::SpecificPlayer { .. }
         | PlayerScope::DefendingPlayer
         | PlayerScope::ParentObjectTargetController
         | PlayerScope::SourceChosenPlayer => ability.controller,
@@ -22947,6 +22985,50 @@ mod tests {
             state.players[1].hand.len(),
             0,
             "P1 should not draw — ledger cleared at chain depth 0"
+        );
+    }
+
+    /// CR 101.4 + CR 608.2d: the per-player secret-number ledger is cleared at
+    /// chain depth 0 too, for the same reason as `last_vote_ballots`. Players
+    /// never change zones, so `Player::chosen_attributes` is otherwise durable:
+    /// without the reset, a card whose choosers are a SUBSET of the table (Life
+    /// at Stake's two choosers) would fold bystanders' numbers left over from an
+    /// earlier Wheel of Misfortune into its "highest number".
+    ///
+    /// Fail-on-revert: drop the reset and the stale `Number(9)` below survives,
+    /// so the extremum reads 9 instead of 0.
+    #[test]
+    fn player_chosen_numbers_clear_at_chain_boundary() {
+        use crate::types::ability::{AggregateFunction, ChosenAttribute, PlayerScope};
+
+        let mut state = GameState::new_two_player(42);
+        // A number left behind by an earlier resolution.
+        state.players[1].chosen_attributes = vec![ChosenAttribute::Number(9)];
+
+        let ability = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(100), PlayerId(0));
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(
+            state.players[1].chosen_attributes.is_empty(),
+            "a fresh top-level resolution must not inherit a prior one's secret numbers"
+        );
+        assert_eq!(
+            crate::game::quantity::resolve_quantity(
+                &state,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::PlayerChosenNumber {
+                        player: PlayerScope::AllPlayers {
+                            aggregate: AggregateFunction::Max,
+                            exclude: None,
+                        },
+                    },
+                },
+                PlayerId(0),
+                ObjectId(100),
+            ),
+            0,
+            "with no numbers chosen this resolution the extremum is empty"
         );
     }
 

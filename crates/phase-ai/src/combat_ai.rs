@@ -225,15 +225,23 @@ pub fn choose_attackers_with_targets_with_profile(
     // attackers or the engine rejects the whole declaration. Partition them out
     // and union them back unconditionally — value heuristics only apply to the
     // free choices. `creature_must_attack` is the engine's single authority.
-    // Loop-invariant hoist: `attackable_player_targets` depends only on `state`
+    // Loop-invariant hoist: the attackable-defender set depends only on `state`
     // (immutable during this filter), so compute it once instead of per creature
-    // inside `creature_must_attack`.
-    let attackable = engine::game::combat::attackable_player_targets(state);
+    // inside `creature_must_attack`. `attackable_defender_targets` is the COUNTED
+    // form; `attacker_choice_sweeps_attackable_players_independent_of_goaded_count`
+    // is revert-failing on this hoist.
+    //
+    // CR 506.3: the whole defender universe — players, planeswalkers, and
+    // battles — so a requirement pointed at a planeswalker (Gideon Jura's "+2")
+    // is recognized as mandatory here exactly like a player-directed lure.
+    // Passing only the player subset would have made the AI omit a creature the
+    // engine then rejects the declaration for.
+    let attackable = engine::game::combat::attackable_defender_targets(state);
     let mandatory: Vec<ObjectId> = candidates
         .iter()
         .copied()
         .filter(|&id| {
-            engine::game::combat::creature_must_attack_with_attackable_players(
+            engine::game::combat::creature_must_attack_with_attackable_targets(
                 state,
                 id,
                 &attackable,

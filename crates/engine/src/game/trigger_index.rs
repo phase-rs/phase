@@ -667,6 +667,11 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::Flipped { .. } => {}
         GameEvent::DayNightChanged { .. } => push(TriggerEventKey::DayNightChanged),
         GameEvent::CardsRevealed { .. } => push(TriggerEventKey::Revealed),
+        // CR 101.4: publishing a chosen number is not CR 701.20 "reveal a card",
+        // and no printed trigger watches for it, so it keys nothing. Listed
+        // explicitly (not folded into `Revealed`) so a future "whenever a player
+        // reveals a card" trigger cannot start firing on a number.
+        GameEvent::ChosenNumbersRevealed { .. } => {}
         GameEvent::CrimeCommitted { .. } => push(TriggerEventKey::PlayerActionPerformed),
         GameEvent::Cycled { .. } => {}
         GameEvent::PlayerPerformedAction { .. } => push(TriggerEventKey::PlayerActionPerformed),

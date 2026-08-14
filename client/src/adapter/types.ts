@@ -331,7 +331,10 @@ export interface MeldSelection {
 // engine surfaces on the declare-attackers/blockers waiting payloads for
 // display-only badges + Confirm gating. `#[serde(tag = "kind")]` in the engine.
 export type CombatRequirement =
-  | { kind: "MustAttack"; players: PlayerId[]; sources?: ObjectId[] }
+  // CR 506.3: `defenders` spans the whole defender category — players,
+  // planeswalkers, and battles — so a planeswalker-directed lure (Gideon Jura's
+  // "+2") surfaces the same way a player-directed one does.
+  | { kind: "MustAttack"; defenders: AttackTarget[]; sources?: ObjectId[] }
   | { kind: "MustBlock"; sources?: ObjectId[]; attackers?: ObjectId[] }
   | { kind: "CantAttack"; sources?: ObjectId[] }
   | { kind: "CantBlock"; sources?: ObjectId[] };
@@ -948,6 +951,14 @@ export type SearchDestinationSplit = {
   primary_enter_tapped: boolean;
   rest_destination: Zone;
 };
+
+// CR 107.1a/b: the engine-published contract for a choice whose answer the
+// player types instead of picking from `options`. Mirrored from Rust
+// `ability::FreeEntry`. `min`/`max` are INCLUSIVE and are the same bounds
+// `ChoiceType::accepts_free_entry_answer` enforces — the client renders and
+// bounds its input from these values and must never restate them, or it becomes
+// a second authority that can reject what the engine accepts.
+export type FreeEntry = { kind: "Number"; min: number; max: number };
 
 // ── Game Object ──────────────────────────────────────────────────────────
 
@@ -1721,7 +1732,7 @@ export type WaitingFor =
   | { type: "TriggerTargetSelection"; data: { player: PlayerId; trigger_controller?: PlayerId; trigger_event?: GameEvent; trigger_events?: GameEvent[]; target_slots: TargetSelectionSlot[]; mode_labels?: (string | null)[]; target_constraints?: TargetSelectionConstraint[]; selection: TargetSelectionProgress; source_id?: ObjectId; description?: string } }
   | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore; min_main_deck_size: number; max_sideboard_size: number | null } }
   | { type: "BetweenGamesChoosePlayDraw"; data: { player: PlayerId; game_number: number; score: MatchScore } }
-  | { type: "NamedChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; source?: { prompt: { identity: unknown; controller: PlayerId; display_name: string }; binding: "ResolutionContext" | "ExactObjectAndResolution" }; persist_player?: PlayerId } }
+  | { type: "NamedChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; source?: { prompt: { identity: unknown; controller: PlayerId; display_name: string }; binding: "ResolutionContext" | "ExactObjectAndResolution" }; persist_player?: PlayerId; free_entry?: FreeEntry } }
   | { type: "OpponentGuess"; data: { player: PlayerId; options: string[]; choice_type: string | Record<string, unknown>; source: { prompt: { identity: unknown; controller: PlayerId; display_name: string } }; proposition_truth?: boolean } }
   | { type: "SpellbookDraft"; data: { player: PlayerId; source_id: ObjectId; options: string[]; destination: Zone; tapped?: boolean } }
   | { type: "DamageSourceChoice"; data: { player: PlayerId; source_filter: TargetFilter; options: ObjectId[] } }
@@ -3503,6 +3514,15 @@ export const AdapterErrorCode = {
   BRACKET_ESTIMATION_UNSUPPORTED: "bracket-estimation/unsupported",
   /** Engine rejected game init because one or more decks are not bracket 5 at a cEDH table. */
   BRACKET_VIOLATION: "BRACKET_VIOLATION",
+  /**
+   * Engine refused game init because another session already owns it. On a
+   * memory-constrained device the P2P host shares the tab's single engine
+   * worker with local play, so the engine refuses in both directions — a
+   * hosted game starting on top of a live local game, and a local game
+   * starting on top of a hosted one. Not recoverable by retry: the user has to
+   * finish or leave the other game first.
+   */
+  ENGINE_OCCUPIED: "ENGINE_OCCUPIED",
   /**
    * The engine's actor-authorization guards (`check_actor_authorization` /
    * priority checks, CR 117 priority / CR 500 turn structure) rejected the

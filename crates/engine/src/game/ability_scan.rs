@@ -473,6 +473,11 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             first: _,
             second: _,
         } => Axes::CONSERVATIVE,
+        // CR 101.4: publishes an already-committed per-player number. Writes only
+        // the visibility half of the chosen-number ledger (`Number` ->
+        // `RevealedNumber`), never a value, so it perturbs no scanned axis; the
+        // player set it names is the only thing to descend into.
+        Effect::RevealChosenNumbers { players } => scan_player_filter(players, mode),
         Effect::EachSourceDealsDamage {
             sources,
             amount,
@@ -1203,12 +1208,16 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
         }
         Effect::ForceAttack {
             target,
-            required_player,
+            required_defender,
             duration,
+            // A static single-vs-mass discriminant (CR 115.1) — no event, sibling,
+            // or projected-resource axis; the filters it selects between are
+            // classified below.
+            scope: _,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
-            acc = acc.or(scan_target_filter(required_player, target_ctx, mode));
+            acc = acc.or(scan_target_filter(required_defender, target_ctx, mode));
             acc = acc.or(scan_duration(duration, mode));
             acc
         }
@@ -2401,6 +2410,13 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             acc
         }
         QuantityRef::ChosenNumber => Axes::NONE,
+        // CR 101.4 + CR 608.2d: the number a player chose this resolution. Like
+        // its object-axis sibling `ChosenNumber` this is a bounded one-shot
+        // answer, not an accumulating projected resource — a re-choose REPLACES
+        // the stored value rather than adding to it (`bind_named_choice`), so it
+        // cannot grow across loop iterations. The only axis it can contribute is
+        // whatever its player scope carries.
+        QuantityRef::PlayerChosenNumber { player } => scan_player_scope(player),
         QuantityRef::AttackedThisTurn { scope, filter } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_count_scope(scope));
@@ -4221,6 +4237,9 @@ fn scan_player_scope(x: &PlayerScope) -> Axes {
         // CR 513.1: turn-agnostic end-step deadline reached via the
         // `UntilNextStepOf` duration walk — a pure timing referent, no axes.
         PlayerScope::AnyTurn => Axes::NONE,
+        // CR 611.2: a frozen literal id — reads no event, sibling, or projected
+        // resource.
+        PlayerScope::SpecificPlayer { .. } => Axes::NONE,
     }
 }
 
@@ -4255,6 +4274,9 @@ fn scan_controller_ref(x: &ControllerRef) -> Axes {
         ControllerRef::EnchantedPlayer => Axes::NONE,
         // CR 102.1: a live read of `state.active_player` — no event/sibling axis.
         ControllerRef::ActivePlayer => Axes::NONE,
+        // CR 109.4 + CR 611.2: a frozen literal id — reads no event, sibling, or
+        // projected resource.
+        ControllerRef::SpecificPlayer { .. } => Axes::NONE,
     }
 }
 
@@ -5429,6 +5451,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::ApplyPostReplacementDamage { .. }
         | Effect::OpponentGuess { .. }
         | Effect::SwapChosenLabels { .. }
+        | Effect::RevealChosenNumbers { .. }
         | Effect::Draw { .. }
         | Effect::Pump { .. }
         | Effect::PairWith { .. }
@@ -5840,6 +5863,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::ApplyPostReplacementDamage { .. }
         | Effect::OpponentGuess { .. }
         | Effect::SwapChosenLabels { .. }
+        | Effect::RevealChosenNumbers { .. }
         | Effect::Draw { .. }
         | Effect::Pump { .. }
         | Effect::PairWith { .. }
@@ -6059,6 +6083,7 @@ pub(crate) fn effect_is_randomness_bearing(e: &Effect) -> bool {
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::OpponentGuess { .. }
         | Effect::SwapChosenLabels { .. }
+        | Effect::RevealChosenNumbers { .. }
         | Effect::Draw { .. }
         | Effect::Pump { .. }
         | Effect::PairWith { .. }

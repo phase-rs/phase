@@ -1913,7 +1913,7 @@ fn declare_attackers_numeric_maps_round_trip_through_value_bare_raw_and_trusted(
             (
                 ObjectId(2),
                 CombatRequirement::MustAttack {
-                    players: vec![PlayerId(1)],
+                    defenders: vec![AttackTarget::Player(PlayerId(1))],
                     sources: vec![ObjectId(22)],
                 },
             ),

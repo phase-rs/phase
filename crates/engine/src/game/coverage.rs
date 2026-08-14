@@ -153,10 +153,10 @@ pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // the attacker that must be blocked (Provoke). Enforced by direct
             // match in combat.rs declare-blockers validation.
             | StaticMode::MustBlockAttacker { .. }
-            // CR 508.1d: MustAttackPlayer carries the `PlayerId` that must be
+            // CR 508.1d: MustAttackDefender carries the `PlayerId` that must be
             // attacked (Alluring Siren). Enforced by direct match in combat.rs
             // declare-attackers validation.
-            | StaticMode::MustAttackPlayer { .. }
+            | StaticMode::MustAttackDefender { .. }
             // CR 509.1b: CantBeBlockedByMoreThan carries the blocker maximum
             // (Stalking Tiger). Enforced in combat.rs declare-blockers validation.
             | StaticMode::CantBeBlockedByMoreThan { .. }
@@ -891,6 +891,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     ControllerRef::EnchantedPlayer => "enchanted player's",
                     // CR 102.1: Display label for active-player controller scope.
                     ControllerRef::ActivePlayer => "the active player's",
+                    // CR 109.4 + CR 611.2: snapshotted controller scope.
+                    ControllerRef::SpecificPlayer { .. } => "that player's",
                 };
                 let zone_str = format!("{zone:?}").to_lowercase();
                 parts.push(format!(
@@ -1063,6 +1065,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ControllerRef::EnchantedPlayer => "enchanted player",
                 // CR 102.1: Display label for active-player controller scope.
                 ControllerRef::ActivePlayer => "the active player",
+                // CR 109.4 + CR 611.2: Display label for a snapshotted controller scope.
+                ControllerRef::SpecificPlayer { .. } => "that player",
             };
             parts.push(label.into());
         } else {
@@ -1138,6 +1142,8 @@ fn fmt_controller(ctrl: &ControllerRef) -> String {
         ControllerRef::EnchantedPlayer => "enchanted player controls",
         // CR 102.1: Display label for active-player controller scope.
         ControllerRef::ActivePlayer => "the active player controls",
+        // CR 109.4 + CR 611.2: Display label for a snapshotted controller scope.
+        ControllerRef::SpecificPlayer { .. } => "that player controls",
     }
     .into()
 }
@@ -1268,6 +1274,8 @@ fn fmt_player_scope(scope: &PlayerScope) -> String {
         PlayerScope::DefendingPlayer => "defending player".to_string(),
         PlayerScope::SourceChosenPlayer => "the chosen player".to_string(),
         PlayerScope::AnyTurn => "any turn".to_string(),
+        // CR 109.4 + CR 611.2: display label for a snapshotted duration scope.
+        PlayerScope::SpecificPlayer { .. } => "that player".to_string(),
         PlayerScope::ParentObjectTargetController => "parent target's controller".to_string(),
         PlayerScope::Opponent { aggregate } => {
             format!("{} of opponents", fmt_aggregate_function(*aggregate))
@@ -1707,6 +1715,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         }
         QuantityRef::TurnsTaken => "turns taken".into(),
         QuantityRef::ChosenNumber => "chosen number".into(),
+        QuantityRef::PlayerChosenNumber { player } => {
+            format!("secretly chosen number ({})", fmt_player_scope(player))
+        }
         QuantityRef::AttackedThisTurn { .. } => "attacked this turn".into(),
         QuantityRef::DescendedThisTurn => "descended this turn".into(),
         QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player } => {
@@ -2063,7 +2074,13 @@ fn fmt_choice_type(ct: &ChoiceType) -> String {
             }
         }
         ChoiceType::CardName => "card name",
-        ChoiceType::NumberRange { min, max, .. } => return format!("number ({min}-{max})"),
+        // CR 107.1a/b: an unbounded range has no ceiling to print.
+        ChoiceType::NumberRange { min, max, .. } => {
+            return match max {
+                Some(max) => format!("number ({min}-{max})"),
+                None => format!("number ({min} or greater)"),
+            }
+        }
         ChoiceType::Labeled { options } => return format!("one of: {}", options.join(", ")),
         ChoiceType::LandType => "land type",
         ChoiceType::CardPredicate { .. } => "card predicate",
@@ -2466,7 +2483,6 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         | Effect::PhaseIn { target }
-        | Effect::ForceAttack { target, .. }
         // CR 701.27a: single-scope Transform reports its `target` like other
         // single-target effects; mass Transform (scope:All) reports a `filter` below.
         | Effect::Transform {
@@ -2491,6 +2507,33 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             if let Some(attacker) = attacker {
                 d.push(("attacker".into(), format!("{attacker:?}")));
             }
+            if *duration != Duration::UntilEndOfTurn {
+                d.push(("duration".into(), format!("{duration:?}")));
+            }
+        }
+        // CR 508.1d + CR 506.3: ForceAttack reports the SUBJECT under the key its
+        // scope earns — `target` for a chosen creature (CR 115.1), `filter` for a
+        // non-targeting population (Gideon Jura's "creatures that player
+        // controls") — plus the REQUIRED DEFENDER, which is the axis that
+        // distinguishes an attack pointed at a player from one pointed at a
+        // planeswalker. Without the defender in the signature those two collapse
+        // to one entry and the coverage/parse-diff artifact cannot tell a
+        // Gideon-Jura-class card from an Alluring-Siren-class one.
+        //
+        // Modelled on the `ForceBlock` arm above, including its non-default
+        // duration rule.
+        Effect::ForceAttack {
+            target,
+            required_defender,
+            duration,
+            scope,
+        } => {
+            let subject_key = match scope {
+                EffectScope::Single => "target",
+                EffectScope::All => "filter",
+            };
+            d.push((subject_key.into(), fmt_target(target)));
+            d.push(("defender".into(), fmt_target(required_defender)));
             if *duration != Duration::UntilEndOfTurn {
                 d.push(("duration".into(), format!("{duration:?}")));
             }
@@ -2986,6 +3029,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         }
         Effect::SwapChosenLabels { first, second } => {
             d.push(("swap".into(), format!("{first} <-> {second}")));
+        }
+        Effect::RevealChosenNumbers { players } => {
+            d.push(("reveal chosen numbers".into(), format!("{players:?}")));
         }
         Effect::ChooseDamageSource { source_filter } => {
             d.push(("source".into(), fmt_target(source_filter)));
@@ -6555,6 +6601,7 @@ fn visit_direct_effect_ability_payloads<'a>(
         | Effect::Choose { .. }
         | Effect::OpponentGuess { .. }
         | Effect::SwapChosenLabels { .. }
+        | Effect::RevealChosenNumbers { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::Suspect { .. }
         | Effect::Unsuspect { .. }
@@ -8168,6 +8215,9 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         // strict-failure marker anywhere, so it is genuinely handled.
         QuantityRef::TurnsTaken => ("TurnsTaken", Handled),
         QuantityRef::ChosenNumber => ("ChosenNumber", Unhandled),
+        // CR 101.4 + CR 608.2d: resolved live in `quantity::resolve_quantity`
+        // over `Player::chosen_attributes` (per-candidate and aggregate scopes).
+        QuantityRef::PlayerChosenNumber { .. } => ("PlayerChosenNumber", Handled),
         QuantityRef::AttackedThisTurn { .. } => ("AttackedThisTurn", Handled),
         QuantityRef::DescendedThisTurn => ("DescendedThisTurn", Unhandled),
         QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. } => {

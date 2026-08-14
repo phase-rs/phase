@@ -49,9 +49,9 @@ use crate::types::ability::ManaProduction;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     AdditionalCostOrigin, AdditionalCostPaymentSource, AggregateFunction, AttachmentKind,
-    AttackersDeclaredCountSubject, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid,
-    CoinFlipResult, Comparator, ControllerRef, CountScope, CounterTriggerFilter, DamageKindFilter,
-    DestinationConstraint, DieResultFilter, Effect, EffectScope, FilterProp,
+    AttackersDeclaredCountSubject, CardSelectionMode, CastManaObjectScope, CastManaSpentMetric,
+    CastVariantPaid, CoinFlipResult, Comparator, ControllerRef, CountScope, CounterTriggerFilter,
+    DamageKindFilter, DestinationConstraint, DieResultFilter, Effect, EffectScope, FilterProp,
     ManaAbilityProducedFilter, ObjectScope, OriginConstraint, ParsedCondition, PlayerFilter,
     PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
     SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality, StaticCondition,
@@ -3367,7 +3367,7 @@ fn parse_unless_life_cost(rest: &str) -> Option<AbilityCost> {
 /// Grammar — two independent axes over one noun:
 ///
 /// ```text
-/// discard_phrase := [<count> | "a" | "an"] [<type phrase>] ("card" | "cards")
+/// discard_phrase := [<count> | "a" | "an"] [<type phrase>] ("card" | "cards") ["at random"]
 /// ```
 ///
 /// Both unless-payer forms route here: the controller form ("unless **you**
@@ -3385,10 +3385,13 @@ fn parse_unless_life_cost(rest: &str) -> Option<AbilityCost> {
 /// at `unless_branch_boundary` so a chained " or …" branch survives, while the
 /// `you` form owns the rest of the clause.
 ///
-/// CR 701.9b ("some effects … require a random discard") stays unsupported:
-/// the resolution-time unless-payment path (`engine_payment_choices.rs`)
-/// ignores `selection` and always prompts, so accepting an "at random" tail
-/// would falsely lower a player-chosen discard as a random discard.
+/// CR 701.9b ("some effects … require a random discard") is the third axis: an
+/// "at random" tail lowers to `CardSelectionMode::Random`. That is only honest
+/// because the unless-payment path now pays such a cost through
+/// `effects::discard::discard_at_random` instead of prompting. Before that, the
+/// only two options were both wrong — claim a player-chosen discard (making a
+/// Balduvian Horde-class cost strictly cheaper than printed) or fail the clause
+/// closed (dropping the whole class to `Unimplemented`).
 fn parse_unless_discard_cost_phrase(branch_text: &str) -> Option<AbilityCost> {
     let trimmed = branch_text.trim().trim_end_matches('.').trim();
     if trimmed.is_empty() {
@@ -3413,29 +3416,41 @@ fn parse_unless_discard_cost_phrase(branch_text: &str) -> Option<AbilityCost> {
     }
 
     let count = i32::try_from(count).ok()?;
-    let discard = |filter| AbilityCost::Discard {
+    let discard = |filter, selection| AbilityCost::Discard {
         count: QuantityExpr::Fixed { value: count },
         filter,
-        selection: crate::types::ability::CardSelectionMode::Chosen,
+        selection,
         self_scope: crate::types::ability::DiscardSelfScope::FromHand,
     };
-
-    // Untyped noun: the count axis alone ("a card", "two cards"). The plural
-    // arm precedes the singular so `tag("card")` cannot leave a stray "s".
+    // Untyped noun: the count axis alone ("a card", "two cards"), optionally
+    // carrying the CR 701.9b randomness axis. The plural arm precedes the
+    // singular so `tag("card")` cannot leave a stray "s".
     if let Ok((rest, _)) =
         alt((tag::<_, _, OracleError<'_>>("cards"), tag("card"))).parse(after_count)
     {
         let rest = rest.trim().trim_end_matches('.').trim();
         if rest.is_empty() {
-            return Some(discard(None));
+            return Some(discard(None, CardSelectionMode::Chosen));
+        }
+        // Full consumption is required. A bare `.is_ok()` also accepts
+        // "at randomly" and "at random foo", which would lower an unrecognized
+        // clause as a random discard instead of leaving it honestly unsupported.
+        if all_consuming(tag::<_, _, OracleError<'_>>("at random"))
+            .parse(rest)
+            .is_ok()
+        {
+            return Some(discard(None, CardSelectionMode::Random));
         }
     }
 
     // Typed noun: the remainder is a type phrase plus the noun, lowered by the
     // shared `parse_discard_card_filter` authority (which owns the
-    // " card"/" cards" suffix strip and rejects anything it cannot type).
+    // " card"/" cards" suffix strip and rejects anything it cannot type). No
+    // printed card combines a type phrase with "at random" in an unless-cost,
+    // so the typed arm stays `Chosen`; the randomness axis lives on the
+    // untyped arm above until such a card ships.
     super::oracle_effect::imperative::parse_discard_card_filter(after_count)
-        .map(|filter| discard(Some(filter)))
+        .map(|filter| discard(Some(filter), CardSelectionMode::Chosen))
 }
 
 /// CR 118.12 + CR 608.2c + CR 119.4: Recognize non-mana "unless" alternative
