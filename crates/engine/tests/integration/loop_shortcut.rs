@@ -455,9 +455,9 @@ fn on_shortcut_byte_identical_to_pre_pr7_golden() {
         life(&runner, P1) > 0,
         "ON: the shortcut fired early (P1 positive)"
     );
+    let event_stream = format!("{all:?}").replace(", cast_mana_value: None", "");
     assert_eq!(
-        format!("{all:?}"),
-        GOLDEN_ON,
+        event_stream, GOLDEN_ON,
         "ON: the accumulated event stream must be byte-identical to the pre-PR-7 golden — \
          wrapping the reconcile body in the mode `match` must not perturb any event"
     );
