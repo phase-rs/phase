@@ -8041,11 +8041,17 @@ pub(crate) fn migrate_legacy_zone_change_trigger_provenance(
             )?;
 
             if let Some(journal) = state.get_mut("resolved_rules_journal") {
-                visit_persisted_journal_zone_change_trigger_records(
-                    journal,
-                    objects,
-                    &mut trigger_bases,
-                )?;
+                visit_persisted_journal_zone_change_trigger_records(journal, &mut |record| {
+                    prune_ceased_source_legacy_trigger_payload(record, objects)
+                })?;
+                visit_persisted_journal_zone_change_trigger_records(journal, &mut |record| {
+                    migrate_persisted_zone_change_trigger_record(
+                        record,
+                        objects,
+                        &mut trigger_bases,
+                        false,
+                    )
+                })?;
             }
             Ok(())
         })()
@@ -8054,9 +8060,9 @@ pub(crate) fn migrate_legacy_zone_change_trigger_provenance(
     migration
 }
 
-/// CR 400.7 + CR 603.3: a ceased source cannot be reconstructed through a
-/// same-id object lookup, while an already-stacked triggered ability keeps its
-/// captured ability independently of that source. Historical ledgers and stack
+/// CR 400.7 + CR 113.7a: a ceased source cannot be reconstructed through a
+/// same-id object lookup, while an already-stacked triggered ability exists
+/// independently of that source. Historical ledgers, journals, and stack
 /// entries may therefore discard only an all-payload legacy trigger list for a
 /// source which no longer exists. Live event carriers remain strict below: they
 /// can still need the exact trigger occurrence to finish trigger collection.
@@ -8306,40 +8312,25 @@ fn migrate_persisted_zone_change_trigger_record(
 /// object's printed base set.
 fn visit_persisted_journal_zone_change_trigger_records(
     value: &mut serde_json::Value,
-    objects: &serde_json::Map<String, serde_json::Value>,
-    trigger_bases: &mut HashMap<ObjectId, PersistedTriggerBase>,
+    visit: &mut impl FnMut(&mut serde_json::Value) -> Result<(), String>,
 ) -> Result<(), String> {
     match value {
         serde_json::Value::Array(values) => {
             for value in values {
-                visit_persisted_journal_zone_change_trigger_records(value, objects, trigger_bases)?;
+                visit_persisted_journal_zone_change_trigger_records(value, visit)?;
             }
         }
         serde_json::Value::Object(object) => {
             if let Some(record) = serialized_zone_changed_record_mut(object) {
-                migrate_persisted_zone_change_trigger_record(
-                    record,
-                    objects,
-                    trigger_bases,
-                    false,
-                )?;
+                visit(record)?;
                 return Ok(());
             }
             if let Some(record) = object.get_mut("zone_change_record") {
-                migrate_persisted_zone_change_trigger_record(
-                    record,
-                    objects,
-                    trigger_bases,
-                    false,
-                )?;
+                visit(record)?;
             }
             for (key, value) in object {
                 if key != "zone_change_record" {
-                    visit_persisted_journal_zone_change_trigger_records(
-                        value,
-                        objects,
-                        trigger_bases,
-                    )?;
+                    visit_persisted_journal_zone_change_trigger_records(value, visit)?;
                 }
             }
         }

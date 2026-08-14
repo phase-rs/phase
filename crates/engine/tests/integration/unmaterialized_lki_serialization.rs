@@ -8,7 +8,7 @@ use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::resolution::ResolutionStateWire;
-use engine::types::resolved_commands::ResolvedZoneChangeCommand;
+use engine::types::resolved_commands::{ResolvedRulesCommand, ResolvedZoneChangeCommand};
 
 const DIES_TRIGGER: &str = "When this creature dies, create a 1/1 green Squirrel creature token.";
 
@@ -57,16 +57,20 @@ fn erase_trigger_occurrences(record: &mut serde_json::Value) {
     record["trigger_definitions"] = serde_json::Value::Array(entries);
 }
 
-fn journal_zone_change_record_mut(wire: &mut serde_json::Value) -> &mut serde_json::Value {
+fn journal_zone_change_record_mut(
+    wire: &mut serde_json::Value,
+    object_id: u64,
+) -> &mut serde_json::Value {
     wire["resolved_rules_journal"]["entries"]
         .as_array_mut()
         .expect("journal entries serialize as an array")
         .iter_mut()
         .find_map(|entry| {
-            entry
+            let record = entry
                 .get_mut("command")?
                 .get_mut("ZoneChange")?
-                .get_mut("zone_change_record")
+                .get_mut("zone_change_record");
+            record.filter(|record| record["object_id"] == object_id)
         })
         .expect("fixture journal retains a zone-change command")
 }
@@ -227,10 +231,10 @@ fn legacy_zone_change_trigger_records_restore_before_client_serialization() {
     );
     erase_trigger_occurrences(&mut state["current_trigger_event"]["data"]["record"]);
     erase_trigger_occurrences(&mut state["pending_trigger_event_batch"][0]["data"]["record"]);
-    erase_trigger_occurrences(journal_zone_change_record_mut(&mut wire));
+    erase_trigger_occurrences(journal_zone_change_record_mut(&mut wire, dying.0));
 
     let mut context_free_journal = wire.clone();
-    journal_zone_change_record_mut(&mut context_free_journal)
+    journal_zone_change_record_mut(&mut context_free_journal, dying.0)
         .as_object_mut()
         .expect("journal record is an object")
         .remove("trigger_source_context");
@@ -337,6 +341,40 @@ fn legacy_ceased_token_trigger_payloads_restore_after_trigger_is_stacked() {
         !runner.state().stack.is_empty(),
         "the dies trigger is already an independent ability on the stack"
     );
+    let record = runner
+        .state()
+        .zone_changes_this_turn
+        .iter()
+        .find(|record| record.object_id == dying)
+        .expect("token death remains in the current-turn ledger")
+        .clone();
+    let source = record
+        .trigger_source_context
+        .as_ref()
+        .expect("token death retains its exact source context")
+        .identity
+        .reference;
+    let cause = runner
+        .state_mut()
+        .resolved_rules_journal
+        .begin_proposal()
+        .expect("fixture opens a journal proposal");
+    runner
+        .state_mut()
+        .resolved_rules_journal
+        .record_zone_change(ResolvedZoneChangeCommand {
+            object: source,
+            resulting_incarnation: source.incarnation + 1,
+            from: record.from_zone.expect("dies source left a zone"),
+            to: record.to_zone,
+            destination_position: 0,
+            owner: record.owner,
+            entry_timestamp: None,
+            turn_zone_change_index: record.turn_zone_change_index,
+            zone_change_record: record,
+            cause,
+        })
+        .expect("fixture journals the token death");
 
     let mut wire =
         serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone()))
@@ -369,6 +407,12 @@ fn legacy_ceased_token_trigger_payloads_restore_after_trigger_is_stacked() {
         .expect("stacked trigger event record is an object")
         .remove("trigger_source_context");
     erase_trigger_occurrences(stacked_record);
+    let journal_record = journal_zone_change_record_mut(&mut wire, dying.0);
+    journal_record
+        .as_object_mut()
+        .expect("journal record is an object")
+        .remove("trigger_source_context");
+    erase_trigger_occurrences(journal_record);
 
     let mut active_event = wire.clone();
     active_event["current_trigger_event"] =
@@ -411,6 +455,26 @@ fn legacy_ceased_token_trigger_payloads_restore_after_trigger_is_stacked() {
     assert!(
         stacked_event.trigger_definitions.is_empty(),
         "the stacked trigger retains its ability, not an invented source occurrence"
+    );
+    let journal_records = restored
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry.command.as_ref() {
+            Some(ResolvedRulesCommand::ZoneChange(command)) => Some(&command.zone_change_record),
+            _ => None,
+        })
+        .filter(|record| record.object_id == dying)
+        .collect::<Vec<_>>();
+    assert!(
+        !journal_records.is_empty(),
+        "fixture retains the historical token-death journal record"
+    );
+    assert!(
+        journal_records
+            .iter()
+            .all(|record| record.trigger_definitions.is_empty()),
+        "the historical journal keeps no fabricated token trigger occurrence"
     );
     serde_json::to_value(ClientGameStateRef::wrap(&restored, Some(P0)))
         .expect("the restored state remains serializable for the browser");
