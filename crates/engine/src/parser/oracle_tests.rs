@@ -638,6 +638,45 @@ fn ability_word_labeled_activated_ability_parses_cost_effect_restriction() {
     );
 }
 
+/// CR 113.7a + CR 608.2h: "~'s controller" is the source object's
+/// controller, not the controller of the resolving activated ability.
+#[test]
+fn source_controller_predicate_chains_with_ordinary_controller_effect() {
+    use crate::types::ability::QuantityExpr;
+
+    let parsed = parse(
+        "{3}: ~'s controller loses 2 life and you draw a card. Any player may activate this ability.",
+        "Xantcha, Sleeper Agent",
+        &[],
+        &["Legendary", "Creature"],
+        &["Minion"],
+    );
+    assert_eq!(parsed.abilities.len(), 1, "got {parsed:#?}");
+    let ability = &parsed.abilities[0];
+    assert!(matches!(
+        ability.effect.as_ref(),
+        Effect::LoseLife {
+            amount: QuantityExpr::Fixed { value: 2 },
+            target: Some(TargetFilter::SourceController),
+        }
+    ));
+    assert!(matches!(
+        ability.sub_ability.as_deref().map(|next| next.effect.as_ref()),
+        Some(Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        })
+    ));
+    assert!(
+        !matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })
+            && ability
+                .sub_ability
+                .as_deref()
+                .is_none_or(|next| !matches!(next.effect.as_ref(), Effect::Unimplemented { .. })),
+        "the full activated body must be supported: {ability:#?}"
+    );
+}
+
 /// CR 102.3 + CR 805.4a: the opponent-turn gate is the team-aware
 /// `IsOpponentsTurn` leaf, NOT `Not(IsYourTurn)` — the latter also admits a
 /// turn where a teammate holds `active_player`, which under shared team turns

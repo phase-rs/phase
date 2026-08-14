@@ -9865,6 +9865,10 @@ fn apply_action(
         (WaitingFor::ReplacementChoice { .. }, GameAction::ChooseReplacement { index }) => {
             engine_replacement::handle_replacement_choice(state, index, &mut events)?
         }
+        (
+            WaitingFor::EntryControllerChoice { .. },
+            GameAction::ChooseEntryController { opponent },
+        ) => engine_replacement::handle_entry_controller_choice(state, opponent, &mut events)?,
         // CR 603.3b: Player submits the chosen order for their pending triggers.
         // `actor` is already authorized as the prompted player by
         // `check_actor_authorization` (via `WaitingFor::acting_player`).
