@@ -22155,9 +22155,7 @@ impl TriggerEntry {
 /// Classifies a persisted trigger list without inferring runtime provenance.
 /// A list is either wholly legacy payloads or wholly identity-bearing entries;
 /// a mixture cannot establish an exact occurrence mapping.
-pub(crate) fn legacy_trigger_entry_list(
-    entries: &[TriggerEntry],
-) -> Result<bool, &'static str> {
+pub(crate) fn legacy_trigger_entry_list(entries: &[TriggerEntry]) -> Result<bool, &'static str> {
     let has_legacy = entries.iter().any(|entry| {
         matches!(
             entry.occurrence,

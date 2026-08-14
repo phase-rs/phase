@@ -5,13 +5,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
     additional_cost_instance_payment_count, additional_cost_instance_payment_count_for_ordinal,
-    AbilityBlockEntry, AbilityDefinition, AdditionalCost, AdditionalCostInstancePayment,
-    AdditionalCostOrigin, BasicLandType, CastTimingPermission, CastVariantPaid, CastingPermission,
-    CastingRestriction, ChosenAttribute, ChosenSubtypeKind, CostPaidObjectSnapshot,
-    ExiledSpellRider, ModalChoice, ReplacementDefinition, SeatDirection, SolveCondition,
-    SpellCastingOption, StaticDefinition, TriggerBaseSetInstanceRef, TriggerDefinition,
-    TriggerDefinitionOccurrenceRef, TriggerEntry, TriggerOccurrenceState,
-    materialize_legacy_printed_trigger_entries,
+    materialize_legacy_printed_trigger_entries, AbilityBlockEntry, AbilityDefinition,
+    AdditionalCost, AdditionalCostInstancePayment, AdditionalCostOrigin, BasicLandType,
+    CastTimingPermission, CastVariantPaid, CastingPermission, CastingRestriction, ChosenAttribute,
+    ChosenSubtypeKind, CostPaidObjectSnapshot, ExiledSpellRider, ModalChoice,
+    ReplacementDefinition, SeatDirection, SolveCondition, SpellCastingOption, StaticDefinition,
+    TriggerBaseSetInstanceRef, TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerEntry,
+    TriggerOccurrenceState,
 };
 use crate::types::card::{LayoutKind, PrintedCardRef, PrintedLoyalty, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
@@ -1638,7 +1638,13 @@ impl GameObject {
             self.base_trigger_definitions.as_slice(),
             self.trigger_base_set_instance,
         )?;
-        if entries == self.trigger_definitions.iter_all().cloned().collect::<Vec<_>>() {
+        if entries
+            == self
+                .trigger_definitions
+                .iter_all()
+                .cloned()
+                .collect::<Vec<_>>()
+        {
             return self.validate_trigger_definitions();
         }
         self.trigger_definitions = entries.into();

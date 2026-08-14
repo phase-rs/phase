@@ -1,8 +1,8 @@
 //! A dies-trigger LKI restoration must leave only serializable trigger entries.
 
+use engine::game::derived_views::ClientGameStateRef;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::game::triggers::process_triggers;
-use engine::game::derived_views::ClientGameStateRef;
 use engine::types::ability::{TriggerDefinitionOccurrenceRef, TriggerEntry};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
@@ -186,10 +186,9 @@ fn legacy_zone_change_trigger_records_restore_before_client_serialization() {
     runner.state_mut().current_trigger_event = Some(pending_event.clone());
     runner.state_mut().pending_trigger_event_batch = vec![pending_event];
 
-    let mut wire = serde_json::to_value(ResolutionStateWire::from_game_state(
-        runner.state().clone(),
-    ))
-    .expect("materialized state serializes as a resolution wire");
+    let mut wire =
+        serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone()))
+            .expect("materialized state serializes as a resolution wire");
     let state = wire.as_object_mut().expect("wire is a state object");
     let mut legacy_record = state["zone_changes_this_turn"]
         .as_array()
@@ -205,12 +204,8 @@ fn legacy_zone_change_trigger_records_restore_before_client_serialization() {
         "sacrificed_permanents_this_turn".to_string(),
         serde_json::Value::Array(vec![legacy_record]),
     );
-    erase_trigger_occurrences(
-        &mut state["current_trigger_event"]["data"]["record"],
-    );
-    erase_trigger_occurrences(
-        &mut state["pending_trigger_event_batch"][0]["data"]["record"],
-    );
+    erase_trigger_occurrences(&mut state["current_trigger_event"]["data"]["record"]);
+    erase_trigger_occurrences(&mut state["pending_trigger_event_batch"][0]["data"]["record"]);
     erase_trigger_occurrences(journal_zone_change_record_mut(&mut wire));
 
     let mut context_free_journal = wire.clone();
@@ -221,9 +216,9 @@ fn legacy_zone_change_trigger_records_restore_before_client_serialization() {
     let error = serde_json::from_value::<ResolutionStateWire>(context_free_journal)
         .expect_err("a legacy journal record must not borrow a live object's trigger base");
     assert!(
-        error
-            .to_string()
-            .contains("legacy journal zone-change record has no record-owned trigger source context"),
+        error.to_string().contains(
+            "legacy journal zone-change record has no record-owned trigger source context"
+        ),
         "journal migration rejects context-free legacy trigger payloads"
     );
 

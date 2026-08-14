@@ -6,7 +6,8 @@ use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
-    default_target_filter_permanent, AbilityCost, AbilityDefinition, AdditionalCost,
+    default_target_filter_permanent, legacy_trigger_entry_list,
+    materialize_legacy_printed_trigger_entries, AbilityCost, AbilityDefinition, AdditionalCost,
     AdditionalCostInstance, AdditionalCostInstancePayment, AttackSubject, BeholdCostAction,
     CastTimingPermission, CastVariantPaid, CategoryChooserScope, ChoiceType, ChoiceValue,
     ChooseFromZoneConstraint, ChosenAttribute, CoinFlipResult, Comparator, ContinuousModification,
@@ -15,9 +16,8 @@ use super::ability::{
     EffectKind, FaceDownProfile, GameRestriction, KeywordAction, KickerVariant, LibraryPosition,
     ModalChoice, PermanentEntryMode, PileSource, QuantityExpr, ResolvedAbility,
     SearchDestinationSplit, SearchSelectionConstraint, StaticCondition, TapCreaturesAggregate,
-    TargetFilter, TargetRef, ThisWayCause, TriggerCondition, TriggerDefinition,
-    TriggerBaseSetInstanceRef, TriggerDefinitionRef, TriggerEntry,
-    legacy_trigger_entry_list, materialize_legacy_printed_trigger_entries,
+    TargetFilter, TargetRef, ThisWayCause, TriggerBaseSetInstanceRef, TriggerCondition,
+    TriggerDefinition, TriggerDefinitionRef, TriggerEntry,
 };
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, PrintedCardRef, TokenImageRef};
@@ -8073,8 +8073,8 @@ fn migrate_persisted_zone_change_trigger_record(
             entries
         }
         Some(context_value) => {
-            let context: TriggerSourceContext = serde_json::from_value(context_value.clone())
-                .map_err(|error| error.to_string())?;
+            let context: TriggerSourceContext =
+                serde_json::from_value(context_value.clone()).map_err(|error| error.to_string())?;
             if context.identity.reference.object_id != object_id {
                 return Err(
                     "zone-change trigger source context object id does not match its record"
@@ -8089,18 +8089,15 @@ fn migrate_persisted_zone_change_trigger_record(
             }
             if entries.len() != context.trigger_entries.len() {
                 return Err(
-                    "zone-change record trigger list disagrees with its source context"
-                        .to_string(),
+                    "zone-change record trigger list disagrees with its source context".to_string(),
                 );
             }
             if has_legacy_entries {
-                if !entries
-                    .iter()
-                    .zip(&context.trigger_entries)
-                    .all(|(record_entry, context_entry)| {
+                if !entries.iter().zip(&context.trigger_entries).all(
+                    |(record_entry, context_entry)| {
                         record_entry.definition == context_entry.definition
-                    })
-                {
+                    },
+                ) {
                     return Err(
                         "zone-change record trigger list disagrees with its source context"
                             .to_string(),
