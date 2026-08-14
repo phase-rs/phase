@@ -2747,6 +2747,19 @@ pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 2;
 /// never emits v1 resolution fields.
 const LEGACY_RESOLUTION_STATE_WIRE_VERSION: u64 = 1;
 
+/// V1 suspension carriers that may retain an active `GameEvent::ZoneChanged`.
+/// Both provenance materialization and occurrence-key reconciliation must visit
+/// this exact legacy surface before it projects into the v2 frame stack.
+const LEGACY_LIVE_ZONE_CHANGED_EVENT_ROOTS: &[&str] = &[
+    "pending_continuation",
+    "pending_choose_zone_trigger_context",
+    "pending_optional_trigger_event",
+    "pending_change_zone_iteration",
+    "pending_batch_deliveries",
+    "pending_mill_deliveries",
+    "pending_each_player_copy_chosen",
+];
+
 /// Versioned wire adapter for full game-state persistence and transport.
 ///
 /// This adapter is the persistence seam between v1's legacy-only payloads and
@@ -2826,47 +2839,35 @@ impl ResolutionStateWire {
         // both belong to `GameStateDecode`; no wire branch gets a private
         // `GameState` serde shortcut.
         GameStateDecode::prepare_resolution_wire(&mut value, decode_mode)?;
-        let additional_live_event_roots: &[&str] = match version {
-            LEGACY_RESOLUTION_STATE_WIRE_VERSION => &[
-                "pending_continuation",
-                "pending_choose_zone_trigger_context",
-                "pending_optional_trigger_event",
-                "pending_change_zone_iteration",
-                "pending_batch_deliveries",
-                "pending_mill_deliveries",
-                "pending_each_player_copy_chosen",
-            ][..],
-            RESOLUTION_STATE_WIRE_VERSION => &[],
-            _ => unreachable!("version was validated before migration"),
+        let additional_live_event_roots = match decode_mode {
+            GameStateDecodeMode::ResolutionWireV1 => LEGACY_LIVE_ZONE_CHANGED_EVENT_ROOTS,
+            GameStateDecodeMode::ResolutionWireV2 => &[],
+            GameStateDecodeMode::PersistedRaw
+            | GameStateDecodeMode::TrustedEnvelope
+            | GameStateDecodeMode::DirectCurrentRaw => {
+                return Err("invalid resolution-state wire decode mode".to_string());
+            }
         };
         crate::types::game_state::migrate_legacy_zone_change_trigger_provenance(
             &mut value,
             additional_live_event_roots,
         )?;
 
-        match version {
+        match decode_mode {
             // V1 reader compatibility path: historical keys are consumed here
             // and projected into typed frames before runtime state is restored.
-            LEGACY_RESOLUTION_STATE_WIRE_VERSION => {
+            GameStateDecodeMode::ResolutionWireV1 => {
                 crate::types::game_state::reconcile_persisted_zone_change_occurrences(
                     &mut value,
-                    &[
-                        "pending_continuation",
-                        "pending_choose_zone_trigger_context",
-                        "pending_optional_trigger_event",
-                        // These v1 frame payloads retain ZoneChanged events in
-                        // their logical-owner, delivery, or trigger context.
-                        "pending_change_zone_iteration",
-                        "pending_batch_deliveries",
-                        "pending_mill_deliveries",
-                        "pending_each_player_copy_chosen",
-                    ],
+                    LEGACY_LIVE_ZONE_CHANGED_EVENT_ROOTS,
                 )?;
                 let object = value
                     .as_object()
                     .expect("the checked resolution state wire remains an object");
                 if object.contains_key("resolution_frames") {
-                    return Err("v1 resolution state must not contain resolution_frames".to_string());
+                    return Err(
+                        "v1 resolution state must not contain resolution_frames".to_string()
+                    );
                 }
                 if object.contains_key("resolution_stack") {
                     return Err("v1 resolution state must not contain resolution_stack".to_string());
@@ -2896,9 +2897,7 @@ impl ResolutionStateWire {
                 let legacy_mutate_merge = LegacyMutateMergeWire::from_value(&value)?;
                 let legacy_replacement_tails = LegacyReplacementTailsWire::from_value(&value)?;
                 let mut legacy_value = value;
-                let legacy_object = legacy_value
-                    .as_object_mut()
-                    .expect("checked JSON object");
+                let legacy_object = legacy_value.as_object_mut().expect("checked JSON object");
                 legacy_object.remove("pending_continuation");
                 legacy_object.remove("search_continuation_attach_host");
                 legacy_object.remove("pending_choose_zone_trigger_context");
@@ -3027,7 +3026,7 @@ impl ResolutionStateWire {
                 debug_assert_runtime_resolution_invariants(&legacy);
                 Ok(Self { state: legacy })
             }
-            RESOLUTION_STATE_WIRE_VERSION => {
+            GameStateDecodeMode::ResolutionWireV2 => {
                 crate::types::game_state::reconcile_persisted_zone_change_occurrences(
                     &mut value,
                     &[],
@@ -3036,11 +3035,14 @@ impl ResolutionStateWire {
                     .as_object()
                     .expect("the checked resolution state wire remains an object");
                 if legacy_resolution_wire_field(object).is_some() {
-                    return Err("v2 resolution state must not contain a legacy resolution field".to_string());
+                    return Err(
+                        "v2 resolution state must not contain a legacy resolution field"
+                            .to_string(),
+                    );
                 }
-                let frames_value = object
-                    .get("resolution_frames")
-                    .ok_or_else(|| "v2 resolution state is missing resolution_frames".to_string())?;
+                let frames_value = object.get("resolution_frames").ok_or_else(|| {
+                    "v2 resolution state is missing resolution_frames".to_string()
+                })?;
                 if has_removed_batched_repeated_optional_payment(frames_value) {
                     return Err(
                         "v2 repeated optional-payment snapshot uses removed batched:true flow; restart the game from a current save"
@@ -3057,8 +3059,9 @@ impl ResolutionStateWire {
                 state_object.remove("resolution_state_version");
                 state_object.remove("resolution_frames");
                 if state_object.remove("resolution_stack").is_some() {
-                    return Err("v2 resolution state must not contain runtime resolution_stack"
-                        .to_string());
+                    return Err(
+                        "v2 resolution state must not contain runtime resolution_stack".to_string(),
+                    );
                 }
                 let state = GameStateDecode::materialize_prepared(state_value)?;
                 frames
@@ -3067,17 +3070,21 @@ impl ResolutionStateWire {
                 let projected = project_frames_into_legacy_state(&state, &frames)?;
                 let canonical = canonicalize_legacy_resolution_state(&projected)?;
                 if canonical != frames {
-                    return Err("v2 resolution frames cannot be represented by the legacy runtime slots"
-                        .to_string());
+                    return Err(
+                        "v2 resolution frames cannot be represented by the legacy runtime slots"
+                            .to_string(),
+                    );
                 }
                 crate::types::game_state::validate_trigger_firing_coherence(&projected)?;
                 #[cfg(debug_assertions)]
                 debug_assert_runtime_resolution_invariants(&projected);
                 Ok(Self { state: projected })
             }
-            other => Err(format!(
-                "unsupported resolution_state_version {other}; expected 1 or {RESOLUTION_STATE_WIRE_VERSION}"
-            )),
+            GameStateDecodeMode::PersistedRaw
+            | GameStateDecodeMode::TrustedEnvelope
+            | GameStateDecodeMode::DirectCurrentRaw => {
+                Err("invalid resolution-state wire decode mode".to_string())
+            }
         }
     }
 }

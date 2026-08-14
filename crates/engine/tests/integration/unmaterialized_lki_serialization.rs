@@ -43,9 +43,14 @@ fn assert_materialized(label: &str, entries: impl IntoIterator<Item = TriggerEnt
 }
 
 fn erase_trigger_occurrences(record: &mut serde_json::Value) {
-    let entries = record["trigger_definitions"]
+    let source = record["trigger_definitions"]
         .as_array()
-        .expect("fixture zone-change record has trigger entries")
+        .expect("fixture zone-change record has trigger entries");
+    assert!(
+        !source.is_empty(),
+        "fixture record must carry trigger entries for the erase to emulate a legacy payload"
+    );
+    let entries = source
         .iter()
         .map(|entry| entry["definition"].clone())
         .collect();
@@ -268,4 +273,19 @@ fn legacy_zone_change_trigger_records_restore_before_client_serialization() {
             assert_materialized("restored ledger", record.trigger_definitions.clone());
         }
     }
+    let mut restored_live_zone_change_events = 0;
+    for event in restored
+        .current_trigger_event
+        .iter()
+        .chain(restored.pending_trigger_event_batch.iter())
+    {
+        if let GameEvent::ZoneChanged { record, .. } = event {
+            assert_materialized("restored live event", record.trigger_definitions.clone());
+            restored_live_zone_change_events += 1;
+        }
+    }
+    assert_eq!(
+        restored_live_zone_change_events, 2,
+        "both live zone-change event roots must survive restoration"
+    );
 }
