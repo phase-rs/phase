@@ -992,6 +992,7 @@ mod the_immortal_sun;
 mod the_kingpin_of_crime_combat_damage;
 mod the_ur_dragon_eminence;
 mod the_who_opponent_guess_resolution;
+mod thor_god_of_thunder;
 mod thorna_and_twigtooth_shared_x_relay_6956;
 mod thought_distortion;
 mod thoughtweft_trample_regression;

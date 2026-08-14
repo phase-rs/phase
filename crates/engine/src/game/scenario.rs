@@ -2310,6 +2310,11 @@ impl<'a> SpellCast<'a> {
         // distinct targets while a single declaration remains reusable across
         // independent modal slots.
         let mut remaining_objects: Vec<ObjectId> = target_objects;
+        // CR 603.3d: triggered-ability targets are chosen after the trigger is
+        // put on the stack, independently of the spell's own target slots.
+        // Keep a separate object-intent pool so the same declared object can
+        // satisfy a trigger target and a later resolution target.
+        let mut remaining_trigger_objects = remaining_objects.clone();
         let declared_players: Vec<PlayerId> = target_players;
         let mut remaining_multi_target_players = declared_players.clone();
         let mut remaining_cost_objects: Vec<ObjectId> = cost_objects;
@@ -2545,6 +2550,29 @@ impl<'a> SpellCast<'a> {
                             .multi_target
                             .as_ref()
                             .map(|_| &mut remaining_multi_target_players),
+                        &declared_players,
+                        selection.current_slot,
+                    );
+                    act_collect(
+                        runner,
+                        GameAction::ChooseTarget { target: choice },
+                        &mut events,
+                    )?;
+                }
+                // CR 603.3d: triggered abilities choose targets after they are
+                // put on the stack. Their object intents are independent of
+                // the spell's target slots, while player intents remain
+                // reusable across both prompts.
+                WaitingFor::TriggerTargetSelection {
+                    target_slots,
+                    selection,
+                    ..
+                } => {
+                    let slot = &target_slots[selection.current_slot];
+                    let choice = pick_slot_target(
+                        slot,
+                        &mut remaining_trigger_objects,
+                        None,
                         &declared_players,
                         selection.current_slot,
                     );
