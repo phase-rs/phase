@@ -1122,8 +1122,12 @@ pub fn combat_damage_to_defender(
     let Some(attacker) = state.objects.get(&attacker_id) else {
         return 0;
     };
+    // CR 510.1a + CR 613.11: `combat_damage_amount` is the resolver's authority for
+    // how much a creature assigns — power normally, toughness under a Doran-style
+    // rule-modifying effect, and 0 under "assigns no combat damage". Reading raw
+    // power here would make this helper contradict the combat it exists to predict.
     // CR 510.1a: a creature assigning 0 or less assigns no combat damage at all.
-    let power = attacker.power.unwrap_or(0).max(0);
+    let power = combat_damage_amount(attacker) as i32;
     if power == 0 {
         return 0;
     }
@@ -1172,9 +1176,12 @@ pub fn combat_damage_to_defender(
                 .iter()
                 .any(|b| b.has_keyword(&Keyword::Deathtouch)),
         ) as i32;
+        // CR 510.1a + CR 613.11: same authority for the blockers — a first-striking
+        // Doran-style blocker kills the attacker with its toughness, and one that
+        // assigns no combat damage cannot kill it at all.
         let first_strike_damage: i32 = first_strike_blockers
             .iter()
-            .map(|b| b.power.unwrap_or(0).max(0))
+            .map(|b| combat_damage_amount(b) as i32)
             .sum();
         if first_strike_damage >= attacker_lethal {
             attacker_alive = false;
@@ -4627,5 +4634,72 @@ mod tests {
         kw(&mut state, a, vec![Keyword::Trample]);
         // CR 510.1a
         assert_eq!(combat_damage_to_defender(&state, a, &[]), 0);
+    }
+
+    // ── Modified damage basis (CR 613.11) ──
+    //
+    // `combat_damage_amount` is what `resolve_combat_damage` assigns from, so this
+    // helper must read the same number. Every case below is chosen to give a
+    // different answer if either side is re-derived from raw power.
+
+    /// CR 613.11 + CR 702.19b: a Doran-style attacker assigns its toughness, so a
+    /// 1/5 trampler covers a 0/2 blocker's lethal and tramples 3. Read from raw
+    /// power it assigns 1, fails to cover the blocker, and gets 0 through.
+    #[test]
+    fn attacker_assigning_from_toughness_tramples_on_its_toughness() {
+        let mut state = setup();
+        let a = create_creature(&mut state, PlayerId(0), "A", 1, 5);
+        kw(&mut state, a, vec![Keyword::Trample]);
+        state
+            .objects
+            .get_mut(&a)
+            .unwrap()
+            .assigns_damage_from_toughness = true;
+        let b = create_creature(&mut state, PlayerId(1), "B", 0, 2);
+        assert_eq!(combat_damage_to_defender(&state, a, &[b]), 3);
+    }
+
+    /// CR 510.1a: "assigns no combat damage" zeroes an unblocked attacker that would
+    /// otherwise connect for its full power.
+    #[test]
+    fn attacker_assigning_no_combat_damage_reaches_the_player_for_nothing() {
+        let mut state = setup();
+        let a = create_creature(&mut state, PlayerId(0), "A", 7, 7);
+        kw(&mut state, a, vec![Keyword::Trample]);
+        state.objects.get_mut(&a).unwrap().assigns_no_combat_damage = true;
+        assert_eq!(combat_damage_to_defender(&state, a, &[]), 0);
+    }
+
+    /// CR 613.11 + CR 702.7b: a first-striking blocker assigning from toughness kills
+    /// the 11/2 attacker with its 3 toughness before the regular step, so nothing
+    /// tramples through. Read from raw power it assigns 0 and 8 gets through.
+    #[test]
+    fn first_strike_blocker_assigning_from_toughness_kills_the_attacker() {
+        let mut state = setup();
+        let a = create_creature(&mut state, PlayerId(0), "A", 11, 2);
+        kw(&mut state, a, vec![Keyword::Trample]);
+        let b = create_creature(&mut state, PlayerId(1), "B", 0, 3);
+        kw(&mut state, b, vec![Keyword::FirstStrike]);
+        state
+            .objects
+            .get_mut(&b)
+            .unwrap()
+            .assigns_damage_from_toughness = true;
+        assert_eq!(combat_damage_to_defender(&state, a, &[b]), 0);
+    }
+
+    /// CR 510.1a + CR 702.7b: the mirror case — a first-striking blocker that assigns
+    /// no combat damage cannot kill the attacker, so the regular step still happens
+    /// and 10 tramples past its 1 toughness. Read from raw power its 5 would be
+    /// lethal to the 11/2 and this would be 0.
+    #[test]
+    fn first_strike_blocker_assigning_no_combat_damage_cannot_kill_the_attacker() {
+        let mut state = setup();
+        let a = create_creature(&mut state, PlayerId(0), "A", 11, 2);
+        kw(&mut state, a, vec![Keyword::Trample]);
+        let b = create_creature(&mut state, PlayerId(1), "B", 5, 1);
+        kw(&mut state, b, vec![Keyword::FirstStrike]);
+        state.objects.get_mut(&b).unwrap().assigns_no_combat_damage = true;
+        assert_eq!(combat_damage_to_defender(&state, a, &[b]), 10);
     }
 }
