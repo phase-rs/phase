@@ -5758,6 +5758,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::ActivationMillPayment { .. }
                     | PendingCostMoveResume::LoyaltyActivation { .. }
                     | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+                    | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
             )
         ),
         // CR 606.4 + CR 616.1: a fully-prevented loyalty counter add (e.g. an
