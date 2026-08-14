@@ -7317,7 +7317,7 @@ mod tests {
     };
     use crate::types::counter::{CounterMatch, CounterType};
 
-    /// CR 903.3d + CR 608.2c: the `StaticCondition` -> `AbilityCondition` bridge
+    /// CR 903.3d + CR 603.4: the `StaticCondition` -> `AbilityCondition` bridge
     /// must lower a commander-control gate, and must keep the two `ownership`
     /// arms DISTINCT — CR 903.3 + CR 109.5 "your commander" (owned and
     /// controlled) is a strictly narrower predicate than CR 903.3d "a commander"

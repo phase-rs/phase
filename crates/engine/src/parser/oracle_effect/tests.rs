@@ -22131,6 +22131,56 @@ fn inline_delayed_trigger_when_damage_this_way_dies_uses_damage_condition() {
     }
 }
 
+/// CR 603.7b: the SIBLING of the test above, and the reason that one is allowed
+/// to lower onto the one-shot `WhenNextEvent`.
+///
+/// CR 603.7b caps a delayed ability at one trigger "unless it has a stated
+/// duration, such as 'this turn.'" Both cards here carry the same stated
+/// duration and the same broad "a creature dealt damage this way" filter, so the
+/// filter cannot be the discriminator — the WotC "When" / "Whenever" templating
+/// is, and `parse_dealt_damage_this_way_dies_trigger` is reached from two call
+/// sites that lower it accordingly:
+///   - "When …" (Skeletonize, damage to a SINGLE target creature, so at most one
+///     death can qualify) → one-shot `WhenNextEvent`, pinned above;
+///   - "Whenever …" (Ghired's Belligerence, damage DIVIDED among any number of
+///     creatures, so many deaths can qualify) → multi-fire `WheneverEvent`,
+///     pinned here.
+///
+/// This split is what makes `game::triggers::false_gate_consumes_one_shot` safe
+/// to consume EVERY `WhenNextEvent` on a false intervening-`if` (CR 603.4): an
+/// ability that must keep watching for the rest of the turn is a `WheneverEvent`,
+/// whose `one_shot` is false, so it never reaches that discard. Re-route this
+/// form onto `WhenNextEvent` and that guarantee is silently lost — which is why
+/// the routing is pinned here rather than left to the call sites.
+#[test]
+fn inline_delayed_trigger_whenever_damage_this_way_dies_is_multi_fire() {
+    let e = parse_effect(
+        "Whenever a creature dealt damage this way dies this turn, create a 1/1 black Skeleton creature token",
+    );
+    match e {
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::WheneverEvent { trigger, .. },
+            ..
+        } => {
+            // Same event shape as the "When" form — only the multiplicity differs.
+            assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+            assert_eq!(trigger.origin, Some(Zone::Battlefield));
+            assert_eq!(trigger.destination, Some(Zone::Graveyard));
+            assert_eq!(
+                trigger.condition,
+                Some(TriggerCondition::DealtDamageBySourceThisTurn),
+                "the 'whenever' form must reuse the same damage-ledger condition as the \
+                 'when' form; only its multiplicity differs"
+            );
+        }
+        other => panic!(
+            "CR 603.7b: a stated-duration 'whenever … dealt damage this way dies this turn' \
+             must lower to the multi-fire WheneverEvent, not the one-shot WhenNextEvent, \
+             got {other:?}"
+        ),
+    }
+}
+
 #[test]
 fn inline_delayed_trigger_when_leaves() {
     let e = parse_effect("When that creature leaves the battlefield, return it to the battlefield under its owner's control");
@@ -52298,7 +52348,7 @@ fn instead_override_lowers_the_typed_completed_dungeon_condition() {
     );
 }
 
-/// CR 603.4 + CR 608.2c + CR 903.3: Fight for the Throne's delayed triggered
+/// CR 603.4 + CR 903.3: Fight for the Throne's delayed triggered
 /// ability carries an intervening-`if` — "When the creature an opponent
 /// controls dies this turn, *if you control your commander*, you become the
 /// monarch." The gate must survive lowering as a TYPED `AbilityCondition`.

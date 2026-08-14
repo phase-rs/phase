@@ -15346,7 +15346,7 @@ impl TargetFilter {
         }
     }
 
-    /// CR 608.2c + CR 400.7: Returns true when this filter names ONE object that
+    /// CR 603.7c + CR 400.7: Returns true when this filter names ONE object that
     /// is already BOUND — a specific permanent or an anaphor to one — rather than
     /// a CLASS of objects re-matched against the live board on every check.
     ///
@@ -20424,10 +20424,13 @@ pub enum AbilityCondition {
     HasCityBlessing,
     /// CR 702.195b: True when the ability controller has the enduring story designation.
     HasEnduringStory,
-    /// CR 903.3d + CR 608.2c: Resolution-time commander-control gate — "if you
+    /// CR 903.3d + CR 608.2a: Resolution-time commander-control gate — "if you
     /// control your commander" / "if you control a commander". CR 903.3d is the
     /// authorizing rule: "If an effect refers to controlling a commander, it
     /// refers to a permanent on the battlefield that is a commander."
+    /// CR 608.2a is the resolution-time half: an intervening-`if` condition is
+    /// re-checked as the ability resolves and the ability does nothing if it is
+    /// then false.
     ///
     /// The effect-resolution mirror of `StaticCondition::ControlsCommander`
     /// (layers), `TriggerCondition::ControlsCommander` (intervening-if on a

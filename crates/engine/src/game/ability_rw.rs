@@ -6250,7 +6250,12 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
         // CR 903.3d: a LIVE battlefield census — see `commander_control_read`.
         // The three condition-vocabulary mirrors of this ONE printed clause share
         // that helper, so none of them can drift from the others.
-        AbilityCondition::ControlsCommander { .. } => commander_control_read(),
+        // M3 binding mandate: `commander_control_read()` is a PRECISE profile, not
+        // `RwProfile::conservative()`, so this arm binds every payload field.
+        // `ownership` is deliberately not read: CR 903.3d makes both arms the same
+        // live battlefield census, and the Own/Any distinction narrows WHICH
+        // commanders qualify, not which state the read touches.
+        AbilityCondition::ControlsCommander { ownership: _ } => commander_control_read(),
         AbilityCondition::AdditionalCostPaidInstead
         | AbilityCondition::AlternativeManaCostPaid
         | AbilityCondition::EffectOutcome { .. }
@@ -6397,7 +6402,8 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
         // CR 903.3d: a LIVE battlefield census — see `commander_control_read`.
         // Shared with the `AbilityCondition` / `StaticCondition` mirrors of the
         // same printed clause.
-        TriggerCondition::ControlsCommander { .. } => commander_control_read(),
+        // M3 binding mandate: precise RHS, so bind every payload field.
+        TriggerCondition::ControlsCommander { ownership: _ } => commander_control_read(),
     }
 }
 
@@ -6502,7 +6508,8 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         // CR 903.3d: a LIVE battlefield census — see `commander_control_read`.
         // Shared with the `AbilityCondition` / `TriggerCondition` mirrors of the
         // same printed clause.
-        StaticCondition::ControlsCommander { .. } => commander_control_read(),
+        // M3 binding mandate: precise RHS, so bind every payload field.
+        StaticCondition::ControlsCommander { ownership: _ } => commander_control_read(),
     }
 }
 

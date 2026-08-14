@@ -9034,6 +9034,12 @@ fn player_scope_unbound_at_fire_time(scope: &PlayerScope) -> bool {
         | PlayerScope::Opponent { .. }
         | PlayerScope::DefendingPlayer
         | PlayerScope::SourceChosenPlayer
+        // CR 109.4: a concrete `PlayerId` already SNAPSHOTTED at resolution — a
+        // literal, so there is nothing left to bind and both legs read the same
+        // value. Same argument as `WhenLeavesPlay`'s already-resolved `ObjectId`.
+        // Like `AnyTurn` it is duration-timing-only and never reaches a quantity,
+        // but is adjudicated here rather than wildcarded.
+        | PlayerScope::SpecificPlayer { .. }
         | PlayerScope::AnyTurn => false,
     }
 }
@@ -9172,6 +9178,14 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::TimesCostPaidThisResolution
+        // CR 608.2c: the secret-number ledger is populated BY the
+        // resolution that ran the choice (Wheel of Misfortune, Menacing Ogre) and
+        // is cleared per resolution — players who chose no number THIS resolution
+        // are excluded from the aggregate entirely. At fire time the ledger holds
+        // an unrelated resolution's numbers or none, so the two legs cannot agree.
+        // The `player` payload is irrelevant to that verdict: the ledger itself is
+        // resolution-scoped whichever player the scope selects.
+        | QuantityRef::PlayerChosenNumber { .. }
         // CR 701.38: the vote tally is published by the resolution that ran the
         // vote block.
         | QuantityRef::VoteCount { .. }
@@ -9349,6 +9363,23 @@ fn static_gate_bridge_loses_zone(condition: &StaticCondition) -> bool {
 /// [`gate_binding_diverges_at_fire_time`] for the object/player/population axes
 /// of the leaf, and [`static_gate_bridge_loses_zone`] for the zone axis the
 /// `IsPresent` intermediate drops.
+///
+/// CR 400.7: there is deliberately NO guard here for a delayed ability carrying
+/// no `trigger_source` context, and the absence is load-bearing rather than an
+/// oversight. The worry it would answer is real in shape — a source-relative gate
+/// with no context would read nothing, evaluate false for want of a reading
+/// rather than on the game state, and (via [`false_gate_consumes_one_shot`])
+/// DELETE a one-shot outright. It cannot happen, because matching runs BEFORE
+/// gating and already requires that context: `delayed_trigger_event_with_index`
+/// opens its `WhenNextEvent` arm with `let source_context = source_context?;`, so
+/// a contextless one-shot never matches an event, never reaches this gate, and is
+/// never discarded. The condition is checked at most where a reading exists.
+///
+/// A guard here would therefore be unreachable code that also declines the hoist
+/// for gates whose fire-time reading is perfectly well-defined without a source
+/// (the controller-scoped `QuantityCheck` populations pinned by
+/// `non_battlefield_presence_gate_declines_the_fire_time_hoist` and its
+/// siblings) — buying nothing and costing CR 603.4's fire-time half.
 fn delayed_intervening_if(ability: &ResolvedAbility) -> Option<TriggerCondition> {
     if delayed_body_outlives_a_false_gate(ability) {
         return None;
@@ -9381,28 +9412,37 @@ fn delayed_intervening_if(ability: &ResolvedAbility) -> Option<TriggerCondition>
 ///   `TargetFilter::names_bound_single_object`). The bound object departs once
 ///   per incarnation, and an object that returns is a NEW object (CR 400.7 /
 ///   CR 603.7c), so a retained ability could never match it anyway;
-/// * EVERY `WhenNextEvent`, whatever its `DelayedTriggerLifetime`. Each shape the
-///   parser builds for this variant names ONE occurrence, so the matched event
-///   has spent it:
-///   - `ThisTurn` is only ever built from "when you **next** [event] this turn"
-///     (`try_parse_when_next_generic_event` / `build_when_next_delayed_trigger`).
-///     "Next" is the ability's own single-occurrence wording; the stated duration
-///     bounds only how long it WAITS for that one occurrence, and CR 603.7b's
-///     "unless it has a stated duration" clause lifts the once-only cap for
-///     "whenever … this turn" (`WheneverEvent`), not for a "next";
-///   - `Persistent` has NO stated duration (The Pandorica's "when ~ becomes
-///     untapped or leaves the battlefield", "when a player planeswalks"), so
-///     CR 603.7b's unqualified "will trigger only once — the next time its
-///     trigger event occurs" applies directly;
-///   - `Reflexive` (CR 603.12) is checked ONLY against its creation batch and must
-///     not be left to fire on a later same-turn event.
+/// * EVERY `WhenNextEvent`, whatever its `DelayedTriggerLifetime` — because this
+///   variant IS CR 603.7b's once-only half. The rule's two outcomes are modelled
+///   as two SIBLING conditions, not as a lifetime: `WheneverEvent` is the
+///   "unless it has a stated duration" carve-out (multi-fire, purged by
+///   `WheneverEventExpiry`), and `WhenNextEvent` is documented on its own
+///   declaration as the "one-shot variant of `WheneverEvent`". A stated-duration
+///   ability that must keep watching is therefore a `WheneverEvent` and CANNOT
+///   reach this function: `effects::delayed_trigger` computes
+///   `one_shot = !matches!(condition, WheneverEvent { .. })` and the only caller
+///   gates on `delayed.one_shot`. The lifetime then bounds only how long the
+///   single shot WAITS — `ThisTurn` to cleanup, `Persistent` open-ended
+///   (The Pandorica), `Reflexive` to its creation batch (CR 603.12).
 ///
-/// A BROAD-FILTER event form ("when a creature dies this turn, if X, …") is
-/// exactly what CR 603.7b's "unless it has a stated duration" clause keeps
-/// watching: the first non-qualifying death must NOT destroy the ability for the
-/// rest of the turn. Those stay installed and have their gate re-checked on the
-/// next occurrence; their stated duration is enforced by the cleanup purge
-/// (`DelayedTriggerLifetime` / `WheneverEventExpiry`), never by this discard.
+/// Do NOT re-derive that from the wording "next": the discriminator is WotC's
+/// "When" / "Whenever" templating, and the parser already keys on exactly that.
+/// The distinction is load-bearing and easy to get backwards, so it is worth
+/// naming the case that proves it. `parse_dealt_damage_this_way_dies_trigger`
+/// (`oracle_effect/mod.rs`) parses "[subject] dealt damage this way dies
+/// [this turn]" — a BROAD filter with no "next" anywhere — and is reached from
+/// two call sites that lower it differently, on the templating alone:
+///   - the `"whenever "` site → `WheneverEvent` (multi-fire). Ghired's
+///     Belligerence and Reckless Blaze, both of which spread damage over many
+///     creatures, so many deaths can qualify;
+///   - the `"when "` site → `WhenNextEvent { ThisTurn }` (one-shot). Skeletonize,
+///     whose damage goes to a SINGLE target creature, so at most one death can
+///     ever qualify — one occurrence, correctly consumed.
+///
+/// Those are the only three cards in the pool with that wording, and the split is
+/// exact for all three. So "broad filter" alone never implies multi-fire here,
+/// and this arm does not need to inspect the filter: the routing decision was
+/// already made, correctly, one layer up.
 ///
 /// Exhaustive on purpose: a new `DelayedTriggerCondition` must decide whether its
 /// stated event is a single occurrence before it can be discarded on a false gate.
@@ -9419,12 +9459,14 @@ fn false_gate_consumes_one_shot(condition: &DelayedTriggerCondition) -> bool {
         | DelayedTriggerCondition::WhenDiesOrExiled { filter } => {
             filter.names_bound_single_object()
         }
-        // CR 603.4 + CR 603.7b (+ CR 603.12 for `Reflexive`): every lifetime this
-        // variant carries names ONE occurrence, and the matched event has now
-        // spent it — see the per-lifetime breakdown above. Retaining it would
-        // silently rewrite "when you next X, if C" into "when you next X for
-        // which C holds", letting a later X fire an ability CR 603.4 already
-        // resolved as doing nothing.
+        // CR 603.4 + CR 603.7b (+ CR 603.12 for `Reflexive`): this variant IS the
+        // one-shot half of the CR 603.7b split — its own doc calls it the
+        // "one-shot variant of `WheneverEvent`" — so the matched event has spent
+        // its single occurrence whatever lifetime it carries. Retaining it would
+        // silently rewrite "when X, if C" into "when X for which C holds", letting
+        // a later X fire an ability CR 603.4 already resolved as doing nothing.
+        // A trigger that must keep watching is a `WheneverEvent` and cannot reach
+        // here at all — see the doc above.
         DelayedTriggerCondition::WhenNextEvent { .. } => true,
         // Never one-shot (`effects::delayed_trigger` computes `one_shot` as
         // "not `WheneverEvent`"), so this arm is unreachable from the caller;
@@ -19171,6 +19213,158 @@ pub mod tests {
             0,
             "CR 603.4 + CR 603.7b: the ability already spent its single occurrence with the \
              gate false; making the gate true afterwards must not let a LATER land drop fire it"
+        );
+    }
+
+    /// The OTHER half of CR 603.7b, and the discriminating counterpart to the
+    /// test above: a STATED-DURATION delayed ability whose first matching event
+    /// fails the intervening-`if` must SURVIVE and still fire on a later matching
+    /// event in the same turn.
+    ///
+    /// CR 603.7b caps a delayed ability at one trigger "unless it has a stated
+    /// duration, such as 'this turn.'" The engine models that carve-out as
+    /// `DelayedTriggerCondition::WheneverEvent` (multi-fire), the sibling of the
+    /// one-shot `WhenNextEvent` — so the protection is structural, and this test
+    /// pins the structure rather than trusting it: `effects::delayed_trigger`
+    /// computes `one_shot = !matches!(condition, WheneverEvent { .. })`, and the
+    /// discard in `check_delayed_triggers` is gated on `delayed.one_shot`, so a
+    /// false gate here must decline the fire WITHOUT consuming the ability.
+    ///
+    /// Two matching events, gate false then true, is what makes this
+    /// discriminating: a one-event fixture would pass even if the ability were
+    /// wrongly discarded, because both readings put nothing on the stack the
+    /// first time.
+    ///
+    /// REVERT-TO-RED: drop the `delayed.one_shot &&` conjunct from the discard
+    /// condition in `check_delayed_triggers` (so every false gate consumes) and
+    /// `after_first` becomes `0` and the second death fires nothing.
+    #[test]
+    fn stated_duration_multi_fire_survives_a_false_intervening_if() {
+        use crate::types::triggers::TriggerMode;
+
+        /// Installs "whenever you play a land this turn, if you control your
+        /// commander, you become the monarch" — the stated-duration shape.
+        /// Deliberately the same fixture as the one-shot test above, differing
+        /// ONLY in the condition sibling, so the two tests isolate exactly the
+        /// `WhenNextEvent` / `WheneverEvent` distinction and nothing else.
+        fn install(state: &mut GameState) -> ObjectId {
+            let controller = PlayerId(0);
+            state.active_player = controller;
+            state.priority_player = controller;
+
+            let source = create_object(
+                state,
+                CardId(0x0603_0409),
+                controller,
+                "Stated Duration Rider".to_string(),
+                Zone::Battlefield,
+            );
+            let land = create_object(
+                state,
+                CardId(0x0603_040a),
+                controller,
+                "Played Land".to_string(),
+                Zone::Battlefield,
+            );
+
+            // CR 305.1 + CR 603.2: scope the delayed event to the controller's
+            // own land drop, exactly as the one-shot fixture above does.
+            let mut trigger_def = TriggerDefinition::new(TriggerMode::LandPlayed);
+            trigger_def.valid_target = Some(TargetFilter::Controller);
+
+            let mut ability =
+                ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+            ability.condition = Some(AbilityCondition::ControlsCommander {
+                ownership: CommanderOwnership::Own,
+            });
+            let source_object = state.objects.get(&source).expect("installed source");
+            ability.trigger_source = Some(trigger_source_context_for_latch(state, source_object));
+
+            state.delayed_triggers.push(DelayedTrigger {
+                condition: DelayedTriggerCondition::WheneverEvent {
+                    trigger: Box::new(trigger_def),
+                    expiry: crate::types::ability::WheneverEventExpiry::EndOfTurn,
+                },
+                ability: Box::new(ability),
+                controller,
+                source_id: source,
+                // CR 603.7b: the stated duration is what makes this multi-fire.
+                // Mirrors `effects::delayed_trigger`'s own computation
+                // (`one_shot = !matches!(condition, WheneverEvent { .. })`).
+                one_shot: false,
+                provenance: DelayedInstallIdentity::LegacyDelayed,
+            });
+
+            land
+        }
+
+        fn stage_commander(state: &mut GameState) {
+            // CR 903.3 + CR 903.3d: owned AND controlled, on the battlefield.
+            let commander = make_creature(state, PlayerId(0), "Your Commander", 2, 2);
+            state
+                .objects
+                .get_mut(&commander)
+                .expect("staged commander")
+                .is_commander = true;
+        }
+
+        fn land_played(land: ObjectId) -> GameEvent {
+            GameEvent::LandPlayed {
+                object_id: land,
+                player_id: PlayerId(0),
+                from_zone: Zone::Hand,
+            }
+        }
+
+        let mut state = setup();
+        let land = install(&mut state);
+
+        // Batch one: a matching event with the gate FALSE (no commander staged).
+        check_delayed_triggers(&mut state, &[land_played(land)]);
+        assert_eq!(
+            state.stack.len(),
+            0,
+            "CR 603.4: a false intervening-`if` means the ability does not trigger on this \
+             occurrence"
+        );
+        let after_first = state.delayed_triggers.len();
+        assert_eq!(
+            after_first, 1,
+            "CR 603.7b: a STATED-DURATION delayed ability is not capped at one trigger, so a \
+             false gate must decline the occurrence WITHOUT consuming the ability"
+        );
+
+        // Batch two: make the gate TRUE, then a second matching event. The
+        // ability must still be installed and must now fire.
+        stage_commander(&mut state);
+        check_delayed_triggers(&mut state, &[land_played(land)]);
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "CR 603.7b + CR 603.4: the ability survived the declined occurrence and its gate is \
+             re-checked on the next one, which now passes"
+        );
+
+        // CR 603.4 (second half) + CR 608.2a: passing the FIRE-TIME gate must not
+        // disarm the RESOLUTION-TIME one. The hoist is a pair, not a move: the
+        // same gate has to ride onto the stack entry so `stack.rs`'s
+        // `bind_resolution_scope` re-checks it, which is what denies the ability
+        // if the condition stops holding between triggering and resolution (a
+        // commander leaving the battlefield in response). An entry carrying
+        // `condition: None` would resolve unconditionally — the very bug this PR
+        // fixes, reintroduced one layer later.
+        let entry = state.stack.last().expect("the fired delayed ability");
+        assert!(
+            matches!(
+                &entry.kind,
+                StackEntryKind::TriggeredAbility {
+                    condition: Some(_),
+                    ..
+                }
+            ),
+            "CR 603.4: the hoisted intervening-`if` must also be carried onto the stack entry \
+             for the resolution-time recheck, got {:?}",
+            entry.kind
         );
     }
 
