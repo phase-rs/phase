@@ -1,7 +1,9 @@
 //! Smaug the Impenetrable — passive-voice noncombat damage-received trigger.
 //!
-//! CR 120.2b + CR 603.2c + CR 111.10a: "Whenever Smaug is dealt noncombat
-//! damage, create that many Treasure tokens." Before the passive-voice damage
+//! "Whenever Smaug is dealt noncombat damage, create that many Treasure tokens."
+//! CR 120.2b classifies the damage as noncombat, CR 603.2c fixes how many times
+//! the ability triggers (once per occurrence of its trigger event), and
+//! CR 111.10a defines the Treasure tokens. Before the passive-voice damage
 //! grammar was parameterized onto its axes, `"is dealt noncombat damage"` was an
 //! unreachable cell — the eight enumerated `tag()` arms covered `"is dealt
 //! damage"`, `"is dealt combat damage"` and the two excess forms, but never the
@@ -94,8 +96,10 @@ fn smaug_creates_treasure_equal_to_noncombat_damage() {
     // Smaug, raising the `DamageDealt` event the trigger matches on.
     let _ = runner.activate(pinger, idx).target_object(smaug).resolve();
 
-    // CR 603.2c + CR 111.10a: "that many" is the magnitude of THIS trigger's own
-    // triggering event, so exactly three Treasure tokens are created.
+    // CR 111.10a: the created tokens are Treasures. "That many" is the magnitude
+    // of THIS trigger's own triggering event, so exactly three are created. (Not
+    // a CR 603.2c claim — that rule governs how many times an ability triggers,
+    // not what value the resulting ability's effect reads.)
     assert_eq!(
         count_treasures(runner.state()) - before,
         3,
@@ -176,9 +180,10 @@ fn smaug_binds_each_damage_event_independently() {
         .target_object(smaug)
         .resolve();
 
-    // CR 603.2c: each trigger instance binds the magnitude of the event that
-    // triggered IT. A shared or last-write-wins amount slot would yield 5+5=10
-    // or 8+8=16 rather than 3+5=8.
+    // CR 603.2c supplies the MULTIPLICITY: two separate damage events are two
+    // occurrences, so the ability triggers twice. The amount each instance binds
+    // is a separate property this assertion pins behaviorally — a shared or
+    // last-write-wins amount slot would yield 5+5=10 or 8+8=16 rather than 3+5=8.
     assert_eq!(
         count_treasures(runner.state()) - before,
         8,

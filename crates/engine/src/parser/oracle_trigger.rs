@@ -12004,6 +12004,26 @@ fn try_parse_event(
                 if !previously_covered && !remaining.trim().is_empty() {
                     return None;
                 }
+                // CR 120.4b + CR 120.4d: damage dealt simultaneously is dealt in a
+                // SINGLE damage event, so a received-damage amount threshold is a
+                // property of the whole event, not of one source's share. Innocent
+                // Bystander ("is dealt 3 or more damage") is the entire population
+                // of this cell and its ruling is explicit — it "triggers only if
+                // it's dealt 3 or more damage all at once" — so two sources each
+                // dealing 2 simultaneously must fire it, and Boros Reckoner's
+                // ruling confirms the same event model ("triggers once and one
+                // target is dealt that much damage"). `match_damage_*` applies
+                // `damage_amount` per `(source, amount)` pair and would under-fire
+                // both. Aggregation is an axis this arm cannot model, so — exactly
+                // as with an unconsumed tail above — it refuses the def rather than
+                // emit a silently-wrong one. Ordered AFTER the tail guard so that
+                // guard still owns the refusal for tail-bearing lines (Pain
+                // Magnification), each guard keeping its own falsifying test. Every
+                // cell the eight former `tag()` arms reached carried no amount, so
+                // this refusal cannot regress a previously supported line.
+                if amount.is_some() {
+                    return None;
+                }
                 def.mode = match channel {
                     DamageChannel::Total => TriggerMode::DamageReceived,
                     DamageChannel::Excess => TriggerMode::ExcessDamageAll,

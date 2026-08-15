@@ -29095,7 +29095,10 @@ fn event_source_lift_rewrites_inline_modal_tap_mode_roots() {
 // CR 120.1 + CR 120.2a + CR 120.2b + CR 120.6 + CR 120.10: the passive-voice
 // damage-received axis grid. These test the parameterized combinator's AXES
 // (voice × channel × kind × amount), not any single card's replay — the four
-// former `tag()` cells are kept as explicit regression guards below.
+// former `tag()` cells are kept as explicit regression guards below. The amount
+// axis is exercised as a REFUSAL: the combinator parses a threshold, but the
+// consumer arm declines to emit one because whole-event aggregation is not yet
+// modeled, so the tests below pin `Unknown` rather than a shape.
 
 #[test]
 fn dealt_damage_axes_noncombat_total() {
@@ -29111,26 +29114,39 @@ fn dealt_damage_axes_noncombat_total() {
 }
 
 #[test]
-fn dealt_damage_axes_amount_threshold() {
-    // CR 603.2 + CR 120.1: per-event damage threshold on the trigger event.
+fn dealt_damage_axes_amount_threshold_is_refused() {
+    // CR 120.4b + CR 120.4d: simultaneous damage is one event, so a received-
+    // damage threshold reads the event total. Innocent Bystander is this cell's
+    // entire population and its ruling requires "3 or more damage all at once",
+    // which the per-`(source, amount)` matcher cannot express. The arm refuses
+    // rather than emit a def that would silently under-fire on two 2-damage
+    // sources. Asserting `Unknown` — not a shape — is what makes this test able
+    // to fail if the refusal is ever dropped.
     let def = parse_trigger_line(
         "Whenever ~ is dealt 3 or more damage, investigate.",
         "Some Card",
     );
-    assert_eq!(def.mode, TriggerMode::DamageReceived);
-    assert_eq!(def.damage_kind, DamageKindFilter::Any);
-    assert_eq!(def.damage_amount, Some((Comparator::GE, 3)));
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "amount-bearing received-damage triggers must stay honestly unsupported \
+         until the aggregation axis is modeled, got {:?}",
+        def.mode
+    );
 }
 
 #[test]
-fn dealt_damage_axes_amount_exactly() {
-    // Exercises the tail's second comparator branch (`parse_exactly`).
+fn dealt_damage_axes_amount_exactly_is_refused() {
+    // Same refusal on the tail's second comparator branch (`parse_exactly`):
+    // "exactly 2" is likewise a whole-event quantity.
     let def = parse_trigger_line(
         "Whenever ~ is dealt exactly 2 damage, draw a card.",
         "Some Card",
     );
-    assert_eq!(def.mode, TriggerMode::DamageReceived);
-    assert_eq!(def.damage_amount, Some((Comparator::EQ, 2)));
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "exactly-N received-damage triggers must stay honestly unsupported, got {:?}",
+        def.mode
+    );
 }
 
 #[test]
@@ -29237,14 +29253,19 @@ fn dealt_damage_newly_opened_cell_rejects_unmodeled_tail() {
         def.mode
     );
 
-    // Paired positive reach-guard: the same newly-opened `N or more` cell IS
-    // reachable when nothing is left unconsumed. Verbatim Oracle text.
+    // Paired positive reach-guard — WITHOUT it the assertion above could pass
+    // vacuously, from the arm reaching no newly-opened cell at all. The control
+    // must therefore be a cell that is newly opened AND still emits: the
+    // noncombat/total cell, which no former `tag()` arm covered. It cannot be
+    // Innocent Bystander's `N or more` cell, which the amount guard now refuses
+    // for unmodelable whole-event aggregation (see `..._amount_threshold_is_refused`).
+    // Verbatim Oracle text.
     let reachable = parse_trigger_line(
-        "Whenever this creature is dealt 3 or more damage, investigate.",
-        "Innocent Bystander",
+        "Whenever Smaug is dealt noncombat damage, create that many Treasure tokens.",
+        "Smaug the Impenetrable",
     );
     assert_eq!(reachable.mode, TriggerMode::DamageReceived);
-    assert_eq!(reachable.damage_amount, Some((Comparator::GE, 3)));
+    assert_eq!(reachable.damage_kind, DamageKindFilter::NoncombatOnly);
 }
 
 #[test]
