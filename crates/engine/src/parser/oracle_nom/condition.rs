@@ -7,7 +7,7 @@ use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::bytes::complete::take_until;
 use nom::character::complete::multispace1;
-use nom::combinator::{eof, map, opt, value};
+use nom::combinator::{eof, map, opt, peek, value, verify};
 use nom::multi::many0;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -9142,6 +9142,32 @@ pub(crate) fn parse_unless_condition(input: &str) -> OracleResult<'_, StaticCond
 /// trailing punctuation like ", " or "."). On `wasn't`/`was not` the negation
 /// is exposed via `negated`.
 pub fn parse_zone_changed_this_way_clause(input: &str) -> OracleResult<'_, (TargetFilter, bool)> {
+    parse_zone_changed_this_way_clause_scoped(input, ThisWayVerbScope::AnyZoneChange)
+}
+
+/// CR 400.7 + CR 608.2c: which zone-change verbs a "… this way" back-reference
+/// may name. A typed scope rather than a `bool` so the axis stays self-documenting
+/// and extensible (per the "never a raw bool" rule); it parameterizes *only* the
+/// verb `alt()` of [`parse_zone_changed_this_way_clause_scoped`] — the article,
+/// type-phrase, disjunction-fold and tense/negation axes are shared verbatim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThisWayVerbScope {
+    /// Every verb the rider grammar covers: the present-tense "enters"/"enter"
+    /// branch plus "put onto the battlefield", "destroyed", "exiled",
+    /// "sacrificed", "returned", "discarded", "milled", "countered".
+    AnyZoneChange,
+    /// Battlefield-entry verbs only: the present-tense "enters"/"enter" branch
+    /// plus "put onto the battlefield". CR 614.1c replacement classification is
+    /// entry-scoped, so only an entry rider can contaminate it.
+    BattlefieldEntry,
+}
+
+/// Scoped implementation of [`parse_zone_changed_this_way_clause`]. See that
+/// function's doc comment for the grammar; `scope` gates the verb axis only.
+pub fn parse_zone_changed_this_way_clause_scoped(
+    input: &str,
+    scope: ThisWayVerbScope,
+) -> OracleResult<'_, (TargetFilter, bool)> {
     // CR 608.2c: A "this way" conditional may be quantified. "at least one" /
     // "one or more" both mean "≥ 1", which the existential `.any()` semantics
     // of `ZoneChangedThisWay` already encode — they value-discard to unit. The
@@ -9210,21 +9236,136 @@ pub fn parse_zone_changed_this_way_clause(input: &str) -> OracleResult<'_, (Targ
 
     // verb-phrase: single-word imperatives + the multi-word
     // "put onto the battlefield". The verb itself is value-discarded; the
-    // " this way" suffix is the discriminator.
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("put onto the battlefield"),
-        tag("destroyed"),
-        tag("exiled"),
-        tag("sacrificed"),
-        tag("returned"),
-        tag("discarded"),
-        tag("milled"),
-        tag("countered"),
-    ))
-    .parse(rest)?;
+    // " this way" suffix is the discriminator. Under
+    // `ThisWayVerbScope::BattlefieldEntry` only the battlefield-entry verb is
+    // offered; the non-entry zone-change verbs are withheld.
+    let (rest, _) = match scope {
+        ThisWayVerbScope::AnyZoneChange => alt((
+            tag::<_, _, OracleError<'_>>("put onto the battlefield"),
+            tag("destroyed"),
+            tag("exiled"),
+            tag("sacrificed"),
+            tag("returned"),
+            tag("discarded"),
+            tag("milled"),
+            tag("countered"),
+        ))
+        .parse(rest)?,
+        ThisWayVerbScope::BattlefieldEntry => {
+            tag::<_, _, OracleError<'_>>("put onto the battlefield").parse(rest)?
+        }
+    };
 
     let (rest, _) = tag(" this way").parse(rest)?;
     Ok((rest, (filter, negated)))
+}
+
+/// CR 608.2c: the bare pronoun subject of a reflexive battlefield-entry
+/// back-reference — "it enters this way" (Pharika's Spawn, Silver Surfer).
+/// Delegates the pronoun set to [`parse_object_recipient_pronoun`], the declared
+/// single authority, rather than re-listing `it`/`them`/`him`/`her` here.
+fn parse_pronoun_enters_this_way_clause(input: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = parse_object_recipient_pronoun(input)?;
+    let (rest, _) = tag(" ").parse(rest)?;
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("enters"), tag("enter"))).parse(rest)?;
+    let (rest, _) = tag(" this way").parse(rest)?;
+    Ok((rest, ()))
+}
+
+/// CR 608.2c: the core reflexive **battlefield-entry** back-reference — a subject,
+/// then an entry verb, then `" this way"`, with no conditional word.
+///
+/// Returns the NEGATION FLAG; it is deliberately never value-discarded, because
+/// the two wrapper voices below decide negation differently (see their doc
+/// comments).
+///
+/// Three subject voices, all delegated to existing combinators:
+///   * passive/present typed subject — `parse_zone_changed_this_way_clause_scoped`
+///     under [`ThisWayVerbScope::BattlefieldEntry`] ("a Hero enters this way",
+///     "an Equipment is put onto the battlefield this way");
+///   * active `you put …` — `parse_you_put_onto_battlefield_this_way_clause`;
+///   * bare pronoun — `parse_pronoun_enters_this_way_clause` ("it enters this way").
+///
+/// A trailing word boundary is required so the clause cannot match a prefix of a
+/// longer word.
+pub fn parse_entry_this_way_clause(input: &str) -> OracleResult<'_, bool> {
+    let (rest, negated) = alt((
+        map(
+            |i| parse_zone_changed_this_way_clause_scoped(i, ThisWayVerbScope::BattlefieldEntry),
+            |(_filter, negated)| negated,
+        ),
+        map(
+            parse_you_put_onto_battlefield_this_way_clause,
+            |(_filter, negated)| negated,
+        ),
+        value(false, parse_pronoun_enters_this_way_clause),
+    ))
+    .parse(input)?;
+    let (rest, _) = peek(alt((tag(","), tag(" "), tag("."), eof))).parse(rest)?;
+    Ok((rest, negated))
+}
+
+/// CR 608.2c: a "… this way" rider is a back-reference to an instruction EARLIER
+/// IN THE SAME ABILITY, never an independent CR 614.1c replacement head — CR 614.1c
+/// defines replacement effects as "[This permanent] enters with …" / "As [this
+/// permanent] enters …" / "[This permanent] enters as …", none of which a reflexive
+/// back-reference can be.
+///
+/// SCOPE (deliberate, [`ThisWayVerbScope::BattlefieldEntry`]): only BATTLEFIELD-ENTRY
+/// riders. CR 614.1c replacement classification is entry-scoped, so only an entry
+/// rider can contaminate it. A "was milled/exiled/destroyed this way" rider
+/// (Loafing Giant, Lazav Familiar Stranger, Demonic Junker, Nurturing Pixie) stays
+/// visible to the classifier: its incidental "prevent all"/"become a copy of"
+/// tokens come from the rider's CONSEQUENT, not from an entry statement.
+///
+/// The conditional word is OPTIONAL here, covering "If …", "When …", "Whenever …"
+/// and bare subject-initial riders alike. This subsumes BOTH former literal guards
+/// that existed for Winter Soldier, Reborn Avenger — the
+/// `has_trigger_prefix(lower) && scan_contains(lower, "enters this way,")` early
+/// return in `oracle_classifier.rs` and the `!scan_contains(&lower, "enters this
+/// way,")` conjunct on the Priority 5-pre enters-with interceptor in `oracle.rs`.
+/// Both modelled a single grammatical voice (present tense, comma-terminated);
+/// routing them through `oracle_classifier::strip_entry_this_way_riders` covers the
+/// whole rider class this combinator recognizes, passive voice included.
+///
+/// NEGATION: accepted at THIS (classifier) voice — a negated back-reference is still
+/// a back-reference and still cannot be a CR 614.1c head. It is REJECTED at the
+/// swallow-detector voice ([`parse_conditional_entry_this_way_rider`]), where
+/// `conditional_enter_with_counters` can only represent an AFFIRMATIVE filter match
+/// (`enter_with_counters_for_object` pushes counters when `matches_target_filter` is
+/// true), so suppressing a negated clause's warning would be coverage dishonesty.
+/// No card in `data/card-data.json` currently prints a passive-negated "this way"
+/// clause; this is a grammar decision, pinned by unit tests.
+///
+/// ALSO EXCLUDED: the cast-permission rider ("if you cast a spell this way, that
+/// creature enters with a finality counter on it" — Intrepid Paleontologist, Noctis,
+/// Leonardo, Osteomancer Adept, Edgar Master Machinist, Helmut Zemo, Advanced Floral
+/// Invocations). That class is owned by
+/// `StaticMode::{Graveyard,Exile}CastPermission.enters_with_counter`, and its tokens
+/// legitimately participate in classification.
+pub fn parse_reflexive_entry_this_way_rider(input: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = opt(alt((tag("if "), tag("when "), tag("whenever ")))).parse(input)?;
+    let (rest, _) = parse_entry_this_way_clause(rest)?;
+    Ok((rest, ()))
+}
+
+/// CR 608.2c + CR 614.1c: the swallow-detector voice of
+/// [`parse_entry_this_way_clause`] — the conditional word is MANDATORY and fixed at
+/// "if ", and negation is REJECTED.
+///
+/// Both restrictions are load-bearing and deliberately narrower than
+/// [`parse_reflexive_entry_this_way_rider`]:
+///   * `tag("if ")` mandatory — this recognizer decides whether a `Condition_If`
+///     swallow warning is SUPPRESSED. Accepting the trigger voice ("When an
+///     Equipment enters this way, …" — Adaptive Armorer, Masterpiece Vault) would
+///     newly silence clauses whose trigger rider is genuinely unrepresented.
+///   * negation rejected — `Effect::ChangeZone.conditional_enter_with_counters`
+///     represents an affirmative existential filter match only, so a negated gate
+///     is not representable by that slot and must stay visible to the audit.
+pub fn parse_conditional_entry_this_way_rider(input: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = tag("if ").parse(input)?;
+    let (rest, _) = verify(parse_entry_this_way_clause, |negated: &bool| !*negated).parse(rest)?;
+    Ok((rest, ()))
 }
 
 /// CR 603.12 + CR 608.2c: Parse "you put [quantifier] [type] onto the battlefield
@@ -18578,6 +18719,127 @@ mod tests {
             }
             other => panic!("expected Typed Card, got {other:?}"),
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // CR 608.2c + CR 614.1c: ThisWayVerbScope + the two reflexive-entry rider voices
+    // ---------------------------------------------------------------------
+
+    /// V0: the verb-scope narrowing is real. `AnyZoneChange` still accepts a
+    /// non-entry verb (the non-vacuous positive — a blanket narrowing regression
+    /// fails here), while `BattlefieldEntry` rejects the same input.
+    #[test]
+    fn this_way_verb_scope_separates_entry_from_non_entry_verbs() {
+        let non_entry = "a creature card was exiled this way, you may cast it";
+        assert!(
+            parse_zone_changed_this_way_clause_scoped(non_entry, ThisWayVerbScope::AnyZoneChange)
+                .is_ok(),
+            "AnyZoneChange must keep the full verb set"
+        );
+        assert!(
+            parse_zone_changed_this_way_clause_scoped(
+                non_entry,
+                ThisWayVerbScope::BattlefieldEntry
+            )
+            .is_err(),
+            "BattlefieldEntry must withhold non-entry zone-change verbs"
+        );
+
+        // The battlefield-entry verb is accepted under BOTH scopes.
+        for scope in [
+            ThisWayVerbScope::AnyZoneChange,
+            ThisWayVerbScope::BattlefieldEntry,
+        ] {
+            assert!(
+                parse_zone_changed_this_way_clause_scoped(
+                    "an equipment is put onto the battlefield this way, attach it",
+                    scope,
+                )
+                .is_ok(),
+                "entry verb must parse under {scope:?}"
+            );
+        }
+    }
+
+    /// V0b (classifier voice): the conditional word is optional and passive
+    /// negation is in scope.
+    #[test]
+    fn reflexive_entry_this_way_rider_accepts_the_classifier_voice() {
+        for accepted in [
+            "if a hero enters this way, it enters with two additional +1/+1 counters on it.",
+            "if a creature enters this way, it enters with an additional +1/+1 counter on it.",
+            "if a land enters this way, it enters tapped.",
+            "when an equipment is put onto the battlefield this way, you may attach it",
+            "when you put one or more equipment onto the battlefield this way, attach one",
+            "whenever a creature enters this way, draw a card",
+            "when it enters this way, each opponent sacrifices a creature.",
+            "it enters this way, so draw a card",
+            // Passive negation is DELIBERATELY in scope at this voice: a negated
+            // back-reference is still a back-reference, never a CR 614.1c head.
+            "if a creature wasn't put onto the battlefield this way, draw a card",
+            "if a creature is not put onto the battlefield this way, draw a card",
+        ] {
+            assert!(
+                parse_reflexive_entry_this_way_rider(accepted).is_ok(),
+                "classifier voice must accept: {accepted}"
+            );
+        }
+    }
+
+    /// V0b (classifier voice): everything structurally outside the CR 608.2c
+    /// battlefield-entry back-reference stays visible to the classifier.
+    #[test]
+    fn reflexive_entry_this_way_rider_rejects_out_of_class_text() {
+        for rejected in [
+            // Cast-permission rider class — owned by StaticMode CastPermission.
+            "if you cast a spell this way, that creature enters with a finality counter on it",
+            // Non-entry zone-change verbs (ThisWayVerbScope::BattlefieldEntry).
+            "if a creature card was exiled this way, you may cast it",
+            "if a land card was milled this way, draw a card",
+            "if a permanent was destroyed this way, you gain 1 life",
+            // Active-voice negation is out of grammar reach by design.
+            "if you didn't put a card onto the battlefield this way, draw a card",
+            // `parse_article` rejects the quantifier "fewer".
+            "if you put fewer than two lands onto the battlefield this way, draw a card",
+            // Trailing adjuncts: "this way" is not clause-initial here.
+            "for each creature card exiled this way, create a token",
+            "this creature enters with a +1/+1 counter on it for each card revealed this way",
+            "each land played this way enters tapped",
+            // A real CR 614.1c replacement head must never be mistaken for a rider.
+            "this creature enters with two +1/+1 counters on it.",
+        ] {
+            assert!(
+                parse_reflexive_entry_this_way_rider(rejected).is_err(),
+                "classifier voice must reject: {rejected}"
+            );
+        }
+    }
+
+    /// V0b (swallow-detector voice): differs from the classifier voice on
+    /// exactly two axes — mandatory "if " and affirmative-only polarity.
+    #[test]
+    fn conditional_entry_this_way_rider_fixes_voice_and_polarity() {
+        // Shared accept: both voices take the affirmative "if" form.
+        let shared =
+            "if a hero enters this way, it enters with two additional +1/+1 counters on it.";
+        assert!(parse_conditional_entry_this_way_rider(shared).is_ok());
+        assert!(parse_reflexive_entry_this_way_rider(shared).is_ok());
+
+        // Conditional word is MANDATORY here (fail-on-revert pin for `tag("if ")`).
+        let trigger_voiced = "when an equipment enters this way, attach it to a creature";
+        assert!(parse_conditional_entry_this_way_rider(trigger_voiced).is_err());
+        assert!(parse_reflexive_entry_this_way_rider(trigger_voiced).is_ok());
+
+        // Negation is REJECTED here (fail-on-revert pin for the polarity decision):
+        // `conditional_enter_with_counters` can only represent an affirmative match.
+        let negated = "if a creature wasn't put onto the battlefield this way, draw a card";
+        assert!(parse_conditional_entry_this_way_rider(negated).is_err());
+        assert!(parse_reflexive_entry_this_way_rider(negated).is_ok());
+
+        // Active-voice negation is rejected at BOTH voices (Break Out).
+        let active_negated = "if you didn't put a card onto the battlefield this way, draw a card";
+        assert!(parse_conditional_entry_this_way_rider(active_negated).is_err());
+        assert!(parse_reflexive_entry_this_way_rider(active_negated).is_err());
     }
 
     // ---------------------------------------------------------------------

@@ -23433,14 +23433,43 @@ fn enters_with_n_additional_counters_parses_canonical_type() {
     assert_eq!(ct, CounterType::Plus1Plus1, "Necromantic Summons type");
     assert_eq!(count, QuantityExpr::Fixed { value: 2 }, "count");
 
-    // "it enters with two additional +1/+1 counters on it" (Heroic Return)
-    let (ct, _) = enters_counter(
+    // "it enters with two additional +1/+1 counters on it" (Heroic Return).
+    //
+    // CR 608.2c: this one is a REFLEXIVE "enters this way" rider, so its canonical
+    // counter type is carried by `ChangeZone.conditional_enter_with_counters` on the
+    // reanimation effect — NOT by a standalone `PutCounter` replacement. (It used to
+    // land in `replacements` with `target: SelfRef`, i.e. counters on the instant
+    // itself, which is unresolvable; the classifier no longer claims the line.)
+    // The canonical-type claim under test is unchanged, only its storage location.
+    let parsed = parse_oracle_text(
         "Return target creature card from your graveyard to the battlefield. \
          If a Hero enters this way, it enters with two additional +1/+1 counters on it.",
         "Heroic Return",
-        &["Sorcery"],
+        &[],
+        &["Instant".to_string()],
+        &[],
     );
-    assert_eq!(ct, CounterType::Plus1Plus1, "Heroic Return type");
+    assert!(
+        parsed.replacements.is_empty(),
+        "Heroic Return: reflexive rider must not become a replacement: {parsed:?}"
+    );
+    let heroic_effect = &parsed
+        .abilities
+        .first()
+        .unwrap_or_else(|| panic!("Heroic Return: reanimation ability missing: {parsed:?}"))
+        .effect;
+    let Effect::ChangeZone {
+        conditional_enter_with_counters,
+        ..
+    } = heroic_effect.as_ref()
+    else {
+        panic!("Heroic Return: head must be ChangeZone, got {heroic_effect:#?}");
+    };
+    let [(_, ct, count)] = conditional_enter_with_counters.as_slice() else {
+        panic!("Heroic Return: expected exactly one conditional entry counter rider: {parsed:?}");
+    };
+    assert_eq!(*ct, CounterType::Plus1Plus1, "Heroic Return type");
+    assert_eq!(*count, QuantityExpr::Fixed { value: 2 }, "count");
 
     // "it enters with three additional +1/+1 counters on it" (Turntimber Symbiosis)
     let (ct, count) = enters_counter(
@@ -23461,6 +23490,168 @@ fn enters_with_n_additional_counters_parses_canonical_type() {
     );
     assert_eq!(ct, CounterType::Time, "Ravaging Riftwurm type");
     assert_eq!(count, QuantityExpr::Fixed { value: 3 }, "count");
+}
+
+/// CR 608.2c + CR 614.1c: the Priority 5-pre enters-with interceptor is
+/// head-scoped, so EVERY grammatical voice of the reflexive entry rider keeps its
+/// line on the trigger path — not just the present-tense, comma-terminated voice
+/// the retired `!scan_contains(&lower, "enters this way,")` literal modelled.
+///
+/// Winter Soldier, Reborn Avenger is the printed member of the class and uses the
+/// present-tense voice; the passive-voice ("… is put onto the battlefield this
+/// way, …") and comma-less members are the ones the literal let through. All three
+/// must produce a TRIGGER whose head instruction survives, with the rider folded
+/// into `conditional_enter_with_counters` — a whole-line "enters with" scan hands
+/// the line to `parse_replacement_line_ir` instead, which publishes a replacement
+/// and drops the head reanimation. That is the assertion that flips on revert.
+#[test]
+fn reflexive_entry_rider_voices_all_stay_on_the_trigger_path() {
+    // Verbatim printed Oracle text (`data/mtgjson/AtomicCards.json`).
+    const WINTER_SOLDIER: &str = "Whenever Winter Soldier attacks, return target creature card \
+         with mana value less than or equal to Winter Soldier's power from your graveyard to \
+         the battlefield. If a Hero enters this way, it enters with an additional +1/+1 \
+         counter on it.";
+    // Same class, passive voice — the voice the retired literal missed.
+    const PASSIVE_VOICE: &str = "Whenever this creature attacks, return target creature card \
+         from your graveyard to the battlefield. If a creature is put onto the battlefield \
+         this way, it enters with an additional +1/+1 counter on it.";
+
+    for (name, oracle) in [
+        ("Winter Soldier, Reborn Avenger", WINTER_SOLDIER),
+        ("Passive Voice Reanimator", PASSIVE_VOICE),
+    ] {
+        // Premise (this is what makes the negative below non-vacuous and pins the
+        // revert): handed the WHOLE line, the replacement parser really does claim
+        // it. Only the head-scoped `enters with` gate keeps the interceptor from
+        // reaching this and dropping the reanimation instruction.
+        assert!(
+            crate::parser::oracle_replacement::parse_replacement_line(oracle, name).is_some(),
+            "{name}: premise — the un-scoped line is claimable by the replacement parser"
+        );
+
+        let parsed = parse(oracle, name, &[], &["Creature"], &[]);
+
+        // Reach-guard: the line really produced a trigger, so the
+        // `replacements.is_empty()` negative cannot pass on a failed parse.
+        assert_eq!(
+            parsed.triggers.len(),
+            1,
+            "{name}: the attack trigger must survive: {parsed:?}"
+        );
+        assert!(
+            parsed.replacements.is_empty(),
+            "{name}: a CR 608.2c rider must not route the line to the replacement \
+             interceptor: {parsed:?}"
+        );
+
+        let execute = parsed.triggers[0]
+            .execute
+            .as_ref()
+            .unwrap_or_else(|| panic!("{name}: trigger must carry an effect: {parsed:?}"));
+        let Effect::ChangeZone {
+            origin,
+            destination,
+            conditional_enter_with_counters,
+            ..
+        } = execute.effect.as_ref()
+        else {
+            panic!("{name}: head must be the reanimation ChangeZone: {execute:#?}");
+        };
+        assert_eq!(*origin, Some(Zone::Graveyard), "{name}");
+        assert_eq!(*destination, Zone::Battlefield, "{name}");
+        assert!(
+            !conditional_enter_with_counters.is_empty(),
+            "{name}: the rider must be folded into the typed slot: {execute:#?}"
+        );
+    }
+}
+
+/// CR 608.2c: head-scoping the spell-line STATIC gate is BEHAVIOR-PRESERVING on
+/// every input reachable today, and this pins that fact.
+///
+/// `is_static_compound_pattern` fires on `"enters with " && !"counter"` — tokens a
+/// rider consequent supplies — and it short-circuits
+/// `is_spell_resolution_instruction_line` one branch BEFORE the replacement gate.
+/// It is now head-scoped for uniformity (see
+/// `oracle_classifier::tests::static_classification_is_rider_contaminable_without_head_scoping`,
+/// which pins the verdict flip at the seam itself).
+///
+/// The *observable* verdict cannot change, though, and that is worth pinning
+/// rather than asserting a difference that does not exist: the same function ends
+/// in an honest-failure gate (`!has_unimplemented(parse_effect_chain(...))`), and a
+/// non-counter entry rider is by construction unrepresentable — the typed slot
+/// `conditional_enter_with_counters` only carries counters — so it fails that gate
+/// regardless. A *representable* rider always carries the word "counter", which
+/// negates the static arm. Both branches below therefore keep the head
+/// reanimation instruction and differ only in whether the rider folds in.
+#[test]
+fn entry_rider_head_scoping_of_the_static_gate_is_behavior_preserving() {
+    /// True when some ability (or its sub-ability chain) is the reanimation head.
+    fn has_reanimation(parsed: &ParsedAbilities) -> bool {
+        fn is_head(effect: &Effect) -> bool {
+            matches!(
+                effect,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Battlefield,
+                    ..
+                }
+            )
+        }
+        parsed.abilities.iter().any(|a| {
+            is_head(a.effect.as_ref()) || a.sub_ability.iter().any(|s| is_head(s.effect.as_ref()))
+        })
+    }
+
+    // Representable rider (carries "counter", so the static arm never fired):
+    // folds into the typed slot and stays in the spell body.
+    let counter_rider = parse(
+        "Draw a card.\nReturn target creature card from your graveyard to the battlefield. \
+         If a Hero enters this way, it enters with two additional +1/+1 counters on it.",
+        "Synthetic Counter Rider",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    assert!(has_reanimation(&counter_rider), "{counter_rider:?}");
+    assert!(
+        counter_rider.abilities.iter().any(|a| {
+            let carries_slot = |effect: &Effect| {
+                matches!(
+                    effect,
+                    Effect::ChangeZone { conditional_enter_with_counters, .. }
+                        if !conditional_enter_with_counters.is_empty()
+                )
+            };
+            carries_slot(a.effect.as_ref())
+                || a.sub_ability
+                    .iter()
+                    .any(|s| carries_slot(s.effect.as_ref()))
+        }),
+        "the representable rider must fold into the typed slot: {counter_rider:?}"
+    );
+
+    // Non-counter rider: the head instruction still survives; only the
+    // unrepresentable rider consequent is left as an honest `Unimplemented`
+    // residual, which is the coverage-honest outcome.
+    let non_counter_rider = parse(
+        "Draw a card.\nReturn target creature card from your graveyard to the battlefield. \
+         If a Hero enters this way, it enters with your choice of flying or vigilance.",
+        "Synthetic Non Counter Rider",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    assert!(
+        has_reanimation(&non_counter_rider),
+        "the head reanimation must survive even when the rider is unrepresentable: \
+         {non_counter_rider:?}"
+    );
+    assert!(
+        non_counter_rider.statics.is_empty() && non_counter_rider.replacements.is_empty(),
+        "the rider must not turn the line into a static or a replacement: \
+         {non_counter_rider:?}"
+    );
 }
 
 /// Regression for issue #1272: Violent Urge's Delirium follow-up ("that

@@ -3109,23 +3109,35 @@ fn strip_represented_replacement_instead_sentences(
     out
 }
 
-/// CR 122.1 + CR 614.1c + CR 608.2c + CR 400.7: "If you put a[n] <type> onto the
-/// battlefield this way, put [N] +1/+1 counters on it" (Oviya, Automech Artisan)
-/// is represented by the typed `Effect::ChangeZone.conditional_enter_with_counters`
-/// gate — the moved object's entry-time counters are applied only when it matches
-/// the carried filter (runtime-verified in
-/// `change_zone::enter_with_counters_for_object`), so the leading "if" is a
-/// representation marker, not a swallowed condition.
+/// CR 122.1 + CR 614.1c + CR 608.2c + CR 400.7: a reflexive battlefield-entry
+/// "this way" conditional with a counter payoff — "If you put a[n] <type> onto the
+/// battlefield this way, put [N] +1/+1 counters on it" (Oviya, Automech Artisan) or
+/// the present-tense "If a Hero enters this way, it enters with two additional
+/// +1/+1 counters on it" (Heroic Return, Recommission, Winter Soldier Reborn
+/// Avenger) — is represented by the typed
+/// `Effect::ChangeZone.conditional_enter_with_counters` gate. The moved object's
+/// entry-time counters are applied only when it matches the carried filter
+/// (runtime-verified in `change_zone::enter_with_counters_for_object`), so the
+/// leading "if" is a representation marker, not a swallowed condition.
 ///
 /// Mirrors `enters_modified_if_is_only_if_marker`: an inside AST probe
 /// (`conditional_enter_with_counters` carries `skip_serializing_if = Vec::is_empty`,
 /// so the key serializes ONLY when non-empty — keying tightly on the
 /// ChangeScope→Battlefield-with-counters shape the resolver handles) plus
-/// text-scoping — the represented put-onto-battlefield-this-way counter clause is
-/// located via the shared `is_moved_object_put_onto_battlefield_counters_clause`
-/// combinator and dropped sentence-by-sentence, and suppression fires ONLY when no
-/// OTHER bare " if " survives, so a compound card carrying the gate AND a separate
-/// unrelated " if " still flags.
+/// text-scoping — the represented entry-this-way counter clause is located via the
+/// shared `is_moved_object_entry_this_way_counters_clause` combinator and dropped
+/// sentence-by-sentence, and suppression fires ONLY when no OTHER bare " if "
+/// survives, so a compound card carrying the gate AND a separate unrelated " if "
+/// still flags.
+///
+/// Two axes are deliberately NOT widened, because the typed slot cannot represent
+/// what they would newly silence:
+///   * conditional voice is fixed at `if ` — a trigger-voiced rider ("When an
+///     Equipment enters this way, …") keeps flagging;
+///   * polarity is affirmative-only — `enter_with_counters_for_object` pushes
+///     counters when `matches_target_filter` is TRUE, so a negated gate ("if a
+///     creature wasn't put onto the battlefield this way, …") is unrepresentable
+///     and keeps flagging.
 fn conditional_enter_counters_if_is_only_if_marker(
     stripped: &str,
     evidence: &UnitEvidence,
@@ -3133,15 +3145,20 @@ fn conditional_enter_counters_if_is_only_if_marker(
     if !evidence.has_slot("conditional_enter_with_counters") {
         return false;
     }
-    let residual: String = stripped
-        .split('.')
+    // Segmentation delegates to `nom_primitives::split_sentence_units`, the single
+    // period-sentence authority shared with the classifier's rider head-scoper, so
+    // the two cannot decide "is THIS sentence the represented rider?" with
+    // divergent sentence models. Units keep their terminal '.' and carry no leading
+    // whitespace, so the residual is rejoined with a single space.
+    let residual: String = crate::parser::oracle_nom::primitives::split_sentence_units(stripped)
+        .into_iter()
         .filter(|sentence| {
-            !crate::parser::oracle_effect::sequence::is_moved_object_put_onto_battlefield_counters_clause(
+            !crate::parser::oracle_effect::sequence::is_moved_object_entry_this_way_counters_clause(
                 sentence,
             )
         })
         .collect::<Vec<_>>()
-        .join(".");
+        .join(" ");
     let has_other_if = residual.contains(" if ") // allow-noncombinator: swallow detector marker scan on classified text
         && !residual.contains(" as if ") // allow-noncombinator: swallow detector marker scan on classified text
         && !residual.contains(" even if "); // allow-noncombinator: swallow detector marker scan on classified text
@@ -3171,16 +3188,17 @@ fn enters_with_finality_this_way_is_only_if_marker(
         return false;
     }
 
-    let residual: String = stripped
-        .split('.')
+    // Same single segmentation authority as the sibling detector above;
+    // `parse_cast_this_way_enters_with_counter` trims its own leading whitespace
+    // and does not require full consumption, so a unit's terminal '.' is inert.
+    let residual: String = crate::parser::oracle_nom::primitives::split_sentence_units(stripped)
+        .into_iter()
         .filter(|sentence| {
-            crate::parser::oracle_effect::parse_cast_this_way_enters_with_counter(
-                sentence.trim_start(),
-            )
-            .is_none()
+            crate::parser::oracle_effect::parse_cast_this_way_enters_with_counter(sentence)
+                .is_none()
         })
         .collect::<Vec<_>>()
-        .join(".");
+        .join(" ");
     let has_other_if = residual.contains(" if ") // allow-noncombinator: swallow detector marker scan on classified text
         && !residual.contains(" as if ") // allow-noncombinator: swallow detector marker scan on classified text
         && !residual.contains(" even if "); // allow-noncombinator: swallow detector marker scan on classified text
@@ -3337,9 +3355,14 @@ fn detect_condition_if(
     if enters_modified_if_is_only_if_marker(&stripped, evidence) {
         return;
     }
-    // CR 122.1 + CR 614.1c + CR 608.2c: "If you put a[n] <type> onto the
-    // battlefield this way, put [N] +1/+1 counters on it" (Oviya) is represented
-    // by `Effect::ChangeZone.conditional_enter_with_counters`.
+    // CR 122.1 + CR 614.1c + CR 608.2c: an affirmative `if `-voiced reflexive
+    // battlefield-entry "this way" clause with a counter payoff — active
+    // ("If you put a[n] <type> onto the battlefield this way, put [N] +1/+1
+    // counters on it" — Oviya) or present-tense ("If a Hero enters this way, it
+    // enters with two additional +1/+1 counters on it" — Heroic Return,
+    // Recommission, Winter Soldier) — is represented by
+    // `Effect::ChangeZone.conditional_enter_with_counters`. Trigger-voiced and
+    // negated riders are NOT suppressed; see the function doc.
     if conditional_enter_counters_if_is_only_if_marker(&stripped, evidence) {
         return;
     }
@@ -6325,6 +6348,110 @@ mod tests {
             &["Artifact"],
         );
 
+        assert!(
+            has_swallowed_detector(&parsed, "Condition_If"),
+            "a separate unrelated if line must remain visible to Condition_If, got {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// V5 (CR 122.1 + CR 614.1c + CR 608.2c): the present-tense reflexive
+    /// battlefield-entry counter rider is represented by
+    /// `Effect::ChangeZone.conditional_enter_with_counters`, so its leading "if"
+    /// is a representation marker, not a swallowed condition.
+    ///
+    /// Winter Soldier is the independently-reachable member: its head instruction
+    /// survives the classifier gates on its own (the trigger-voiced head carries no
+    /// "enters with" of its own once the rider sentence is scoped off), so this
+    /// assertion fails on revert of Unit 2 alone, without Unit 1.
+    ///
+    /// Fixture text is the VERBATIM printed Oracle text from
+    /// `data/mtgjson/AtomicCards.json` (`"Winter Soldier, Reborn Avenger"`), so the
+    /// pinned `ChangeZone` shape is the real card's dynamic
+    /// `Cmc LE Ref(Power{Source})` subject, not a synthetic fixed-mana-value one.
+    #[test]
+    fn condition_if_accepts_present_tense_enters_this_way_counter_rider() {
+        let parsed = parse_named(
+            "Whenever Winter Soldier attacks, return target creature card with mana value \
+             less than or equal to Winter Soldier's power from your graveyard to the \
+             battlefield. If a Hero enters this way, it enters with an additional +1/+1 \
+             counter on it.",
+            "Winter Soldier, Reborn Avenger",
+            &["Creature"],
+        );
+        // Reach-guard: `check_swallowed_clauses` early-returns on Unimplemented,
+        // so a bare negative would be vacuous. Prove the rider really is
+        // represented by the typed slot before asserting the absence.
+        let carries_slot = parsed.triggers.iter().any(|t| {
+            t.execute.as_ref().is_some_and(|e| {
+                matches!(
+                    e.effect.as_ref(),
+                    Effect::ChangeZone {
+                        conditional_enter_with_counters,
+                        ..
+                    } if !conditional_enter_with_counters.is_empty()
+                )
+            })
+        });
+        assert!(
+            carries_slot,
+            "premise: the rider must be represented by conditional_enter_with_counters: {parsed:?}"
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_If"),
+            "a represented present-tense entry rider must not report a swallowed \
+             condition: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// V5: the two axes Unit 2 deliberately did NOT widen. Both fixtures carry the
+    /// same represented slot, so a blanket-widening regression flips them silently.
+    #[test]
+    fn condition_if_still_flags_unrepresented_entry_this_way_voices() {
+        // Conditional voice: `tag("if ")` is mandatory. A trigger-voiced rider is
+        // a different, unrepresented shape and must keep flagging.
+        assert!(
+            !crate::parser::oracle_effect::sequence::is_moved_object_entry_this_way_counters_clause(
+                "When an Equipment enters this way, put a +1/+1 counter on it"
+            ),
+            "trigger-voiced rider must not be treated as represented"
+        );
+        // Polarity: `conditional_enter_with_counters` represents an AFFIRMATIVE
+        // filter match only, so a negated gate is unrepresentable.
+        assert!(
+            !crate::parser::oracle_effect::sequence::is_moved_object_entry_this_way_counters_clause(
+                "If a creature wasn't put onto the battlefield this way, put a +1/+1 counter on it"
+            ),
+            "negated gate must not be treated as represented"
+        );
+        // Non-vacuous positive on the same seam: the affirmative `if` voice IS
+        // represented, so a blanket-`false` regression fails here.
+        assert!(
+            crate::parser::oracle_effect::sequence::is_moved_object_entry_this_way_counters_clause(
+                "If a Hero enters this way, it enters with two additional +1/+1 counters on it"
+            )
+        );
+        // The retained "counter" payoff gate: Silver Surfer's `enters tapped`
+        // rider is genuinely unrepresented and must stay visible to the audit.
+        assert!(
+            !crate::parser::oracle_effect::sequence::is_moved_object_entry_this_way_counters_clause(
+                "If a land enters this way, it enters tapped"
+            )
+        );
+    }
+
+    /// V5: a card carrying the represented gate PLUS an unrelated bare " if "
+    /// must still flag — exercising the `has_other_if` residual branch.
+    #[test]
+    fn represented_entry_this_way_counter_rider_does_not_hide_unrelated_if() {
+        let parsed = parse_named(
+            "Return target creature card from your graveyard to the battlefield. \
+             If a Hero enters this way, it enters with two additional +1/+1 counters on it.\n\
+             Draw a card if the moon is bright.",
+            "Heroic Return Compound Fixture",
+            &["Instant"],
+        );
         assert!(
             has_swallowed_detector(&parsed, "Condition_If"),
             "a separate unrelated if line must remain visible to Condition_If, got {:?}",
