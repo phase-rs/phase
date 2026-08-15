@@ -4271,39 +4271,69 @@ fn static_attach_only_restriction_legendary_lowers_to_filter() {
     );
 }
 
+/// Champion of Lambholt — "Creatures with power less than ~'s power can't
+/// block creatures you control." Both halves are filters and neither is the
+/// source, so this is the general "<subject> can't block <object>" production
+/// (CR 509.1b), not a card-specific shape: the subject is the restricted
+/// blocker set and the object is the attacker set they may not block.
+///
+/// This previously had a dedicated parser that matched the card's exact
+/// wording verbatim and lowered to the attacker-side dual `CantBeBlockedBy`.
+/// The general production subsumes it and claims the line first, so the
+/// one-card arm was removed; the two lowerings are runtime-equivalent because
+/// `combat.rs` evaluates both per (blocker, attacker) pair.
 #[test]
 fn static_source_power_cant_block_creatures_you_control() {
     let def = parse_static_line(
         "Creatures with power less than ~'s power can't block creatures you control.",
     )
     .expect("Champion of Lambholt static should parse");
-    assert!(matches!(
-        def.affected,
-        Some(TargetFilter::Typed(ref tf))
-            if tf.type_filters.contains(&TypeFilter::Creature)
-                && tf.controller == Some(ControllerRef::You)
-    ));
+
+    // Subject: the restricted blockers are creatures with power < the source's.
+    assert!(
+        matches!(
+            def.affected,
+            Some(TargetFilter::Typed(ref tf))
+                if tf.type_filters.contains(&TypeFilter::Creature)
+                    && tf.properties.contains(&FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Current,
+                        // The shared type-phrase grammar normalizes "less than
+                        // X" to "at most X - 1"; equivalent over the integers
+                        // power is defined on (CR 208.1).
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Offset {
+                            inner: Box::new(QuantityExpr::Ref {
+                                qty: QuantityRef::Power {
+                                    scope: ObjectScope::Source
+                                }
+                            }),
+                            offset: -1,
+                        }
+                    })
+        ),
+        "expected a source-power subject filter, got {:?}",
+        def.affected
+    );
+
+    // Object: they may not block creatures you control — a whitelist over the
+    // negation of that set.
     assert!(
         matches!(
             def.mode,
-            StaticMode::CantBeBlockedBy { ref filter }
+            StaticMode::BlockRestriction { ref filter }
                 if matches!(
                     filter,
-                    TargetFilter::Typed(tf)
-                        if tf.type_filters.contains(&TypeFilter::Creature)
-                            && tf.properties.contains(&FilterProp::PtComparison {
-                                stat: PtStat::Power,
-                                scope: PtValueScope::Current,
-                                comparator: Comparator::LT,
-                                value: QuantityExpr::Ref {
-                                    qty: QuantityRef::Power {
-                                        scope: ObjectScope::Source
-                                    }
-                                }
-                            })
+                    TargetFilter::Not { filter: inner }
+                        if matches!(
+                            **inner,
+                            TargetFilter::Typed(ref tf)
+                                if tf.type_filters.contains(&TypeFilter::Creature)
+                                    && tf.controller == Some(ControllerRef::You)
+                        )
                 )
         ),
-        "expected CantBeBlockedBy with source-power LT blocker filter, got {:?}",
+        "expected BlockRestriction negating 'creatures you control', got {:?}",
         def.mode
     );
 }
@@ -32829,5 +32859,228 @@ fn granted_replacement_is_not_host_lifetime_stamped() {
         standalone.expiry,
         Some(crate::types::ability::RestrictionExpiry::UntilHostLeavesPlay),
         "#6538's standalone host-lifetime stamp must be preserved (CR 400.7)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CR 509.1b: "<subject> can't block <object>" — issue #7238.
+//
+// Building-block coverage for the whole production rather than for one card:
+// the subject and the object are each exercised across the type-phrase
+// grammar's axes (subtype, keyword property, controller scope, card type,
+// color, static and dynamic power comparison), the object is shown to compose
+// with the shared trailing-condition handling, and the guard tests pin every
+// neighbouring shape this arm must NOT claim.
+//
+// Every Oracle line below was read from shipped card data, not from memory.
+// ---------------------------------------------------------------------------
+
+/// Destructure a `BlockRestriction`'s negated object, asserting the mode and
+/// the whitelist-negation shape. Returns the object filter so each caller can
+/// assert on the typed value instead of a Debug-format substring.
+#[cfg(test)]
+fn block_restriction_object(def: &crate::types::ability::StaticDefinition) -> &TargetFilter {
+    use crate::types::statics::StaticMode;
+    let StaticMode::BlockRestriction { filter } = &def.mode else {
+        panic!("expected BlockRestriction, got: {:?}", def.mode);
+    };
+    // `BlockRestriction` is a whitelist ("can block only <filter>"), so a
+    // prohibition is the negation of the object.
+    let TargetFilter::Not { filter: object } = filter else {
+        panic!("object must be negated, got: {filter:?}");
+    };
+    object
+}
+
+/// The subtypes a `TargetFilter::Typed` names, for direction assertions.
+#[cfg(test)]
+fn typed_subtypes(filter: &TargetFilter) -> Vec<String> {
+    let TargetFilter::Typed(typed) = filter else {
+        panic!("expected a Typed filter, got: {filter:?}");
+    };
+    typed
+        .type_filters
+        .iter()
+        .filter_map(|tf| match tf {
+            crate::types::ability::TypeFilter::Subtype(s) => Some(s.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Gornog, the Red Reaper — "Cowards can't block Warriors." Asserted through
+/// the typed filters in both positions, so an inverted lowering (Warriors
+/// restricted from blocking Cowards) fails here. That inversion is equally
+/// well-typed and would otherwise be invisible.
+#[test]
+fn gornog_cowards_cant_block_warriors_scopes_subject_and_object() {
+    let def = parse_static_line("Cowards can't block Warriors.").expect("Gornog's clause");
+
+    let affected = def.affected.as_ref().expect("a scoped subject");
+    assert_eq!(
+        typed_subtypes(affected),
+        vec!["Coward".to_string()],
+        "the restricted blockers must be Cowards"
+    );
+    assert_eq!(
+        typed_subtypes(block_restriction_object(&def)),
+        vec!["Warrior".to_string()],
+        "the prohibited attackers must be Warriors"
+    );
+}
+
+/// The object must survive across every axis of the type-phrase grammar, and
+/// the subject must land in `affected`. Under the terminal `can't block` arm
+/// every one of these collapsed to `CantBlock { affected: SelfRef }` — dropping
+/// the object AND inventing a self-restriction the card never grants.
+#[test]
+fn subject_cant_block_object_keeps_both_halves() {
+    // (line, subject is the source)
+    let cases = [
+        // Boldwyr / Kargan / A-Kargan Intimidator — subtype subject and object.
+        ("Cowards can't block Warriors.", false),
+        // Bower Passage — keyword-property subject, controller-scoped object.
+        (
+            "Creatures with flying can't block creatures you control.",
+            false,
+        ),
+        // Heat Wave — color subject.
+        ("Blue creatures can't block creatures you control.", false),
+        // Sidar Kondo of Jamuraa — negated-keyword subject, power object.
+        (
+            "Creatures your opponents control without flying or reach can't block creatures with power 2 or less.",
+            false,
+        ),
+        // Brassclaw Orcs / Ironclaw Orcs / Ironclaw Buzzardiers / Zurgo Bellstriker.
+        ("~ can't block creatures with power 2 or greater.", true),
+        // Sunweb / Cyclops Tyrant — the opposite comparator.
+        ("~ can't block creatures with power 2 or less.", true),
+        // Goblin Mutant / Orgg.
+        ("~ can't block creatures with power 3 or greater.", true),
+        // Hinterland Drake — card-type object, no comparison at all.
+        ("~ can't block artifact creatures.", true),
+        // Gibbering Hyenas — color object.
+        ("~ can't block black creatures.", true),
+        // Hunted Ghoul — subtype object.
+        ("~ can't block Humans.", true),
+        // Orcish Veteran — color AND power on the same object.
+        (
+            "~ can't block white creatures with power 2 or greater.",
+            true,
+        ),
+        // Spitfire Handler — the object's threshold is a dynamic reference to
+        // the source's own power, not a constant.
+        (
+            "~ can't block creatures with power greater than ~'s power.",
+            true,
+        ),
+        // Spectral Grasp — an Aura subject.
+        ("Enchanted creature can't block creatures you control.", false),
+    ];
+
+    for (line, subject_is_source) in cases {
+        let def = parse_static_line(line).unwrap_or_else(|| panic!("{line} should parse"));
+        // Panics unless the mode is BlockRestriction with a negated object.
+        block_restriction_object(&def);
+        assert_eq!(
+            matches!(def.affected, Some(TargetFilter::SelfRef)),
+            subject_is_source,
+            "{line}: subject scope is wrong, got: {:?}",
+            def.affected
+        );
+        assert!(
+            !matches!(def.affected, None | Some(TargetFilter::Any)),
+            "{line}: an unscoped subject would restrict every creature: {:?}",
+            def.affected
+        );
+    }
+}
+
+/// The object composes with the shared trailing-condition handling, because it
+/// is consumed inside `parse_subject_combat_rule_static` rather than by a
+/// parallel arm that would never reach that code. Hipparion keeps BOTH its
+/// object and its cost condition; previously the object was dropped.
+#[test]
+fn object_composes_with_a_trailing_unless_condition() {
+    use crate::types::StaticCondition;
+
+    let def =
+        parse_static_line("~ can't block creatures with power 3 or greater unless you pay {1}.")
+            .expect("Hipparion's clause");
+    block_restriction_object(&def);
+    assert!(
+        matches!(def.condition, Some(StaticCondition::UnlessPay { .. })),
+        "the unless-cost condition must survive alongside the object: {:?}",
+        def.condition
+    );
+}
+
+/// Guard: shapes with no object keep their existing lowering. A blanket
+/// prohibition, the `alone` companion requirement, and the symmetric
+/// `or be blocked by` conjunction all sit next to this production in dispatch
+/// order, so each is pinned against the object grammar loosening later.
+#[test]
+fn shapes_without_an_object_keep_their_existing_lowering() {
+    use crate::types::statics::{CombatAloneAction, CombatAloneRequirement, StaticMode};
+
+    for line in ["~ can't block.", "Beasts can't block."] {
+        let def = parse_static_line(line).unwrap_or_else(|| panic!("{line} should parse"));
+        assert!(
+            matches!(def.mode, StaticMode::CantBlock),
+            "{line} must stay a blanket CantBlock, got: {:?}",
+            def.mode
+        );
+    }
+
+    // Bonded Horncrest — "alone" is a companion requirement, not an object.
+    let alone = parse_static_line("~ can't block alone.").expect("alone clause");
+    assert!(
+        matches!(
+            alone.mode,
+            StaticMode::CombatAlone {
+                action: CombatAloneAction::Block,
+                requirement: CombatAloneRequirement::NeedsCompanion,
+            }
+        ),
+        "'can't block alone' is not an object: {:?}",
+        alone.mode
+    );
+
+    // Sneaky Homunculus — the symmetric conjunction needs a static per
+    // direction and is deliberately not claimed by this production.
+    let symmetric =
+        parse_static_line("~ can't block or be blocked by creatures with power 2 or greater.")
+            .expect("symmetric clause");
+    assert!(
+        matches!(symmetric.mode, StaticMode::CantBlock),
+        "the symmetric conjunction must keep its existing lowering: {:?}",
+        symmetric.mode
+    );
+
+    // A conditionless blanket prohibition with a trailing gate keeps both.
+    let gated = parse_static_line("~ can't block unless you control another Minotaur.")
+        .expect("Felhide Brawler's clause");
+    assert!(
+        matches!(gated.mode, StaticMode::CantBlock) && gated.condition.is_some(),
+        "an object-less unless-gate must stay a conditioned CantBlock: {:?} / {:?}",
+        gated.mode,
+        gated.condition
+    );
+}
+
+/// Guard: when the OBJECT is the source ("can't block this creature"), the
+/// tight `affected` set is the source, so the source-anchored arms keep
+/// lowering it to the attacker-side dual `CantBeBlockedBy`. The production
+/// declines a self-referential object for exactly that reason.
+#[test]
+fn source_object_still_lowers_to_cant_be_blocked_by() {
+    use crate::types::statics::StaticMode;
+
+    let def = parse_static_line("Creatures with power 2 or less can't block this creature.")
+        .expect("Kraken-shaped clause");
+    assert!(
+        matches!(def.mode, StaticMode::CantBeBlockedBy { .. }),
+        "a source object must stay attacker-side, got: {:?}",
+        def.mode
     );
 }

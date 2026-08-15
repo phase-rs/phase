@@ -13,50 +13,6 @@ pub(crate) fn parse_min_blockers_phrase(input: &str) -> OracleResult<'_, u32> {
     Ok((rest, n))
 }
 
-pub(crate) fn parse_source_power_block_restriction(text: &str) -> Option<StaticDefinition> {
-    let lower = text.to_lowercase();
-    let (rest, _) = tag::<_, _, OracleError<'_>>("creatures with power less than ")
-        .parse(lower.as_str())
-        .ok()?;
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("~'s power"),
-        tag("this creature's power"),
-    ))
-    .parse(rest)
-    .ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>(" can't block ")
-        .parse(rest)
-        .ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>("creatures you control")
-        .parse(rest)
-        .ok()?;
-    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
-    if !rest.trim().is_empty() {
-        return None;
-    }
-
-    Some(
-        StaticDefinition::new(StaticMode::CantBeBlockedBy {
-            filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
-                FilterProp::PtComparison {
-                    stat: PtStat::Power,
-                    scope: PtValueScope::Current,
-                    comparator: Comparator::LT,
-                    value: QuantityExpr::Ref {
-                        qty: QuantityRef::Power {
-                            scope: ObjectScope::Source,
-                        },
-                    },
-                },
-            ])),
-        })
-        .affected(TargetFilter::Typed(
-            TypedFilter::creature().controller(ControllerRef::You),
-        ))
-        .description(text.to_string()),
-    )
-}
-
 /// CR 509.1b: classify the remainder after "can't be blocked except by " into a
 /// typed `BlockExceptionKind`. A leading count phrase ("N or more creatures")
 /// is a minimum-blocker constraint; everything else is a per-blocker quality
@@ -349,7 +305,7 @@ fn parse_compound_subject_rule_static_inner(
         predicates
             .into_iter()
             .map(|(predicate, defended)| {
-                lower_rule_static(predicate, affected.clone(), text).attack_defended(defended)
+                lower_rule_static(predicate, None, affected.clone(), text).attack_defended(defended)
             })
             .collect(),
     )
@@ -1039,7 +995,7 @@ pub(crate) fn try_split_and_must_attack_block(text: &str) -> Option<Vec<StaticDe
     }
     for (predicate, defended) in tail_predicates {
         let mut companion =
-            lower_rule_static(predicate, affected.clone(), text).attack_defended(defended);
+            lower_rule_static(predicate, None, affected.clone(), text).attack_defended(defended);
         if let Some(condition) = condition.clone() {
             companion = companion.condition(condition);
         }
@@ -2325,7 +2281,7 @@ pub(crate) fn parse_subject_rule_static(text: &str) -> Option<StaticDefinition> 
             unless.lower.trim_end_matches('.'),
         ) {
             let predicate = parse_rule_static_predicate(base.original)?;
-            let mut def = lower_rule_static(predicate, affected, text);
+            let mut def = lower_rule_static(predicate, None, affected, text);
             def.condition = Some(StaticCondition::Not {
                 condition: Box::new(control),
             });
@@ -2337,7 +2293,9 @@ pub(crate) fn parse_subject_rule_static(text: &str) -> Option<StaticDefinition> 
         parse_combat_rule_static_predicate_with_defended_nom(predicate_text)
     {
         if rest.trim().is_empty() {
-            return Some(lower_rule_static(predicate, affected, text).attack_defended(defended));
+            return Some(
+                lower_rule_static(predicate, None, affected, text).attack_defended(defended),
+            );
         }
     }
 
@@ -2346,12 +2304,12 @@ pub(crate) fn parse_subject_rule_static(text: &str) -> Option<StaticDefinition> 
     if matches!(predicate, RuleStaticPredicate::CantUntap) {
         let pred_lower = predicate_text.to_lowercase();
         if let Some(condition) = extract_cant_untap_condition(&pred_lower) {
-            let mut def = lower_rule_static(predicate, affected, text);
+            let mut def = lower_rule_static(predicate, None, affected, text);
             def.condition = Some(condition);
             return Some(def);
         }
     }
-    Some(lower_rule_static(predicate, affected, text))
+    Some(lower_rule_static(predicate, None, affected, text))
 }
 
 /// CR 509.1b + CR 609.4 + CR 702.14c + CR 702.14d:
@@ -2441,10 +2399,37 @@ pub(crate) fn parse_subject_combat_rule_static(text: &str) -> Option<StaticDefin
         &lower,
         parse_combat_rule_static_predicate_with_defended_nom,
     )?;
+    // CR 509.1b: the optional OBJECT of a blocking prohibition — "<subject>
+    // can't block <object>" (Gornog, the Red Reaper; Bower Passage; Hinterland
+    // Drake). The blocker-side mirror of `defended` (CR 508.1b) on the attack
+    // side, consumed here so the object composes with this function's shared
+    // subject scoping and trailing-condition handling below rather than needing
+    // a parallel arm that would reach neither.
+    let (rest, block_object) = match predicate {
+        RuleStaticPredicate::CantBlock => match opt(preceded(
+            tag::<_, _, OracleError<'_>>(" "),
+            super::shared::parse_block_object_filter,
+        ))
+        .parse(rest)
+        {
+            Ok((after, Some(object))) if !matches!(object, TargetFilter::SelfRef) => {
+                (after, Some(object))
+            }
+            // A self-referential object ("… can't block it" / "… this
+            // creature") is the attacker-side dual: there the tight `affected`
+            // set is the SOURCE, not the subject, so it keeps its
+            // `CantBeBlockedBy` lowering in the source-anchored dispatch arms.
+            // Leaving `rest` unconsumed makes this parser decline, so dispatch
+            // falls through to them.
+            _ => (rest, None),
+        },
+        _ => (rest, None),
+    };
     let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
     let subject = text[..subject_lower.len()].trim();
     let affected = parse_rule_static_subject_filter(subject)?;
-    let mut def = lower_rule_static(predicate, affected, text).attack_defended(defended);
+    let mut def =
+        lower_rule_static(predicate, block_object, affected, text).attack_defended(defended);
     let trailing = rest.trim();
     if trailing.is_empty() {
         return Some(def);

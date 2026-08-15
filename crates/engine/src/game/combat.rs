@@ -13767,6 +13767,96 @@ mod tests {
         );
     }
 
+    /// CR 509.1b + issue #7238: Gornog, the Red Reaper — "Cowards can't block
+    /// Warriors." A THIRD-PARTY blocking restriction: neither the restricted
+    /// blocker nor the prohibited attacker is the source, so both halves must
+    /// survive the parser and be re-resolved per (blocker, attacker) pair at
+    /// declare-blockers.
+    ///
+    /// Drives the shipped Oracle text through the real parser instead of
+    /// hand-building the static, so a degenerate or inverted lowering fails
+    /// here as well. Before the fix the clause collapsed to
+    /// `CantBlock { affected: SelfRef }`, which flipped TWO assertions below:
+    /// the Coward was allowed to block the Warrior, and Gornog itself was
+    /// barred from blocking anything.
+    #[test]
+    fn issue_7238_gornog_coward_cannot_block_warrior() {
+        let mut state = setup();
+
+        let warrior = create_creature(&mut state, PlayerId(0), "Warrior", 2, 2);
+        state
+            .objects
+            .get_mut(&warrior)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Warrior".into());
+        // A non-Warrior attacker on the same board: the restriction is scoped to
+        // Warriors, so it must not read as a blanket "Cowards can't block".
+        let bear = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+
+        let gornog = create_creature(&mut state, PlayerId(0), "Gornog, the Red Reaper", 2, 3);
+        {
+            let obj = state.objects.get_mut(&gornog).unwrap();
+            obj.card_types.subtypes.push("Minotaur".into());
+            obj.card_types.subtypes.push("Warrior".into());
+            obj.static_definitions.push(
+                crate::parser::oracle_static::parse_static_line("Cowards can't block Warriors.")
+                    .expect("Gornog's clause must parse"),
+            );
+        }
+
+        // The defending player's creature, after Gornog's attack trigger made it
+        // a Coward — plus a plain creature the restriction must not leak onto.
+        let coward = create_creature(&mut state, PlayerId(1), "Cowering Soldier", 3, 3);
+        state
+            .objects
+            .get_mut(&coward)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Coward".into());
+        let wall = create_creature(&mut state, PlayerId(1), "Wall", 0, 4);
+
+        // The reported defect.
+        assert!(
+            !can_block_pair(&state, coward, warrior),
+            "a Coward must not be a legal blocker for a Warrior"
+        );
+        assert!(
+            validate_blockers(&state, &[(coward, warrior)]).is_err(),
+            "declaring a Coward as a Warrior's blocker must be rejected"
+        );
+
+        // Scoped to Warriors, not a blanket prohibition.
+        assert!(
+            can_block_pair(&state, coward, bear),
+            "the Coward may still block a non-Warrior attacker"
+        );
+        assert!(
+            validate_blockers(&state, &[(coward, bear)]).is_ok(),
+            "blocking a non-Warrior attacker must remain legal"
+        );
+
+        // Scoped to Cowards, not to every creature the defender controls.
+        assert!(
+            can_block_pair(&state, wall, warrior),
+            "a non-Coward blocker is unaffected by the restriction"
+        );
+        assert!(
+            validate_blockers(&state, &[(wall, warrior)]).is_ok(),
+            "a non-Coward may still block the Warrior"
+        );
+
+        // The source is not the subject: Gornog is a Warrior, not a Coward, so it
+        // keeps its own ability to block.
+        let enemy = create_creature(&mut state, PlayerId(1), "Enemy Bear", 2, 2);
+        assert!(
+            can_block_pair(&state, gornog, enemy),
+            "the restriction is scoped to Cowards — Gornog itself must still block"
+        );
+    }
+
     /// The precomputed `can_block_pair_with_precomputed` path must agree with the
     /// `can_block_pair` wrapper for a blocker-side BlockRestriction (flying-only):
     /// reject a ground attacker, accept a flyer. Reverted-fix discrimination: if
