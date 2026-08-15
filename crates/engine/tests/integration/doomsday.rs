@@ -3,6 +3,7 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::actions::GameAction;
+use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -90,10 +91,24 @@ fn doomsday_exiles_search_remainder_and_orders_five_chosen_cards() {
         "library + graveyard search candidates"
     );
 
-    cast.act(GameAction::SelectCards {
-        cards: chosen.clone(),
-    })
-    .expect("selecting Doomsday's five cards should be legal");
+    let resolution = cast
+        .act(GameAction::SelectCards {
+            cards: chosen.clone(),
+        })
+        .expect("selecting Doomsday's five cards should be legal");
+
+    assert!(
+        !resolution.events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Exile,
+                ..
+            } if chosen.contains(object_id)
+        )),
+        "chosen cards must never undergo the remainder's exile move; events={:?}",
+        resolution.events
+    );
 
     assert!(
         matches!(cast.state().waiting_for, WaitingFor::Priority { .. }),
