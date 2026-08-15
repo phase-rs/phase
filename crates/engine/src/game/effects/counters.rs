@@ -4,8 +4,8 @@ use crate::game::game_object::GameObject;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     AbilityTag, CounterMoveSelection, CounterTransferMode, DelayedTriggerCondition, Duration,
-    Effect, EffectError, EffectKind, QuantityExpr, ResolvedAbility, TargetChoiceTiming,
-    TargetFilter, TargetRef,
+    Effect, EffectError, EffectKind, EventCounterReproductionCount, QuantityExpr, ResolvedAbility,
+    TargetChoiceTiming, TargetFilter, TargetRef,
 };
 #[cfg(test)]
 use crate::types::counter::parse_counter_type;
@@ -20,10 +20,12 @@ use crate::types::game_state::{
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{CounterMoveStage, CounterPlacement, ProposedEvent};
+use crate::types::resolution::FrameGate;
 use crate::types::resolved_commands::{
     ResolvedObjectCounterCommand, ResolvedObjectCounterEdit,
     ResolvedObjectCounterReplayInvariantError,
 };
+use crate::types::zones::Zone;
 
 /// CR 306.5c + CR 310.4c: After mutating the counter map, re-derive the
 /// `obj.loyalty` / `obj.defense` field so the counter count and the cached
@@ -335,7 +337,7 @@ fn merge_pending_counter_completion_after_nested_pause(
     completion: PendingEffectResolved,
 ) {
     let Some(queue) = state.active_counter_additions_mut() else {
-        stash_pending_counter_additions(state, Vec::new(), completion);
+        park_counter_completion_outside_active_direct_choice(state, completion);
         return;
     };
 
@@ -365,6 +367,70 @@ fn merge_pending_counter_completion_after_nested_pause(
                 player_id: action.player_id,
                 action: action.action,
             });
+    }
+}
+
+/// CR 608.2c + CR 616.1: Park a completion that outlived a paused post-action
+/// when no counter-additions queue is active to absorb it.
+///
+/// The default is unchanged — push the completion as the active inner frame.
+/// The one exception is a pause that installed a direct-choice owner (a fresh
+/// `ProliferateChoice`, say). That owner must stay at the stack top until its
+/// action handler consumes it — `ResolutionStack::validate` rejects a buried
+/// direct-choice owner — so pushing on top of it would corrupt the stack exactly
+/// the way issue #7384 did. There the completion becomes the owner's PARENT
+/// instead and runs once the owner is consumed, preserving the instruction
+/// order; and when it owes nothing at all it is dropped rather than parked, so
+/// no empty frame is installed above a live prompt.
+///
+/// Note that a completion parked as a parent is no longer the ACTIVE queue, so a
+/// later `append_pending_counter_post_actions` would not find it. No such
+/// appender is reachable while a direct-choice prompt is live, and the ordering
+/// caveat on `ContinueProliferateActions` records the condition that would
+/// change that.
+fn park_counter_completion_outside_active_direct_choice(
+    state: &mut GameState,
+    completion: PendingEffectResolved,
+) {
+    let active_owns_prompt = state
+        .resolution_stack
+        .last()
+        .is_some_and(|frame| matches!(frame.gate(), FrameGate::DirectChoice(_)));
+    if !active_owns_prompt {
+        // Every non-direct-choice pause keeps its historical shape, including
+        // the empty placeholder frame that a later
+        // `append_pending_counter_post_actions` may still land work on.
+        stash_pending_counter_additions(state, Vec::new(), completion);
+        return;
+    }
+    if completion.is_noop() {
+        return;
+    }
+    let queue = PendingCounterAdditionQueue {
+        remaining: Vec::new(),
+        completion: Some(completion),
+    };
+    if state
+        .insert_counter_additions_parent_of_active(queue)
+        .is_err()
+    {
+        // Unreachable from a valid stack: the guard above proves an active child
+        // exists, and inserting BELOW the top leaves the top — and so the prompt
+        // gate — untouched. The insert validates a CLONE and assigns only on
+        // success, so a failure leaves both stack and journal untouched.
+        //
+        // A failure therefore means the stack was ALREADY invalid, and the two
+        // recoveries are not symmetric. Pushing the queue instead would stack an
+        // owner above a live prompt, adding a SECOND validate violation to a
+        // stack that already has one; dropping the completion forfeits its
+        // terminal event but leaves the stack no worse than it was found. The
+        // drop is the deliberate choice: compounding stack corruption is what
+        // makes this class unrecoverable, and panicking is the very failure mode
+        // #7384 reported.
+        debug_assert!(
+            false,
+            "inserting a counter-additions parent below a direct-choice owner must validate"
+        );
     }
 }
 
@@ -415,6 +481,7 @@ pub(crate) fn drain_pending_counter_additions(state: &mut GameState, events: &mu
                         action: action.action,
                         look_count: None,
                         scry_bottom_count: None,
+                        scry_top_count: None,
                     });
                 }
             }
@@ -478,8 +545,17 @@ fn apply_pending_counter_post_action(
                 action,
                 look_count: None,
                 scry_bottom_count: None,
+                scry_top_count: None,
             });
             true
+        }
+        // CR 701.34a: The interrupted proliferate action is now complete —
+        // publish it and drive whatever actions the effect still owes. Returns
+        // `false` when another `ProliferateChoice` is open; the completion this
+        // ran from is empty by construction, so nothing is re-parked and the
+        // fresh direct-choice frame is left owning the stack top.
+        PendingCounterPostAction::ContinueProliferateActions { pending } => {
+            super::proliferate::continue_proliferate_actions(state, pending, events)
         }
         PendingCounterPostAction::AddSubtype { object_id, subtype } => {
             if let Some(obj) = state.objects.get_mut(&object_id) {
@@ -684,15 +760,19 @@ fn apply_pending_counter_post_action(
                 events,
             );
             let completion = status.completion;
-            if let Some(pending) = state.active_copy_token_mut() {
-                pending.created_ids.extend(status.created_ids);
-            } else {
-                state.last_created_token_ids.extend(status.created_ids);
-            }
+            super::token_copy::extend_copy_batch_created_ids(state, status.created_ids);
             match completion {
                 super::token_copy::CopyTokenApplyCompletion::Completed => true,
                 super::token_copy::CopyTokenApplyCompletion::Paused => false,
             }
+        }
+        PendingCounterPostAction::ContinueCopyTokenEntryAfterAuraHost { object_id, tail } => {
+            // CR 303.4f: the host choice is answered and the attach is applied;
+            // run the rest of this token's entry (copy exceptions, entry counters,
+            // entry events) plus the rest of the batch.
+            super::token_copy::continue_copy_token_entry_after_aura_host(
+                state, object_id, *tail, events,
+            )
         }
         PendingCounterPostAction::ApplyCopyTokenModificationsAndFinalize {
             object_id,
@@ -786,6 +866,7 @@ fn apply_pending_counter_post_action(
             source_id,
             duration,
             exile_tracking,
+            enters_attacking,
             drain,
         } => {
             // CR 614.12a: the delivery tail may surface a Devour as-enters
@@ -812,7 +893,25 @@ fn apply_pending_counter_post_action(
                 None,
                 events,
             ) {
-                super::change_zone::ZoneDeliveryResult::Done => true,
+                super::change_zone::ZoneDeliveryResult::Done => {
+                    if enters_attacking && to == Zone::Battlefield {
+                        let controller = state
+                            .objects
+                            .get(&object_id)
+                            .map(|object| object.controller)
+                            .expect("a settled battlefield entrant must exist");
+                        // CR 508.4: an entrant joins combat only after its
+                        // replacement-modified entry has fully settled.
+                        if crate::game::combat::choose_entry_attack_target_or_enter(
+                            state, object_id, controller,
+                        )
+                        .is_some()
+                        {
+                            return false;
+                        }
+                    }
+                    true
+                }
                 super::change_zone::ZoneDeliveryResult::NeedsChoice(_) => false,
             }
         }
@@ -893,6 +992,9 @@ pub(crate) fn apply_counter_addition(
         object_id,
         counter_type,
         count,
+        // CR 122.1 + CR 603.2c: record who placed the counters so actor-gated
+        // "whenever you/an opponent put counters" triggers can match.
+        actor,
     });
 }
 
@@ -1475,13 +1577,106 @@ fn emit_evolved_event_for_counter_addition(
             GameEvent::CounterAdded {
                 object_id: added_to,
                 counter_type: CounterType::Plus1Plus1,
-                count
+                count,
+                ..
             } if *added_to == object_id && *count > 0
         )
     });
     if evolved {
         events.push(GameEvent::Evolved { object_id });
     }
+}
+
+/// CR 122.1 + CR 603.2c + CR 608.2h: Reproduce onto the effect's target(s) the
+/// counters that the triggering counter-placement event just put onto the
+/// recipient creature ("put the same number and kind of counters" / "put one of
+/// each of those kinds of counters"). The kind→count multiset is read from
+/// `state.current_trigger_events` — which, under the per-recipient firing model
+/// (`matching_counter_added_events_by_recipient`), holds exactly one recipient's
+/// `GameEvent::CounterAdded` occurrences (one per kind placed on it). Unlike
+/// `resolve_move` this reads the DELTA the event placed, not the recipient's
+/// total counter map. The multiset is snapshotted from the firing's events
+/// (CR 608.2h), so later changes to the recipient's counters don't affect it.
+pub fn resolve_reproduce_event_counters(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let per_kind_count = match &ability.effect {
+        Effect::ReproduceEventCounters { per_kind_count, .. } => *per_kind_count,
+        _ => return Ok(()),
+    };
+
+    // Fold the firing's `CounterAdded` occurrences into a kind→count multiset,
+    // preserving first-seen kind order for deterministic placement/event order.
+    let mut reproduced: Vec<(CounterType, u32)> = Vec::new();
+    for event in &state.current_trigger_events {
+        let GameEvent::CounterAdded {
+            counter_type,
+            count,
+            ..
+        } = event
+        else {
+            continue;
+        };
+        // CR 122.1: "one of each of those kinds" (PerKind) ignores the event's
+        // per-kind magnitude; "the same number and kind" (SameNumber) reproduces
+        // exactly what the event placed, summing repeated kinds.
+        let amount = match per_kind_count {
+            EventCounterReproductionCount::SameNumber => *count,
+            EventCounterReproductionCount::PerKind(n) => n,
+        };
+        if amount == 0 {
+            continue;
+        }
+        match reproduced.iter_mut().find(|(kind, _)| kind == counter_type) {
+            Some((_, existing)) => match per_kind_count {
+                // SameNumber sums repeated kinds; PerKind is a flat per-kind
+                // count, so a repeated kind stays at `n` (already recorded).
+                EventCounterReproductionCount::SameNumber => *existing += amount,
+                EventCounterReproductionCount::PerKind(_) => {}
+            },
+            None => reproduced.push((counter_type.clone(), amount)),
+        }
+    }
+
+    if reproduced.is_empty() {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
+
+    let targets = resolve_defined_or_targets(state, ability);
+    let additions: Vec<PendingCounterAddition> = targets
+        .into_iter()
+        .flat_map(|obj_id| {
+            reproduced.iter().map(move |(kind, amount)| {
+                object_counter_addition(ability.controller, obj_id, kind.clone(), *amount)
+            })
+        })
+        .collect();
+
+    let completion =
+        PendingEffectResolved::new(EffectKind::from(&ability.effect), ability.source_id);
+    for (index, addition) in additions.iter().cloned().enumerate() {
+        if !apply_object_counter_addition(state, addition, events) {
+            // CR 614: a replacement choice paused placement — stash the rest so
+            // the continuation drains them after the choice resolves.
+            stash_pending_counter_additions(state, additions[index + 1..].to_vec(), completion);
+            return Ok(());
+        }
+    }
+
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::from(&ability.effect),
+        source_id: ability.source_id,
+        subject: None,
+    });
+
+    Ok(())
 }
 
 /// CR 122.1: Place counters on all battlefield objects matching a filter (no targeting).
@@ -1749,6 +1944,10 @@ fn resolve_defined_or_targets(
     let target_spec = match &ability.effect {
         Effect::MultiplyCounter { target, .. }
         | Effect::RemoveCounter { target, .. }
+        // CR 122.1 + CR 603.2c: reproduction targets exactly like `PutCounter` —
+        // `SelfRef` short-circuits to the source (Captain Marvel), a real target
+        // falls through to the chosen-target return (Aragorn).
+        | Effect::ReproduceEventCounters { target, .. }
         | Effect::PutCounter { target, .. } => Some(target),
         _ => None,
     };
@@ -1872,6 +2071,23 @@ fn resolve_defined_or_targets(
             .cost_paid_object
             .iter()
             .map(|snap| snap.object_id)
+            .collect();
+    }
+
+    // CR 608.2c: A `ParentTarget` in a chained counter effect refers to the
+    // object chosen by the parent instruction. Prefer that propagated object
+    // target over the triggering event context; for a landfall trigger, the
+    // latter is the entering land rather than the creature chosen by the
+    // player. The object guard deliberately excludes the chooser-only target
+    // bookkeeping used by `ChooseOneOf` branches above.
+    if matches!(target_spec, Some(TargetFilter::ParentTarget)) && has_object_target {
+        return ability
+            .live_object_targets(state)
+            .into_iter()
+            .filter_map(|target| match target {
+                TargetRef::Object(id) => Some(id),
+                TargetRef::Player(_) => None,
+            })
             .collect();
     }
 
@@ -4469,6 +4685,7 @@ mod tests {
                 object_id,
                 counter_type: CounterType::Plus1Plus1,
                 count: 2,
+                ..
             } if *object_id == dest_id
         )));
     }
@@ -6703,6 +6920,110 @@ mod tests {
                  destroys the guarded ledger. The survivor row must stay 1: the drain still runs \
                  and still publishes, which is what makes the two zeros a measurement of the guard \
                  rather than of a drain that never happened"
+            );
+        }
+    }
+
+    /// Building-block rows for `park_counter_completion_outside_active_direct_choice`
+    /// (issue #7384). A post-action may pause having installed a direct-choice
+    /// owner; `ResolutionStack::validate` rejects a buried direct-choice owner,
+    /// so the completion that outlives the pause may not simply be pushed on top
+    /// of it.
+    mod parking_a_completion_after_a_paused_post_action {
+        use super::*;
+        use crate::types::game_state::{PendingEffectResolutionEvent, PendingEffectResolved};
+        use crate::types::resolution::{FrameKind, PendingProliferateActions};
+
+        fn live_proliferate_prompt() -> GameState {
+            let mut state = GameState::new_two_player(42);
+            state
+                .install_direct_choice_frame(
+                    ResolutionFrame::Proliferate(PendingProliferateActions {
+                        actor: PlayerId(0),
+                        source_id: ObjectId(77),
+                        remaining: 1,
+                    }),
+                    WaitingFor::ProliferateChoice {
+                        player: PlayerId(0),
+                        eligible: vec![TargetRef::Player(PlayerId(0))],
+                    },
+                )
+                .expect("a proliferate owner installs with its own prompt");
+            state
+        }
+
+        fn owed_completion() -> PendingEffectResolved {
+            PendingEffectResolved::new(EffectKind::Proliferate, ObjectId(77))
+        }
+
+        /// THE row this branch exists for: the completion goes BELOW the live
+        /// prompt, and the resulting stack still validates. Pushing it on top
+        /// instead is exactly the corruption #7384 reported.
+        #[test]
+        fn a_completion_owed_behind_a_live_prompt_becomes_its_parent() {
+            let mut state = live_proliferate_prompt();
+
+            merge_pending_counter_completion_after_nested_pause(&mut state, owed_completion());
+
+            let frames: Vec<_> = state.resolution_stack.iter().map(|f| f.kind()).collect();
+            assert_eq!(
+                frames,
+                vec![FrameKind::CounterAdditions, FrameKind::Proliferate],
+                "the owed completion parks BELOW the direct-choice owner, which keeps \
+                 the stack top — and so the prompt gate — untouched"
+            );
+            state
+                .resolution_stack
+                .validate(&state.waiting_for)
+                .expect("a direct-choice owner with a parent completion is a valid stack");
+        }
+
+        /// A pause that owes nothing installs no frame at all — an empty owner
+        /// above a live prompt would bury it for no benefit.
+        #[test]
+        fn a_completion_owing_nothing_behind_a_live_prompt_is_dropped() {
+            let mut state = live_proliferate_prompt();
+            let spent = PendingEffectResolved {
+                resolution_event: PendingEffectResolutionEvent::Suppress,
+                post_actions: Vec::new(),
+                player_action: None,
+                ..owed_completion()
+            };
+            assert!(spent.is_noop(), "the row's premise: nothing is owed");
+
+            merge_pending_counter_completion_after_nested_pause(&mut state, spent);
+
+            let frames: Vec<_> = state.resolution_stack.iter().map(|f| f.kind()).collect();
+            assert_eq!(
+                frames,
+                vec![FrameKind::Proliferate],
+                "nothing owed means nothing parked"
+            );
+        }
+
+        /// The historical shape is preserved for every pause that did NOT
+        /// install a direct-choice owner — including an empty completion, whose
+        /// placeholder frame a later `append_pending_counter_post_actions` may
+        /// still land work on.
+        #[test]
+        fn a_pause_without_a_live_prompt_still_pushes_its_placeholder_frame() {
+            let mut state = GameState::new_two_player(42);
+            let spent = PendingEffectResolved {
+                resolution_event: PendingEffectResolutionEvent::Suppress,
+                post_actions: Vec::new(),
+                player_action: None,
+                ..owed_completion()
+            };
+            assert!(spent.is_noop());
+
+            merge_pending_counter_completion_after_nested_pause(&mut state, spent);
+
+            let frames: Vec<_> = state.resolution_stack.iter().map(|f| f.kind()).collect();
+            assert_eq!(
+                frames,
+                vec![FrameKind::CounterAdditions],
+                "a non-direct-choice pause keeps the placeholder frame it has always \
+                 pushed, so a later append still has a queue to land on"
             );
         }
     }

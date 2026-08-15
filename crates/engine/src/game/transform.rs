@@ -255,6 +255,7 @@ mod tests {
     use super::*;
     use crate::game::game_object::BackFaceData;
     use crate::game::zones::create_object;
+    use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::card_type::{CardType, CoreType};
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
@@ -294,6 +295,11 @@ mod tests {
         obj.base_abilities = Arc::clone(&obj.abilities);
         obj.color = vec![ManaColor::Green];
         obj.base_color = vec![ManaColor::Green];
+        obj.parse_warnings = vec![OracleDiagnostic::IgnoredRemainder {
+            text: "front diagnostic".to_string(),
+            parser: "transform_test".to_string(),
+            line_index: 0,
+        }];
 
         obj.back_face = Some(BackFaceData {
             name: "Werewolf Back".to_string(),
@@ -327,6 +333,11 @@ mod tests {
             casting_restrictions: vec![],
             casting_options: vec![],
             layout_kind: None,
+            parse_warnings: vec![OracleDiagnostic::IgnoredRemainder {
+                text: "back diagnostic".to_string(),
+                parser: "transform_test".to_string(),
+                line_index: 0,
+            }],
         });
 
         id
@@ -351,6 +362,10 @@ mod tests {
             "BackAbility"
         );
         assert_eq!(obj.color, vec![ManaColor::Green, ManaColor::Red]);
+        assert!(matches!(
+            obj.parse_warnings.as_slice(),
+            [OracleDiagnostic::IgnoredRemainder { text, .. }] if text == "back diagnostic"
+        ));
         assert!(state.layers_dirty.is_dirty());
         assert_eq!(events.len(), 1);
         assert_eq!(events[0], GameEvent::Transformed { object_id: id });
@@ -368,6 +383,10 @@ mod tests {
         let obj = &state.objects[&id];
         assert!(!obj.transformed);
         assert_eq!(obj.name, "Werewolf Front");
+        assert!(matches!(
+            obj.parse_warnings.as_slice(),
+            [OracleDiagnostic::IgnoredRemainder { text, .. }] if text == "front diagnostic"
+        ));
         assert_eq!(events.len(), 2);
     }
 

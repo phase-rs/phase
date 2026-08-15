@@ -130,6 +130,18 @@ export class P2PDraftGuest {
     await this.session.send({ type: "draft_pick", cardInstanceId });
   }
 
+  async submitPickWithDraftEffect(
+    effectCardInstanceId: string,
+    cardInstanceIds: string[],
+  ): Promise<void> {
+    if (!this.session) throw new Error("Not connected to draft host");
+    await this.session.send({
+      type: "draft_pick_with_draft_effect",
+      effectCardInstanceId,
+      cardInstanceIds,
+    });
+  }
+
   async submitDeck(mainDeck: string[]): Promise<void> {
     if (!this.session) throw new Error("Not connected to draft host");
     await this.session.send({ type: "draft_submit_deck", mainDeck });

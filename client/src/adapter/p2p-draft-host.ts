@@ -12,7 +12,7 @@
 import type Peer from "peerjs";
 import type { DataConnection } from "peerjs";
 
-import { DraftAdapter } from "./draft-adapter";
+import { DraftAdapter, EMPTY_DRAFT_POOL_GROUPS } from "./draft-adapter";
 import type { DraftPlayerView, MultiplayerSeatDescriptor, PairingView, PoolInput, SeatPublicView } from "./draft-adapter";
 import type { PodPolicy, TournamentFormat } from "./draft-adapter";
 import {
@@ -34,6 +34,10 @@ import {
   clearDraftHostSession,
   type PersistedDraftHostSession,
 } from "../services/draftPersistence";
+
+function matchConfigForView(view: DraftPlayerView): MatchConfig {
+  return view.match_config;
+}
 import {
   commandAcknowledgement,
   draftIntergameDigest,
@@ -248,7 +252,7 @@ export class P2PDraftHost {
       handler: (conn: DataConnection) => void,
     ) => () => void,
     private readonly poolInput: PoolInput,
-    private readonly kind: "Premier" | "Traditional",
+    private readonly kind: "Premier" | "Traditional" | "Sealed",
     private readonly podSize: number,
     private readonly hostDisplayName: string,
     private readonly tournamentFormat: TournamentFormat,
@@ -457,14 +461,17 @@ export class P2PDraftHost {
   private async handleGuestMessage(seat: number, msg: DraftP2PMessage): Promise<void> {
     switch (msg.type) {
       case "draft_pick": {
-        if (!this.draftStarted || this.paused) {
-          this.guestSessions.get(seat)?.send({
-            type: "draft_error",
-            reason: this.paused ? "Draft is paused" : "Draft not started",
-          });
-          return;
-        }
+        if (!this.canGuestPick(seat)) return;
         await this.handlePick(seat, msg.cardInstanceId);
+        break;
+      }
+      case "draft_pick_with_draft_effect": {
+        if (!this.canGuestPick(seat)) return;
+        await this.handlePickWithDraftEffect(
+          seat,
+          msg.effectCardInstanceId,
+          msg.cardInstanceIds,
+        );
         break;
       }
       case "draft_submit_deck": {
@@ -560,7 +567,10 @@ export class P2PDraftHost {
     this.draftCode = draftCode;
     this.activePodSize = seats.length;
     this.picksThisRound.clear();
-    await this.resolveBotPicks({ emit: false, persist: false });
+    const startView = await this.adapter.getViewForSeat(0);
+    if (startView.status === "Drafting") {
+      await this.resolveBotPicks({ emit: false, persist: false });
+    }
 
     // Send each guest their filtered view
     for (const [seat, session] of this.guestSessions) {
@@ -575,7 +585,9 @@ export class P2PDraftHost {
     this.persistSession();
     const freshHostView = await this.adapter.getViewForSeat(0);
     this.emit({ type: "draftStarted", view: freshHostView });
-    this.startPickTimer(0);
+    if (freshHostView.status === "Drafting") {
+      this.startPickTimer(0);
+    }
   }
 
   /**
@@ -585,6 +597,14 @@ export class P2PDraftHost {
     return this.handlePick(0, cardInstanceId);
   }
 
+  /** Host submits an effect pick for seat 0. */
+  async submitHostPickWithDraftEffect(
+    effectCardInstanceId: string,
+    cardInstanceIds: string[],
+  ): Promise<DraftPlayerView> {
+    return this.handlePickWithDraftEffect(0, effectCardInstanceId, cardInstanceIds);
+  }
+
   /**
    * Host submits their own deck (seat 0).
    */
@@ -592,11 +612,28 @@ export class P2PDraftHost {
     return this.handleDeckSubmission(0, mainDeck);
   }
 
+  private assertPickAllowed(): void {
+    if (!this.draftStarted) throw new Error("Draft not started");
+    if (this.paused) throw new Error("Draft is paused");
+  }
+
+  private canGuestPick(seat: number): boolean {
+    try {
+      this.assertPickAllowed();
+      return true;
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      this.guestSessions.get(seat)?.send({ type: "draft_error", reason });
+      return false;
+    }
+  }
+
   private async handlePick(
     seat: number,
     cardInstanceId: string,
     resolveBots = true,
   ): Promise<DraftPlayerView> {
+    this.assertPickAllowed();
     return this.applyPick(seat, cardInstanceId, {
       acknowledge: true,
       emit: true,
@@ -605,13 +642,37 @@ export class P2PDraftHost {
     });
   }
 
+  private async handlePickWithDraftEffect(
+    seat: number,
+    effectCardInstanceId: string,
+    cardInstanceIds: string[],
+  ): Promise<DraftPlayerView> {
+    this.assertPickAllowed();
+    return this.applyPick(
+      seat,
+      effectCardInstanceId,
+      {
+        acknowledge: true,
+        emit: true,
+        persist: true,
+        resolveBots: true,
+      },
+      () => this.adapter.submitPickWithDraftEffectForSeat(
+        seat,
+        effectCardInstanceId,
+        cardInstanceIds,
+      ),
+    );
+  }
+
   private async applyPick(
     seat: number,
     cardInstanceId: string,
     options: PickOptions,
+    submitPick = () => this.adapter.submitPickForSeat(seat, cardInstanceId),
   ): Promise<DraftPlayerView> {
     try {
-      const view = await this.adapter.submitPickForSeat(seat, cardInstanceId);
+      const view = await submitPick();
       this.picksThisRound.add(seat);
 
       // Send pick acknowledgement to the picking player
@@ -1110,7 +1171,7 @@ export class P2PDraftHost {
           botSeat,
           botName,
           deckPayload,
-          matchConfig: this.matchConfig(),
+          matchConfig: matchConfigForView(view),
           binding,
       });
       return;
@@ -1139,7 +1200,7 @@ export class P2PDraftHost {
         opponentName: hostOpponentName,
         matchHostPeerId: matchRoomCode,
         deckPayload,
-        matchConfig: this.matchConfig(),
+        matchConfig: matchConfigForView(view),
         binding,
     });
     this.sendMatchLaunch(guestSeat, {
@@ -1152,7 +1213,7 @@ export class P2PDraftHost {
         opponentName: guestOpponentName,
         matchHostPeerId: matchRoomCode,
         localDeck: guestDeck,
-        matchConfig: this.matchConfig(),
+        matchConfig: matchConfigForView(view),
         binding,
     });
   }
@@ -1245,9 +1306,6 @@ export class P2PDraftHost {
     );
   }
 
-  private matchConfig(): MatchConfig {
-    return { match_type: this.kind === "Traditional" ? "Bo3" : "Bo1" };
-  }
 
   /**
    * Report a match result. Called when a guest sends draft_match_result.
@@ -1995,6 +2053,7 @@ export class P2PDraftHost {
         connected: i === 0 || this.guestSessions.has(i),
         has_submitted_deck: false,
         pick_status: "NotDrafting",
+        face_up_draft_cards: [],
       });
     }
     return seats;
@@ -2009,6 +2068,8 @@ export class P2PDraftHost {
       pass_direction: "Left",
       current_pack: null,
       pool: [],
+      draft_effects: [],
+      pool_groups: EMPTY_DRAFT_POOL_GROUPS,
       seats: this.buildSeatPublicViews(),
       cards_per_pack: 14,
       pack_count: 3,
@@ -2020,6 +2081,7 @@ export class P2PDraftHost {
       tournament_format: "Swiss",
       pod_policy: "Competitive",
       pairings: [],
+      match_config: { match_type: this.kind === "Traditional" ? "Bo3" : "Bo1" },
     };
   }
 

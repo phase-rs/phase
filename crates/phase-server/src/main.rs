@@ -185,7 +185,7 @@ type SharedGameSpectators = Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<
 fn restore_persisted_session(json: &str, db: SharedDb) -> Result<GameSession, String> {
     let persisted = serde_json::from_str::<server_core::PersistedSession>(json)
         .map_err(|error| error.to_string())?;
-    Ok(GameSession::from_persisted(persisted, db.as_ref()))
+    GameSession::from_persisted(persisted, db.as_ref())
 }
 
 async fn reserve_lobby_subscriber_slot(
@@ -493,6 +493,100 @@ fn build_state_update_message(
         viewer_interaction,
         rewind_targets,
     })
+}
+
+/// Resolve All can collect thousands of engine events. They are needed for
+/// authoritative transition bookkeeping, but replaying them in one wire frame
+/// defeats the batch path and breaches the snapshot payload guard. Preserve a
+/// bounded tail of engine-authored logs alongside the final, fully-derived
+/// state; the requester acknowledgement carries progress metadata separately.
+const MAX_RESOLVE_ALL_LOG_ENTRIES: usize = 128;
+
+/// Resolving the batch and then resuming normal AI play are one authoritative
+/// transition. Retain their engine-authored logs in that order while keeping
+/// the compact final snapshot bounded.
+fn resolve_all_log_tail(
+    batch_log_entries: &[GameLogEntry],
+    ai_results: &[RevisionedActionResult],
+) -> Vec<GameLogEntry> {
+    fn append_tail(tail: &mut Vec<GameLogEntry>, entries: &[GameLogEntry]) {
+        if entries.len() >= MAX_RESOLVE_ALL_LOG_ENTRIES {
+            tail.clear();
+            tail.extend_from_slice(&entries[entries.len() - MAX_RESOLVE_ALL_LOG_ENTRIES..]);
+            return;
+        }
+
+        let overflow = tail
+            .len()
+            .saturating_add(entries.len())
+            .saturating_sub(MAX_RESOLVE_ALL_LOG_ENTRIES);
+        if overflow > 0 {
+            tail.drain(..overflow);
+        }
+        tail.extend_from_slice(entries);
+    }
+
+    let mut tail = Vec::with_capacity(MAX_RESOLVE_ALL_LOG_ENTRIES);
+    append_tail(&mut tail, batch_log_entries);
+    for (_, (_, _, _, log_entries, _, _, _)) in ai_results {
+        append_tail(&mut tail, log_entries);
+    }
+    tail
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_resolve_all_state_update_message(
+    raw_state: &GameState,
+    log_entries: &[GameLogEntry],
+    legal_actions: &[GameAction],
+    spell_costs: &HashMap<engine::types::identifiers::ObjectId, engine::types::mana::ManaCost>,
+    legal_actions_by_object: &HashMap<engine::types::identifiers::ObjectId, Vec<GameAction>>,
+    state_revision: u64,
+    player: PlayerId,
+    eliminated_players: Vec<PlayerId>,
+    rewind_targets: Vec<RewindOption>,
+) -> ServerMessage {
+    let is_actor = server_core::is_acting(raw_state, player);
+    let filtered = server_core::filter_state_for_player(raw_state, player);
+    let end_continuous_effect_offers = if is_actor {
+        engine_end_continuous_effect_offers(legal_actions)
+    } else {
+        Vec::new()
+    };
+    let mana_payment_shortcut_actions = if is_actor {
+        engine_mana_payment_shortcut_actions(raw_state, legal_actions_by_object)
+    } else {
+        Vec::new()
+    };
+
+    ServerMessage::StateUpdate {
+        state_revision,
+        state: filtered.clone(),
+        events: Vec::new(),
+        legal_actions: if is_actor {
+            legal_actions.to_vec()
+        } else {
+            Vec::new()
+        },
+        auto_pass_recommended: engine_auto_pass_for_viewer(raw_state, player, legal_actions),
+        end_continuous_effect_offers,
+        mana_payment_shortcut_actions,
+        eliminated_players,
+        log_entries: log_entries.to_vec(),
+        spell_costs: if is_actor {
+            spell_costs.clone()
+        } else {
+            HashMap::new()
+        },
+        legal_actions_by_object: if is_actor {
+            object_action_payloads(legal_actions_by_object)
+        } else {
+            HashMap::new()
+        },
+        derived: derive_transport_views(raw_state, &filtered, Some(player)),
+        viewer_interaction: derive_viewer_interaction(raw_state, &filtered, player),
+        rewind_targets,
+    }
 }
 
 /// Build the public spectator view for an in-progress game.
@@ -893,6 +987,7 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
         ClientMessage::CreateGame { .. }
         | ClientMessage::JoinGame { .. }
         | ClientMessage::Action { .. }
+        | ClientMessage::ResolveAll { .. }
         | ClientMessage::Interaction { .. }
         | ClientMessage::PreviewManaPayment { .. }
         | ClientMessage::Reconnect { .. }
@@ -947,6 +1042,7 @@ fn guard_full_create_game_settings_inbound(
     lobby_broker::validate_create_game_settings_inbound_fields(&fields)?;
     if let Some(format_config) = fields.format_config {
         format_config.validate_for_player_count(pc)?;
+        format_config.reject_unimplemented_range_of_influence()?;
     }
     guard_create_ai_seats(ai_seats, pc)?;
     lobby_broker::validate_deck_payload("deck", fields.deck)?;
@@ -982,6 +1078,7 @@ fn client_forbidden_draft_action_reason(action: &draft_core::types::DraftAction)
         }
         DraftAction::StartDraft
         | DraftAction::Pick { .. }
+        | DraftAction::PickWithDraftEffect { .. }
         | DraftAction::SubmitDeck { .. }
         | DraftAction::ReportMatchResult { .. }
         | DraftAction::AdvanceRound
@@ -1269,7 +1366,11 @@ async fn serve() {
                             let register_req =
                                 server_core::persist::restored_draft_lobby_register_request(&ps);
                             let timer_ms = ps.timer_remaining_ms;
-                            dsm.restore_session(ps);
+                            if let Err(error) = dsm.restore_persisted_session(ps) {
+                                warn!(draft = %draft_code, error = %error, "invalid persisted draft session, deleting");
+                                let _ = game_db.delete_draft_session(draft_code);
+                                continue;
+                            }
                             if let Some(req) = register_req {
                                 lob.register_game(draft_code, req, &SysEnv);
                             }
@@ -2071,6 +2172,7 @@ async fn handle_socket(
 
     loop {
         tokio::select! {
+            biased;
             Some(msg) = rx.recv() => {
                 if let Ok(json) = serde_json::to_string(&msg) {
                     if socket.send(Message::text(json)).await.is_err() {
@@ -2663,7 +2765,7 @@ async fn create_and_connect_multiplayer_session(
             pc,
             match_config,
             format_config,
-        );
+        )?;
         let full_key = match game_db.create_full_session_key(&game_code) {
             Ok(key) => key,
             Err(error) => {
@@ -3762,6 +3864,17 @@ impl GameSubmission {
         }
     }
 
+    /// Accepted zero-count debug creates are transport no-ops: server-core
+    /// still authenticates and preflights them, but the Full-mode wrapper must
+    /// not allocate a revision, run AI, persist, or broadcast unchanged state.
+    fn is_zero_count_debug_create(&self) -> bool {
+        matches!(
+            self,
+            GameSubmission::Action(GameAction::Debug(debug_action))
+                if debug_action.is_zero_count_create()
+        )
+    }
+
     fn payload_rejection(&self) -> Result<(), Box<ServerMessage>> {
         match self {
             GameSubmission::Action(action) => guard_game_action_payload(action)
@@ -3786,8 +3899,10 @@ async fn handle_full_game_submission(
     submission: GameSubmission,
     socket: &mut WebSocket,
     state: &SharedState,
+    db: &SharedDb,
     draft_state: &SharedDraftState,
     connections: &SharedConnections,
+    tx: &mpsc::UnboundedSender<ServerMessage>,
     game_db: &SharedGameDb,
     game_spectators: &SharedGameSpectators,
     // Read-only: this handler reads `game_code`, `player_token`, and `player_id`
@@ -3798,6 +3913,7 @@ async fn handle_full_game_submission(
     identity: &SocketIdentity,
 ) {
     let kind = submission.kind();
+    let is_zero_count_debug_create = submission.is_zero_count_debug_create();
     let game_code = match &identity.game_code {
         Some(c) => c.clone(),
         None => {
@@ -3839,13 +3955,20 @@ async fn handle_full_game_submission(
         let lock_start = std::time::Instant::now();
         let mut mgr = state.lock().await;
         let applied = match submission {
-            GameSubmission::Action(action) => mgr.handle_action(&game_code, &player_token, action),
+            GameSubmission::Action(action) => {
+                mgr.handle_action_with_card_db(&game_code, &player_token, action, Some(db.as_ref()))
+            }
             GameSubmission::Interaction(submission) => {
                 mgr.handle_interaction(&game_code, &player_token, submission)
             }
         };
         match applied {
             Ok(human_result) => {
+                if is_zero_count_debug_create {
+                    drop(mgr);
+                    let _ = tx.send(ServerMessage::ActionNoOp);
+                    return;
+                }
                 let human_revision = mgr
                     .sessions
                     .get_mut(&game_code)
@@ -4082,6 +4205,254 @@ async fn handle_full_game_submission(
                 let _ = socket.send(Message::text(json)).await;
             }
         }
+    }
+}
+
+/// Handle the authenticated native Resolve All capability. Unlike ordinary
+/// actions, this sends one compact final state snapshot and a requester-only
+/// progress acknowledgement rather than replaying the entire batch event log.
+#[allow(clippy::too_many_arguments)]
+async fn handle_resolve_all(
+    request_id: u64,
+    max_resolutions: u32,
+    state: &SharedState,
+    draft_state: &SharedDraftState,
+    connections: &SharedConnections,
+    tx: &mpsc::UnboundedSender<ServerMessage>,
+    game_db: &SharedGameDb,
+    game_spectators: &SharedGameSpectators,
+    identity: &SocketIdentity,
+) {
+    let (Some(game_code), Some(player_token), Some(requester)) = (
+        identity.game_code.clone(),
+        identity.player_token.clone(),
+        identity.player_id,
+    ) else {
+        let msg = ServerMessage::ResolveAllRejected {
+            request_id,
+            reason: "Not in a game".to_string(),
+        };
+        let _ = tx.send(msg);
+        return;
+    };
+
+    let processed = {
+        let mut mgr = state.lock().await;
+        match mgr.resolve_all_for_player(&game_code, &player_token, max_resolutions) {
+            Ok((transition, summary)) => match transition {
+                None => Ok((summary, None)),
+                Some((_, (_, _, _, batch_log_entries, _, _, _))) => {
+                    let session = mgr
+                        .sessions
+                        .get_mut(&game_code)
+                        .expect("Resolve All retains its session");
+                    // Resolve All is a shortcut through a human-authorized batch,
+                    // not a replacement for the session's ordinary AI hand-off.
+                    // Keep that hand-off under the same lock, then derive the one
+                    // final payload from the current session rather than the batch
+                    // transition it has already moved past.
+                    let ai_results = session.run_ai();
+                    let (raw_state, legal_actions, _auto_pass, spell_costs, by_object) =
+                        session.current_broadcast_snapshot();
+                    let revision = session.state_revision;
+                    let log_entries = resolve_all_log_tail(&batch_log_entries, &ai_results);
+                    let eliminated = session.state.eliminated_players.clone();
+                    let rewind_targets = session.rewind_options();
+                    let player_count = session.player_count;
+                    let game_over_winner = match &session.state.waiting_for {
+                        engine::types::game_state::WaitingFor::GameOver { winner } => Some(*winner),
+                        _ => None,
+                    };
+                    let terminal = if let Some(winner) = game_over_winner {
+                        let ranked_result = ranked_duel_players(session).and_then(|players| {
+                            ranked_result_for_duel(game_db, &game_code, &players, winner)
+                        });
+                        terminal_artifact(session, winner, "Game ended".to_string(), ranked_result)
+                            .map(Some)
+                    } else {
+                        persist_full_session_async(game_db, session);
+                        Ok(None)
+                    };
+                    terminal.map(|terminal| {
+                        (
+                            summary,
+                            Some((
+                                revision,
+                                raw_state,
+                                legal_actions,
+                                log_entries,
+                                spell_costs,
+                                by_object,
+                                eliminated,
+                                rewind_targets,
+                                player_count,
+                                game_over_winner,
+                                terminal,
+                            )),
+                        )
+                    })
+                }
+            },
+            Err(error) => Err(error),
+        }
+    };
+
+    let (summary, payload) = match processed {
+        Ok(processed) => processed,
+        Err(reason) => {
+            let _ = tx.send(ServerMessage::ResolveAllRejected { request_id, reason });
+            return;
+        }
+    };
+
+    let acknowledgement = ServerMessage::ResolveAllResult {
+        request_id,
+        items_resolved: summary.items_resolved,
+        total: summary.total,
+    };
+    let Some((
+        revision,
+        raw_state,
+        legal_actions,
+        log_entries,
+        spell_costs,
+        by_object,
+        eliminated,
+        rewind_targets,
+        player_count,
+        game_over_winner,
+        terminal,
+    )) = payload
+    else {
+        let _ = tx.send(acknowledgement);
+        return;
+    };
+
+    if let Err(reason) = guard_state_snapshot_broadcast(StateSnapshotParts {
+        state: &raw_state,
+        events: &[],
+        log_entries: &log_entries,
+        legal_actions: &legal_actions,
+        legal_actions_by_object: &by_object,
+        spell_costs: &spell_costs,
+    }) {
+        warn!(game = %game_code, %reason, "Resolve All snapshot exceeds broadcast bounds after commit");
+        let _ = tx.send(build_resolve_all_state_update_message(
+            &raw_state,
+            &log_entries,
+            &legal_actions,
+            &spell_costs,
+            &by_object,
+            revision,
+            requester,
+            eliminated.clone(),
+            rewind_targets.clone(),
+        ));
+        let _ = tx.send(acknowledgement);
+        return;
+    }
+
+    let terminal_deliveries = match terminal {
+        Some(artifact) => match prepare_full_terminal(game_db, artifact).await {
+            Ok(deliveries) => deliveries,
+            Err(error) => {
+                error!(game = %game_code, %error, "Resolve All terminal preparation failed after commit");
+                let _ = tx.send(build_resolve_all_state_update_message(
+                    &raw_state,
+                    &log_entries,
+                    &legal_actions,
+                    &spell_costs,
+                    &by_object,
+                    revision,
+                    requester,
+                    eliminated.clone(),
+                    rewind_targets.clone(),
+                ));
+                let _ = tx.send(acknowledgement);
+                return;
+            }
+        },
+        None => Vec::new(),
+    };
+
+    // Queue the requester's final state and acknowledgement through its direct
+    // sender in order; the adapter resolves only after this cached snapshot.
+    let requester_update = build_resolve_all_state_update_message(
+        &raw_state,
+        &log_entries,
+        &legal_actions,
+        &spell_costs,
+        &by_object,
+        revision,
+        requester,
+        eliminated.clone(),
+        rewind_targets.clone(),
+    );
+    let _ = tx.send(requester_update);
+
+    {
+        let conns = connections.lock().await;
+        if let Some(players) = conns.get(&game_code) {
+            for player in 0..player_count {
+                let player = PlayerId(player);
+                if player == requester {
+                    continue;
+                }
+                if let Some(sender) = players.get(&player) {
+                    let _ = sender.send(build_resolve_all_state_update_message(
+                        &raw_state,
+                        &log_entries,
+                        &legal_actions,
+                        &spell_costs,
+                        &by_object,
+                        revision,
+                        player,
+                        eliminated.clone(),
+                        rewind_targets.clone(),
+                    ));
+                }
+            }
+        }
+    }
+    if let Ok(spectator_update) =
+        build_spectator_state_update_message(&raw_state, &[], &log_entries, revision)
+    {
+        let mut spectators = game_spectators.lock().await;
+        if let Some(senders) = spectators.get_mut(&game_code) {
+            senders.retain(|sender| sender.send(spectator_update.clone()).is_ok());
+            if senders.is_empty() {
+                spectators.remove(&game_code);
+            }
+        }
+    }
+    let _ = tx.send(acknowledgement);
+
+    if !terminal_deliveries.is_empty() {
+        let conns = connections.lock().await;
+        if let Some(players) = conns.get(&game_code) {
+            for (player, delivery) in &terminal_deliveries {
+                if *player == requester {
+                    let _ = tx.send(ServerMessage::TerminalResult {
+                        delivery: Some(delivery.clone()),
+                    });
+                } else if let Some(sender) = players.get(player) {
+                    let _ = sender.send(ServerMessage::TerminalResult {
+                        delivery: Some(delivery.clone()),
+                    });
+                }
+            }
+        }
+        drop(conns);
+        report_draft_game_over(
+            draft_state,
+            connections,
+            &game_code,
+            game_over_winner.flatten(),
+        )
+        .await;
+        state.lock().await.remove_game(&game_code);
+        connections.lock().await.remove(&game_code);
+        game_spectators.lock().await.remove(&game_code);
     }
 }
 
@@ -4452,8 +4823,28 @@ async fn handle_client_message(
                 GameSubmission::Action(action),
                 socket,
                 state,
+                db,
                 draft_state,
                 connections,
+                tx,
+                game_db,
+                game_spectators,
+                identity,
+            )
+            .await;
+        }
+
+        ClientMessage::ResolveAll {
+            request_id,
+            max_resolutions,
+        } => {
+            handle_resolve_all(
+                request_id,
+                max_resolutions,
+                state,
+                draft_state,
+                connections,
+                tx,
                 game_db,
                 game_spectators,
                 identity,
@@ -4466,8 +4857,10 @@ async fn handle_client_message(
                 GameSubmission::Interaction(submission),
                 socket,
                 state,
+                db,
                 draft_state,
                 connections,
+                tx,
                 game_db,
                 game_spectators,
                 identity,
@@ -4970,7 +5363,7 @@ async fn handle_client_message(
                 // --- AI game path: create, start, and run initial AI actions ---
                 let (game_code, player_token, full_key, game_started_msg) = {
                     let mut mgr = state.lock().await;
-                    let (game_code, player_token) = mgr.create_game_with_ai(
+                    let (game_code, player_token) = match mgr.create_game_with_ai(
                         resolved,
                         display_name.clone(),
                         timer_seconds,
@@ -4979,7 +5372,13 @@ async fn handle_client_message(
                         db.card_names(),
                         format_config.clone(),
                         db.as_ref(),
-                    );
+                    ) {
+                        Ok(created) => created,
+                        Err(error) => {
+                            let _ = tx.send(ServerMessage::error(error));
+                            return;
+                        }
+                    };
 
                     let full_key = match game_db.create_full_session_key(&game_code) {
                         Ok(key) => key,
@@ -6813,6 +7212,7 @@ async fn handle_client_message(
                 &password,
                 timer_seconds,
                 pod_size,
+                kind,
             ) {
                 let msg = ServerMessage::DraftActionRejected { reason };
                 if let Ok(json) = serde_json::to_string(&msg) {
@@ -6831,6 +7231,19 @@ async fn handle_client_message(
                 return;
             }
 
+            if kind != draft_core::types::DraftKind::Quick
+                && tournament_format == draft_core::types::TournamentFormat::SingleElimination
+                && pod_size != 8
+            {
+                let msg = ServerMessage::DraftActionRejected {
+                    reason: "Single-elimination draft events require exactly 8 seats".to_string(),
+                };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
+
             let config = draft_core::types::DraftConfig {
                 source: draft_core::types::DraftSource::Set {
                     code: set_code.clone(),
@@ -6839,7 +7252,11 @@ async fn handle_client_message(
                 kind,
                 pod_size,
                 cards_per_pack: 14,
-                pack_count: 3,
+                pack_count: if kind == draft_core::types::DraftKind::Sealed {
+                    6
+                } else {
+                    3
+                },
                 min_deck_size: 40,
                 addable_cards: draft_core::types::DeckAddableCards::standard_basics(),
                 rng_seed: rand::random(),
@@ -7326,12 +7743,15 @@ async fn handle_client_message(
 #[cfg(test)]
 mod state_transport_derived_tests {
     use super::*;
-    use engine::types::ability::SearchSelectionConstraint;
+    use engine::game::deck_loading::PlayerDeckPayload;
+    use engine::types::ability::{Effect, ResolvedAbility, SearchSelectionConstraint};
     use engine::types::actions::GameAction;
     use engine::types::game_state::{
-        ActiveSearchDecisionAuthority, ActiveSearchDecisionControl, PriorityPassingMode, WaitingFor,
+        ActiveSearchDecisionAuthority, ActiveSearchDecisionControl, PriorityPassingMode,
+        StackEntry, StackEntryKind, WaitingFor,
     };
     use engine::types::identifiers::ObjectId;
+    use engine::types::log::{GameLogEntry, LogCategory, LogSegment};
     use engine::types::phase::Phase;
 
     fn low_use_window_priority_result(
@@ -7379,6 +7799,230 @@ mod state_transport_derived_tests {
                 ..
             } => (legal_actions.len(), auto_pass_recommended),
             other => panic!("expected StateUpdate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_all_snapshot_keeps_a_bounded_tail_of_engine_logs() {
+        let state = GameState::new_two_player(42);
+        let logs: Vec<_> = (0..=MAX_RESOLVE_ALL_LOG_ENTRIES)
+            .map(|seq| GameLogEntry {
+                seq: seq as u32,
+                turn: 1,
+                phase: Phase::PreCombatMain,
+                category: LogCategory::Game,
+                segments: vec![LogSegment::Text(format!("entry {seq}"))],
+                presentation: Default::default(),
+            })
+            .collect();
+        let tail = &logs[logs.len().saturating_sub(MAX_RESOLVE_ALL_LOG_ENTRIES)..];
+
+        let update = build_resolve_all_state_update_message(
+            &state,
+            tail,
+            &[],
+            &HashMap::new(),
+            &HashMap::new(),
+            1,
+            PlayerId(0),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        match update {
+            ServerMessage::StateUpdate {
+                log_entries,
+                events,
+                ..
+            } => {
+                assert!(events.is_empty());
+                assert_eq!(log_entries.as_slice(), tail);
+                assert_eq!(log_entries.len(), MAX_RESOLVE_ALL_LOG_ENTRIES);
+            }
+            other => panic!("expected StateUpdate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_all_final_log_tail_orders_batch_before_ai_follow_up_logs() {
+        let state = GameState::new_two_player(42);
+        let batch_logs: Vec<_> = (0..=MAX_RESOLVE_ALL_LOG_ENTRIES)
+            .map(|seq| GameLogEntry {
+                seq: seq as u32,
+                turn: 1,
+                phase: Phase::PreCombatMain,
+                category: LogCategory::Game,
+                segments: vec![LogSegment::Text(format!("batch {seq}"))],
+                presentation: Default::default(),
+            })
+            .collect();
+        let ai_logs: Vec<_> = (0..2)
+            .map(|seq| GameLogEntry {
+                seq: (100 + seq) as u32,
+                turn: 1,
+                phase: Phase::PreCombatMain,
+                category: LogCategory::Game,
+                segments: vec![LogSegment::Text(format!("ai {seq}"))],
+                presentation: Default::default(),
+            })
+            .collect();
+        let ai_results = vec![(
+            2,
+            (
+                state,
+                Vec::new(),
+                Vec::new(),
+                ai_logs.clone(),
+                false,
+                HashMap::new(),
+                HashMap::new(),
+            ),
+        )];
+
+        let tail = resolve_all_log_tail(&batch_logs, &ai_results);
+
+        assert_eq!(tail.len(), MAX_RESOLVE_ALL_LOG_ENTRIES);
+        assert_eq!(tail.first(), batch_logs.get(3));
+        assert_eq!(&tail[tail.len() - ai_logs.len()..], ai_logs.as_slice());
+    }
+
+    #[tokio::test]
+    async fn resolve_all_handler_sends_the_final_snapshot_before_its_acknowledgement() {
+        let mut manager = SessionManager::new();
+        let (game_code, player_token) = manager.create_game(PlayerDeckPayload::default());
+        let ai_player = PlayerId(1);
+        let session = manager
+            .sessions
+            .get_mut(&game_code)
+            .expect("new game retains its session");
+        session.ai_seats.insert(ai_player);
+        session.ai_configs.insert(
+            ai_player,
+            phase_ai::config::create_config_for_players(
+                phase_ai::config::AiDifficulty::Easy,
+                phase_ai::config::Platform::Native,
+                2,
+            ),
+        );
+        let stack_object = ObjectId(1);
+        session.state.active_player = ai_player;
+        session.state.priority_player = PlayerId(0);
+        session.state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        // The AI has already passed in this priority cycle, so the requesting
+        // human's pass deterministically resolves the stack entry.
+        session.state.priority_passes.insert(ai_player);
+        session.state.stack.push_back(StackEntry {
+            id: stack_object,
+            source_id: stack_object,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: stack_object,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    Vec::new(),
+                    stack_object,
+                    PlayerId(0),
+                )),
+            },
+        });
+        let revision_before = session.state_revision;
+
+        let state: SharedState = Arc::new(Mutex::new(manager));
+        let draft_state: SharedDraftState = Arc::new(Mutex::new(DraftSessionManager::new()));
+        let connections: SharedConnections = Arc::new(Mutex::new(HashMap::new()));
+        let game_spectators: SharedGameSpectators = Arc::new(Mutex::new(HashMap::new()));
+        let db_file = tempfile::NamedTempFile::new().expect("temporary game database");
+        let game_db = Arc::new(
+            persistence::GameDb::open(db_file.path(), persistence::SessionRetention::Multiplayer)
+                .expect("open temporary game database"),
+        );
+        let (requester_tx, mut requester_rx) = mpsc::unbounded_channel();
+        let (ai_tx, mut ai_rx) = mpsc::unbounded_channel();
+        connections
+            .lock()
+            .await
+            .insert(game_code.clone(), HashMap::from([(ai_player, ai_tx)]));
+        let identity = SocketIdentity {
+            game_code: Some(game_code.clone()),
+            player_id: Some(PlayerId(0)),
+            player_token: Some(player_token),
+            lobby_subscribed: false,
+            session_span: None,
+            client_hello: None,
+            lobby_host_game: None,
+            seat_reservations: Vec::new(),
+            lobby_reservations: Vec::new(),
+            draft_code: None,
+            draft_seat: None,
+            draft_token: None,
+            spectator_draft_code: None,
+            spectator_visibility: None,
+            spectator_game_code: None,
+        };
+
+        handle_resolve_all(
+            41,
+            1,
+            &state,
+            &draft_state,
+            &connections,
+            &requester_tx,
+            &game_db,
+            &game_spectators,
+            &identity,
+        )
+        .await;
+
+        let (expected_revision, expected_waiting_for) = {
+            let manager = state.lock().await;
+            let session = manager
+                .sessions
+                .get(&game_code)
+                .expect("Resolve All retains its session");
+            assert!(
+                session.state_revision > revision_before,
+                "the resolved batch must advance the authoritative revision"
+            );
+            (session.state_revision, session.state.waiting_for.clone())
+        };
+
+        match tokio::time::timeout(std::time::Duration::from_secs(1), requester_rx.recv())
+            .await
+            .expect("Resolve All must send the requester state update")
+            .expect("requester state update channel remains open")
+        {
+            ServerMessage::StateUpdate {
+                state_revision,
+                state,
+                ..
+            } => {
+                assert_eq!(state_revision, expected_revision);
+                assert_eq!(state.waiting_for, expected_waiting_for);
+            }
+            other => panic!("expected requester StateUpdate, got {other:?}"),
+        }
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), requester_rx.recv())
+                .await
+                .expect("Resolve All must acknowledge after its state update")
+                .expect("requester acknowledgement channel remains open"),
+            ServerMessage::ResolveAllResult {
+                request_id: 41,
+                items_resolved: 1,
+                total: 1,
+            }
+        ));
+        match tokio::time::timeout(std::time::Duration::from_secs(1), ai_rx.recv())
+            .await
+            .expect("Resolve All must fan out the final state to the AI seat")
+            .expect("AI recipient channel remains open")
+        {
+            ServerMessage::StateUpdate { state_revision, .. } => {
+                assert_eq!(state_revision, expected_revision);
+            }
+            other => panic!("expected AI recipient StateUpdate, got {other:?}"),
         }
     }
 
@@ -7879,6 +8523,23 @@ mod full_create_guard_tests {
     }
 
     #[test]
+    fn full_create_guard_rejects_limited_range_until_supported() {
+        let deck = deck();
+        let mut fields = fields(&deck, None, None);
+        let mut format_config = engine::types::format::FormatConfig::standard();
+        format_config.range_of_influence =
+            Some(Box::new(engine::types::format::RangeOfInfluenceConfig {
+                default_range: 0,
+                player_overrides: std::collections::BTreeMap::new(),
+            }));
+        fields.format_config = Some(&format_config);
+
+        let err = guard_full_create_game_settings_inbound(fields, &[]).unwrap_err();
+
+        assert!(err.contains("range_of_influence"));
+    }
+
+    #[test]
     fn full_create_guard_rejects_ai_seats_before_deck_payload() {
         let mut deck = deck();
         deck.main_deck =
@@ -8207,13 +8868,34 @@ mod game_submission_tests {
     use super::issue_4548_full_create_tests::{recv_server_message, spawn_full_mode_server};
     use super::*;
     use engine::game::interaction::MAX_INTERACTION_STRING_LEN;
+    use engine::types::actions::DebugAction;
     use engine::types::interaction::{InteractionChoiceId, InteractionId, InteractionResponse};
+    use engine::types::zones::Zone;
     use futures_util::SinkExt;
     use server_core::game_action_payload_guard::MAX_ACTION_LIST_LEN;
     use server_core::protocol::DeckData;
     use tokio_tungstenite::tungstenite::Message as WsMessage;
     use tokio_tungstenite::MaybeTlsStream;
     use tokio_tungstenite::WebSocketStream;
+
+    #[test]
+    fn zero_count_debug_create_is_the_only_submission_no_op() {
+        let create_card = |count| {
+            GameSubmission::Action(GameAction::Debug(DebugAction::CreateCard {
+                card_name: "Lightning Bolt".to_string(),
+                owner: PlayerId(0),
+                zone: Zone::Hand,
+                count,
+                attach_to: None,
+                run_etb: false,
+                nonlegendary: false,
+            }))
+        };
+
+        assert!(create_card(0).is_zero_count_debug_create());
+        assert!(!create_card(1).is_zero_count_debug_create());
+        assert!(!GameSubmission::Action(GameAction::PassPriority).is_zero_count_debug_create());
+    }
 
     /// Connect, handshake, and create a two-seat game so the socket carries an
     /// authenticated `SocketIdentity` with both a `game_code` and a
@@ -9113,6 +9795,11 @@ mod handshake_tests {
             draft_core::types::DraftAction::Pick {
                 seat: 0,
                 card_instance_id: "x".into(),
+            },
+            draft_core::types::DraftAction::PickWithDraftEffect {
+                seat: 0,
+                effect_card_instance_id: "effect".into(),
+                card_instance_ids: vec!["x".into(), "y".into()],
             },
             draft_core::types::DraftAction::SubmitDeck {
                 seat: 0,

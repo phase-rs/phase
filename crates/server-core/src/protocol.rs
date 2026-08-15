@@ -153,6 +153,12 @@ pub enum ClientMessage {
     Action {
         action: GameAction,
     },
+    /// Server-authoritative fast-forward of repeated priority passes. The
+    /// authenticated session supplies both the requester and AI seats.
+    ResolveAll {
+        request_id: u64,
+        max_resolutions: u32,
+    },
     /// Read-only simulation of an exact automatic spell-cast action. The
     /// authenticated session, rather than the client, determines the actor.
     PreviewManaPayment {
@@ -493,6 +499,23 @@ pub enum ServerMessage {
     },
     ActionRejected {
         reason: String,
+    },
+    /// Confirms an authenticated action that intentionally produced no state
+    /// transition. The submitting adapter resolves its pending request without
+    /// caching or publishing a replacement snapshot.
+    ActionNoOp,
+    /// Requester-only rejection for a native Resolve All batch. The request
+    /// identifier prevents unrelated action failures from settling this promise.
+    ResolveAllRejected {
+        request_id: u64,
+        reason: String,
+    },
+    /// Requester-only acknowledgement for a native Resolve All batch. The
+    /// matching StateUpdate is sent first and carries the authoritative state.
+    ResolveAllResult {
+        request_id: u64,
+        items_resolved: u32,
+        total: u32,
     },
     /// Acknowledges a host-authorized permanent game cleanup.
     GameAbandoned {
@@ -1949,11 +1972,11 @@ mod tests {
     }
 
     #[test]
-    fn client_message_create_draft_with_settings_roundtrips() {
+    fn client_message_create_sealed_draft_with_settings_roundtrips() {
         let msg = ClientMessage::CreateDraftWithSettings {
             display_name: "Alice".to_string(),
             set_code: "MKM".to_string(),
-            kind: draft_core::types::DraftKind::Premier,
+            kind: draft_core::types::DraftKind::Sealed,
             public: true,
             password: Some("secret".to_string()),
             timer_seconds: Some(75),
@@ -1976,7 +1999,7 @@ mod tests {
             } => {
                 assert_eq!(display_name, "Alice");
                 assert_eq!(set_code, "MKM");
-                assert_eq!(kind, draft_core::types::DraftKind::Premier);
+                assert_eq!(kind, draft_core::types::DraftKind::Sealed);
                 assert!(public);
                 assert_eq!(password, Some("secret".to_string()));
                 assert_eq!(timer_seconds, Some(75));
@@ -2081,16 +2104,43 @@ mod tests {
     #[test]
     fn server_message_draft_state_update_roundtrips() {
         use draft_core::types::*;
-        use draft_core::view::DraftPlayerView;
+        use draft_core::view::{DraftPlayerView, DraftPoolGroups};
 
+        let first_pull = DraftCardInstance {
+            instance_id: "pack-1-card-1".to_string(),
+            name: "First Pull".to_string(),
+            set_code: "TST".to_string(),
+            collector_number: "1".to_string(),
+            rarity: "common".to_string(),
+            colors: vec!["W".to_string()],
+            cmc: 1,
+            type_line: "Creature — Test".to_string(),
+            draft_effect: None,
+        };
+        let second_pull = DraftCardInstance {
+            instance_id: "pack-2-card-1".to_string(),
+            name: "Second Pull".to_string(),
+            set_code: "TST".to_string(),
+            collector_number: "2".to_string(),
+            rarity: "uncommon".to_string(),
+            colors: vec!["U".to_string()],
+            cmc: 2,
+            type_line: "Instant".to_string(),
+            draft_effect: None,
+        };
+        let pool = vec![first_pull.clone(), second_pull.clone()];
+        let pool_groups = DraftPoolGroups::from_pool(&pool);
         let view = DraftPlayerView {
-            status: DraftStatus::Drafting,
-            kind: DraftKind::Premier,
+            status: DraftStatus::Deckbuilding,
+            kind: DraftKind::Sealed,
             current_pack_number: 0,
             pick_number: 2,
             pass_direction: PassDirection::Left,
             current_pack: None,
-            pool: Vec::new(),
+            pool,
+            draft_effects: vec![first_pull.clone()],
+            pool_groups,
+            sealed_packs: Some(vec![vec![first_pull], vec![second_pull]]),
             seats: Vec::new(),
             cards_per_pack: 14,
             pack_count: 3,
@@ -2102,15 +2152,31 @@ mod tests {
             tournament_format: TournamentFormat::Swiss,
             pod_policy: PodPolicy::Competitive,
             pairings: Vec::new(),
+            match_config: DraftKind::Sealed.match_config(),
         };
         let msg = ServerMessage::DraftStateUpdate { view: view.clone() };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ServerMessage::DraftStateUpdate { view: v } => {
-                assert_eq!(v.status, DraftStatus::Drafting);
+                assert_eq!(v.status, DraftStatus::Deckbuilding);
                 assert_eq!(v.pick_number, 2);
                 assert_eq!(v.timer_remaining_ms, Some(5000));
+                assert_eq!(v.pool_groups, view.pool_groups);
+                assert_eq!(v.draft_effects, view.draft_effects);
+                assert_eq!(
+                    v.sealed_packs
+                        .as_ref()
+                        .expect("sealed packs survive JSON transport")
+                        .iter()
+                        .map(|pack| {
+                            pack.iter()
+                                .map(|card| card.instance_id.as_str())
+                                .collect::<Vec<_>>()
+                        })
+                        .collect::<Vec<_>>(),
+                    vec![vec!["pack-1-card-1"], vec!["pack-2-card-1"]]
+                );
             }
             _ => panic!("wrong variant"),
         }
@@ -2240,6 +2306,7 @@ mod tests {
             tournament_format: TournamentFormat::Swiss,
             pod_policy: PodPolicy::Competitive,
             pairings: Vec::new(),
+            match_config: DraftKind::Premier.match_config(),
             pools: None,
             current_packs: None,
         };
@@ -2257,18 +2324,18 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_24() {
-        assert_eq!(PROTOCOL_VERSION, 24);
+    fn protocol_version_is_31() {
+        assert_eq!(PROTOCOL_VERSION, 31);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
     /// pairing. This is the assertion with teeth: full-game servers accept ONLY
-    /// the current protocol, so a v24 client can never complete a handshake
-    /// with a v23 server and silently render zero ∞ badges (the family channel
-    /// is `#[serde(default)]`, so that loss would raise no parse error).
+    /// the current protocol, so an older peer cannot complete a handshake with
+    /// a server that may answer an accepted action on a variant it does not
+    /// understand.
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
-    /// this guards — and this test reds while `protocol_version_is_24` stays
+    /// this guards — and this test reds while `protocol_version_is_31` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
@@ -2288,6 +2355,39 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
         assert!(matches!(parsed, ClientMessage::RequestTakeback(None)));
+    }
+
+    #[test]
+    fn resolve_all_wire_frames_carry_only_server_safe_metadata() {
+        let request = ClientMessage::ResolveAll {
+            request_id: 7,
+            max_resolutions: 5_000,
+        };
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"type":"ResolveAll","data":{"request_id":7,"max_resolutions":5000}}"#
+        );
+
+        let result = ServerMessage::ResolveAllResult {
+            request_id: 7,
+            items_resolved: 3,
+            total: 52,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"ResolveAllResult","data":{"request_id":7,"items_resolved":3,"total":52}}"#
+        );
+        assert!(!json.contains("waiting_for"));
+
+        let rejected = ServerMessage::ResolveAllRejected {
+            request_id: 7,
+            reason: "Resolve All requires your priority".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&rejected).unwrap(),
+            r#"{"type":"ResolveAllRejected","data":{"request_id":7,"reason":"Resolve All requires your priority"}}"#
+        );
     }
 
     /// R15. The last-action frame the client actually sends carries **no**
@@ -2418,6 +2518,16 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
         assert!(matches!(parsed, ClientMessage::CancelTakeback));
+    }
+
+    #[test]
+    fn server_message_action_no_op_roundtrips() {
+        let json = serde_json::to_string(&ServerMessage::ActionNoOp).unwrap();
+        assert_eq!(json, r#"{"type":"ActionNoOp"}"#);
+        assert!(matches!(
+            serde_json::from_str::<ServerMessage>(&json).unwrap(),
+            ServerMessage::ActionNoOp
+        ));
     }
 
     #[test]

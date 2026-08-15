@@ -434,15 +434,19 @@ fn resolve_choice(
             pick_empty_blockers(&actions)
         }
 
-        // CR 701.42b / CR 508.4: deterministic projection for the two Meld
-        // resolution choices. Tactical public play uses the policy/search path;
-        // projection only needs a stable legal branch.
-        WaitingFor::MeldPairChoice { .. } | WaitingFor::MeldAttackTargetChoice { .. } => actions
-            .first()
-            .cloned()
-            .ok_or_else(|| BailReason::NoLegalAction {
-                waiting_for: format!("{:?}", state.waiting_for),
-            })?,
+        // CR 701.42b / CR 508.4: deterministic projection for Meld and
+        // battlefield-entry attack-target choices. Tactical public play uses the
+        // policy/search path; projection only needs a stable legal branch.
+        WaitingFor::MeldPairChoice { .. }
+        | WaitingFor::MeldAttackTargetChoice { .. }
+        | WaitingFor::EntryAttackTargetChoice { .. } => {
+            actions
+                .first()
+                .cloned()
+                .ok_or_else(|| BailReason::NoLegalAction {
+                    waiting_for: format!("{:?}", state.waiting_for),
+                })?
+        }
 
         // CR 118.3 + CR 605.3b: ReturnToHand, Behold, and TapCreatures cost
         // payments project as "first legal payment" (matching the pre-collapse
@@ -1214,6 +1218,7 @@ mod tests {
                 per_cycle: None,
             },
             schema: engine::analysis::decision_template::ShortcutDecisionSchema::default(),
+            declaration: None,
         };
 
         let (_actor, action, is_policy_choice, _successor) =

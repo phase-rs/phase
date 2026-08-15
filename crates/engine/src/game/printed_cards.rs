@@ -184,6 +184,10 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     obj.base_printed_ref = obj.printed_ref.clone();
     obj.source_related_token_ids = card_face.metadata.related_token_ids.clone();
     obj.spellbook = card_face.metadata.spellbook.clone();
+    // Evidence that this face's printed text did not parse cleanly. Carried onto
+    // the object so a consumer can tell "this card has no such ability" apart from
+    // "the parser could not read that clause".
+    obj.parse_warnings = card_face.parse_warnings.clone();
     obj.modal = card_face.modal.clone();
     obj.additional_cost = card_face.additional_cost.clone();
     obj.strive_cost = card_face.strive_cost.clone();
@@ -292,6 +296,9 @@ pub fn apply_card_face_to_back_face(back_face: &mut BackFaceData, card_face: &Ca
     back_face.strive_cost = card_face.strive_cost.clone();
     back_face.casting_restrictions = card_face.casting_restrictions.clone();
     back_face.casting_options = card_face.casting_options.clone();
+    // Same copy, same reason, as `apply_card_face_to_object`: evidence that THIS
+    // face's printed text did not parse cleanly travels with the face.
+    back_face.parse_warnings = card_face.parse_warnings.clone();
 }
 
 pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) {
@@ -341,6 +348,10 @@ pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) 
     obj.strive_cost = back_face.strive_cost;
     obj.casting_restrictions = back_face.casting_restrictions;
     obj.casting_options = back_face.casting_options;
+    // The displayed face's diagnostics replace the outgoing face's. Both
+    // directions matter and both are this one line: a back face the parser could
+    // not fully read starts gating here, and transforming back off it stops.
+    obj.parse_warnings = back_face.parse_warnings;
 }
 
 /// CR 306.5b + CR 310.4b + CR 614.1c: Seed the intrinsic "enters with N
@@ -743,6 +754,9 @@ pub fn snapshot_object_face(obj: &GameObject) -> BackFaceData {
         strive_cost: obj.strive_cost.clone(),
         casting_restrictions: obj.casting_restrictions.clone(),
         casting_options: obj.casting_options.clone(),
+        // The outgoing face's diagnostics ride out with it, so the return trip
+        // restores them rather than inheriting whatever the other face had.
+        parse_warnings: obj.parse_warnings.clone(),
         layout_kind: None,
     }
 }
@@ -788,6 +802,10 @@ pub fn snapshot_object_base_face(obj: &GameObject) -> BackFaceData {
         strive_cost: obj.strive_cost.clone(),
         casting_restrictions: obj.casting_restrictions.clone(),
         casting_options: obj.casting_options.clone(),
+        // Face-derived, with no base/live split to choose between: nothing writes
+        // `parse_warnings` except a face install, so the live field IS the printed
+        // face's diagnostics and the layer system never touches it.
+        parse_warnings: obj.parse_warnings.clone(),
         layout_kind: None,
     }
 }
@@ -972,17 +990,20 @@ pub(crate) fn build_conjure_registry(
     (registry, all_collected)
 }
 
-/// CR 712 / CR 715 / CR 722: Attach the other printed face to `obj.back_face`
-/// when absent. Required for transformed zone changes (Fable of the
-/// Mirror-Breaker chapter III, Ajani flip triggers), adventurer casts, MDFC
-/// casts, and prepare spell access. Without this, `deliver_replaced_zone_change`
-/// silently skips transform when `back_face` is `None` and saga ETB lore-counter
-/// replacements fire on the front face.
-pub fn populate_back_face_if_dfc(obj: &mut GameObject, db: &CardDatabase, card_face: &CardFace) {
-    if obj.back_face.is_some() {
-        return;
-    }
+/// CR 712 / CR 715 / CR 722: Build the other printed face for a face-complete
+/// card source. This is shared by normal database hydration and debug card
+/// batches so a paused batch can retain DFC/Adventure/Omen/Meld/Prepare data
+/// without consulting the card database again on resume.
+pub fn back_face_for_card_face(db: &CardDatabase, card_face: &CardFace) -> Option<BackFaceData> {
+    let printed_ref = printed_ref_from_face(card_face);
+    back_face_for_card_face_with_printed_ref(db, card_face, printed_ref.as_ref())
+}
 
+fn back_face_for_card_face_with_printed_ref(
+    db: &CardDatabase,
+    card_face: &CardFace,
+    printed_ref: Option<&PrintedCardRef>,
+) -> Option<BackFaceData> {
     let second_face = db
         .get_by_name(&card_face.name)
         .and_then(|card_rules| match &card_rules.layout {
@@ -1010,14 +1031,11 @@ pub fn populate_back_face_if_dfc(obj: &mut GameObject, db: &CardDatabase, card_f
                 .as_deref()
                 .and_then(|id| db.get_layout_kind(id))
                 .unwrap_or(LayoutKind::Single);
-            obj.printed_ref
-                .as_ref()
+            printed_ref
                 .and_then(|printed_ref| db.get_other_face_by_printed_ref(printed_ref))
                 .map(|face| (layout_kind, face))
         });
-    let Some((layout_kind, face)) = second_face else {
-        return;
-    };
+    let (layout_kind, face) = second_face?;
 
     let mut back = BackFaceData {
         name: String::new(),
@@ -1040,13 +1058,28 @@ pub fn populate_back_face_if_dfc(obj: &mut GameObject, db: &CardDatabase, card_f
         strive_cost: None,
         casting_restrictions: Vec::new(),
         casting_options: Vec::new(),
+        // Empty seed; `apply_card_face_to_back_face` below fills it from the face.
+        parse_warnings: Vec::new(),
         layout_kind: None,
     };
     apply_card_face_to_back_face(&mut back, face);
     if layout_kind != LayoutKind::Single {
         back.layout_kind = Some(layout_kind);
     }
-    obj.back_face = Some(back);
+    Some(back)
+}
+
+/// CR 712 / CR 715 / CR 722: Attach the other printed face to `obj.back_face`
+/// when absent. Required for transformed zone changes (Fable of the
+/// Mirror-Breaker chapter III, Ajani flip triggers), adventurer casts, MDFC
+/// casts, and prepare spell access. Without this, `deliver_replaced_zone_change`
+/// silently skips transform when `back_face` is `None` and saga ETB lore-counter
+/// replacements fire on the front face.
+pub fn populate_back_face_if_dfc(obj: &mut GameObject, db: &CardDatabase, card_face: &CardFace) {
+    if obj.back_face.is_none() {
+        obj.back_face =
+            back_face_for_card_face_with_printed_ref(db, card_face, obj.printed_ref.as_ref());
+    }
 }
 
 pub fn rehydrate_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
@@ -1889,6 +1922,7 @@ mod tests {
             casting_restrictions: vec![],
             casting_options: vec![],
             layout_kind: None,
+            parse_warnings: vec![],
         });
 
         rehydrate_game_from_card_db(&mut state, &db);

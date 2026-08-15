@@ -218,6 +218,19 @@ pub enum PlaneswalkRole {
     Any,
 }
 
+/// CR 603.2 + CR 608.2: the point in another ability's lifecycle that a
+/// meta-trigger observes. The two points are distinct events with distinct
+/// timing consequences: an ability that triggers may still be countered
+/// (CR 701.5) or have its intervening-if fail (CR 603.4) and therefore never
+/// resolve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AbilityLifecyclePoint {
+    /// CR 603.2: the observed ability's trigger condition was met.
+    Triggered,
+    /// CR 608.2: the observed ability finished resolving.
+    Resolved,
+}
+
 /// All trigger modes from Forge's TriggerType enum (CR 603).
 ///
 /// Triggered abilities have a trigger condition and an effect, written as
@@ -445,6 +458,9 @@ pub enum TriggerMode {
     // Mana
     /// CR 106.4: Triggers when mana is added to a player's mana pool.
     ManaAdded,
+    /// CR 605.1b: Triggers once when a qualifying activated mana ability
+    /// resolves and produces mana, including non-tap mana abilities.
+    ManaAbilityProduced,
     ManaExpend,
 
     // Land
@@ -598,6 +614,30 @@ pub enum TriggerMode {
     /// `game::haunt::match_haunted_creature_dies`.
     HauntedCreatureDies,
 
+    /// CR 714.2e: a meta-trigger on another permanent's FINAL chapter ability —
+    /// "whenever the final chapter ability of a Saga you control resolves"
+    /// (Narci, Fable Singer; Tom Bombadil) / "… triggers" (Historian's Boon).
+    /// CR 714.2e defines a Saga's final chapter ability as the chapter ability
+    /// whose chapter symbol carries its final chapter number (CR 714.2d).
+    ///
+    /// `lifecycle` is the one axis the printed class actually varies over. It is
+    /// deliberately NOT parameterized on *which* chapter ability is observed:
+    /// all three printed cards say "the final chapter ability", and an
+    /// unqualified "a chapter ability" observer could not be modeled correctly
+    /// here anyway. CR 714.2b makes each chapter symbol its own triggered
+    /// ability, so one lore-counter addition that crosses several chapter
+    /// numbers triggers that many chapter abilities — an observer of all of them
+    /// must fire once per crossed ability, which an event-keyed matcher reading
+    /// a single `CounterAdded` cannot express. Adding that scope needs an
+    /// occurrence-level chapter event first, not a wider enum.
+    ///
+    /// The Saga itself is constrained by the trigger's ordinary `valid_card`
+    /// filter ("a Saga you control"), so no Saga-specific filter axis is needed
+    /// here.
+    FinalSagaChapterAbility {
+        lifecycle: AbilityLifecyclePoint,
+    },
+
     /// Fallback for unrecognized trigger mode strings.
     Unknown(String),
 }
@@ -712,6 +752,7 @@ impl FromStr for TriggerMode {
             "LifeLostAll" => TriggerMode::LifeLostAll,
             "LosesGame" => TriggerMode::LosesGame,
             "ManaAdded" => TriggerMode::ManaAdded,
+            "ManaAbilityProduced" => TriggerMode::ManaAbilityProduced,
             "ManaExpend" => TriggerMode::ManaExpend,
             "ManifestDread" => TriggerMode::ManifestDread,
             "Mentored" => TriggerMode::Mentored,
@@ -1052,6 +1093,7 @@ mod tests {
             "LosesGame",
             "LoyaltyAbilityActivated",
             "ManaAdded",
+            "ManaAbilityProduced",
             "ManaExpend",
             "ManifestDread",
             "Mentored",

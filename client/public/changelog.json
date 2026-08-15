@@ -1,6 +1,49 @@
 {
   "entries": [
     {
+      "id": 191,
+      "date": "2026-08-12",
+      "title": "The AI finally blocks menace",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Narci, Fable Singer drains — the engine can now watch another permanent's Saga chapter abilities resolve, which nothing could do before (Historian's Boon rides along)\n• Court of Ambition's monarch rider works: \"each opponent loses 6 life unless they discard two cards\", plus every punisher that asks a player for more than one card\n• True-Name Nemesis gets its protection from the player you name\n• Mechanized Production can win you the game on eight same-named artifacts\n• \"Whenever you cast your second spell each turn\" triggers now fire (Ichneumon Druid)\n• A spell can pay with convoke and delve together\n• Freerunning is now castable once your commander has connected\n• Forage offers its actions, and Faerie Miscreant draws when you already control one\n• Cumulative upkeep costs that aren't mana can finally be paid\n\n🛠️ Cards That Now Work Right\n• Tom Bombadil had hexproof and indestructible unconditionally — he now needs the four lore counters among your Sagas that he asks for\n• Nadu, Winged Wisdom's once-per-turn cap counts per creature, and holds across abilities it granted\n• Caged Sun and Extraplanar Lens amplify a land's mana once instead of repeatedly\n• Wrath of the Skies destroys creatures by the energy you actually paid\n• Moonlight Bargain repeats only over the cards it looked at\n• Coalition Relic stops asking for a color when it has no counter to remove\n• Memory Jar returns your hand at the right end step\n• Thousand-Year Storm counts your earlier spells again\n• Expend counts mana that was auto-tapped for you (Bakersbane Duo)\n• Fight effects point at the right two creatures\n• \"Creatures entering don't trigger\" effects now suppress only the abilities they should\n• Emperor of Bones, Serra's Emissary, Rhythm of the Wild, Eerie Interlude, Valakut, Recruit and Harsh Mentor each got a targeted fix\n• Paying life, paying mana mid-resolution, and drawing while a replacement effect asks you a question all keep their bookkeeping straight now\n\n⚔️ Combat & Gameplay\n• Your phase stops are honored during auto-pass again\n\n🤖 AI\n• The AI blocks menace creatures — and anything printing \"can't be blocked except by three or more creatures\", like Pathrazer of Ulamog. Before this it offered exactly one legal declaration against them: don't block\n• It will also throw a doomed gang block in front of lethal, since a block that dies still stops every point of damage from a non-trampler\n• It stops pointing burn at a creature it provably can't kill, while still casting mixed removal whose other half does the work\n• It no longer proposes targets it can't legally complete\n\n🖥️ Interface\n• Loading a saved game rebuilds combat prompts, suspended cards, and the full set of legal actions\n\n🌐 Multiplayer\n• A hidden card's real printed name and an unrevealed Room's details no longer travel in the state sent to opponents",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1537282067329720370"
+    },
+    {
+      "id": 190,
+      "date": "2026-08-10",
+      "title": "Magmatic Scorchwing takes flight",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Magmatic Scorchwing now deals its 3 damage on entry when your library has no nonbasic land cards, and Exuberant Wolfbear can turn a Human you control into a copy of its current power and toughness for the turn\n\n🛠️ Cards That Now Work Right\n• Emperor of Bones now finishes returning its exiled creature with its finality counter, haste, and next-end-step sacrifice even when that creature makes an enters-the-battlefield choice\n• Scythecat Cub doubles the counters from its second landfall trigger each turn as printed\n• Shared-subject triggers now keep both halves together, restoring attack, damage, zone-change, and targeting triggers on cards including Ironsoul Enforcer\n\n⚔️ Combat & Gameplay\n• Draft packs now honor each set’s published booster collation, including fixed sheets and sheets that allow duplicate cards\n\n🖥️ Interface\n• Resolve All now works reliably in native AI games and clearly reports a transport error instead of silently stopping\n\n🤖 AI\n• AI no longer spends priority windows on loop-shortcut responses that cannot affect the game, while still recognizing mana and other actions that can create a real answer",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1536540057731735555"
+    },
+    {
+      "id": 189,
+      "date": "2026-08-09",
+      "title": "Sealed packs and Marvel heroes",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Sealed is now a peer of Quick Draft and Cube Draft: open six packs one at a time, see each pack’s pulls, then review a pool grouped by card type before building\n• Captain Marvel, Apex Avenger; Conduit of Worlds; Galactus; and Avenge now have their core card interactions supported\n\n🛠️ Cards That Now Work Right\n• Brainspoil, Hawkeye, Dwarven Armorer, Archnemesis, Batroc the Leaper, Doom’s Time Platform, Dragon Man, Black Bolt, Galvanic Iteration, and Endless Ranks of HYDRA now follow more of their printed targets, costs, counters, or trigger conditions\n• Delayed-trigger payloads retain their following instructions in the correct order, fixing affected multi-clause cards such as Codie and Power Pack\n• Mana abilities that move cards to or from a library are no longer treated as mana abilities\n\n⚔️ Combat & Gameplay\n• Conditional forced-attack requirements such as Galactus’s now parse and enforce the correct defender choices\n• Cleanup discard triggers, player choices, and restored game state retain their correct game context more reliably\n\n🖥️ Interface\n• The game timeline is easier to act on, and remote scry outcomes no longer get lost when several finish together\n\n🤖 AI\n• AI keeps its choices within the actions the engine issued, handles target-dependent optional costs more safely, and recovers gracefully if an AI worker times out",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1536203698454274138"
+    },
+    {
       "id": 188,
       "date": "2026-08-08",
       "title": "Assimilate the Borg arrives",

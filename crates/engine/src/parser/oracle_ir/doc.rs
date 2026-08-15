@@ -1507,6 +1507,8 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::DoublePT { .. } => {}
         Effect::DoublePTAll { .. } => {}
         Effect::MoveCounters { .. } => {}
+        // CR 122.1: leaf counter effect — no printed-slot self-reference.
+        Effect::ReproduceEventCounters { .. } => {}
         Effect::Animate { .. } => {}
         Effect::RegisterBending { .. } => {}
         Effect::Cleanup { .. } => {}
@@ -1526,6 +1528,7 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::Choose { .. } => {}
         Effect::OpponentGuess { .. } => {}
         Effect::SwapChosenLabels { .. } => {}
+        Effect::RevealChosenNumbers { .. } => {}
         Effect::ChooseDamageSource { .. } => {}
         Effect::Suspect { .. } => {}
         Effect::Unsuspect { .. } => {}
@@ -1644,6 +1647,7 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::Adapt { .. } => {}
         Effect::Learn => {}
         Effect::Forage => {}
+        Effect::CompletePlayerAction { .. } => {}
         Effect::Harness => {}
         Effect::CollectEvidence { .. } => {}
         Effect::Endure { .. } => {}

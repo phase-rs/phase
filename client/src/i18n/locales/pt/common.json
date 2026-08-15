@@ -5,6 +5,16 @@
     "close": "Fechar",
     "closeNamed": "Fechar {{name}}"
   },
+  "quantityRef": {
+    "highestNumber": "o número mais alto",
+    "lowestNumber": "o número mais baixo",
+    "chosenNumber": "o número escolhido"
+  },
+  "scryOutcome": {
+    "title": "Vidência concluída",
+    "you": "Você",
+    "result": "{{player}} — {{top}} no topo · {{bottom}} no fundo"
+  },
   "modal": {
     "defaultEyebrow": "Ferramenta de Workspace"
   },

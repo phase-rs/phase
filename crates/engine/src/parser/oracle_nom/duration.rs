@@ -8,7 +8,13 @@
 //! upkeep", "until its controller's next untap step"), "until ~/this creature
 //! leaves the battlefield", "until you exile another card with ~/this
 //! ability", "for the rest of the game", "for as long as [condition]", "this
-//! turn", "this/that combat".
+//! turn", "this/that combat", and the "during target opponent's/player's next
+//! turn" WINDOW (Gideon Jura).
+//!
+//! A phrase added here is taken away from every clause-level grammar that owned
+//! it, because the positional wrappers below run first — see
+//! `parse_next_turn_window_possessor` for why the "during …" arm accepts only
+//! the targeted possessives.
 //!
 //! Positional wrappers (`strip_trailing_duration` / `strip_leading_duration`
 //! in `oracle_effect/lower.rs`, the clause shell, and the combat-grant
@@ -26,7 +32,9 @@ use nom::Parser;
 use super::condition::{parse_inner_condition, parse_recipient_has_counters};
 use super::error::{oracle_err, OracleError, OracleResult};
 use super::primitives::scan_contains;
-use crate::types::ability::{Duration, ObjectScope, PlayerScope, StaticCondition, TargetFilter};
+use crate::types::ability::{
+    ControllerRef, Duration, ObjectScope, PlayerScope, StaticCondition, TargetFilter,
+};
 use crate::types::phase::Phase;
 
 /// Parse a duration phrase from Oracle text.
@@ -40,9 +48,131 @@ pub fn parse_duration(input: &str) -> OracleResult<'_, Duration> {
     alt((
         preceded(tag("until "), parse_until_body),
         preceded(tag("for "), parse_for_body),
+        preceded(tag("during "), parse_during_body),
         parse_current_phase_duration,
     ))
     .parse(input)
+}
+
+/// Alternatives after the shared "during " prefix.
+///
+/// CR 514.2 + CR 508.1d: "during <possessor> next turn" names a WINDOW — the
+/// whole of that player's next turn — which is exactly the span
+/// [`Duration::UntilEndOfNextTurnOf`] already models (armed at that player's
+/// untap step, pruned at that turn's cleanup). CR 508.1d's closing sentence
+/// makes the whole-turn reading load-bearing rather than incidental: "If a
+/// requirement that says a creature attacks if able during a certain turn refers
+/// to a turn with multiple combat phases, the creature attacks if able during
+/// each declare attackers step in that turn." Gideon Jura's official ruling says
+/// the same in card terms — the "+2" "applies during each combat phase of the
+/// affected player's next turn (as opposed to applying during the affected
+/// player's next combat phase)".
+///
+/// The possessor is its own axis (`parse_next_turn_window_possessor`), so
+/// "during your next turn" and "during target opponent's next turn" are one
+/// production rather than enumerated full-string arms.
+fn parse_during_body(input: &str) -> OracleResult<'_, Duration> {
+    let (rest, possessor) = parse_next_turn_window_possessor(input)?;
+    let (rest, _) = tag(" next turn").parse(rest)?;
+    Ok((
+        rest,
+        Duration::UntilEndOfNextTurnOf {
+            player: possessor.scope(),
+        },
+    ))
+}
+
+/// The possessor of a "during <possessor> next turn" window, **as written**.
+///
+/// Deliberately distinct from the emitted [`PlayerScope`], for the same reason
+/// [`StepDeadlinePossessor`] is: two spellings that produce the SAME runtime
+/// `PlayerScope` can still differ in what the rest of the parser must do about
+/// them. Here, "target player's" and "target opponent's" both emit
+/// `PlayerScope::Target` (CR 109.4 — the duration reads the first player target
+/// either way), but they declare different companion target SLOTS, and the
+/// clause body's "that player" anaphor must inherit the matching
+/// [`ControllerRef`] so the slot's legal-target set is right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NextTurnWindowPossessor {
+    /// CR 109.4: "target player's".
+    TargetPlayer,
+    /// CR 109.4 + CR 102.2: "target opponent's" (Gideon Jura). Runtime-read
+    /// identical to `TargetPlayer`; the slot excludes the controller.
+    TargetOpponent,
+}
+
+impl NextTurnWindowPossessor {
+    /// The duration's runtime scope. Both spellings collapse here — the legality
+    /// difference lives in [`Self::controller_ref`], not in the duration.
+    fn scope(self) -> PlayerScope {
+        match self {
+            Self::TargetPlayer | Self::TargetOpponent => PlayerScope::Target,
+        }
+    }
+
+    /// CR 608.2c: the `ControllerRef` a "that player" anaphor in the clause body
+    /// must bind to.
+    pub(crate) fn controller_ref(self) -> ControllerRef {
+        match self {
+            Self::TargetPlayer => ControllerRef::TargetPlayer,
+            Self::TargetOpponent => ControllerRef::TargetOpponent,
+        }
+    }
+}
+
+/// CR 109.4: the possessor axis of a "during <possessor> next turn" window.
+///
+/// **Deliberately TARGETED possessives only** — not
+/// [`parse_controller_possessive_pronoun`]'s "your"/"their". This grammar is
+/// reached through the POSITIONAL wrappers (`strip_leading_duration` /
+/// `strip_trailing_duration`), which peel a duration phrase off ANY clause, so a
+/// phrase added here is taken away from every other clause-level grammar that
+/// owns it. "during their next turn" is owned by the CR 723.1 control-next-turn
+/// grammar (`try_parse_control_next_turn_suffix` — Mindslaver, Construct a
+/// Cosmic Cube's "you control target opponent during their next turn"), where
+/// the window is part of the effect rather than a separable duration. Accepting
+/// the pronoun forms here silently stripped that window and left the
+/// control-opponent rider unparsed.
+///
+/// "during target opponent's next turn" (Gideon Jura) is owned by no other
+/// grammar, so it is safe — and necessary — here.
+///
+/// The possessive marker is a shared trailing `alt()` over both apostrophe
+/// glyphs and the apostrophe-less spelling, matching the factoring in
+/// [`parse_object_controller_possessive`] — the noun and the marker are separate
+/// axes, not enumerated pairs.
+fn parse_next_turn_window_possessor(input: &str) -> OracleResult<'_, NextTurnWindowPossessor> {
+    terminated(
+        preceded(
+            tag("target "),
+            alt((
+                value(NextTurnWindowPossessor::TargetOpponent, tag("opponent")),
+                value(NextTurnWindowPossessor::TargetPlayer, tag("player")),
+            )),
+        ),
+        alt((tag("\u{2019}s"), tag("'s"), tag("s"))),
+    )
+    .parse(input)
+}
+
+/// CR 608.2c + CR 109.4: The possessor of a LEADING "during <possessor> next
+/// turn, …" window, for callers that must publish the window's targeted player
+/// as the clause body's relative-player scope.
+///
+/// Shares the single possessor combinator with [`parse_during_body`], so the
+/// duration value and the anaphor scope can never disagree about which spelling
+/// was written. Returns `None` when `input` does not open with such a window.
+pub(crate) fn leading_next_turn_window_possessor(input: &str) -> Option<NextTurnWindowPossessor> {
+    let (rest, possessor) = preceded(
+        tag::<_, _, OracleError<'_>>("during "),
+        parse_next_turn_window_possessor,
+    )
+    .parse(input)
+    .ok()?;
+    let (_, _) = (tag::<_, _, OracleError<'_>>(" next turn"), tag(", "))
+        .parse(rest)
+        .ok()?;
+    Some(possessor)
 }
 
 /// Alternatives after the shared "until " prefix.

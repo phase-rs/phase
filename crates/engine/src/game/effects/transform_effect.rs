@@ -222,6 +222,7 @@ mod tests {
             // face so `is_double_faced_permanent` recognizes it (the mass-transform
             // resolver pre-filters on that authority).
             layout_kind: Some(crate::types::card::LayoutKind::Transform),
+            parse_warnings: vec![],
         });
         id
     }

@@ -309,6 +309,11 @@ pub enum GameAction {
     ChooseReplacement {
         index: usize,
     },
+    /// CR 614.12a: choose which eligible opponent controls an entering
+    /// permanent. This is distinct from CR 616 replacement ordering.
+    ChooseEntryController {
+        opponent: PlayerId,
+    },
     /// CR 603.3b: Player submits the chosen order for their pending triggers.
     /// `order` is a permutation of indices into the `OrderTriggers.triggers`
     /// vec the player was prompted with; index 0 = first placed (bottom of
@@ -679,7 +684,7 @@ pub enum GameAction {
     ChooseLegend {
         keep: ObjectId,
     },
-    /// CR 310.10 + CR 704.5w + CR 704.5x: Choose which player becomes the
+    /// CR 310.11 + CR 704.5w + CR 704.5x: Choose which player becomes the
     /// battle's new protector when the SBA pauses with a `BattleProtectorChoice`.
     ChooseBattleProtector {
         protector: PlayerId,
@@ -1004,6 +1009,16 @@ fn default_true() -> bool {
     true
 }
 
+/// Default and maximum debug-spawn batch sizes. The ceiling is deliberately
+/// small relative to the server's 10,000-object snapshot ceiling: debug spawns
+/// can still be multiplied by ordinary token replacement effects.
+pub const MAX_DEBUG_CREATE_COUNT: u32 = 100;
+
+/// Serde default for debug create counts: legacy payloads create one object.
+fn default_debug_create_count() -> u32 {
+    1
+}
+
 /// Direct game-state manipulation actions for debugging, testing, and remediation.
 /// Bypasses `WaitingFor` validation — fires from any game state without disrupting
 /// the current prompt. Gated on `GameState::debug_mode`.
@@ -1033,6 +1048,11 @@ pub enum DebugAction {
         card_name: String,
         owner: PlayerId,
         zone: Zone,
+        /// Number of card objects to create. The WASM card-database bridge
+        /// currently supports one-at-a-time materialization only, because an
+        /// entry can pause for a replacement or ETB choice.
+        #[serde(default = "default_debug_create_count")]
+        count: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attach_to: Option<AttachTarget>,
         /// When `true`, route a `Battlefield` spawn through the real ETB pipeline
@@ -1178,6 +1198,10 @@ pub enum DebugAction {
     /// pass are skipped — mirrors `MoveToZone { simulate: false }`.
     CreateToken {
         request: DebugTokenRequest,
+        /// Number of tokens proposed in one creation event. This intentionally
+        /// reaches the normal replacement pipeline as one batch.
+        #[serde(default = "default_debug_create_count")]
+        count: u32,
         #[serde(default = "default_true")]
         run_etb: bool,
     },
@@ -1186,6 +1210,9 @@ pub enum DebugAction {
     CreateTokenCopy {
         source_id: ObjectId,
         owner: PlayerId,
+        /// Number of token copies created by the normal copy-token resolver.
+        #[serde(default = "default_debug_create_count")]
+        count: u32,
         /// Apply the existing `RemoveSupertype(Legendary)` copy modification
         /// while synthesizing the token.
         #[serde(default)]
@@ -1236,6 +1263,35 @@ impl DebugTokenRequest {
 }
 
 impl DebugAction {
+    /// A zero-count create request is an authorized, state-preserving no-op.
+    /// The action boundary recognizes it before lifecycle/finalization work so
+    /// UI count controls can submit zero without invalidating replays.
+    pub fn is_zero_count_create(&self) -> bool {
+        matches!(
+            self,
+            Self::CreateCard { count: 0, .. }
+                | Self::CreateToken { count: 0, .. }
+                | Self::CreateTokenCopy { count: 0, .. }
+        )
+    }
+
+    /// Rejects hostile or accidental debug spawn batches before they allocate
+    /// objects. Zero is legal and is handled as a no-op by the action boundary.
+    pub fn validate_create_count(&self) -> Result<(), String> {
+        let count = match self {
+            Self::CreateCard { count, .. }
+            | Self::CreateToken { count, .. }
+            | Self::CreateTokenCopy { count, .. } => *count,
+            _ => return Ok(()),
+        };
+        if count > MAX_DEBUG_CREATE_COUNT {
+            return Err(format!(
+                "Debug create count {count} exceeds the maximum {MAX_DEBUG_CREATE_COUNT}"
+            ));
+        }
+        Ok(())
+    }
+
     /// Human-readable description of this debug action, used by the sandbox
     /// audit log so all players see what an authorized debugger did. Engine
     /// owns the wording so the FE remains a pure display layer.
@@ -1282,6 +1338,7 @@ impl DebugAction {
                 card_name,
                 owner,
                 zone,
+                count,
                 attach_to,
                 run_etb,
                 nonlegendary,
@@ -1296,8 +1353,9 @@ impl DebugAction {
                 let etb_suffix = if *run_etb { "" } else { " (no ETB)" };
                 let nonlegendary_suffix = if *nonlegendary { " (nonlegendary)" } else { "" };
                 format!(
-                    "CreateCard ({} for {} in {:?}{}{}{})",
+                    "CreateCard ({} ×{} for {} in {:?}{}{}{})",
                     card_name,
+                    count,
                     player_label(*owner),
                     zone,
                     attach_suffix,
@@ -1433,7 +1491,11 @@ impl DebugAction {
                 player_label(*active_player)
             ),
             DebugAction::RunStateBasedActions => "RunStateBasedActions".to_string(),
-            DebugAction::CreateToken { request, run_etb } => {
+            DebugAction::CreateToken {
+                request,
+                count,
+                run_etb,
+            } => {
                 let counters = if request.enter_with_counters().is_empty() {
                     String::new()
                 } else {
@@ -1464,8 +1526,9 @@ impl DebugAction {
                     } => characteristics.display_name.clone(),
                 };
                 format!(
-                    "CreateToken ({} for {}{}{})",
+                    "CreateToken ({} ×{} for {}{}{})",
                     token_label,
+                    count,
                     player_label(request.owner()),
                     counters,
                     etb_suffix
@@ -1474,10 +1537,12 @@ impl DebugAction {
             DebugAction::CreateTokenCopy {
                 source_id,
                 owner,
+                count,
                 nonlegendary,
             } => format!(
-                "CreateTokenCopy ({} for {}{})",
+                "CreateTokenCopy ({} ×{} for {}{})",
                 obj(*source_id),
+                count,
                 player_label(*owner),
                 if *nonlegendary { " (nonlegendary)" } else { "" },
             ),
@@ -1627,6 +1692,7 @@ impl GameAction {
             | GameAction::SelectTargets { .. }
             | GameAction::ChooseTarget { .. }
             | GameAction::ChooseReplacement { .. }
+            | GameAction::ChooseEntryController { .. }
             | GameAction::OrderTriggers { .. }
             | GameAction::CancelCast
             | GameAction::BackToManaPayment

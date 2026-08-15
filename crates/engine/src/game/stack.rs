@@ -10,7 +10,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, CastingVariant, ExileLink, ExileLinkKind, GameState,
     MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingCounterPostAction, PendingSpellResolution,
-    StackEntry, StackEntryKind, StackPaidSnapshot, WaitingFor,
+    StackEntry, StackEntryKind, StackPaidSnapshot, TriggerSourceContext, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, TriggerFiring};
 use crate::types::player::PlayerId;
@@ -107,17 +107,21 @@ fn push_to_stack_with_firing(
             .get(&entry.source_id)
             .filter(|object| object.back_face.is_some());
         let count = source.map(|object| object.transformation_count);
-        let incarnation = source.map(|object| object.incarnation);
         if let Some(ability) = entry.ability_mut() {
+            // CR 608.2h + CR 113.7a: Every activated/triggered ability needs
+            // its source incarnation, not only a transforming source. Effects
+            // such as "~'s controller loses life" use it to read the source's
+            // current controller while it remains in its expected zone and its
+            // LKI controller after it leaves, without rebinding a re-entered
+            // object that reuses this storage id.
+            if ability.source_incarnation.is_none() {
+                ability
+                    .set_source_incarnation_recursive(source_ref.map(|source| source.incarnation));
+            }
             // CR 701.27f: delayed triggered abilities already carry their
             // creation-time generation and must not be restamped when fired.
             if ability.context.source_transformation_count.is_none() {
                 ability.set_source_transformation_count_recursive(count);
-                // CR 400.7: a re-entered source can share the same storage ID
-                // and transformation generation, so retain its incarnation too.
-                if ability.source_incarnation.is_none() {
-                    ability.set_source_incarnation_recursive(incarnation);
-                }
             }
         }
     }
@@ -990,6 +994,61 @@ pub(crate) fn bind_resolution_scope(
     true
 }
 
+/// CR 714.2 + CR 714.2d: The Saga-chapter identity of a stack entry that is
+/// about to resolve, or `None` if the entry is not a Saga chapter ability.
+struct ResolvingSagaChapter {
+    saga: TriggerSourceContext,
+    controller: PlayerId,
+    chapter: u32,
+    final_chapter: u32,
+}
+
+/// CR 714.2 + CR 400.7: Classify an about-to-resolve stack entry as a Saga
+/// chapter ability, reading everything from the trigger's own source context.
+///
+/// Deliberately does NOT consult live state by `source_id`. `source_id` is
+/// storage identity: a Saga that left and re-entered occupies the same id as a
+/// different object, whose chapter abilities — and mana value — are not the ones
+/// this ability triggered from. CR 113.7a lets that already-triggered chapter
+/// ability resolve anyway, so reading live state would either report the wrong
+/// Saga's numbers or (if guarded on incarnation) drop an occurrence that really
+/// did resolve.
+///
+/// `TriggerSourceContext` is the engine's existing answer to exactly this: it
+/// was captured when the chapter ability triggered, pins the incarnation in
+/// `identity.reference`, and carries that incarnation's `trigger_entries` and
+/// `lki`. Both the chapter numbers below and every characteristic an observer
+/// can later ask about therefore come from the right object by construction.
+fn resolving_saga_chapter(entry: &StackEntry) -> Option<ResolvingSagaChapter> {
+    let StackEntryKind::TriggeredAbility { ability, .. } = &entry.kind else {
+        return None;
+    };
+    let occurrence = &ability.trigger_definition_ref.as_ref()?.occurrence;
+    let saga = ability.trigger_source.as_ref()?;
+
+    // CR 714.2: chapter numbers come from the chapter-symbol provenance on the
+    // source incarnation's own trigger entries, never from a live lore count.
+    let chapter = saga
+        .trigger_entries
+        .iter()
+        .find(|entry| &entry.occurrence == occurrence)
+        .and_then(|entry| entry.definition.saga_chapter)?;
+    // CR 714.2d: greatest chapter number among that same incarnation's chapter
+    // abilities.
+    let final_chapter = saga
+        .trigger_entries
+        .iter()
+        .filter_map(|entry| entry.definition.saga_chapter)
+        .max()?;
+
+    Some(ResolvingSagaChapter {
+        saga: saga.clone(),
+        controller: entry.controller,
+        chapter,
+        final_chapter,
+    })
+}
+
 /// CR 608.2: Resolve the top object on the stack.
 pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 603.3c + CR 603.3d: The top of the stack may be a trigger entry that
@@ -1088,6 +1147,12 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         state.resolution_source_relatch = None;
         return;
     }
+
+    // CR 714.2: Snapshot the Saga-chapter identity while the Saga is still
+    // reachable — the chapter ability's own effect may remove it. Only the
+    // success path below publishes it; a fizzle (CR 608.2b) or a failed
+    // intervening-if (CR 603.4) leaves the stack without resolving.
+    let saga_chapter = resolving_saga_chapter(&entry);
 
     // Extract the resolved ability from the stack entry. `KeywordAction` is
     // handled by the early return above and never reaches this match.
@@ -1650,7 +1715,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     *enter_tapped = crate::types::proposed_event::EtbTapState::Tapped;
                 }
             }
-            // CR 712.14a + CR 310.11b: If this spell was finalized from an
+            // CR 712.14a + CR 310.12b: If this spell was finalized from an
             // ExileWithAltCost permission with `cast_transformed`, the permanent
             // enters the battlefield transformed (resolving to its back face).
             // The finalized stack-paid snapshot is authoritative here; the
@@ -2494,6 +2559,22 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     events.push(GameEvent::StackResolved {
         object_id: entry.id,
     });
+    // CR 608.2p: "Once all possible steps described in 608.2c–n are completed,
+    // any abilities that trigger when that spell or ability resolves trigger."
+    // This is the only exit from `resolve_top` on which a triggered ability
+    // actually RESOLVED — the fizzle, no-legal-target and failed-intervening-if
+    // paths returned earlier, each pushing their own `StackResolved`. Publishing
+    // the chapter-resolution event only here is what keeps "whenever the final
+    // chapter ability of a Saga you control resolves" (Narci, Fable Singer) from
+    // firing on a chapter ability that never did.
+    if let Some(chapter) = saga_chapter {
+        events.push(GameEvent::SagaChapterAbilityResolved {
+            saga: Box::new(chapter.saga),
+            controller: chapter.controller,
+            chapter: chapter.chapter,
+            final_chapter: chapter.final_chapter,
+        });
+    }
     // The popped object remains the resolving carrier through every typed
     // resolution frame, including a direct optional-choice frame. In particular,
     // a self-moving trigger needs that carrier to establish its CR 400.7j
@@ -2995,6 +3076,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         trigger_definition_ref,
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
+        selected_target_incarnations: _, // CR 400.7 selected-target pins; batch candidacy is shape-only
         controller: _,
         original_controller,
         scoped_player,
@@ -3006,6 +3088,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         context,
         optional_targeting,
         optional,
+        optional_player,
         optional_for,
         multi_target,
         target_constraints,
@@ -3066,6 +3149,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && *context == SpellContext::default()
         && !*optional_targeting
         && !*optional
+        && optional_player.is_none()
         && optional_for.is_none()
         && multi_target.is_none()
         && target_constraints.is_empty()
@@ -3207,6 +3291,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         trigger_definition_ref: _,
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
+        selected_target_incarnations: _, // CR 400.7 selected-target pins; batch candidacy is shape-only
         controller: _,
         original_controller: _,
         scoped_player,
@@ -3215,9 +3300,10 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         else_ability,
         duration,
         condition,
-        context: _,
+        context,
         optional_targeting,
         optional,
+        optional_player,
         optional_for,
         multi_target,
         target_constraints,
@@ -3270,8 +3356,10 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         && else_ability.is_none()
         && duration.is_none()
         && condition.is_none()
+        && *context == SpellContext::default()
         && !*optional_targeting
         && !*optional
+        && optional_player.is_none()
         && optional_for.is_none()
         && multi_target.is_none()
         && target_constraints.is_empty()
@@ -3398,6 +3486,7 @@ fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility
         trigger_definition_ref: _,
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
+        selected_target_incarnations: _, // CR 400.7 selected-target pins; batch candidacy is shape-only
         controller: _,
         original_controller: _,
         scoped_player,
@@ -3406,9 +3495,10 @@ fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility
         else_ability,
         duration,
         condition,
-        context: _,
+        context,
         optional_targeting,
         optional,
+        optional_player,
         optional_for,
         multi_target,
         target_constraints,
@@ -3461,8 +3551,10 @@ fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility
         && else_ability.is_none()
         && duration.is_none()
         && condition.is_none()
+        && *context == SpellContext::default()
         && !*optional_targeting
         && !*optional
+        && optional_player.is_none()
         && optional_for.is_none()
         && multi_target.is_none()
         && target_constraints.is_empty()
@@ -4048,6 +4140,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         context: a_context,
         optional_targeting: a_optional_targeting,
         optional: a_optional,
+        optional_player: a_optional_player,
         optional_for: a_optional_for,
         multi_target: a_multi_target,
         target_constraints: a_target_constraints,
@@ -4082,6 +4175,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         modal: a_modal,
         mode_abilities: a_mode_abilities,
         parent_target_missing_reason: a_parent_target_missing_reason,
+        selected_target_incarnations: a_selected_target_incarnations,
     } = a;
     let ResolvedAbility {
         effect: b_effect,
@@ -4103,6 +4197,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         context: b_context,
         optional_targeting: b_optional_targeting,
         optional: b_optional,
+        optional_player: b_optional_player,
         optional_for: b_optional_for,
         multi_target: b_multi_target,
         target_constraints: b_target_constraints,
@@ -4137,6 +4232,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         modal: b_modal,
         mode_abilities: b_mode_abilities,
         parent_target_missing_reason: b_parent_target_missing_reason,
+        selected_target_incarnations: b_selected_target_incarnations,
     } = b;
 
     a_effect == b_effect
@@ -4147,6 +4243,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         // keeps this manual comparison in agreement with the type's derived
         // `PartialEq`; disagreeing with the derive would be the actual defect.
         && a_target_incarnations == b_target_incarnations
+        && a_selected_target_incarnations == b_selected_target_incarnations
         && a_controller == b_controller
         && a_scoped_player == b_scoped_player
         && a_kind == b_kind
@@ -4169,6 +4266,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         && a_context == b_context
         && a_optional_targeting == b_optional_targeting
         && a_optional == b_optional
+        && a_optional_player == b_optional_player
         && a_optional_for == b_optional_for
         && a_multi_target == b_multi_target
         && a_target_constraints == b_target_constraints
@@ -4806,6 +4904,7 @@ mod tests {
             casting_restrictions: vec![],
             casting_options: vec![],
             layout_kind: None,
+            parse_warnings: vec![],
         }
     }
 
@@ -5332,6 +5431,7 @@ mod tests {
         let trigger_event = GameEvent::BecomesTarget {
             target: TargetRef::Object(ObjectId(999)), // target doesn't matter for this test
             source_id: spell_id,
+            source_controller: PlayerId(0),
         };
 
         // Build a triggered ability that would want to resolve TriggeringSpellController
@@ -9793,7 +9893,7 @@ mod tests {
         ///
         /// Self-skips when `/tmp/gamestate.json` is absent (CI lacks the repro).
         /// `#[ignore]` by default: depends on a local-only 27MB snapshot. Run with
-        /// `cargo test -p engine -- --ignored real_scute_board`.
+        /// `cargo test -p phase-engine -- --ignored real_scute_board`.
         /// Re-parse every `StaticCondition::Unrecognized` carried in a snapshot's
         /// static definitions through the live `parse_inner_condition`, replacing
         /// any that now parse to a typed condition. The snapshot's stored text has

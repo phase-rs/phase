@@ -44,8 +44,26 @@ fn live_battlefield_object_mut<'a>(
     })
 }
 
-fn pending_replacement_pauses_sba(state: &GameState) -> bool {
+/// CR 704.4: state-based actions pay no attention to what happens during the
+/// resolution of a spell or ability. An entry that is mid-resolution — parked on
+/// a CR 616.1 replacement-ordering choice, or on a CR 303.4f Aura-host choice —
+/// is not yet the thing that entered, so the object-destroying SBAs (notably the
+/// CR 704.5m unattached-Aura sweep) must not see it.
+///
+/// NOT `effects::waits_for_resolution_choice`, though the two overlap on
+/// `ReturnAsAuraTarget`. That predicate answers a different question — "must a
+/// chained sub-ability be stashed as a CR 608.2c continuation across this
+/// window?" — and answers it for some sixty prompt variants (Scry, Discard,
+/// Search, …). Reusing it here would suppress the CR 704.5 SBAs across every one
+/// of them, a behavior change with nothing to do with an in-flight ENTRY. It
+/// also cannot express the other half of this gate: `pending_replacement`, which
+/// is a parked event rather than a `WaitingFor` variant at all.
+fn mid_resolution_entry_pauses_sba(state: &GameState) -> bool {
     state.pending_replacement.is_some()
+        || matches!(
+            state.waiting_for,
+            crate::types::game_state::WaitingFor::ReturnAsAuraTarget { .. }
+        )
 }
 
 /// CR 704.3: Run state-based actions in a fixpoint loop until no more actions are performed,
@@ -136,7 +154,7 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
         // on the next pass once the choice is answered. The later
         // `pending_replacement` guard (after lethal-damage) still handles
         // regeneration replacements created *within* this loop.
-        if pending_replacement_pauses_sba(state) {
+        if mid_resolution_entry_pauses_sba(state) {
             return;
         }
 
@@ -162,7 +180,7 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
         }
 
         // CR 614.3 / CR 701.19b: If a regeneration replacement choice is pending, pause SBA evaluation.
-        if pending_replacement_pauses_sba(state) {
+        if mid_resolution_entry_pauses_sba(state) {
             return;
         }
 
@@ -174,7 +192,7 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             // CR 704.5m: If an Aura is attached to an illegal object or player, it is put into
             // its owner's graveyard.
             check_unattached_auras(state, events, &mut any_performed, &battlefield_snapshot);
-            if pending_replacement_pauses_sba(state) {
+            if mid_resolution_entry_pauses_sba(state) {
                 return;
             }
 
@@ -187,7 +205,7 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             // graveyard. Runs after unattached_auras so dead-host Roles are already
             // gone — only attached Roles compete for the per-(host, controller) slot.
             check_role_uniqueness(state, events, &mut any_performed, &battlefield_snapshot);
-            if pending_replacement_pauses_sba(state) {
+            if mid_resolution_entry_pauses_sba(state) {
                 return;
             }
 
@@ -196,13 +214,13 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             // graveyards; on a tie for newest, all of them do. Global (not per-player) and
             // choiceless — modeled on check_role_uniqueness.
             check_world_rule(state, events, &mut any_performed, &battlefield_snapshot);
-            if pending_replacement_pauses_sba(state) {
+            if mid_resolution_entry_pauses_sba(state) {
                 return;
             }
 
             // CR 704.5i + CR 306.9: If a planeswalker has loyalty 0, it is put into its owner's graveyard.
             check_zero_loyalty(state, events, &mut any_performed, &battlefield_snapshot);
-            if pending_replacement_pauses_sba(state) {
+            if mid_resolution_entry_pauses_sba(state) {
                 return;
             }
 
@@ -210,7 +228,7 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             // ability that has triggered but not yet left the stack, it's put into its
             // owner's graveyard.
             check_zero_defense(state, events, &mut any_performed, &battlefield_snapshot);
-            if pending_replacement_pauses_sba(state) {
+            if mid_resolution_entry_pauses_sba(state) {
                 return;
             }
 
@@ -226,17 +244,17 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
                 &battlefield_snapshot,
             );
 
-            // CR 704.5w + CR 704.5x + CR 310.10: Battle with no (or illegal) protector —
+            // CR 704.5w + CR 704.5x + CR 310.11: Battle with no (or illegal) protector —
             // controller chooses an appropriate protector; graveyard if none can be chosen.
             check_battle_protector(state, events, &mut any_performed, &battlefield_snapshot);
-            if pending_replacement_pauses_sba(state) {
+            if mid_resolution_entry_pauses_sba(state) {
                 return;
             }
 
             // CR 704.5s + CR 714.4: If a Saga has lore counters >= its final chapter number,
             // and no chapter ability has triggered but not yet left the stack, sacrifice it.
             check_saga_sacrifice(state, events, &mut any_performed, &battlefield_snapshot);
-            if pending_replacement_pauses_sba(state) {
+            if mid_resolution_entry_pauses_sba(state) {
                 return;
             }
 
@@ -256,7 +274,7 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
                 &mut any_performed,
                 &battlefield_snapshot,
             );
-            if pending_replacement_pauses_sba(state) {
+            if mid_resolution_entry_pauses_sba(state) {
                 return;
             }
 
@@ -630,6 +648,8 @@ fn static_affects_player(
             // CR 102.1: this matcher has no `GameState` to read
             // `active_player` from. Fail closed (mirrors the siblings above).
             Some(ControllerRef::ActivePlayer) => false,
+            // CR 109.4 + CR 611.2: a snapshotted id IS resolvable here.
+            Some(ControllerRef::SpecificPlayer { id }) => *id == player_id,
             None => true,
         },
         Some(TargetFilter::Player) => true,
@@ -1790,7 +1810,7 @@ fn check_zero_defense(
     zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &performed_ids));
 }
 
-/// CR 704.5p (+ CR 310.9 for the battle half): the full "this permanent may not
+/// CR 704.5p (+ CR 310.10 for the battle half): the full "this permanent may not
 /// be attached to anything" state-based action, expressed as its two printed
 /// sentences.
 ///
@@ -1911,7 +1931,7 @@ fn check_illegal_attachment_unattach(
     }
 }
 
-/// CR 704.5w + CR 704.5x + CR 310.10 + CR 310.11a: If a battle that isn't being
+/// CR 704.5w + CR 704.5x + CR 310.11 + CR 310.12a: If a battle that isn't being
 /// attacked has no protector, an illegal protector, or (for Sieges) a protector
 /// that equals its controller, its controller chooses a legal protector. If no
 /// legal player exists, the battle is put into its owner's graveyard.
@@ -1960,8 +1980,8 @@ fn check_battle_protector(
         let is_siege = battle.card_types.subtypes.iter().any(|s| s == "Siege");
         let protector = battle.protector();
 
-        // Legal protectors for a Siege are opponents of the controller (CR 310.11a).
-        // For non-Siege battles with no battle type, CR 310.8a says the controller
+        // Legal protectors for a Siege are opponents of the controller (CR 310.12a).
+        // For non-Siege battles with no battle type, CR 310.9a says the controller
         // becomes the protector; we treat the controller as legal in that case.
         let protector_legal = match protector {
             Some(p) if is_siege => crate::game::players::opponents(state, controller).contains(&p),
@@ -1973,12 +1993,12 @@ fn check_battle_protector(
             continue;
         }
         if being_attacked.contains(&battle_id) {
-            // CR 310.10: Only applies to battles that aren't being attacked.
+            // CR 310.11: Only applies to battles that aren't being attacked.
             continue;
         }
 
         // Compute legal choices.
-        // CR 310.11a: a Siege's controller "must choose its protector from among their
+        // CR 310.12a: a Siege's controller "must choose its protector from among their
         // opponents", and CR 704.5w's SBA phrasing — "no player IN THE GAME designated as
         // its protector ... chooses an appropriate player" — seats CR 102.1 directly on
         // this seam. A CHOICE, not a target (CR 115.10a), so the candidate list is the
@@ -1993,7 +2013,7 @@ fn check_battle_protector(
                 .filter(|p| !state.eliminated_players.contains(p))
                 .collect()
         } else {
-            // CR 310.8a: With no battle types, controller is the protector.
+            // CR 310.9a: With no battle types, controller is the protector.
             vec![controller]
         };
 
@@ -2002,7 +2022,7 @@ fn check_battle_protector(
                 if live_battlefield_object(state, &battle_id).is_none() {
                     continue;
                 }
-                // CR 310.10 / CR 704.5w + CR 614.6: No legal protector exists —
+                // CR 310.11 / CR 704.5w + CR 614.6: No legal protector exists —
                 // the battle is put into the graveyard, a "leaves the
                 // battlefield" event that must consult Moved redirects. Bail on a
                 // CR 616.1 pause (the SBA fixpoint re-runs and finds the rest).
@@ -2031,7 +2051,7 @@ fn check_battle_protector(
                 if live_battlefield_object(state, &battle_id).is_none() {
                     continue;
                 }
-                // CR 310.10 + CR 704.5w + CR 704.5x: multiple legal protectors —
+                // CR 310.11 + CR 704.5w + CR 704.5x: multiple legal protectors —
                 // the controller must choose. Pause the SBA fixpoint and yield
                 // a WaitingFor (mirrors `check_legend_rule`). The SBA re-runs
                 // on the next apply and finds any remaining battles.
@@ -4347,15 +4367,17 @@ mod tests {
         obj.card_types.core_types.push(CoreType::Enchantment);
         obj.card_types.subtypes.push("Saga".to_string());
         obj.entered_battlefield_turn = Some(state.turn_number);
-        // Add chapter triggers so final_chapter_number() works
+        // CR 714.2: add chapter triggers so final_chapter_number() works. The
+        // `saga_chapter` provenance is what marks these as chapter abilities —
+        // a bare lore threshold is not one (see `saga_chapter_numbers`).
         for ch in 1..=final_chapter {
             obj.trigger_definitions.push(
-                TriggerDefinition::new(TriggerMode::CounterAdded).counter_filter(
-                    CounterTriggerFilter {
+                TriggerDefinition::new(TriggerMode::CounterAdded)
+                    .counter_filter(CounterTriggerFilter {
                         counter_type: CounterType::Lore,
                         threshold: Some(ch),
-                    },
-                ),
+                    })
+                    .saga_chapter(ch),
             );
         }
         id
@@ -4462,6 +4484,7 @@ mod tests {
             object_id: id,
             counter_type: CounterType::Lore,
             count: 1,
+            actor: PlayerId(0),
         }];
 
         check_state_based_actions(&mut state, &mut events);

@@ -197,7 +197,7 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // CR 508.1d + CR 701.15b: MustAttackAwayFromSource — the goad requirement
     // pair without the designation (Kardur, Doomscourge; Maximum Carnage I).
     // Nullary, so it is registry-keyable (unlike the data-carrying
-    // `MustAttackPlayer`). Runtime enforcement lives in combat.rs. The registry
+    // `MustAttackDefender`). Runtime enforcement lives in combat.rs. The registry
     // key is ALSO what keeps `coverage::unimplemented_mechanics` quiet for every
     // creature this grafts onto — it is load-bearing for the client, not
     // decoration.
@@ -1579,6 +1579,27 @@ pub fn player_protection_from(
     player_id: PlayerId,
     source: Option<ObjectId>,
 ) -> bool {
+    player_protection_from_object(
+        state,
+        player_id,
+        source.and_then(|id| state.objects.get(&id)),
+    )
+}
+
+/// CR 702.16 + CR 614.12: [`player_protection_from`] against an explicitly
+/// supplied source object.
+///
+/// Every source-side read in this authority is a characteristic read (card type
+/// for CR 702.16 + CR 205.2, controller for CR 702.16k), so a source that is not
+/// yet the object stored under its id — a meld or liminal ENTRANT, whose id still
+/// holds the pre-entry component — must be read from its projection instead of
+/// from `state.objects`. `None` means "no concrete source object", for which only
+/// the CR 702.16j `Everything` short-circuit can fire.
+pub fn player_protection_from_object(
+    state: &GameState,
+    player_id: PlayerId,
+    source: Option<&crate::game::game_object::GameObject>,
+) -> bool {
     use crate::game::keywords::source_matches_card_type;
     use crate::types::ability::ControllerRef;
     use crate::types::keywords::ProtectionTarget;
@@ -1587,7 +1608,7 @@ pub fn player_protection_from(
     if player_has_protection_from_everything(state, player_id) {
         return true;
     }
-    let Some(source_id) = source else {
+    let Some(source_obj) = source else {
         return false;
     };
     let context = StaticCheckContext {
@@ -1624,36 +1645,28 @@ pub fn player_protection_from(
                 ProtectionTarget::Everything => false,
                 // CR 702.16 + CR 205.2: protection from the card type
                 // chosen as the granting permanent (e.g. Serra's Emissary) entered.
-                ProtectionTarget::ChosenCardType => {
-                    state.objects.get(&source_id).is_some_and(|src| {
-                        src_obj
-                            .chosen_card_type()
-                            .and_then(|ct| ct.protection_quality_str())
-                            .is_some_and(|quality| source_matches_card_type(src, quality))
-                    })
-                }
+                ProtectionTarget::ChosenCardType => src_obj
+                    .chosen_card_type()
+                    .and_then(|ct| ct.protection_quality_str())
+                    .is_some_and(|quality| source_matches_card_type(source_obj, quality)),
                 // CR 702.16k: "Protection from [a player]" at the player level — the
                 // protected player has protection from each object the specified
                 // player(s) control. "Each of your opponents" (CR 702.16i) → the
                 // `Opponent` scope: any source NOT controlled by the protected
                 // player is an opponent's object in 1v1 and free-for-all. Mirrors the
                 // object-level arm in `game/keywords.rs::source_matches_protection_target`.
-                ProtectionTarget::FromPlayer(scope) => {
-                    state
-                        .objects
-                        .get(&source_id)
-                        .is_some_and(|src| match scope {
-                            ControllerRef::Opponent => src.controller != player_id,
-                            ControllerRef::You => src.controller == player_id,
-                            // Target/chosen player refs have no static context here —
-                            // fail closed (the parser never emits them for protection).
-                            _ => false,
-                        })
-                }
+                ProtectionTarget::FromPlayer(scope) => match scope {
+                    ControllerRef::Opponent => source_obj.controller != player_id,
+                    ControllerRef::You => source_obj.controller == player_id,
+                    // Target/chosen player refs have no static context here —
+                    // fail closed (the parser never emits them for protection).
+                    _ => false,
+                },
                 // Truly inert at the player level — no card grants these qualities to
                 // a player; object-level grants of these qualities flow through the
                 // `AddKeyword(Protection)` continuous path, not `PlayerProtection`.
                 ProtectionTarget::ChosenColor
+                | ProtectionTarget::ChosenPlayer
                 | ProtectionTarget::Color(_)
                 | ProtectionTarget::Multicolored
                 | ProtectionTarget::Quality(_)
@@ -1981,6 +1994,11 @@ pub(crate) fn static_filter_matches(
                         // `state.active_player`.
                         crate::types::ability::ControllerRef::ActivePlayer => {
                             state.active_player == player_id
+                        }
+                        // CR 109.4 + CR 611.2: a snapshotted id, resolvable
+                        // directly (mirrors the ActivePlayer arm above).
+                        crate::types::ability::ControllerRef::SpecificPlayer { id } => {
+                            *id == player_id
                         }
                     };
                 }

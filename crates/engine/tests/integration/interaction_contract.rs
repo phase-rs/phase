@@ -34,7 +34,8 @@ use engine::types::interaction::{
     InteractionPreviewRequest, InteractionPreviewStatus, InteractionReasonCode,
     InteractionResponse, InteractionResponseSpec, InteractionRoleCode, InteractionSessionId,
     InteractionShortcutCountSpec, InteractionShortcutDecision, InteractionShortcutPin,
-    InteractionShortcutPointKind, InteractionShortcutResponseCode, InteractionSubmission,
+    InteractionShortcutPointKind, InteractionShortcutPreview, InteractionShortcutPreviewEntry,
+    InteractionShortcutPreviewFamily, InteractionShortcutResponseCode, InteractionSubmission,
     PreviewRequestId, MAX_INTERACTION_LIST_LEN,
 };
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -2365,6 +2366,7 @@ fn loop_shortcut_zero_max_iterations_is_rejected_not_clamped() {
                 max_iterations,
                 ..Default::default()
             },
+            declaration: None,
         };
         bind(&mut state, "loop-zero-bound");
         state
@@ -2426,6 +2428,7 @@ fn loop_shortcut_narrowed_max_iterations_bounds_the_picker() {
             max_iterations: 3,
             ..Default::default()
         },
+        declaration: None,
     };
     bind(&mut state, "loop-narrowed-bound");
 
@@ -2474,6 +2477,7 @@ fn loop_shortcut_number_schema_accepts_a_fixed_count_above_one() {
             // No narrowed CR 732.2a bound — `Default` carries the global cap.
             ..Default::default()
         },
+        declaration: None,
     };
     bind(&mut state, "loop-count");
     let view = priority_view(&state);
@@ -2497,6 +2501,386 @@ fn loop_shortcut_number_schema_accepts_a_fixed_count_above_one() {
         },
     );
     assert_eq!(preview.status, InteractionPreviewStatus::Confirmable);
+}
+
+/// The per-period signature the C4 preview rows multiply out. Chosen so that three separate
+/// ways of getting the preview wrong all show up as a value mismatch:
+///
+/// * **two mana colors**, so a preview that published raw axes instead of folding them into
+///   one engine-side family total would emit two `Mana` rows;
+/// * **a life LOSS on a seat that is not the proposer**, which `unbounded_components` drops
+///   entirely (it reports only what a cycle accrues) and which a proposer-keyed subject
+///   mapping would attribute to the wrong player;
+/// * **a whole-game axis** (`tokens_created`) with no seat, so the `Option<u8>` subject is
+///   exercised on both sides.
+fn preview_period_delta() -> engine::analysis::resource::ResourceVector {
+    let mut delta = engine::analysis::resource::ResourceVector::default();
+    // `MANA_INDEX` is `[W, U, B, R, G, C]`.
+    delta.mana[0] = 1;
+    delta.mana[1] = 2;
+    delta.life.insert(P1, -2);
+    delta.tokens_created = 4;
+    delta
+}
+
+/// A `LoopShortcut` offer stated exactly the way `certified_bounded_cycle_offer` states one:
+/// `Fixed(max_iterations)` as the suggestion and the same number as the ceiling, with the
+/// measured period on the certificate.
+fn preview_offer(
+    iteration_count: IterationCount,
+    max_iterations: u32,
+    per_cycle: Option<engine::analysis::resource::ResourceVector>,
+) -> GameState {
+    let mut state = GameState::new_two_player(42);
+    state.waiting_for = WaitingFor::LoopShortcut {
+        proposer: P0,
+        predicted_winner: Some(P0),
+        certificate: engine::analysis::loop_check::LoopCertificate {
+            unbounded: Vec::new(),
+            win_kind: engine::analysis::loop_check::WinKind::Advantage,
+            mandatory: false,
+            residual_board_delta: engine::analysis::resource::BoardDelta::default(),
+            per_cycle: per_cycle.map(|delta| engine::analysis::resource::PeriodicDelta {
+                frames_per_period: 1,
+                delta,
+                victim_slot: Vec::new(),
+            }),
+        },
+        schema: ShortcutDecisionSchema {
+            iteration_count,
+            max_iterations,
+            ..Default::default()
+        },
+        // `points` is empty here (`..Default::default()`), and an empty schema never publishes a
+        // declaration — the same invariant row D4 asserts against `build_bounded_declaration`. So
+        // `None` is what the engine itself would stage, not merely what makes the literal compile.
+        // These rows exercise the PREVIEW projection, which reads the certificate and schema; a
+        // declaration here would stage a state the producer cannot emit.
+        declaration: None,
+    };
+    bind(&mut state, "loop-preview");
+    state
+}
+
+fn shortcut_preview_of(state: &GameState) -> Option<InteractionShortcutPreview> {
+    let view = priority_view(state);
+    let InteractionOpportunityResponse::Schema {
+        spec: InteractionResponseSpec::Shortcut { preview, .. },
+        ..
+    } = &view.opportunities[0].response
+    else {
+        panic!("loop shortcut uses a shortcut schema");
+    };
+    preview.clone()
+}
+
+fn preview_entry(
+    family: InteractionShortcutPreviewFamily,
+    player: Option<u8>,
+    amount: i32,
+) -> InteractionShortcutPreviewEntry {
+    InteractionShortcutPreviewEntry {
+        family,
+        player,
+        amount,
+    }
+}
+
+/// C4a — CR 732.2a: the offer publishes what its stated count actually DOES, computed by the
+/// engine as `n × δ` over the certificate's measured per-period delta. Without this the count
+/// picker C5 wires up is a number with no displayed consequence, and the only other way to
+/// show one is `× count` arithmetic in the display layer, which the layer rule forbids.
+///
+/// **Asserted at TWO distinct counts, and that is the point of the row.** A single count is
+/// satisfiable by an implementation that ignores `count` entirely and publishes the raw
+/// per-cycle delta, or by one that hardcodes a constant. Only the pair pins the
+/// multiplication.
+///
+/// REVERT-PROBES, both RUN:
+/// * drop the `count` factor (`per_cycle` instead of `per_cycle.saturating_mul(count)`) ⇒
+///   both arms fail on values;
+/// * hardcode the factor to `3` ⇒ the `n = 3` arm still PASSES and the `n = 5` arm fails,
+///   which is exactly the "one value is satisfiable by a constant" hole the second count
+///   closes.
+#[test]
+fn loop_shortcut_preview_states_the_finished_magnitude_for_the_declared_count() {
+    use engine::analysis::resource::ResourceAxis;
+
+    // ── REACH-GUARDS on the fixture, before any preview is read. Each one names the wrong
+    //    implementation it makes observable; without them this row could pass while the
+    //    preview was built on the wrong fold or aggregated in the wrong layer.
+    let delta = preview_period_delta();
+    assert!(
+        !delta
+            .unbounded_components()
+            .iter()
+            .any(|(axis, _)| matches!(axis, ResourceAxis::Life(_))),
+        "reach-guard: the victim's life LOSS is INVISIBLE to `unbounded_components`, so a \
+         preview rebuilt on that fold would silently publish a lethal drain as producing \
+         nothing. The `Life` expectations below are what detect it"
+    );
+    assert_eq!(
+        delta
+            .axis_components()
+            .iter()
+            .filter(|(axis, _)| matches!(axis, ResourceAxis::Mana(_)))
+            .count(),
+        2,
+        "reach-guard: the period moves TWO mana axes, so the single `Mana` entry expected \
+         below is proof the engine folded them — not proof that only one existed"
+    );
+    assert_ne!(
+        P1.0, P0.0,
+        "reach-guard: the victim is not the proposer, so a subject mapping keyed off the \
+         proposer resolves to the wrong seat"
+    );
+
+    let at = |n: u32| {
+        shortcut_preview_of(&preview_offer(
+            IterationCount::Fixed(n),
+            n,
+            Some(preview_period_delta()),
+        ))
+        .expect("a bounded offer with a measured period states a preview")
+    };
+
+    let three = at(3);
+    assert_eq!(
+        three.count, 3,
+        "the count travels WITH the magnitudes, so a renderer cannot attach them to another"
+    );
+    assert_eq!(
+        three.entries,
+        vec![
+            preview_entry(InteractionShortcutPreviewFamily::Mana, None, 9),
+            preview_entry(InteractionShortcutPreviewFamily::Life, Some(P1.0), -6),
+            preview_entry(InteractionShortcutPreviewFamily::Tokens, None, 12),
+        ],
+        "CR 732.2a: three repetitions of (+1W +2U, P1 -2 life, +4 tokens) finish at +9 mana, \
+         P1 at -6 life, +12 tokens"
+    );
+
+    let five = at(5);
+    assert_eq!(five.count, 5);
+    assert_eq!(
+        five.entries,
+        vec![
+            preview_entry(InteractionShortcutPreviewFamily::Mana, None, 15),
+            preview_entry(InteractionShortcutPreviewFamily::Life, Some(P1.0), -10),
+            preview_entry(InteractionShortcutPreviewFamily::Tokens, None, 20),
+        ],
+        "the SECOND count is what makes this row unsatisfiable by a constant: an \
+         implementation pinned to 3 passes the arm above and fails here"
+    );
+}
+
+/// C4a, negative half — a preview is published only when the offer supplies BOTH authorities
+/// it multiplies: a measured per-period signature and a finite count. Every arm is paired
+/// with the positive control on the same builder, so none of them can pass because the whole
+/// window failed to project.
+#[test]
+fn loop_shortcut_preview_is_absent_without_both_a_period_and_a_finite_count() {
+    // ── PAIRED POSITIVE, first.
+    assert!(
+        shortcut_preview_of(&preview_offer(
+            IterationCount::Fixed(4),
+            4,
+            Some(preview_period_delta()),
+        ))
+        .is_some(),
+        "control: both authorities present must publish a preview, else every arm below \
+         passes for an unrelated reason"
+    );
+
+    // ── No measured period: every mint except the bounded one carries `per_cycle: None`,
+    //    as does every save written before that field existed.
+    assert_eq!(
+        shortcut_preview_of(&preview_offer(IterationCount::Fixed(4), 4, None)),
+        None,
+        "an offer that states no per-period signature has nothing to multiply"
+    );
+
+    // ── CR 704.5a: `UntilLethal` is the determinate-drain mode. It names no number, so
+    //    there is no declared count to state a finished magnitude for — even though the
+    //    period here IS measured, which is what keeps this arm distinct from the one above.
+    assert_eq!(
+        shortcut_preview_of(&preview_offer(
+            IterationCount::UntilLethal,
+            4,
+            Some(preview_period_delta()),
+        )),
+        None,
+        "`UntilLethal` states no finite count to multiply the period by"
+    );
+
+    // ── A period whose every family nets to zero (one W gained and one W spent) states
+    //    nothing, and is dropped rather than published as a row of zeroes.
+    let mut inert = engine::analysis::resource::ResourceVector::default();
+    inert.mana[0] = 1;
+    inert.mana[5] = -1;
+    assert_eq!(
+        inert.axis_components().len(),
+        2,
+        "reach-guard: the inert period really does move two axes, so the `None` below is the \
+         family fold cancelling them — not an empty vector arriving empty"
+    );
+    assert_eq!(
+        shortcut_preview_of(&preview_offer(IterationCount::Fixed(4), 4, Some(inert))),
+        None,
+        "a period that nets to nothing on every family publishes no preview at all"
+    );
+}
+
+/// C4a's hostile guard — the preview is ARITHMETIC, and must never become a clone-apply.
+///
+/// `game::interaction::preview_interaction` answers a different question (is this response
+/// submittable) by cloning the whole `GameState` and applying to the clone. It cannot answer
+/// this one: a CR 732.2a shortcut's declared count may reach `MAX_SHORTCUT_CYCLES`, and the
+/// entire point of the rule is that the sequence is NOT played out to find out what it does.
+/// A future rewrite that reached for the previewer would be quietly quadratic and quietly
+/// wrong, and no value assertion would catch it — so this row reads the source.
+///
+/// ⚠ TWO SPANS, AND THE SECOND ONE IS WHY THIS ROW CAN FAIL AT ALL (fix round 2, F1).
+///
+/// The first revision read only `shortcut_preview_entries`, whose signature is
+/// `(&ResourceVector, u32)` — no `GameState` is in scope anywhere in it, and neither is one in
+/// its only caller `loop_shortcut_projection(&WaitingFor)`. The banned construct was therefore
+/// not CONSTRUCTIBLE in the span, so the row could not fail no matter what regressed. MEASURED
+/// by the reviewer: inserting `let mut probe_clone = authoritative_state.clone();` immediately
+/// above the `loop_shortcut_projection` call left all three C4 rows green.
+///
+/// The clone-apply can only originate where the spec is BUILT: `opportunity_for_slot`'s
+/// `LoopShortcut` arm, which holds `authoritative_state` and `filtered_state`, both
+/// `&GameState`. Both spans are read now, and the arm span proves its OWN constructibility —
+/// the enclosing signature binds two `&GameState` parameters and the span uses one — so it
+/// cannot silently degrade into another span where the ban is unwritable. A positive control
+/// proves the SEARCH is real; only the constructibility guard proves the SPAN is right.
+///
+/// WHAT WRONG IMPLEMENTATION WOULD STILL PASS THIS ROW? One that clones the state inside a
+/// THIRD function called from the arm — the ban is textual, not a call-graph closure — and one
+/// that computes the right numbers by some other expensive means. This is a routing guard; the
+/// value rows above pin the arithmetic.
+///
+/// The likeliest instance of that first gap is closed by TYPE rather than by text (fix round 3,
+/// G4): the cheapest way to reach a `GameState` from the preview is to widen
+/// `loop_shortcut_projection` to accept one, which contains none of the banned strings and
+/// lives in a span this row does not read. Its parameter list is pinned below, so the
+/// projection can see the waiting-for state and nothing else — and neither can anything it
+/// calls. What remains uncovered is a clone reached through some OTHER existing binding, which
+/// no signature can rule out.
+///
+/// REVERT-PROBES, ALL THREE RUN:
+/// * add the line `// preview_interaction` inside `shortcut_preview_entries` ⇒ FAILS on the
+///   assert (it still compiles, so the probe discriminates on the assertion, not the build);
+/// * insert `let mut probe_clone = authoritative_state.clone();` immediately above the
+///   `loop_shortcut_projection` call in the arm — the reviewer's exact probe ⇒ FAILS;
+/// * widen `loop_shortcut_projection` to `(waiting_for: &WaitingFor, _state: &GameState)` —
+///   the exact evasion the textual ban misses ⇒ FAILS on the signature pin (and on nothing
+///   else, which is the point).
+#[test]
+fn loop_shortcut_preview_never_routes_through_the_clone_apply_previewer() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/game/interaction.rs");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+
+    // ── POSITIVE CONTROL: the banned symbol IS in this file. Without this the "does not
+    //    contain" assertions below would pass just as happily against an empty read, a
+    //    renamed file, or a search that never matched anything.
+    assert!(
+        text.contains("pub fn preview_interaction("),
+        "positive control: `preview_interaction` must exist in this file, else the absence \
+         asserted below is the absence of the whole search"
+    );
+
+    // The span from `marker` up to the next `terminator`, both anchored at a line start.
+    let extract = |scope: &str, marker: &str, terminator: &str| -> String {
+        let start = scope.find(marker).unwrap_or_else(|| {
+            panic!("reach-guard: `{marker}` must be found by name, or this row is vacuous")
+        });
+        let rest = &scope[start + marker.len()..];
+        let end = rest.find(terminator).unwrap_or(rest.len());
+        format!("{marker}{}", &rest[..end])
+    };
+
+    // ── SPAN 1: the arithmetic itself.
+    let arithmetic = extract(&text, "\nfn shortcut_preview_entries(", "\nfn ");
+    assert!(
+        arithmetic.contains("saturating_mul"),
+        "reach-guard: the extracted span must be the real body — the multiplication is the \
+         function's entire job, so its absence means the span is wrong"
+    );
+
+    // ── SPAN 2: the attach site, where the spec carrying the preview is built.
+    let builder = "\nfn opportunity_for_slot(";
+    let builder_start = text.find(builder).expect(
+        "reach-guard: the spec builder must be found by name — it is the only scope holding a \
+         `GameState` on the preview's path",
+    );
+    let builder_scope = &text[builder_start..];
+    let signature_end = builder_scope
+        .find(") -> ")
+        .expect("reach-guard: the builder's signature must be delimited");
+    let signature = &builder_scope[..signature_end];
+    // ── CONSTRUCTIBILITY: the ban below is only a guard where the banned thing can be
+    //    WRITTEN. This span sits inside a function that binds two `&GameState` parameters,
+    //    so `authoritative_state.clone()` — the reviewer's exact probe — compiles here.
+    assert!(
+        signature.contains("authoritative_state: &GameState")
+            && signature.contains("filtered_state: &GameState"),
+        "constructibility: the arm span guards nothing unless a `GameState` is IN SCOPE to be \
+         cloned. `shortcut_preview_entries` takes `(&ResourceVector, u32)`, which is exactly \
+         why reading only that function produced a row that could not fail"
+    );
+    let attach = extract(
+        builder_scope,
+        "\n        HumanResponseModel::LoopShortcut => {",
+        "\n        HumanResponseModel::",
+    );
+    assert!(
+        attach.contains("loop_shortcut_projection(") && attach.contains("projection.preview"),
+        "reach-guard: the extracted arm must be the one that projects the offer AND publishes \
+         the preview onto the spec, else the ban is being applied to the wrong arm"
+    );
+    assert!(
+        attach.contains("filtered_state"),
+        "constructibility, second half: the arm must actually USE one of those `&GameState` \
+         bindings, so a clone is writable at the exact point the reviewer's probe inserted one"
+    );
+
+    // ── TYPE-LEVEL PIN: the ban below is TEXTUAL, so its cheapest evasion is to widen
+    //    `loop_shortcut_projection` to take a `&GameState` and clone it THERE — a third span
+    //    this row does not read, and one that would contain none of the three banned strings.
+    //    The projection's parameter list closes that route by TYPE rather than by text: with
+    //    only a `&WaitingFor` in scope, no callee it reaches can be handed a `GameState`
+    //    either, so "the preview computation cannot see game state" stops being a search
+    //    result and becomes a fact about the signature.
+    let projection_signature = extract(&text, "\nfn loop_shortcut_projection(", ") -> ");
+    let projection_params = projection_signature
+        .strip_prefix("\nfn loop_shortcut_projection(")
+        .expect("`extract` re-emits its own marker, so the prefix is always present")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_eq!(
+        projection_params.trim_end_matches(','),
+        "waiting_for: &WaitingFor",
+        "type-level pin: the shortcut preview is computed from the WAITING-FOR state alone. \
+         Adding a parameter here — a `&GameState`, or anything reaching one — reopens the \
+         clone-apply route through a span the textual ban below never reads"
+    );
+
+    for (span_name, body) in [
+        ("shortcut_preview_entries", &arithmetic),
+        ("opportunity_for_slot's LoopShortcut arm", &attach),
+    ] {
+        for banned in ["preview_interaction", "state.clone()", "GameState"] {
+            assert!(
+                !body.contains(banned),
+                "CR 732.2a: the shortcut preview is `n × δ` over the certificate's measured \
+                 period. {span_name} must not reach `{banned}` — a clone-apply cannot state \
+                 the result of a sequence that is deliberately never played out"
+            );
+        }
+    }
 }
 
 #[test]
@@ -2570,6 +2954,7 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
             ],
             convoke_tappable_count: 1,
         },
+        declaration: None,
     };
     bind(runner.state_mut(), "loop-point-kinds");
 
@@ -2640,6 +3025,187 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
         InteractionPreviewStatus::Rejected {
             reason: InteractionReasonCode::UnknownChoice,
         }
+    );
+}
+
+/// **Row R2-f — the HUMAN ingress emits the same spelling as the engine's own producer.**
+///
+/// CR 601.2c: one shape per point kind, whoever submitted it. `materialize_loop_shortcut_response`
+/// decodes a submitted player candidate on a `Targets` point into
+/// `Scheduled(Constant(Ranking::one(AnnouncementSubject::Seat(..))))` — the same value
+/// `game::engine::record_trigger_target_answer` journals for an announced seat — and an OBJECT
+/// candidate on the SAME point into `TargetPin::ByIdentity`, unchanged.
+///
+/// # Discrimination
+///
+/// Migrate only the engine's producer and leave this decoder emitting `TargetPin::Player(*player)`
+/// ⇒ one `Targets` point yields two different pin spellings depending on WHO submitted the
+/// answer, and the seat assertion below FAILS while the object assertion stays green. That
+/// asymmetry — one arm moving, one not — is what makes this a spelling row rather than a
+/// smoke test.
+///
+/// # Paired positive reach-guard
+///
+/// The decoder must still ACCEPT end to end: `resolve_interaction_response` returns
+/// `Ok(GameAction::DeclareShortcut { .. })`, which means `declaration_conforms` ran
+/// `predictability_gate` and `validate_pins` at range 1 and passed. Without it the row would be
+/// satisfied by a decoder that had simply started refusing everything.
+///
+/// # ⚠ WHY THIS ROW BUILDS ITS OWN BOARD (measured, not preference)
+///
+/// The file's other shortcut rows share a schema whose only slot source is
+/// `AllCopies { CardId(9001) }`, which no battlefield object carries. After the split a `Seat`
+/// pin on such a slot resolves through `resolve_ability_instance` ⇒ `resolve_source`'s
+/// `AllCopies` arm (`.filter(|o| o.zone == Zone::Battlefield && o.card_id == *card_id)`) ⇒
+/// `None` ⇒ `IllegalTarget` ⇒ `validate_pins` ⇒ `declaration_conforms == false` ⇒
+/// `ConstraintUnsatisfied`. The positive reach-guard above would be UNSATISFIABLE there, and the
+/// cheapest-looking repair would be to loosen a fail-closed predicate. So the slot source here is
+/// a `ThisObject` naming a live battlefield creature, at that object's LIVE incarnation read from
+/// state (CR 400.7) — never a hard-coded one. `AllCopies` cannot take the CR 114.4 / CR 113.6p
+/// command-zone disjunct either: that disjunct is `ThisObject`-only, so a command-zone source
+/// named by CARD identity (a conspiracy, an Eminence commander — both of which DO have cards)
+/// still resolves `None` and fails closed. Measured residual, disclosed rather than closed.
+///
+/// The three shipped `Shortcut` rows in this file are untouched by the split, but by INDEX
+/// ORDERING rather than by design: the file has exactly one candidate-selection site and it takes
+/// `candidate_ids[0]`, which on the one board offering both is the OBJECT. That vector must not
+/// be reordered.
+///
+/// This row's own board deliberately exercises BOTH indices, and the two arms key each other: if
+/// the projection's candidate order did not follow `legal_targets`, both assertions would fail
+/// rather than one silently passing on the wrong candidate.
+#[test]
+fn loop_shortcut_human_ingress_emits_the_target_class_spelling_for_a_submitted_seat() {
+    use engine::analysis::decision_template::{
+        AnnouncementSubject, PinnedDecision, Ranking, TargetPin, TargetSchedule,
+    };
+
+    let mut scenario = GameScenario::new();
+    let target = scenario.add_creature(P0, "R2f Ability Source", 1, 1).id();
+    let mut runner = scenario.build();
+    let incarnation = runner.state().objects[&target].incarnation;
+    let slot = DecisionSlot {
+        source: engine::types::game_state::YieldTarget::ThisObject {
+            source_id: target,
+            incarnation: Some(incarnation),
+            trigger_description: None,
+        },
+        index: 0,
+    };
+    runner.state_mut().waiting_for = WaitingFor::LoopShortcut {
+        proposer: P0,
+        predicted_winner: Some(P0),
+        certificate: engine::analysis::loop_check::LoopCertificate {
+            unbounded: Vec::new(),
+            win_kind: engine::analysis::loop_check::WinKind::Advantage,
+            mandatory: false,
+            residual_board_delta: engine::analysis::resource::BoardDelta::default(),
+            per_cycle: None,
+        },
+        schema: ShortcutDecisionSchema {
+            iteration_count: IterationCount::Fixed(2),
+            max_iterations: ShortcutDecisionSchema::default().max_iterations,
+            points: vec![DecisionPoint {
+                slot: slot.clone(),
+                kind: DecisionPointKind::Targets {
+                    // Index 0 is the OBJECT, index 1 is the SEAT. Both are exercised below.
+                    legal_targets: vec![TargetRef::Object(target), TargetRef::Player(P1)],
+                    min_targets: 1,
+                    max_targets: 1,
+                    ordered: true,
+                },
+            }],
+            convoke_tappable_count: 0,
+        },
+        declaration: None,
+    };
+    bind(runner.state_mut(), "r2f-human-seat-pin");
+
+    let view = priority_view(runner.state());
+    let InteractionOpportunityResponse::Schema {
+        spec: InteractionResponseSpec::Shortcut { points, .. },
+        ..
+    } = &view.opportunities[0].response
+    else {
+        panic!("the loop shortcut offer uses a shortcut schema");
+    };
+    assert_eq!(
+        points.len(),
+        1,
+        "reach-guard: exactly one published point, so the pin below addresses the point this \
+         row is about"
+    );
+    assert_eq!(
+        points[0].candidate_ids.len(),
+        2,
+        "reach-guard: BOTH legal targets must be offered as candidates, else one of the two \
+         arms below is unreachable"
+    );
+
+    let decode = |candidate: usize| {
+        resolve_interaction_response(
+            runner.state(),
+            P0,
+            &InteractionSubmission {
+                interaction_id: view.opportunities[0].interaction_id.clone(),
+                response: InteractionResponse::Shortcut {
+                    decision: InteractionShortcutDecision::AcceptSuggested,
+                    pins: vec![InteractionShortcutPin {
+                        group: 0,
+                        choice_ids: vec![points[0].candidate_ids[candidate].clone()],
+                    }],
+                },
+            },
+        )
+    };
+
+    // ── THE CLAIM: a submitted SEAT decodes to the CR 601.2c TARGET-class spelling ──
+    let GameAction::DeclareShortcut {
+        template: Some(seat_template),
+        ..
+    } = decode(1).expect(
+        "paired positive: the human ingress still ACCEPTS end to end — `declaration_conforms` \
+         ran `predictability_gate` and `validate_pins` at range 1 and passed",
+    )
+    else {
+        panic!("a shortcut acceptance carrying pins materializes a template");
+    };
+    assert_eq!(
+        seat_template.decisions,
+        vec![PinnedDecision::Targets {
+            slot: slot.clone(),
+            targets: vec![TargetPin::Scheduled(TargetSchedule::Constant(
+                Ranking::one(AnnouncementSubject::Seat(P1))
+            ))],
+        }],
+        "CR 601.2c: a candidate on a `Targets` point is an ANNOUNCED target, so a submitted \
+         seat takes the TARGET-class spelling — the same value the engine's own producer \
+         journals. `TargetPin::Player(P1)` here would select the authority by WHO SUBMITTED \
+         the answer rather than by WHAT IT IS"
+    );
+
+    // ── THE SIBLING: an OBJECT candidate on the SAME point is unchanged ──
+    let GameAction::DeclareShortcut {
+        template: Some(object_template),
+        ..
+    } = decode(0).expect("the object candidate is accepted on the same point")
+    else {
+        panic!("a shortcut acceptance carrying pins materializes a template");
+    };
+    assert_eq!(
+        object_template.decisions,
+        vec![PinnedDecision::Targets {
+            slot,
+            targets: vec![TargetPin::ByIdentity(
+                engine::types::game_state::YieldTarget::ThisObject {
+                    source_id: target,
+                    incarnation: Some(incarnation),
+                    trigger_description: None,
+                }
+            )],
+        }],
+        "the migration re-spelled the SEAT branch only: an object candidate still binds by \
+         CR 400.7 identity"
     );
 }
 

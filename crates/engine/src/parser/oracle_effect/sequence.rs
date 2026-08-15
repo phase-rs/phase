@@ -1,6 +1,6 @@
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, tag_no_case, take_until};
+use nom::bytes::complete::{tag, tag_no_case, take_till, take_until};
 use nom::character::complete::multispace1;
 use nom::combinator::{all_consuming, eof, map, opt, rest, value};
 use nom::sequence::{preceded, terminated};
@@ -24,12 +24,12 @@ use crate::parser::oracle_quantity::{
 };
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, ChoiceType, Chooser,
-    ContinuousModification, ControllerRef, CopyRetargetPermission, CounterSourceRider, DigSource,
-    Duration, Effect, EffectScope, ExcessRecipient, FaceDownBody, FaceDownProfile, FilterProp,
-    ForEachCategoryAction, LibraryPosition, ManaSpendRestriction, MultiTargetSpec, ObjectScope,
-    PermissionGrantee, PlayerFilter, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
-    SpellStackToGraveyardReplacement, StaticDefinition, TargetChoiceTiming, TargetFilter,
-    TypeFilter, TypedFilter,
+    ContinuousModification, ControllerRef, CopyRetargetPermission, CounterSourceRider,
+    DigRestOrder, DigSource, Duration, Effect, EffectScope, ExcessRecipient, FaceDownBody,
+    FaceDownProfile, FilterProp, ForEachCategoryAction, LibraryPosition, ManaSpendRestriction,
+    MultiTargetSpec, ObjectScope, PermissionGrantee, PlayerFilter, PtValue, QuantityExpr,
+    QuantityRef, RevealUntilDisposition, SpellStackToGraveyardReplacement, StaticDefinition,
+    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -280,7 +280,10 @@ fn parse_put_chosen_cards_at_library_position(lower: &str) -> Option<LibraryPosi
     value(
         LibraryPosition::Top,
         all_consuming((
-            tag::<_, _, OracleError<'_>>("put those cards on top"),
+            alt((
+                tag::<_, _, OracleError<'_>>("put those cards on top"),
+                tag("put the chosen cards on top"),
+            )),
             opt(alt((
                 tag(" of your library"),
                 tag(" of their owner's library"),
@@ -404,20 +407,18 @@ fn parse_reveal_until_rest_zone(lower: &str) -> Option<Zone> {
 /// Whole-line dig continuation "put the rest on the bottom of your library
 /// [in a random order | in any order]" following a `ChooseFromZone`.
 ///
-/// CR 401.4: multi-card library placement defaults to owner-arranged order,
-/// so "in any order" restates the default. The random-order variant is
-/// currently collapsed into the same continuation (randomization is not yet
-/// modeled at this seam) — the suffix axis is one `opt(alt(...))`, extended
-/// there when it is.
-fn parse_put_rest_on_bottom_line(input: &str) -> OracleResult<'_, ()> {
-    value(
-        (),
-        all_consuming((
-            tag("put the rest on the bottom of your library"),
-            opt(alt((tag(" in a random order"), tag(" in any order")))),
-        )),
-    )
-    .parse(input)
+/// CR 400.5 + CR 608.2c: "in a random order" is an instruction distinct from
+/// the player-chosen ordering in "in any order".
+fn parse_put_rest_on_bottom_line(input: &str) -> OracleResult<'_, DigRestOrder> {
+    let (input, _) = tag("put the rest on the bottom of your library").parse(input)?;
+    let (input, rest_order) = opt(alt((
+        value(DigRestOrder::Random, tag(" in a random order")),
+        value(DigRestOrder::Preserve, tag(" in any order")),
+    )))
+    .parse(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    let (input, _) = eof(input)?;
+    Ok((input, rest_order.unwrap_or(DigRestOrder::Preserve)))
 }
 
 /// Whole-line dig continuation matcher — delegates to [`parse_put_rest_on_bottom_line`]
@@ -817,24 +818,36 @@ fn parse_put_all_back_in_any_order(lower: &str) -> bool {
         .is_ok()
 }
 
-fn parse_put_one_dig_card_on_top(lower: &str) -> bool {
-    (
+fn parse_put_one_dig_card_on_top(lower: &str) -> Option<DigRestOrder> {
+    let (rest, _) = (
         alt((
             tag::<_, _, OracleError<'_>>("you may put "),
             tag("may put "),
             tag("put "),
         )),
+        opt(tag("up to ")),
         alt((tag("one of those cards"), tag("one of them"))),
-        tag(" back "),
+        opt(tag(" back")),
+        tag(" "),
         alt((tag("on top of your library"), tag("on top"))),
-        opt(tag(".")),
-        eof,
     )
         .parse(lower.trim())
-        .is_ok()
+        .ok()?;
+    let (rest, order) = opt(value(
+        DigRestOrder::Random,
+        tag::<_, _, OracleError<'_>>(
+            " and the rest on the bottom of your library in a random order",
+        ),
+    ))
+    .parse(rest)
+    .ok()?;
+    terminated(opt(tag::<_, _, OracleError<'_>>(".")), eof)
+        .parse(rest)
+        .ok()?;
+    Some(order.unwrap_or(DigRestOrder::Preserve))
 }
 
-fn parse_exile_rest_after_dig(lower: &str) -> bool {
+fn parse_exile_rest_clause(lower: &str) -> bool {
     (
         tag::<_, _, OracleError<'_>>("exile the rest"),
         opt(tag(".")),
@@ -1082,7 +1095,16 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                     // attach tail is the sole exception: split at " and attach an
                     // Equipment that was attached …" even inside quote mode.
                     let allow_single_quote_attach_split = in_single_quote
-                        && starts_attach_equipment_was_attached_clause(remainder_trimmed);
+                        && (starts_attach_equipment_was_attached_clause(remainder_trimmed)
+                            // CR 608.2c + CR 113.7a: `~'s controller` is a
+                            // complete player predicate, so its chained action
+                            // must reach the regular clause lowerer. Restrict
+                            // this escape hatch to the exact typed source-owner
+                            // subject; other possessives remain one clause.
+                            || source_controller_predicate_has_action_tail(
+                                &current,
+                                remainder_trimmed,
+                            ));
                     if !in_single_quote || allow_single_quote_attach_split {
                         // Suppress split when "and put" follows "from among" — the
                         // "put into hand / onto battlefield" is part of the same
@@ -2418,6 +2440,23 @@ pub(crate) fn starts_bare_and_clause(text: &str) -> bool {
     starts_bare_and_clause_lower(&lower)
 }
 
+/// CR 608.2c + CR 113.7a: `~'s controller loses 2 life and you draw a card`
+/// contains two actions. Card-name possessives otherwise keep quote mode to
+/// protect object predicates such as "~'s controller sacrifices it and draws a
+/// card"; admit only the self-source player predicate followed by a normal
+/// imperative clause start.
+fn source_controller_predicate_has_action_tail(current: &str, tail: &str) -> bool {
+    let lower = current.to_ascii_lowercase();
+    let parsed = preceded(
+        take_until::<_, _, OracleError<'_>>("~'s controller "),
+        tag::<_, _, OracleError<'_>>("~'s controller "),
+    )
+    .parse(lower.as_str());
+    parsed.is_ok_and(|(rest, _)| {
+        tag::<_, _, OracleError<'_>>("loses ").parse(rest).is_ok() && starts_bare_and_clause(tail)
+    })
+}
+
 fn starts_they_continuous_clause_lower(input: &str) -> OracleResult<'_, ()> {
     let (input, _) = tag("they ").parse(input)?;
     alt((
@@ -2729,6 +2768,42 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         value((), tag("you search ")),
         value((), tag("you surveil ")),
         value((), tag("you get ")),
+        // CR 725.1: "There is no monarch in a game until an effect instructs a
+        // player to become the monarch" — becoming the monarch is its own
+        // instruction, never a noun-phrase continuation of the conjunct before
+        // it. CR 608.2c: the controller follows the printed instructions "in
+        // the order written", so a trailing "… and you become the monarch" is
+        // the NEXT instruction and must reach the clause dispatcher on its own.
+        //
+        // Exactly two lines in the whole corpus contain " and you become " —
+        // both were broken, in different ways:
+        //   Heart-Shaped Herb: "…with three +1/+1 counters on it AND YOU BECOME
+        //     THE MONARCH" — dropped SILENTLY (reported supported, zero gaps).
+        //     It failed at TWO seams: the return-destination counter suffix in
+        //     `strip_return_destination_ext_with_remainder` (lower.rs) used to
+        //     truncate its remainder at the counter clause's START offset,
+        //     discarding the tail before any guard could see it (that seam now
+        //     CONSUMES the clause as a leading entry rider, so the tail
+        //     survives), and this splitter had no arm to peel the tail into its
+        //     own chunk once it did.
+        //   Fall from Favor: "tap enchanted creature AND YOU BECOME THE
+        //     MONARCH" — isolated by `try_split_targeted_compound` (mod.rs) but
+        //     dispatched through `parse_imperative_effect`, which never tries
+        //     the subject-predicate path for a bare "you" subject, so it
+        //     surfaced as `Unimplemented { name: "you" }`.
+        // Splitting at the chunk level runs BEFORE both of those seams, so this
+        // one arm recovers both cards.
+        //
+        // The tag is the SUBJECT+VERB boundary, not the designation: "become"
+        // is a registered `PREDICATE_VERBS` member (subject.rs) and
+        // `build_become_clause` (subject.rs) is the single authority that
+        // adjudicates WHICH become (monarch / life total / day-night / color /
+        // animation). Matching "you become the monarch" here would put
+        // card-specific knowledge in the sentence-chunking layer. Mirrors the
+        // `it becomes ` arm below — same predicate, different subject. A
+        // blanket "you <PREDICATE_VERB>" rule is NOT safe: " and you control"
+        // (22 corpus lines) is a relative clause, never a clause start.
+        value((), tag("you become ")),
         value((), tag("you may ")),
         // CR 614.1b + CR 603.7a: "Effects that use the word 'skip' are
         // replacement effects" — a skip is its own instruction, never a
@@ -4110,6 +4185,7 @@ pub(super) fn apply_clause_continuation(
         ContinuationAst::PutRest {
             destination,
             reorder_all,
+            rest_order,
         } => {
             // CR 608.2c + CR 701.20b (Portent of Calamity): After a per-category
             // exile from among revealed cards, "put the rest into <zone>" moves
@@ -4139,6 +4215,7 @@ pub(super) fn apply_clause_continuation(
                         target: TargetFilter::LastRevealed,
                         enters_under: None,
                         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                        enters_attacking: false,
                         enter_with_counters: vec![],
                         face_down_profile: None,
                         library_position: None,
@@ -4184,10 +4261,11 @@ pub(super) fn apply_clause_continuation(
                             target: TargetFilter::LastRevealed,
                             enters_under: None,
                             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                            enters_attacking: false,
                             enter_with_counters: vec![],
                             face_down_profile: None,
                             library_position,
-                            random_order: false,
+                            random_order: matches!(rest_order, DigRestOrder::Random),
                         },
                     ));
                     return;
@@ -4196,6 +4274,7 @@ pub(super) fn apply_clause_continuation(
                     &mut defs[bound_index],
                     destination,
                     reorder_all,
+                    rest_order,
                 );
             }
         }
@@ -4204,9 +4283,11 @@ pub(super) fn apply_clause_continuation(
             filter: card_filter,
             destination: kept_dest,
             rest_destination: rest_dest,
+            rest_order: continuation_rest_order,
             enters_under,
             face_down_profile,
             enter_tapped,
+            enters_attacking,
             reveal_verb,
         } => {
             // CR 608.2c: the "from among those cards" continuation patches the
@@ -4298,8 +4379,10 @@ pub(super) fn apply_clause_continuation(
                                 filter: TargetFilter::Any,
                                 destination: None,
                                 rest_destination: Some(Zone::Library),
+                                rest_order: DigRestOrder::Preserve,
                                 reveal: false,
                                 enter_tapped: false,
+                                enters_attacking: false,
                                 source: DigSource::PriorLook,
                             },
                         );
@@ -4319,8 +4402,10 @@ pub(super) fn apply_clause_continuation(
                                 filter: card_filter,
                                 destination: kept_dest,
                                 rest_destination: Some(rest_dest.unwrap_or(Zone::Library)),
+                                rest_order: continuation_rest_order,
                                 reveal: false,
                                 enter_tapped,
+                                enters_attacking,
                                 source: DigSource::PriorLook,
                             },
                         );
@@ -4361,8 +4446,10 @@ pub(super) fn apply_clause_continuation(
                 filter,
                 destination,
                 rest_destination,
+                rest_order,
                 reveal,
                 enter_tapped: dig_enter_tapped,
+                enters_attacking: dig_enters_attacking,
                 ..
             } = &mut *previous.effect
             {
@@ -4411,7 +4498,9 @@ pub(super) fn apply_clause_continuation(
                 if let Some(rd) = rest_dest {
                     *rest_destination = Some(rd);
                 }
+                *rest_order = continuation_rest_order;
                 *dig_enter_tapped = enter_tapped;
+                *dig_enters_attacking = enters_attacking;
             } else if let Effect::Mill {
                 destination: mill_destination,
                 ..
@@ -4456,6 +4545,7 @@ pub(super) fn apply_clause_continuation(
                                 enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(
                                     enter_tapped,
                                 ),
+                                enters_attacking,
                                 enter_with_counters: vec![],
                                 face_down_profile,
                                 library_position: None,
@@ -4492,7 +4582,7 @@ pub(super) fn apply_clause_continuation(
                                 enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(
                                     enter_tapped,
                                 ),
-                                enters_attacking: false,
+                                enters_attacking,
                                 up_to: is_up_to,
                                 enter_with_counters: vec![],
                                 conditional_enter_with_counters: vec![],
@@ -4713,6 +4803,63 @@ pub(super) fn apply_clause_continuation(
             );
             append_definition_to_sub_chain(previous, put_def);
         }
+        ContinuationAst::ExileSearchRemainder => {
+            let Some(previous) = defs.last_mut() else {
+                return;
+            };
+            // Recognition only constructs this continuation after
+            // `SearchLibrary { target_player: None, source_zones.len() >= 2 }`.
+            // Keep that invariant loud here: this continuation is absorbed, so
+            // silently returning would otherwise discard "exile the rest"
+            // without emitting the required zone move.
+            let Effect::SearchLibrary {
+                source_zones,
+                target_player: None,
+                ..
+            } = &*previous.effect
+            else {
+                unreachable!(
+                    "ExileSearchRemainder must immediately follow a self multi-zone SearchLibrary"
+                );
+            };
+            // CR 701.23a + CR 400.3: the preceding search selected from each
+            // listed zone, so `origin: None` lets this mass move scan both the
+            // library and graveyard constrained by `InAnyZone` below.
+            // CR 608.2c: the selected cards are the search's tracked result;
+            // exclude that set so only the unchosen remainder is exiled.
+            let target = TargetFilter::Typed(
+                TypedFilter::default()
+                    .controller(ControllerRef::You)
+                    .properties(vec![
+                        FilterProp::InAnyZone {
+                            zones: source_zones.clone(),
+                        },
+                        FilterProp::Not {
+                            prop: Box::new(FilterProp::InTrackedSet {
+                                id: crate::types::identifiers::TrackedSetId(0),
+                            }),
+                        },
+                    ]),
+            );
+            append_definition_to_sub_chain(
+                previous,
+                AbilityDefinition::new(
+                    kind,
+                    Effect::ChangeZoneAll {
+                        origin: None,
+                        destination: Zone::Exile,
+                        target,
+                        enters_under: None,
+                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                        enters_attacking: false,
+                        enter_with_counters: vec![],
+                        face_down_profile: None,
+                        library_position: None,
+                        random_order: false,
+                    },
+                ),
+            );
+        }
         ContinuationAst::BecomesPlotted => {
             let Some(previous) = defs.last_mut() else {
                 return;
@@ -4784,6 +4931,22 @@ pub(super) fn apply_clause_continuation(
                     // object's type at ChangeZone resolution instead of
                     // applying them unconditionally.
                     *enters_modified_if = moved_filter;
+                }
+                Effect::ChangeZoneAll {
+                    enters_attacking,
+                    enter_tapped,
+                    ..
+                } => {
+                    *enters_attacking = true;
+                    *enter_tapped = crate::types::zones::EtbTapState::Tapped;
+                }
+                Effect::Dig {
+                    enters_attacking,
+                    enter_tapped,
+                    ..
+                } => {
+                    *enters_attacking = true;
+                    *enter_tapped = true;
                 }
                 Effect::Meld { entry, .. } => {
                     *entry = crate::types::ability::PermanentEntryMode::TappedAndAttacking {
@@ -4963,6 +5126,22 @@ pub(super) fn apply_clause_continuation(
                 position: crate::types::ability::LibraryPosition::Top,
                 face_down,
             };
+            // CR 608.2c + CR 401.1: "look at the top card of each player's library,
+            // then exile those cards" — the `ScopedPlayer` owner marker set by
+            // `parse_dig_library_owner` lifts this materialized `ExileTop` into a
+            // per-player `player_scope: All` fan-out, the same shape the direct
+            // "exile the top card of each player's library" path gets via the lift
+            // in `parse_effect_chain_ir`. This is the symmetric materialization
+            // seam: the direct path lifts where `parse_exile_ast` produces its
+            // `ExileTop`, and this look-then-exile path lifts where the `Dig` is
+            // back-patched into one. The lift survives assembly because this
+            // back-patched def already passed the per-clause `player_scope` write,
+            // and the current clause's write only touches its own def. The
+            // after-scope play/cast tail (Extract Power's `CastFromZone`) is
+            // detached by `split_player_scope_chain` and runs once for the
+            // controller over the union of exiled cards.
+            let d = &mut defs[bound_index];
+            super::lift_each_player_exile_top_scope(&mut d.effect, &mut d.player_scope);
         }
         // CR 702.75a + CR 406.3: "exile one of them face down" patches the
         // preceding private `Dig` into the Hideaway shape — the controller
@@ -5166,11 +5345,13 @@ fn patch_rest_destination_recursively(
     def: &mut AbilityDefinition,
     destination: Zone,
     reorder_all: bool,
+    rest_order: DigRestOrder,
 ) {
     match &mut *def.effect {
         Effect::Dig {
             destination: kept_destination,
             rest_destination,
+            rest_order: dig_rest_order,
             ..
         } => {
             if reorder_all {
@@ -5179,6 +5360,7 @@ fn patch_rest_destination_recursively(
             } else if rest_destination.is_none() {
                 *rest_destination = Some(destination);
             }
+            *dig_rest_order = rest_order;
         }
         Effect::RevealUntil {
             rest_destination, ..
@@ -5188,7 +5370,7 @@ fn patch_rest_destination_recursively(
         _ => {}
     }
     if let Some(else_def) = def.else_ability.as_deref_mut() {
-        patch_rest_destination_recursively(else_def, destination, reorder_all);
+        patch_rest_destination_recursively(else_def, destination, reorder_all, rest_order);
     }
 }
 
@@ -5231,6 +5413,10 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::PutChoiceRemainderOnBottom => true,
         ContinuationAst::ChoicePartitionDestinations { .. } => true,
         ContinuationAst::PutChosenCardsAtLibraryPosition { .. } => true,
+        // Recognition is gated on a self multi-zone SearchLibrary, and lowering
+        // appends its `ChangeZoneAll` child. It is therefore safe to absorb the
+        // clause rather than emit an `Unimplemented` sibling.
+        ContinuationAst::ExileSearchRemainder => true,
         ContinuationAst::BecomesPlotted => true,
         ContinuationAst::BecomesForetold => true,
         ContinuationAst::EntersTappedAttacking { .. } => true,
@@ -5303,6 +5489,7 @@ pub(super) fn parse_intrinsic_continuation_ast(
                     || nom_primitives::scan_contains(&full_lower, "put the card on top")
                     || nom_primitives::scan_contains(&full_lower, "put them on top")
                     || nom_primitives::scan_contains(&full_lower, "put those cards on top")
+                    || nom_primitives::scan_contains(&full_lower, "put the chosen cards on top")
                     || (nom_primitives::scan_contains(&full_lower, "put that card")
                         && nom_primitives::scan_contains(&full_lower, "from the top"));
             if has_positional_put {
@@ -5456,7 +5643,7 @@ pub(super) fn parse_dig_from_among(
     // Experiment): "reveal up to N <filter> cards from among them, then put the
     // rest on the bottom" — the kept cards are NOT auto-routed; subsequent
     // sub_abilities route them by type via `TargetFilter::TrackedSetFiltered`.
-    let (destination, enter_tapped) = parse_dig_kept_destination(lower);
+    let (destination, enter_tapped, enters_attacking) = parse_dig_kept_destination(lower);
 
     // CR 701.17c + CR 608.2c: "return a card milled this way to your hand"
     // is the same tracked-set continuation as "from among the milled cards",
@@ -5569,9 +5756,11 @@ pub(super) fn parse_dig_from_among(
             filter,
             destination,
             rest_destination: None,
+            rest_order: DigRestOrder::Preserve,
             enters_under,
             face_down_profile,
             enter_tapped,
+            enters_attacking,
             reveal_verb,
         });
     }
@@ -5662,16 +5851,21 @@ pub(super) fn parse_dig_from_among(
         // shared rest-anaphor matcher so the rest pile is routed correctly instead of
         // falling through to the `None`→Graveyard default. A genuinely separate
         // "Put the rest ..." sentence still patches via its own PutRest continuation.
-        let rest_destination = parse_of_them_rest_destination(lower);
+        let (rest_destination, rest_order) = parse_of_them_rest_destination(lower)
+            .map_or((None, DigRestOrder::Preserve), |(destination, order)| {
+                (Some(destination), order)
+            });
 
         return Some(ContinuationAst::DigFromAmong {
             quantity,
             filter,
             destination,
             rest_destination,
+            rest_order,
             enters_under,
             face_down_profile,
             enter_tapped,
+            enters_attacking,
             reveal_verb,
         });
     }
@@ -5721,16 +5915,21 @@ pub(super) fn parse_dig_from_among(
                 PutCount::up(1)
             };
 
-            let rest_destination = parse_of_them_rest_destination(lower);
+            let (rest_destination, rest_order) = parse_of_them_rest_destination(lower)
+                .map_or((None, DigRestOrder::Preserve), |(destination, order)| {
+                    (Some(destination), order)
+                });
 
             return Some(ContinuationAst::DigFromAmong {
                 quantity,
                 filter: TargetFilter::Any,
                 destination,
                 rest_destination,
+                rest_order,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped,
+                enters_attacking,
                 reveal_verb: false,
             });
         }
@@ -5739,7 +5938,7 @@ pub(super) fn parse_dig_from_among(
     None
 }
 
-fn parse_dig_kept_destination(lower: &str) -> (Option<Zone>, bool) {
+fn parse_dig_kept_destination(lower: &str) -> (Option<Zone>, bool, bool) {
     if let Some(parsed) = parse_dig_from_among_destination(lower) {
         return parsed;
     }
@@ -5759,10 +5958,10 @@ fn parse_dig_kept_destination(lower: &str) -> (Option<Zone>, bool) {
     } else {
         None
     };
-    (destination, false)
+    (destination, false, false)
 }
 
-fn parse_milled_this_way_destination(lower: &str) -> Option<(Option<Zone>, bool)> {
+fn parse_milled_this_way_destination(lower: &str) -> Option<(Option<Zone>, bool, bool)> {
     let (tail, _) = preceded(
         take_until::<_, _, OracleError<'_>>("milled this way"),
         tag::<_, _, OracleError<'_>>("milled this way"),
@@ -5772,7 +5971,7 @@ fn parse_milled_this_way_destination(lower: &str) -> Option<(Option<Zone>, bool)
     parse_dig_destination_tail(tail)
 }
 
-fn parse_dig_from_among_destination(lower: &str) -> Option<(Option<Zone>, bool)> {
+fn parse_dig_from_among_destination(lower: &str) -> Option<(Option<Zone>, bool, bool)> {
     let (tail, _) = preceded(
         take_until::<_, _, OracleError<'_>>("from among"),
         (
@@ -5785,7 +5984,7 @@ fn parse_dig_from_among_destination(lower: &str) -> Option<(Option<Zone>, bool)>
     parse_dig_destination_tail(tail)
 }
 
-fn parse_dig_destination_tail(input: &str) -> Option<(Option<Zone>, bool)> {
+fn parse_dig_destination_tail(input: &str) -> Option<(Option<Zone>, bool, bool)> {
     // Strip a leading clause separator: "from among them, then put that card on
     // top ..." (Fertile Thicket) leaves a ", " before the "then put" verb.
     let input = input.trim_start();
@@ -5815,10 +6014,15 @@ fn parse_dig_destination_tail(input: &str) -> Option<(Option<Zone>, bool)> {
     ))
     .parse(input)
     {
-        let (_, tapped) = opt(tag::<_, _, OracleError<'_>>(" tapped"))
+        // Qualifiers belong to the kept-card clause. The continuation may
+        // have a later sentence that describes the rest pile (for example,
+        // "put the rest ... onto the battlefield tapped"), which must not
+        // affect the kept-card entry mode.
+        let (_, qualifier_tail) = take_till::<_, _, OracleError<'_>>(|character| character == '.')
             .parse(rest)
             .ok()?;
-        return Some((Some(Zone::Battlefield), tapped.is_some()));
+        let (tapped, attacking) = super::parse_battlefield_entry_qualifiers(qualifier_tail);
+        return Some((Some(Zone::Battlefield), tapped, attacking));
     }
 
     if alt((
@@ -5830,7 +6034,7 @@ fn parse_dig_destination_tail(input: &str) -> Option<(Option<Zone>, bool)> {
     .parse(input)
     .is_ok()
     {
-        return Some((Some(Zone::Hand), false));
+        return Some((Some(Zone::Hand), false, false));
     }
 
     // CR 401.4: cards put at a specific library position (top) are arranged by
@@ -5846,7 +6050,7 @@ fn parse_dig_destination_tail(input: &str) -> Option<(Option<Zone>, bool)> {
     .parse(input)
     .is_ok()
     {
-        return Some((Some(Zone::Library), false));
+        return Some((Some(Zone::Library), false, false));
     }
 
     None
@@ -6100,18 +6304,33 @@ pub(super) fn parse_its_face_down_profile(lower: &str) -> Option<FaceDownProfile
 /// rest" generalizes to any remainder count. Both anaphors point to the same
 /// rest_destination semantics, so they share the same downstream zone
 /// classification.
-fn parse_of_them_rest_destination(lower: &str) -> Option<Zone> {
+fn parse_of_them_rest_destination(lower: &str) -> Option<(Zone, DigRestOrder)> {
     let (_, (_, after_rest)) = nom_primitives::split_once_on(lower, " and the rest")
         .or_else(|_| nom_primitives::split_once_on(lower, " and the other"))
         .ok()?;
-    if contains_possessive(after_rest, "into", "graveyard") {
-        Some(Zone::Graveyard)
+    let destination = if contains_possessive(after_rest, "into", "graveyard") {
+        Zone::Graveyard
     } else if contains_possessive(after_rest, "into", "hand") {
-        Some(Zone::Hand)
+        Zone::Hand
     } else {
         // Default: bottom of library ("on the bottom", "in any order", etc.)
-        Some(Zone::Library)
-    }
+        Zone::Library
+    };
+    let random = opt(preceded(
+        take_until::<_, _, OracleError<'_>>(" in a random order"),
+        tag(" in a random order"),
+    ))
+    .parse(after_rest)
+    .ok()
+    .is_some_and(|(_, matched)| matched.is_some());
+    Some((
+        destination,
+        if random {
+            DigRestOrder::Random
+        } else {
+            DigRestOrder::Preserve
+        },
+    ))
 }
 
 /// CR 608.2c: The controller follows a card's instructions in written order;
@@ -6221,6 +6440,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::PutCounter { .. }
         | Effect::PutCounterAll { .. }
         | Effect::MultiplyCounter { .. }
+        | Effect::ReproduceEventCounters { .. }
         | Effect::DoublePT { .. }
         | Effect::DoublePTAll { .. }
         | Effect::MoveCounters { .. }
@@ -6244,6 +6464,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::Choose { .. }
         | Effect::OpponentGuess { .. }
         | Effect::SwapChosenLabels { .. }
+        | Effect::RevealChosenNumbers { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::Suspect { .. }
         | Effect::Unsuspect { .. }
@@ -6348,6 +6569,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::Learn
         | Effect::NoteManaSpent
         | Effect::Forage
+        | Effect::CompletePlayerAction { .. }
         | Effect::Harness
         | Effect::CollectEvidence { .. }
         | Effect::Endure { .. }
@@ -6500,26 +6722,43 @@ pub(crate) fn is_moved_object_enters_modifier_clause(sentence: &str) -> bool {
     !matches!(filter, TargetFilter::Any | TargetFilter::None)
 }
 
-/// CR 122.1 + CR 614.1c + CR 608.2c: returns true when `sentence` is a
-/// moved-object put-onto-battlefield-this-way conditional whose counter payoff
-/// is represented by `Effect::ChangeZone.conditional_enter_with_counters`
-/// ("If you put an artifact onto the battlefield this way, put two +1/+1 counters
-/// on it" — Oviya, Automech Artisan). Shared with the `Condition_If` swallow
-/// detector so the represented clause can be located and stripped text-scoped,
-/// reusing the same `parse_you_put_onto_battlefield_this_way_clause` combinator
-/// that produced the gate — not a verbatim Oracle-string match. Mirrors
-/// `is_moved_object_enters_modifier_clause`: it keys on the put-this-way condition
-/// AND a "counter" payoff tail so it drops only the represented clause.
-pub(crate) fn is_moved_object_put_onto_battlefield_counters_clause(sentence: &str) -> bool {
+/// CR 122.1 + CR 614.1c + CR 608.2c + CR 400.7: returns true when `sentence` is a
+/// moved-object battlefield-entry "this way" conditional whose counter payoff is
+/// represented by `Effect::ChangeZone.conditional_enter_with_counters`. Shared
+/// with the `Condition_If` swallow detector so the represented clause can be
+/// located and stripped text-scoped, reusing the same combinator family that
+/// produced the gate — not a verbatim Oracle-string match. Mirrors
+/// `is_moved_object_enters_modifier_clause`: it keys on the entry-this-way
+/// condition AND a "counter" payoff tail so it drops only the represented clause.
+///
+/// CLAUSE VOICES accepted (all three are represented by the same typed slot):
+///   * active — "If you put an artifact onto the battlefield this way, put two
+///     +1/+1 counters on it" (Oviya, Automech Artisan);
+///   * present-tense typed — "If a Hero enters this way, it enters with two
+///     additional +1/+1 counters on it" (Heroic Return, Recommission, Winter
+///     Soldier Reborn Avenger);
+///   * passive typed — "If an Equipment is put onto the battlefield this way, …".
+///
+/// CONDITIONAL VOICE is deliberately held at `if ` only, POLARITY at affirmative
+/// only, and the SUBJECT at typed-filter-carrying only — all three are enforced by
+/// `parse_conditional_entry_this_way_rider`, whose doc comment carries the
+/// rationale. A trigger-voiced rider ("When an Equipment enters this way, …" —
+/// Adaptive Armorer, Masterpiece Vault), a negated gate, and the bare-pronoun
+/// voice ("If it enters this way, …") all stay visible to the audit. The pronoun
+/// exclusion is the one that matters most here: no lowering produces
+/// `AbilityCondition::ZoneChangedThisWay { filter }` for a filter-less subject, so
+/// `fold_enters_this_way_counter_rider` never folds it into the slot — treating it
+/// as represented would let a compound card whose OTHER rider populates the slot
+/// strip this unrepresented one out of the swallow detector's residual.
+///
+/// The "counter" payoff gate is load-bearing and unchanged: it keeps a non-counter
+/// entry rider ("if a land enters this way, it enters tapped" — Silver Surfer,
+/// Cosmic Voyager), which is genuinely unrepresented, flagged.
+pub(crate) fn is_moved_object_entry_this_way_counters_clause(sentence: &str) -> bool {
     let lower = sentence.to_lowercase();
     let lower = lower.trim();
-    let Ok((after_if, _)) = tag::<_, _, OracleError<'_>>("if ").parse(lower) else {
-        return false;
-    };
     let Ok((body, _)) =
-        crate::parser::oracle_nom::condition::parse_you_put_onto_battlefield_this_way_clause(
-            after_if,
-        )
+        crate::parser::oracle_nom::condition::parse_conditional_entry_this_way_rider(lower)
     else {
         return false;
     };
@@ -6764,9 +7003,11 @@ pub(super) fn parse_followup_continuation_ast(
                 ])),
                 destination: Some(Zone::Battlefield),
                 rest_destination: None,
+                rest_order: DigRestOrder::Preserve,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                enters_attacking: false,
                 // "put one of those cards onto the battlefield" — a put, not a reveal.
                 reveal_verb: false,
             })
@@ -6774,15 +7015,22 @@ pub(super) fn parse_followup_continuation_ast(
         // "You may put one of those cards back on top of your library" after
         // Dig — keep up to one looked-at card on top, leaving the remainder
         // for a following rest-placement clause.
-        Effect::Dig { .. } if parse_put_one_dig_card_on_top(&lower) => {
+        Effect::Dig { .. } if parse_put_one_dig_card_on_top(&lower).is_some() => {
             Some(ContinuationAst::DigFromAmong {
                 quantity: PutCount::up(1),
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Library),
-                rest_destination: None,
+                rest_destination: matches!(
+                    parse_put_one_dig_card_on_top(&lower),
+                    Some(DigRestOrder::Random)
+                )
+                .then_some(Zone::Library),
+                rest_order: parse_put_one_dig_card_on_top(&lower)
+                    .expect("continuation guard just matched"),
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                enters_attacking: false,
                 // "put one ... back on top" — a put, not a reveal.
                 reveal_verb: false,
             })
@@ -6794,7 +7042,15 @@ pub(super) fn parse_followup_continuation_ast(
             Some(ContinuationAst::PutRest {
                 destination: Zone::Library,
                 reorder_all: true,
+                rest_order: DigRestOrder::Preserve,
             })
+        }
+        Effect::SearchLibrary {
+            source_zones,
+            target_player: None,
+            ..
+        } if source_zones.len() >= 2 && parse_exile_rest_clause(&lower) => {
+            Some(ContinuationAst::ExileSearchRemainder)
         }
         Effect::SearchLibrary { .. } | Effect::Shuffle { .. } | Effect::Dig { .. }
             if parse_put_chosen_cards_at_library_position(&lower).is_some() =>
@@ -6816,10 +7072,11 @@ pub(super) fn parse_followup_continuation_ast(
         }
         // "Exile the rest" after Dig — sets rest_destination on the preceding
         // looked-at pile while preserving any prior kept-card destination.
-        Effect::Dig { .. } if parse_exile_rest_after_dig(&lower) => {
+        Effect::Dig { .. } if parse_exile_rest_clause(&lower) => {
             Some(ContinuationAst::PutRest {
                 destination: Zone::Exile,
                 reorder_all: false,
+                rest_order: DigRestOrder::Preserve,
             })
         }
         // CR 406.3 + CR 701.20e: "[then] exile it/them [face down]" after a
@@ -6878,9 +7135,13 @@ pub(super) fn parse_followup_continuation_ast(
                 // Default: bottom of library (covers "on the bottom", "back in any order", etc.)
                 Zone::Library
             };
+            let rest_order = parse_put_rest_on_bottom_line(&lower)
+                .map(|(_, order)| order)
+                .unwrap_or(DigRestOrder::Preserve);
             Some(ContinuationAst::PutRest {
                 destination,
                 reorder_all: false,
+                rest_order,
             })
         }
         // CR 608.2c + CR 701.20b (Portent of Calamity / Sanar class): "Put the
@@ -6907,6 +7168,7 @@ pub(super) fn parse_followup_continuation_ast(
             Some(ContinuationAst::PutRest {
                 destination,
                 reorder_all: false,
+                rest_order: DigRestOrder::Preserve,
             })
         }
         // CR 701.20a + CR 608.2c: A reveal-until rest-pile clause may be
@@ -6919,6 +7181,7 @@ pub(super) fn parse_followup_continuation_ast(
             Some(ContinuationAst::PutRest {
                 destination: parse_reveal_until_rest_zone(&lower).unwrap_or(Zone::Library),
                 reorder_all: false,
+                rest_order: DigRestOrder::Preserve,
             })
         }
         // CR 701.20a + CR 608.2c: "Put any number of those [filter] cards onto the
@@ -7083,6 +7346,7 @@ pub(super) fn parse_followup_continuation_ast(
             Some(ContinuationAst::PutRest {
                 destination,
                 reorder_all: false,
+                rest_order: DigRestOrder::Preserve,
             })
         }
         // "create a ... token and suspect it" → chain suspect on last created token
@@ -8159,7 +8423,7 @@ pub(super) fn try_parse_scoped_does_the_same(text: &str) -> Option<PlayerFilter>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::QuantityExpr;
+    use crate::types::ability::{QuantityExpr, SearchSelectionConstraint};
 
     #[test]
     fn face_down_pile_is_dig_lookback_transparent() {
@@ -9768,8 +10032,10 @@ mod tests {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
+            rest_order: crate::types::ability::DigRestOrder::Preserve,
             reveal: false,
             enter_tapped: false,
+            enters_attacking: false,
             source: DigSource::Library,
         }
     }
@@ -9825,6 +10091,7 @@ mod tests {
             Some(ContinuationAst::PutRest {
                 destination: Zone::Library,
                 reorder_all: false,
+                rest_order: DigRestOrder::Preserve,
             })
         );
     }
@@ -9842,6 +10109,7 @@ mod tests {
             Some(ContinuationAst::PutRest {
                 destination: Zone::Library,
                 reorder_all: false,
+                rest_order: DigRestOrder::Preserve,
             })
         );
     }
@@ -9859,6 +10127,7 @@ mod tests {
             Some(ContinuationAst::PutRest {
                 destination: Zone::Graveyard,
                 reorder_all: false,
+                rest_order: DigRestOrder::Preserve,
             })
         );
     }
@@ -9876,6 +10145,7 @@ mod tests {
             Some(ContinuationAst::PutRest {
                 destination: Zone::Library,
                 reorder_all: false,
+                rest_order: DigRestOrder::Random,
             })
         );
     }
@@ -9893,6 +10163,7 @@ mod tests {
             Some(ContinuationAst::PutRest {
                 destination: Zone::Library,
                 reorder_all: true,
+                rest_order: DigRestOrder::Preserve,
             })
         );
     }
@@ -9910,6 +10181,7 @@ mod tests {
             Some(ContinuationAst::PutRest {
                 destination: Zone::Hand,
                 reorder_all: false,
+                rest_order: DigRestOrder::Preserve,
             })
         );
     }
@@ -9927,6 +10199,7 @@ mod tests {
             Some(ContinuationAst::PutRest {
                 destination: Zone::Library,
                 reorder_all: false,
+                rest_order: DigRestOrder::Preserve,
             })
         );
     }
@@ -9949,9 +10222,11 @@ mod tests {
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
+                rest_order: DigRestOrder::Preserve,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                enters_attacking: false,
                 reveal_verb: false,
             })
         );
@@ -9973,9 +10248,11 @@ mod tests {
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
+                rest_order: DigRestOrder::Preserve,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                enters_attacking: false,
                 reveal_verb: false,
             })
         );
@@ -10002,9 +10279,11 @@ mod tests {
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
+                rest_order: DigRestOrder::Preserve,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                enters_attacking: false,
                 reveal_verb: false,
             })
         );
@@ -10025,9 +10304,11 @@ mod tests {
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Graveyard),
+                rest_order: DigRestOrder::Preserve,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                enters_attacking: false,
                 reveal_verb: false,
             })
         );
@@ -10048,9 +10329,11 @@ mod tests {
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
+                rest_order: DigRestOrder::Preserve,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                enters_attacking: false,
                 reveal_verb: false,
             })
         );
@@ -10073,9 +10356,11 @@ mod tests {
                     filter: TargetFilter::Any,
                     destination: Some(Zone::Hand),
                     rest_destination: None,
+                    rest_order: DigRestOrder::Preserve,
                     enters_under: None,
                     face_down_profile: None,
                     enter_tapped: false,
+                    enters_attacking: false,
                     reveal_verb: false,
                 }),
                 "{text}"
@@ -10148,13 +10433,29 @@ mod tests {
             parse_dig_kept_destination(
                 "put a land card from among them onto the battlefield tapped. put the rest on the bottom of your library.",
             ),
-            (Some(Zone::Battlefield), true)
+            (Some(Zone::Battlefield), true, false)
         );
         assert_eq!(
             parse_dig_kept_destination(
                 "put a land card from among them onto the battlefield. put the rest onto the battlefield tapped.",
             ),
-            (Some(Zone::Battlefield), false)
+            (Some(Zone::Battlefield), false, false)
+        );
+    }
+
+    #[test]
+    fn from_among_battlefield_qualifiers_preserve_attacking() {
+        assert_eq!(
+            parse_dig_kept_destination(
+                "put a human creature card from among them onto the battlefield tapped and attacking. put the rest on the bottom of your library in a random order.",
+            ),
+            (Some(Zone::Battlefield), true, true)
+        );
+        assert_eq!(
+            parse_dig_kept_destination(
+                "put a creature card from among them onto the battlefield attacking.",
+            ),
+            (Some(Zone::Battlefield), false, true)
         );
     }
 
@@ -10330,9 +10631,11 @@ mod tests {
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
+                rest_order: DigRestOrder::Preserve,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                enters_attacking: false,
                 reveal_verb: false,
             },
             AbilityKind::Spell,
@@ -10602,9 +10905,11 @@ mod tests {
                 filter: TargetFilter::Typed(TypedFilter::creature()),
                 destination: Some(Zone::Hand),
                 rest_destination: None,
+                rest_order: DigRestOrder::Preserve,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                enters_attacking: false,
                 reveal_verb: false,
             },
             AbilityKind::Spell,
@@ -10650,9 +10955,11 @@ mod tests {
                 filter: TargetFilter::Typed(TypedFilter::creature()),
                 destination: Some(Zone::Hand),
                 rest_destination: None,
+                rest_order: DigRestOrder::Preserve,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                enters_attacking: false,
                 reveal_verb: false,
             },
             AbilityKind::Spell,
@@ -10716,9 +11023,11 @@ mod tests {
                 filter: or_filter.clone(),
                 destination: Some(Zone::Hand),
                 rest_destination: None,
+                rest_order: DigRestOrder::Preserve,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                enters_attacking: false,
                 reveal_verb: false,
             },
             AbilityKind::Spell,
@@ -11655,6 +11964,71 @@ mod tests {
         );
     }
 
+    #[test]
+    fn put_the_chosen_cards_on_top_parses_as_library_position_continuation() {
+        let search = Effect::SearchLibrary {
+            filter: TargetFilter::Any,
+            count: QuantityExpr::Fixed { value: 5 },
+            reveal: false,
+            target_player: None,
+            selection_constraint: SearchSelectionConstraint::None,
+            split: None,
+            source_zones: vec![Zone::Graveyard, Zone::Library],
+        };
+        let result = parse_followup_continuation_ast(
+            "Put the chosen cards on top of your library in any order.",
+            &search,
+            &mut ParseContext::default(),
+        );
+        assert_eq!(
+            result,
+            Some(ContinuationAst::PutChosenCardsAtLibraryPosition {
+                position: LibraryPosition::Top,
+            })
+        );
+    }
+
+    #[test]
+    fn exile_the_rest_after_multi_zone_search_excludes_selected_set() {
+        let search = Effect::SearchLibrary {
+            filter: TargetFilter::Any,
+            count: QuantityExpr::Fixed { value: 5 },
+            reveal: false,
+            target_player: None,
+            selection_constraint: SearchSelectionConstraint::None,
+            split: None,
+            source_zones: vec![Zone::Graveyard, Zone::Library],
+        };
+        let result = parse_followup_continuation_ast(
+            "Exile the rest.",
+            &search,
+            &mut ParseContext::default(),
+        );
+        assert_eq!(result, Some(ContinuationAst::ExileSearchRemainder));
+    }
+
+    #[test]
+    fn exile_the_rest_after_single_zone_search_is_not_recognized() {
+        let search = Effect::SearchLibrary {
+            filter: TargetFilter::Any,
+            count: QuantityExpr::Fixed { value: 5 },
+            reveal: false,
+            target_player: None,
+            selection_constraint: SearchSelectionConstraint::None,
+            split: None,
+            source_zones: vec![Zone::Library],
+        };
+        assert_eq!(
+            parse_followup_continuation_ast(
+                "Exile the rest.",
+                &search,
+                &mut ParseContext::default(),
+            ),
+            None,
+            "a single-zone search must not exile its library remainder"
+        );
+    }
+
     /// CR 201.2 + CR 608.2c: Mitotic-Manipulation-style name-match selection
     /// after a Dig emits a `DigFromAmong` continuation that patches the
     /// preceding Dig with destination = Battlefield, keep_count = 1,
@@ -11678,9 +12052,11 @@ mod tests {
                 ])),
                 destination: Some(Zone::Battlefield),
                 rest_destination: None,
+                rest_order: DigRestOrder::Preserve,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
+                enters_attacking: false,
                 reveal_verb: false,
             })
         );
@@ -12219,6 +12595,71 @@ mod tests {
         assert!(starts_bare_and_clause(
             "this creature can't be blocked this turn"
         ));
+    }
+
+    /// CR 725.1 + CR 608.2c: "… and you become <designation>" is a subject +
+    /// predicate clause, never a noun-phrase continuation. The splitter arm is
+    /// deliberately VERB-level (`"you become "`), not designation-level, so
+    /// `build_become_clause` (subject.rs) stays the single authority over which
+    /// become is meant.
+    #[test]
+    fn bare_and_clause_starts_on_you_become_subject_predicate() {
+        // The two real corpus lines this fixes (Heart-Shaped Herb, Fall from
+        // Favor) both use the monarch designation.
+        assert!(starts_bare_and_clause("you become the monarch"));
+        assert!(starts_bare_and_clause("You become the Monarch"));
+
+        // Generalization guard: the arm is designation-agnostic, so a future
+        // non-monarch `become` conjunct is carried too. These are SYNTHETIC
+        // inputs to the predicate — both phrases are real Oracle text, but
+        // neither currently occurs after a bare " and ", so this is not an
+        // end-to-end reachability claim. Downstream, `build_become_clause`
+        // declines the monarch arm and falls through to the animation path,
+        // which is the honest-defer route.
+        assert!(starts_bare_and_clause("you become the starting player"));
+        assert!(starts_bare_and_clause(
+            "you become a card until you leave your library or that library is shuffled"
+        ));
+
+        // Negative: " and you control …" is a RELATIVE clause (22 corpus
+        // lines), never a clause start. A blanket "you <PREDICATE_VERB>" rule
+        // would have split these and changed unrelated cards.
+        assert!(!starts_bare_and_clause("you control"));
+        assert!(!starts_bare_and_clause("you control a Swamp"));
+        assert!(!starts_bare_and_clause(
+            "you control a legendary creature or planeswalker"
+        ));
+    }
+
+    /// CR 725.1 + CR 608.2c: the bare-and split must peel the monarch conjunct
+    /// off Heart-Shaped Herb's activated ability into its OWN chunk, and
+    /// `push_clause_chunk`'s `trim_end_matches(['.', ','])` must strip the
+    /// sentence-final period. The period is load-bearing: `build_become_clause`
+    /// gates on the exact match `become_text.eq_ignore_ascii_case("the
+    /// monarch")` (subject.rs), which a surviving "." would defeat, silently
+    /// falling through to the animation path.
+    #[test]
+    fn you_become_monarch_conjunct_splits_without_trailing_period() {
+        // Verbatim Oracle text (data/mtgjson/AtomicCards.json), effect body of
+        // the "{2}, {T}, Sacrifice this artifact:" ability.
+        let chunks = clause_texts(
+            "return that card to the battlefield under its owner's control with three +1/+1 counters on it and you become the monarch.",
+        );
+        assert_eq!(
+            chunks.last().map(String::as_str),
+            Some("you become the monarch"),
+            "monarch conjunct must be its own chunk with no trailing period, got {chunks:?}"
+        );
+        // Paired positive reach-guard: the leading return clause must survive
+        // intact, so a passing split assertion cannot be an artifact of the
+        // sentence being mangled.
+        assert_eq!(
+            chunks.first().map(String::as_str),
+            Some(
+                "return that card to the battlefield under its owner's control with three +1/+1 counters on it"
+            ),
+            "return clause must remain whole, got {chunks:?}"
+        );
     }
 
     /// CR 608.2c: Anaphoric back-reference conjuncts. Nalia de'Arnise's third
@@ -12978,8 +13419,10 @@ mod tests {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
+            rest_order: DigRestOrder::Preserve,
             reveal: false,
             enter_tapped: false,
+            enters_attacking: false,
             source: DigSource::Library,
         }
     }

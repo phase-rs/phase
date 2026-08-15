@@ -804,23 +804,29 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
             qty: QuantityRef::ChosenNumber,
         },
 
-        // CR 105 + CR 109.1: "the number of colors among [permanents]" —
-        // distinct colors across the matching permanent set. Composes with
-        // the permanents-filter converter; mirrors the parser's CDA mapping
-        // (oracle_quantity.rs DistinctColorsAmongPermanents).
+        // CR 105.1 + CR 105.2: "the number of colors among [permanents]" —
+        // distinct colors across the matching permanent set. Composes with the
+        // permanents-filter converter; mirrors the parser's CDA mapping. The
+        // engine slot is parameterized on `CardTypeSetSource` (the shared
+        // population axis), and a live object census is the `Objects` arm.
         GameNumber::NumColorsAmongPermanents(filter) => QuantityExpr::Ref {
-            qty: QuantityRef::DistinctColorsAmongPermanents {
-                filter: convert_permanents(filter)?,
+            qty: QuantityRef::DistinctColorsAmong {
+                source: CardTypeSetSource::Objects {
+                    filter: convert_permanents(filter)?,
+                },
             },
         },
-        // CR 105 + CR 109.1: "the number of colors of [permanent]" — the
+        // CR 105.1 + CR 105.2: "the number of colors of [permanent]" — the
         // single-permanent specialization. Engine slot is the same
-        // `DistinctColorsAmongPermanents { filter }` taking a one-permanent
-        // TargetFilter; the resolver counts distinct W/U/B/R/G across the
-        // resolved set (CR 105.1 — gold/multicolor/colorless are not colors).
+        // `DistinctColorsAmong { source: Objects { filter } }` taking a
+        // one-permanent TargetFilter; the resolver counts distinct W/U/B/R/G
+        // across the resolved set (CR 105.2 — gold/multicolor/colorless are not
+        // colors).
         GameNumber::NumColorsOfPermanent(perm) => QuantityExpr::Ref {
-            qty: QuantityRef::DistinctColorsAmongPermanents {
-                filter: convert_permanent(perm)?,
+            qty: QuantityRef::DistinctColorsAmong {
+                source: CardTypeSetSource::Objects {
+                    filter: convert_permanent(perm)?,
+                },
             },
         },
 

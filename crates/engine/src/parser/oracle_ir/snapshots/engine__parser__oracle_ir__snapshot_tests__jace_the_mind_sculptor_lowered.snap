@@ -23,7 +23,8 @@ expression: "&lowered"
         },
         "rest_destination": null,
         "reveal": false,
-        "enter_tapped": false
+        "enter_tapped": false,
+        "enters_attacking": false
       },
       "cost": {
         "type": "Loyalty",

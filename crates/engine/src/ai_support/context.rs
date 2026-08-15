@@ -39,14 +39,14 @@ impl AiDecisionContract {
             state_revision: state.state_revision,
             // The engine's candidate enumerator is the authoritative finite
             // domain for this prompt. Combat and search continuations remain
-            // reducer-owned. A target choice crosses the reducer only when the
-            // pending spell's mana obligation can still change with its final
-            // target set. Submission still performs the public action-boundary
+            // reducer-owned. Choices that can change either a pending spell's
+            // target requirements or its final mana obligation cross the reducer
+            // before issue. Submission still performs the public action-boundary
             // apply after exact-membership and owner checks.
             candidates: {
                 let mut candidates =
                     candidate_actions_for_semantic_owner_with_probe(state, semantic_owner, None);
-                if target_selection_requires_reducer_validation(state) {
+                if decision_contract_requires_reducer_validation(state) {
                     candidates = FilterPipeline::default_pipeline().apply(state, candidates);
                 }
                 candidates.sort_by(|left, right| left.action.cmp_stable(&right.action));
@@ -103,25 +103,28 @@ impl AiDecisionContract {
 }
 
 pub(crate) fn target_selection_requires_reducer_validation(state: &GameState) -> bool {
-    let WaitingFor::TargetSelection {
-        player,
-        pending_cast,
-        target_slots,
-        selection,
-        ..
-    } = &state.waiting_for
-    else {
-        return false;
-    };
+    // CR 601.2c + CR 601.2e-h + CR 602.2b: selecting a target can complete
+    // target declaration and immediately check legality and pay the proposed
+    // spell or activation cost. A later optional slot can become auto-skippable
+    // only after this target is chosen, so the reducer is the sole authority for
+    // whether a particular candidate completes the transition.
+    matches!(&state.waiting_for, WaitingFor::TargetSelection { .. })
+}
 
-    // Only the final target can lock a target-dependent cost. Earlier
-    // selections are valid reducer continuations regardless of whether the
-    // eventual cost is payable.
-    selection.current_slot.checked_add(1) == Some(target_slots.len())
-        && !crate::game::casting::pending_mana_obligation_is_stable_before_targets(
-            state,
-            *player,
-            pending_cast,
+/// Whether a decision can alter the target requirements of an in-progress cast.
+///
+/// CR 601.2b-c: a kicker declaration precedes target selection and may replace
+/// the spell's target requirements. The capability contract must therefore
+/// simulate each such payment decision before issuing it; otherwise an AI can
+/// decline the only target-enabling kicker and receive a targetless cast.
+fn decision_contract_requires_reducer_validation(state: &GameState) -> bool {
+    target_selection_requires_reducer_validation(state)
+        || matches!(
+            &state.waiting_for,
+            WaitingFor::OptionalCostChoice {
+                pending_cast,
+                ..
+            } if pending_cast.deferred_target_selection
         )
 }
 

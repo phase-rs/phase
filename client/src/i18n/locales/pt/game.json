@@ -16,10 +16,15 @@
     "shorten": "Break out",
     "decline": "Decline the shortcut",
     "untilLethal": "Repeat until the game ends.",
-    "fixedCount_one": "Repeat once.",
-    "fixedCount_other": "Repeat {{count}} times.",
+    "fixedCount_one": "Repeat at most once.",
+    "fixedCount_other": "Repeat at most {{count}} times.",
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
     "convokeInfo_other": "Auto-taps up to {{count}} creatures for convoke each iteration.",
+    "countAria": "Number of iterations",
+    "previewTitle_one": "Repeating once produces:",
+    "previewTitle_other": "Repeating {{count}} times produces:",
+    "previewEntry": "{{amount}} {{resource}}",
+    "previewEntryPlayer": "{{amount}} {{resource}} — {{player}}",
     "winKind": {
       "LethalDamage": "This loop deals lethal damage.",
       "PoisonLoss": "This loop gives lethal poison counters.",
@@ -45,6 +50,7 @@
     "expand": "Expandir progresso de resolução"
   },
   "debugCreate": {
+    "copies": "Cópias",
     "tokenPower": "Power",
     "tokenToughness": "Toughness",
     "tokenPowerPlaceholder": "Power",
@@ -485,8 +491,10 @@
     "companion": "Companheiro",
     "unboundedTooltip": "{{resource}} ilimitado (∞)",
     "unboundedScheduledTooltip": "{{resource}} ilimitado (∞) — colapso pendente; será escolhida uma quantidade finita",
+    "unboundedScheduledYouTooltip": "{{resource}} ilimitado (∞) — colapso pendente; você indicará a quantidade",
     "unboundedScheduledGlyph": "∞→N",
     "unboundedConditionalTooltip": "{{resource}} ilimitado (∞) — colapso pendente; isto pode continuar ilimitado",
+    "unboundedConditionalYouTooltip": "{{resource}} ilimitado (∞) — colapso pendente; isto pode continuar ilimitado e, caso contrário, você indicará a quantidade",
     "unboundedMixedTooltip": "{{resource}} ilimitado (∞) — parte deste grupo tem um colapso pendente; parte continua ilimitada",
     "unboundedConditionalGlyph": "∞→?",
     "unboundedManaPoolMarker": "Mana ilimitada (∞)",
@@ -1806,6 +1814,10 @@
     "title": "Escolher destinatário do presente",
     "subtitle": "Escolha qual oponente recebe o presente prometido."
   },
+  "entryController": {
+    "title": "Escolher controlador ao entrar",
+    "subtitle": "Escolha qual oponente controla esta permanente ao entrar."
+  },
   "optionalCost": {
     "gift": {
       "title": "Prometer um presente?",
@@ -2039,6 +2051,7 @@
     "searchPlaceholder": "Buscar por nome...",
     "noCardsFound": "Nenhuma carta encontrada",
     "buttonSubtitle": "Selecione uma opção",
+    "numberSubtitle": "Digite um número inteiro maior ou igual a {{min}}",
     "filterPlaceholder": "Filtrar opções...",
     "noOptionsMatch": "Nenhuma opção corresponde"
   },

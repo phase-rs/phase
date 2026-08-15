@@ -246,6 +246,13 @@ fn cast_one_copy(
         card_id,
         controller: ability.controller,
         object_id: copy_id,
+        cast_mana_value: Some(
+            state
+                .objects
+                .get(&copy_id)
+                .expect("cast copy must remain available for SpellCast event")
+                .spell_mana_value(),
+        ),
     });
     if let Some(obj) = state.objects.get(&copy_id).cloned() {
         crate::game::restrictions::record_spell_cast_from_zone(

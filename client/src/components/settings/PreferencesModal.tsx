@@ -1014,6 +1014,12 @@ function CloudSyncSection() {
                 >
                   {t("sync.keepLocal")}
                 </button>
+                <button
+                  className={SYNC_BUTTON_CLASS}
+                  onClick={() => void resolveConflict("merge")}
+                >
+                  {t("sync.keepBothDecks")}
+                </button>
               </div>
             </div>
           ) : (

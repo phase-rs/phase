@@ -123,10 +123,15 @@ pub struct LoopCertificate {
     pub unbounded: Vec<ResourceAxis>,
     /// The classified win condition derived from `unbounded`.
     pub win_kind: WinKind,
-    /// CR 104.4b vs CR 732.2a/CR 732.6: whether the cycle is all-mandatory (no
-    /// "may"/choice once started). `true` ⇒ a forced loop the live path would draw
-    /// (CR 732.4) absent a net resource; `false` ⇒ an optional loop a player chooses
-    /// to repeat. The detector cannot infer optionality from two states alone, so
+    /// CR 732.5 / CR 732.2b: whether NO living player has a meaningful priority action
+    /// that could break the loop — the producer's own measurement, not a property of the
+    /// cycle's contents. (`game::engine::interactive_loop_bridge` assigns it from
+    /// `no_living_player_has_meaningful_priority_action`, which probes EVERY living player
+    /// as the priority holder.) CR 732.5 is why that is the right question: no player can
+    /// be forced to take an action that would end a loop, so a loop is unbreakable exactly
+    /// when nobody HAS such an action to take voluntarily; CR 732.2b is the shortcut-side
+    /// counterpart — the window in which another player would name a different choice.
+    /// The detector cannot infer optionality from two states alone, so
     /// the caller (which drives the actions) supplies it.
     pub mandatory: bool,
     /// CR 110.1: non-recycled per-cycle remainder of battlefield permanents (the "+1
@@ -153,10 +158,17 @@ impl LoopCertificate {
     }
 }
 
-/// CR 732.2a: the public, log/display summary a `WaitingFor::RespondToShortcut` carries
-/// to each responding opponent — "the player with priority suggests repeating this loop
-/// N times". Every field is derived from public board state (the confirmed certificate +
-/// the proposer's declared count), so there is no hidden information to redact.
+/// CR 732.2a: the log/display summary a `WaitingFor::RespondToShortcut` carries to each
+/// responding opponent — "the player with priority suggests repeating this loop N times".
+///
+/// Every field EXCEPT [`ShortcutProposal::template`] is derived from public board state (the
+/// confirmed certificate + the proposer's declared count). `template` is NOT: it is the
+/// proposer's `DecisionTemplate` moved here verbatim by `game::engine::handle_declare_shortcut`,
+/// and its pins can name objects in hidden zones. It is redacted per viewer in
+/// `game::visibility::filter_state_for_viewer` through the shared `pins_name_hidden_source`
+/// authority — all-or-nothing per CR 732.2b, the whole template is dropped and never trimmed.
+/// The blanket "no hidden information to redact" this doc used to claim is exactly what let
+/// this carrier drift from the `WaitingFor::LoopShortcut` offer it is copied from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShortcutProposal {
     /// CR 732.2a: the player with priority who proposed the shortcut. This is separate from
@@ -234,7 +246,8 @@ pub enum ShortcutResponse {
 /// `controller` is the loop's controlling player (so the consumed-axis constraint
 /// is scoped to *their* life/mana and opponent depletion reads as progress, and
 /// the win classifier can tell an opponent loss from self-mill/lifegain), and
-/// `mandatory` records whether the driven cycle contained an optional choice. The
+/// `mandatory` records whether no living player had a meaningful priority action that
+/// could break the loop (CR 732.5). The
 /// caller, which drove the actions, knows both.
 pub fn detect_loop(
     cycle_start: &GameState,
@@ -501,7 +514,7 @@ pub(crate) fn live_mandatory_loop_winner(
 /// `OrderTriggers` exemption already retains the ring across a non-sampling beat (dump D
 /// measured 35 such beats in one drive), and `WaitingFor::is_forced_cascade_window`
 /// extends that to every forced pre-priority window (CR 603.3d / CR 603.5 + CR 608.2 /
-/// CR 903.9a / CR 704.5j / CR 310.10 / CR 703.1 + CR 117.3a). The invariant this guard
+/// CR 903.9a / CR 704.5j / CR 310.11 / CR 703.1 + CR 117.3a). The invariant this guard
 /// actually needs is weaker and true:
 /// **every point at which CR 704.5a could fire is either sampled or clears the ring.**
 /// CR 704.3 fixes those points: SBAs are checked whenever a player would get priority,
@@ -510,7 +523,7 @@ pub(crate) fn live_mandatory_loop_winner(
 /// exempt for three DIFFERENT reasons, and the weaker invariant is what covers all
 /// three:
 /// the between-resolutions members (CR 603.3b / CR 603.3d / CR 903.9a / CR 704.5j /
-/// CR 310.10) sit inside the CR 704.3 fixpoint itself, where no life total moves; the
+/// CR 310.11) sit inside the CR 704.3 fixpoint itself, where no life total moves; the
 /// MID-resolution member (`OptionalEffectChoice`, CR 603.5 + CR 608.2) is a pause in the
 /// middle of a resolution, where life absolutely can move — but CR 608.2 performs no SBA
 /// check mid-resolution, so a life change there is not a CR 704.5a point being skipped,

@@ -91,6 +91,7 @@ pub(crate) fn parse_ignore_hexproof_static(
         defs.push(
             StaticDefinition::new(StaticMode::SuppressTriggers {
                 source_filter: filter,
+                trigger_source_filter: None,
                 events: vec![SuppressedTriggerEvent::BecomesTargeted],
             })
             .description(text.to_string()),

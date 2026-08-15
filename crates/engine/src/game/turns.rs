@@ -179,6 +179,12 @@ pub(in crate::game) fn advance_phase_once(
         removed = taken;
     }
 
+    // CR 511.3: End Combat teardown happens when the step ends, after its
+    // priority window, not when the step begins.
+    if leaving == Phase::EndCombat {
+        complete_end_combat_teardown(state);
+    }
+
     // If wrapping from Cleanup to Untap, start next turn. Turn-level skip
     // replacements (CR 614.10) are handled inside `start_next_turn` — the
     // per-phase pipeline below runs only for within-turn phase advances.
@@ -247,18 +253,13 @@ pub fn end_turn_to_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) {
     enter_phase(state, Phase::Cleanup, events);
 }
 
-/// CR 724.2d: End the current combat phase by removing everything from combat,
-/// expiring "until end of combat" effects, and skipping straight to the
-/// postcombat main phase. Mirrors the end-of-combat teardown the `EndCombat`
-/// step performs (see the `Phase::EndCombat` arm of `advance_phase`), but skips
-/// the intervening end-of-combat step so its "at end of combat" triggers do not
-/// fire (CR 724.2e). Drives `Effect::EndCombatPhase` (Mandate of Peace).
-pub fn end_combat_phase_to_postcombat(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    // CR 724.2d / CR 511.3: Remove all creatures and planeswalkers from combat.
+/// CR 511.2 + CR 511.3: End Combat effects expire and combat objects leave
+/// combat only after the step's priority window has ended. Explicit effects
+/// that skip directly out of combat use the same teardown authority.
+fn complete_end_combat_teardown(state: &mut GameState) {
     state.combat = None;
-    // CR 724.2d: Effects that last "until end of combat" expire — continuous
-    // effects, replacement definitions, and pending damage replacements alike,
-    // matching the normal end-of-combat prune.
+    state.current_combat_attacker_restriction = None;
+    state.current_combat_attacker_restriction_source = None;
     super::layers::prune_end_of_combat_effects(state);
     super::layers::prune_controller_end_combat_step_effects(state, state.active_player);
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
@@ -268,11 +269,19 @@ pub fn end_combat_phase_to_postcombat(state: &mut GameState, events: &mut Vec<Ga
     state
         .pending_damage_replacements
         .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));
+}
 
-    // CR 511.3 / CR 724.2d: the combat phase is over — clear any active
-    // additional-combat attacker restriction (Last Night Together / Bumi).
-    state.current_combat_attacker_restriction = None;
-    state.current_combat_attacker_restriction_source = None;
+/// CR 724.2d: End the current combat phase by removing everything from combat,
+/// expiring "until end of combat" effects, and skipping straight to the
+/// postcombat main phase. Mirrors the end-of-combat teardown the `EndCombat`
+/// step performs (see the `Phase::EndCombat` arm of `advance_phase`), but skips
+/// the intervening end-of-combat step so its "at end of combat" triggers do not
+/// fire (CR 724.2e). Drives `Effect::EndCombatPhase` (Mandate of Peace).
+pub fn end_combat_phase_to_postcombat(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    // CR 724.2d / CR 511.3: Remove all creatures and planeswalkers from combat.
+    // CR 724.2d: Effects that last "until end of combat" expire through the
+    // same authority as the normal End Combat transition.
+    complete_end_combat_teardown(state);
 
     // CR 724.2d: Skip straight to the postcombat main phase, skipping any
     // intervening steps (including the end-of-combat step — CR 724.2e). Any
@@ -295,22 +304,13 @@ pub(super) fn mark_empty_attackers_end_combat(state: &mut GameState, events: &mu
 }
 
 /// The declaration-continuation form of [`mark_empty_attackers_end_combat`].
-/// It preserves the established ordering that has already processed
-/// declaration triggers and advances past the synthetic marker without
-/// running EndCombat step triggers.
+/// CR 508.8 skips only Declare Blockers and Combat Damage; the normal End
+/// Combat step still begins and must run its triggers and priority window.
 pub(super) fn advance_after_empty_attackers(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
     mark_empty_attackers_end_combat(state, events);
-    state.combat = None;
-    // CR 511.3: The synthetic empty-attacker path still ends this combat, so
-    // its extra-combat attacker restriction cannot survive to postcombat main.
-    state.current_combat_attacker_restriction = None;
-    state.current_combat_attacker_restriction_source = None;
-    super::layers::prune_end_of_combat_effects(state);
-    super::layers::prune_controller_end_combat_step_effects(state, state.active_player);
-    let _ = advance_phase_once(state, events);
     auto_advance(state, events)
 }
 
@@ -907,6 +907,40 @@ pub(crate) fn select_next_turn_after_completion(
     }
 }
 
+/// CR 800.4i: Expires a departed player's last-turn attack record when the turn
+/// that player would have taken is skipped in seat order.
+fn expire_departed_last_turn_attack_records(
+    state: &mut GameState,
+    completed_player: PlayerId,
+    next_active: PlayerId,
+    is_extra_turn: bool,
+) {
+    if is_extra_turn || state.seat_order.is_empty() {
+        return;
+    }
+
+    let seat_order = &state.seat_order;
+    let current_idx = seat_order
+        .iter()
+        .position(|&player| player == completed_player)
+        .unwrap_or(0);
+    for offset in 1..=seat_order.len() {
+        let idx = super::players::turn_order_index(
+            current_idx,
+            offset,
+            seat_order.len(),
+            state.turn_direction,
+        );
+        let candidate = seat_order[idx];
+        if !super::players::is_alive(state, candidate) {
+            state.attacked_defenders_last_turn.remove(&candidate);
+        }
+        if candidate == next_active {
+            break;
+        }
+    }
+}
+
 /// CR 101.4 + CR 103.1 + CR 500.1 + CR 500.7 + CR 805.4: Display-only turn
 /// projection. Slot 0 is the current live turn representative; later slots are
 /// the next turns that would actually begin after extra turns, skipped turns,
@@ -1067,6 +1101,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // replacement pipeline so condition-gated skip effects (e.g., Stranglehold)
     // can observe it.
     let (next_active, is_extra_turn) = select_next_turn_after_completion(state, completed_player);
+    expire_departed_last_turn_attack_records(state, completed_player, next_active, is_extra_turn);
     state.active_player = next_active;
 
     // CR 614.10: Simple turn-skip counter (effect-based, e.g., Meditate, Eater of
@@ -2156,6 +2191,23 @@ fn clear_cleanup_damage(state: &mut GameState, events: &mut Vec<GameEvent>) {
 /// choose which cards to discard down to maximum hand size, or `None` if
 /// cleanup completes immediately.
 pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Option<WaitingFor> {
+    // CR 508.6 + CR 514.2: Snapshot this turn's attacks so "attacked you during
+    // their last turn" (Avenge / O-Kagachi / Weathered Sentinels) can query each
+    // player's most recent completed turn. Overwrite the active (ending) player's
+    // entry — empty when they attacked no one, so a no-attack turn correctly
+    // clears their record; other players' entries are untouched (a skipped player
+    // never reaches cleanup, so it keeps its genuine last-turn record). Runs
+    // before `start_next_turn` clears `attacked_defenders_this_turn`, and is
+    // idempotent under a repeated cleanup step (CR 514.3): same ending player,
+    // same attacks.
+    let ending = state.active_player;
+    let this_turn = state
+        .attacked_defenders_this_turn
+        .get(&ending)
+        .cloned()
+        .unwrap_or_default();
+    state.attacked_defenders_last_turn.insert(ending, this_turn);
+
     // CR 701.19b: Regeneration shields expire at cleanup.
     // CR 615: Prevention effects also expire.
     // CR 514.2: Resolution-time replacements with `expiry: EndOfTurn` (e.g.,
@@ -2954,40 +3006,31 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
                     player: state.active_player,
                 });
             }
-            let _ = advance_phase_once(state, events);
-            // Continue to EndCombat
+            // CR 117.3a: After the combat-damage turn-based action and its
+            // triggered abilities are handled, the active player receives
+            // priority before the step ends. This also gives phase stops a
+            // Priority window in which to interrupt auto-pass.
+            return AutoAdvanceStep::waiting(WaitingFor::Priority {
+                player: state.active_player,
+            });
         }
         Phase::EndCombat => {
             // CR 511.1: "At end of combat" triggers fire here.
             let event_snapshot = events.clone();
             let (triggers_fired, ordering_prompt) =
                 process_phase_triggers(state, &event_snapshot, events);
-            // CR 511.3: At end of combat, all creatures are removed from combat.
-            state.combat = None;
-            // CR 511.3: the combat phase is over — its attacker restriction
-            // (Last Night Together / Bumi) ends with it.
-            state.current_combat_attacker_restriction = None;
-            state.current_combat_attacker_restriction_source = None;
-            super::layers::prune_end_of_combat_effects(state);
-            super::layers::prune_controller_end_combat_step_effects(state, state.active_player);
-            for obj in state.objects.iter_mut().map(|(_, v)| v) {
-                obj.replacement_definitions
-                    .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));
-            }
-            state
-                .pending_damage_replacements
-                .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));
             if triggers_fired {
                 // CR 603.3b: surface a same-controller ordering prompt before priority.
                 if let Some(prompt) = ordering_prompt {
                     return AutoAdvanceStep::waiting(prompt);
                 }
-                return AutoAdvanceStep::waiting(WaitingFor::Priority {
-                    player: state.active_player,
-                });
             }
-            let _ = advance_phase_once(state, events);
-            // Continue to PostCombatMain
+            // CR 511.1: The active player receives priority as the End Combat step
+            // begins, even when no ability triggered. Keeping the phase active until
+            // all players pass lets phase stops interrupt auto-pass here.
+            return AutoAdvanceStep::waiting(WaitingFor::Priority {
+                player: state.active_player,
+            });
         }
         Phase::End => {
             // CR 513.1 + CR 611.2a/b: Expire `PlayFromExile { duration:
@@ -3117,7 +3160,14 @@ mod tests {
         state.current_combat_attacker_restriction_source = Some(ObjectId(99));
         let mut events = Vec::new();
 
-        let _ = advance_after_empty_attackers(&mut state, &mut events);
+        let waiting = advance_after_empty_attackers(&mut state, &mut events);
+
+        assert_eq!(state.phase, Phase::EndCombat);
+        assert!(matches!(waiting, WaitingFor::Priority { .. }));
+        assert!(state.current_combat_attacker_restriction.is_some());
+
+        apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
+        apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
 
         assert!(state.current_combat_attacker_restriction.is_none());
         assert!(state.current_combat_attacker_restriction_source.is_none());
@@ -6575,6 +6625,84 @@ mod tests {
         assert_eq!(state.objects[&id].damage_marked, 0);
     }
 
+    /// CR 508.6 + CR 514.2: cleanup snapshots this turn's attacks into
+    /// `attacked_defenders_last_turn`, keyed by the ending (active) player and
+    /// directional, so "attacked you during their last turn" can query it. A
+    /// no-attack turn overwrites only that player's entry to empty; other players'
+    /// records persist (the skipped-player retention property).
+    #[test]
+    fn execute_cleanup_snapshots_attacked_defenders_last_turn() {
+        // P1's turn: P1 declared attackers against P0.
+        let mut state = setup();
+        state.active_player = PlayerId(1);
+        state
+            .attacked_defenders_this_turn
+            .insert(PlayerId(1), [PlayerId(0)].into_iter().collect());
+        let mut events = Vec::new();
+        execute_cleanup(&mut state, &mut events);
+
+        assert!(
+            state.player_attacked_player_last_turn(PlayerId(1), PlayerId(0)),
+            "P1 attacked P0 during P1's (now-completed) turn"
+        );
+        // The record is one-directional: P0 did not attack P1.
+        assert!(
+            !state.player_attacked_player_last_turn(PlayerId(0), PlayerId(1)),
+            "helper is directional (attacker, defender) — the swap must be false"
+        );
+
+        // P0 then takes a real turn and attacks no one: P0's entry is overwritten
+        // to empty, while P1's genuine last-turn record is untouched.
+        state.active_player = PlayerId(0);
+        state.attacked_defenders_this_turn.clear();
+        let mut events = Vec::new();
+        execute_cleanup(&mut state, &mut events);
+        assert!(
+            !state.player_attacked_player_last_turn(PlayerId(0), PlayerId(1)),
+            "P0's no-attack turn leaves no last-turn record"
+        );
+        assert!(
+            state.player_attacked_player_last_turn(PlayerId(1), PlayerId(0)),
+            "P1's last-turn record persists across another player's turn"
+        );
+
+        // A later real P1 turn with no attack overwrites P1's record to empty.
+        state.active_player = PlayerId(1);
+        state.attacked_defenders_this_turn.clear();
+        let mut events = Vec::new();
+        execute_cleanup(&mut state, &mut events);
+        assert!(
+            !state.player_attacked_player_last_turn(PlayerId(1), PlayerId(0)),
+            "P1's subsequent no-attack turn clears its record to empty"
+        );
+    }
+
+    #[test]
+    fn start_next_turn_expires_departed_players_last_turn_attack_record() {
+        use crate::game::elimination::eliminate_player;
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.active_player = PlayerId(0);
+        state
+            .attacked_defenders_last_turn
+            .insert(PlayerId(1), [PlayerId(0)].into_iter().collect());
+        eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
+
+        assert!(
+            state.player_attacked_player_last_turn(PlayerId(1), PlayerId(0)),
+            "the departed player's record persists before their skipped turn boundary"
+        );
+
+        start_next_turn(&mut state, &mut Vec::new());
+
+        assert_eq!(state.active_player, PlayerId(2));
+        assert!(
+            !state.player_attacked_player_last_turn(PlayerId(1), PlayerId(0)),
+            "the departed player's record expires when their skipped turn boundary is crossed"
+        );
+    }
+
     #[test]
     fn execute_cleanup_preserves_damage_under_damage_not_removed_static() {
         use crate::types::card_type::CoreType;
@@ -7506,6 +7634,10 @@ mod tests {
         )
         .unwrap();
 
+        // CR 511.1: the empty-attacker path still enters EndCombat, whose
+        // priority window must be passed before PostCombatMain.
+        apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
+        apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
         assert_eq!(state.phase, Phase::PostCombatMain);
     }
 

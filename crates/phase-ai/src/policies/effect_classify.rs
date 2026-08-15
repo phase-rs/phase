@@ -76,6 +76,16 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         Effect::PutCounter { counter_type, .. } | Effect::PutCounterAll { counter_type, .. } => {
             counter_sign_polarity(counter_type)
         }
+        // CR 122.1: the reproduced counter KIND is event-derived at resolution —
+        // there is no static `counter_type` to sign, and the triggering event can
+        // carry a harmful kind (e.g. -1/-1). The `target` is also not necessarily
+        // self: Aragorn, Company Leader reproduces onto "up to one OTHER target
+        // creature", so the effect can land on a creature the controller does not
+        // want buffed/debuffed. Neither the sign nor the recipient is knowable
+        // until the policy holds the selected target and the triggering multiset,
+        // so classify as Contextual and let the call site (e.g. anti_self_harm)
+        // inspect both rather than assuming a self-buff.
+        Effect::ReproduceEventCounters { .. } => EffectPolarity::Contextual,
         // CR 122.1 + CR 121: Removing counters inverts the placement polarity —
         // removing a +1/+1 counter harms the bearer, removing a -1/-1 counter
         // helps it (Hexcaster's Mark, Solemnity-style interactions, Vampire
@@ -294,6 +304,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::FlipCoins { .. }
         | Effect::FlipCoinUntilLose { .. }
         | Effect::Forage
+        | Effect::CompletePlayerAction { .. }
         | Effect::ForceAttack { .. }
         | Effect::ForEachCategory { .. }
         | Effect::FreeCastFromZones { .. }
@@ -347,6 +358,10 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::Renown { .. }
         | Effect::ReturnAsAura { .. }
         | Effect::Reveal { .. }
+        // CR 101.4: publishing already-chosen numbers moves no card and changes
+        // no board state, so it is neither good nor bad on its own — the damage
+        // and wheel clauses that READ those numbers carry the polarity.
+        | Effect::RevealChosenNumbers { .. }
         | Effect::RevealFromHand { .. }
         | Effect::RevealHand { .. }
         | Effect::RevealTop { .. }

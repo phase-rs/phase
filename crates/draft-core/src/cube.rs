@@ -2,6 +2,7 @@ use rand::seq::SliceRandom;
 use serde::Serialize;
 
 use engine::database::CardDatabase;
+use engine::parser::oracle::draft_effect_from_oracle_text;
 use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
 use engine::types::mana::ManaColor;
@@ -162,6 +163,10 @@ fn card_instance_from_face(face: &CardFace, index: usize, copy: u32) -> DraftCar
         cmc: face.mana_cost.mana_value().min(u32::from(u8::MAX)) as u8,
         type_line: type_line(face),
         is_land: face.card_type.core_types.contains(&CoreType::Land),
+        draft_effect: face
+            .oracle_text
+            .as_deref()
+            .and_then(draft_effect_from_oracle_text),
     }
 }
 
@@ -303,6 +308,7 @@ mod tests {
                 cmc: 0,
                 type_line: String::new(),
                 is_land: false,
+                draft_effect: None,
             })
             .collect();
         let source = CubePackSource::new(cards);

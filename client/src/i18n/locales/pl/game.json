@@ -16,10 +16,15 @@
     "shorten": "Break out",
     "decline": "Decline the shortcut",
     "untilLethal": "Repeat until the game ends.",
-    "fixedCount_one": "Repeat once.",
-    "fixedCount_other": "Repeat {{count}} times.",
+    "fixedCount_one": "Repeat at most once.",
+    "fixedCount_other": "Repeat at most {{count}} times.",
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
     "convokeInfo_other": "Auto-taps up to {{count}} creatures for convoke each iteration.",
+    "countAria": "Number of iterations",
+    "previewTitle_one": "Repeating once produces:",
+    "previewTitle_other": "Repeating {{count}} times produces:",
+    "previewEntry": "{{amount}} {{resource}}",
+    "previewEntryPlayer": "{{amount}} {{resource}} — {{player}}",
     "winKind": {
       "LethalDamage": "This loop deals lethal damage.",
       "PoisonLoss": "This loop gives lethal poison counters.",
@@ -45,6 +50,7 @@
     "expand": "Rozwiń postęp rozwiązywania"
   },
   "debugCreate": {
+    "copies": "Kopie",
     "tokenPower": "Power",
     "tokenToughness": "Toughness",
     "tokenPowerPlaceholder": "Power",
@@ -485,8 +491,10 @@
     "companion": "Towarzysz",
     "unboundedTooltip": "Nieograniczone: {{resource}} (∞)",
     "unboundedScheduledTooltip": "Nieograniczone: {{resource}} (∞) — zwinięcie oczekuje; zostanie wybrana skończona liczba",
+    "unboundedScheduledYouTooltip": "Nieograniczone: {{resource}} (∞) — zwinięcie oczekuje; podasz liczbę",
     "unboundedScheduledGlyph": "∞→N",
     "unboundedConditionalTooltip": "Nieograniczone: {{resource}} (∞) — zwinięcie oczekuje; może pozostać nieograniczone",
+    "unboundedConditionalYouTooltip": "Nieograniczone: {{resource}} (∞) — zwinięcie oczekuje; może pozostać nieograniczone, a jeśli nie — podasz liczbę",
     "unboundedMixedTooltip": "Nieograniczone: {{resource}} (∞) — część tej grupy ma oczekujące zwinięcie; część pozostaje nieograniczona",
     "unboundedConditionalGlyph": "∞→?",
     "unboundedManaPoolMarker": "Nieograniczona mana (∞)",
@@ -1806,6 +1814,10 @@
     "title": "Wybierz odbiorcę prezentu",
     "subtitle": "Wybierz przeciwnika, który otrzyma obiecany prezent."
   },
+  "entryController": {
+    "title": "Wybierz kontrolującego przy wejściu",
+    "subtitle": "Wybierz przeciwnika, który kontroluje ten permanent, gdy wchodzi na pole bitwy."
+  },
   "optionalCost": {
     "gift": {
       "title": "Obiecać prezent?",
@@ -2039,6 +2051,7 @@
     "searchPlaceholder": "Szukaj po nazwie...",
     "noCardsFound": "Nie znaleziono kart",
     "buttonSubtitle": "Wybierz jedną opcję",
+    "numberSubtitle": "Wpisz liczbę całkowitą nie mniejszą niż {{min}}",
     "filterPlaceholder": "Filtruj opcje...",
     "noOptionsMatch": "Brak pasujących opcji"
   },

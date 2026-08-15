@@ -26,7 +26,13 @@ import { notifyEngineSlow } from "../game/engineRecovery";
 
 type EngineResponse =
   | { type: "result"; id: number; data: unknown }
-  | { type: "error"; id: number; message: string; bracketViolation?: true };
+  | {
+      type: "error";
+      id: number;
+      message: string;
+      bracketViolation?: true;
+      engineOccupied?: true;
+    };
 
 /**
  * Watchdog timeout for gameplay round-trip calls. Generous on purpose: a
@@ -95,11 +101,17 @@ export class EngineWorkerClient {
           if (entry) {
             this.pending.delete(msg.id);
             if (entry.timer) clearTimeout(entry.timer);
-            // Bracket violation is a typed rejection so the caller can match
-            // by code rather than by string substring on the error message.
-            const err = msg.bracketViolation
-              ? new AdapterError(AdapterErrorCode.BRACKET_VIOLATION, msg.message, false)
-              : new Error(msg.message);
+            // Bracket violation and occupied-engine refusals are typed
+            // rejections so the caller can match by code rather than by string
+            // substring on the error message.
+            let err: Error;
+            if (msg.bracketViolation) {
+              err = new AdapterError(AdapterErrorCode.BRACKET_VIOLATION, msg.message, false);
+            } else if (msg.engineOccupied) {
+              err = new AdapterError(AdapterErrorCode.ENGINE_OCCUPIED, msg.message, false);
+            } else {
+              err = new Error(msg.message);
+            }
             entry.reject(err);
           }
           break;
@@ -217,6 +229,32 @@ export class EngineWorkerClient {
     });
   }
 
+  /**
+   * Host-start entry point. Unlike `initializeGame`, the engine refuses when it
+   * already holds a game and claims the multiplayer flag in the same call that
+   * installs the state — so a host sharing this worker with local play can
+   * never overwrite (or be overwritten by) the other session. Rejects with
+   * `AdapterErrorCode.ENGINE_OCCUPIED` on refusal.
+   */
+  async initializeMultiplayerHostGame(
+    deckData: unknown | null,
+    seed: number,
+    formatConfig: FormatConfig | null,
+    matchConfig: MatchConfig | null,
+    playerCount?: number,
+    firstPlayer?: number,
+  ): Promise<SubmitResult> {
+    return this.request<SubmitResult>({
+      type: "initializeMultiplayerHostGame",
+      deckData,
+      seed,
+      formatConfig,
+      matchConfig,
+      playerCount,
+      firstPlayer,
+    });
+  }
+
   // ── Gameplay round-trips ──────────────────────────────────────────────
   // Each of these is a per-action engine call that the UI awaits before it can
   // continue (and that holds the dispatch mutex). They carry a watchdog that
@@ -311,6 +349,27 @@ export class EngineWorkerClient {
     return this.request(
       { type: "getAiActionProposalWithDiagnostics", difficulty, playerId },
       ENGINE_AI_TIMEOUT_MS,
+    );
+  }
+
+  /** Engine-owned tactical floor for a decision whose optional scorer timed out. */
+  async getAiTacticalActionProposal(
+    difficulty: string,
+    playerId: number,
+  ): Promise<AiActionProposal | null> {
+    return this.request<AiActionProposal | null>(
+      { type: "getAiTacticalActionProposal", difficulty, playerId },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async getAiTacticalActionProposalWithDiagnostics(
+    difficulty: string,
+    playerId: number,
+  ): Promise<{ proposal: AiActionProposal; receipt: AiDecisionDiagnosticReceipt } | null> {
+    return this.request(
+      { type: "getAiTacticalActionProposalWithDiagnostics", difficulty, playerId },
+      ENGINE_REQUEST_TIMEOUT_MS,
     );
   }
 

@@ -48,6 +48,7 @@ fn attach_transform_back_face(runner: &mut GameRunner, object_id: ObjectId) {
         // CR 712.16: this is a transforming DFC, so the mass resolver may
         // transform it rather than applying CR 701.27c's no-op.
         layout_kind: Some(LayoutKind::Transform),
+        parse_warnings: vec![],
     });
 }
 

@@ -26,6 +26,7 @@ import type {
   StandingEntry,
   TournamentFormat,
   PodPolicy,
+  DraftKind,
 } from "./draft-adapter";
 import type { ServerInfo } from "./ws-adapter";
 
@@ -43,7 +44,7 @@ export type DraftPhase =
 export interface CreateDraftSettings {
   displayName: string;
   setCode: string;
-  kind: "Premier" | "Traditional";
+  kind: Exclude<DraftKind, "Quick">;
   public: boolean;
   password?: string;
   timerSeconds?: number;

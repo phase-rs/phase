@@ -18,15 +18,16 @@ use nom::Parser;
 
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::effect_chain::{
-    AbsorbKind, ClauseDisposition, ClauseId, EffectChainIr, OtherwiseKind, PlayerScopeRewrite,
-    PriorModifier, ReplaceMeaningKind, ReplicateKind,
+    AbsorbKind, ClauseDisposition, ClauseId, ClausePlacement, EffectChainIr, OtherwiseKind,
+    PlayerScopeRewrite, PriorModifier, ReplaceMeaningKind, ReplicateKind,
 };
 use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::OracleError;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CastFromZoneDriver,
-    CastingPermission, ControllerRef, Effect, PlayerFilter, QuantityExpr, QuantityRef,
-    StaticCondition, SubAbilityLink, TapStateChange, TargetFilter,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
+    CastFromZoneDriver, CastingPermission, ChoiceType, Comparator, ControllerRef, DamageChannel,
+    Effect, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, StaticCondition, SubAbilityLink,
+    TapStateChange, TargetFilter,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -550,8 +551,8 @@ impl Arena {
     }
 }
 
-/// Is a def with this witness anywhere in `def`'s tree? Walks the two slots a
-/// handler can nest an absorbed node into.
+/// Is a def with this witness anywhere in `def`'s tree? Walks the slots a
+/// handler can nest an absorbed node into, including a delayed trigger payload.
 ///
 /// `AbilityDefinition` has a THIRD nested-def slot — `mode_abilities` — and it is
 /// excluded deliberately, not by oversight: assembly never writes it (verified; the
@@ -560,11 +561,110 @@ impl Arena {
 /// absorbed-parenthood assert goes RED — the safe direction, and the signal to add
 /// the slot here rather than a silent pass.
 fn def_tree_contains(def: &AbilityDefinition, witness: DefWitness) -> bool {
-    def_witness(def) == witness
-        || [def.sub_ability.as_deref(), def.else_ability.as_deref()]
-            .into_iter()
-            .flatten()
-            .any(|child| def_tree_contains(child, witness))
+    if def_witness(def) == witness {
+        return true;
+    }
+    // CR 603.7: a delayed trigger's payload is a DEFINITION held inside the
+    // effect, not in `sub_ability`/`else_ability`.
+    // `relocate_clause_defs_into_delayed_payload` is the first handler to absorb
+    // a node into that slot, so the walk must descend into it — otherwise the
+    // absorbed-parenthood assert reports "wrong parent" for a node whose parent
+    // is exactly right, on every relocated continuation.
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_contains(effect, witness) {
+            return true;
+        }
+    }
+    [def.sub_ability.as_deref(), def.else_ability.as_deref()]
+        .into_iter()
+        .flatten()
+        .any(|child| def_tree_contains(child, witness))
+}
+
+/// CR 603.7: a clause whose lowered definitions must move into an earlier delayed
+/// trigger payload. Recorded during the clause loop and executed afterwards.
+///
+/// `[base, end)` is over `defs` as the loop leaves it. Pending ranges are
+/// disjoint and strictly increasing because each base is recorded before the
+/// clause extends `defs`, and each end after its intrinsic continuation runs.
+struct PendingRelocation {
+    base: usize,
+    end: usize,
+}
+
+/// CR 603.7: the delayed-trigger wrapper immediately preceding `[base, end)`,
+/// or `None` when the assembled definitions do not support a safe relocation.
+///
+/// The shared receiver makes the refusal path structurally mutation-free: the
+/// caller cannot drain `defs` until this predicate has accepted the range.
+fn relocation_antecedent(defs: &[AbilityDefinition], base: usize, end: usize) -> Option<usize> {
+    if base == 0 || end <= base || end > defs.len() {
+        return None;
+    }
+    let antecedent = base - 1;
+    matches!(
+        &*defs[antecedent].effect,
+        Effect::CreateDelayedTrigger { .. }
+    )
+    .then_some(antecedent)
+}
+
+/// CR 603.7 + CR 608.2c: move `[base, end)` into the delayed payload it
+/// continues. On refusal, mutate nothing and retain the prior sibling layout.
+///
+/// Moved definitions are appended in printed order. `sub_link` is deliberately
+/// not rewritten: its stamped boundary is the CR 608.2c ordering signal, and a
+/// `ContinuationStep` rewrite could make an optional first continuation swallow
+/// the next. `absorb_last_created_riders` stamps `sub_link` for its own distinct
+/// same-chain rider operation; that idiom authorizes only this mover's `kind`
+/// normalization, never a `sub_link` change here.
+fn relocate_clause_defs_into_delayed_payload(
+    defs: &mut Vec<AbilityDefinition>,
+    base: usize,
+    end: usize,
+    continuation_kind: AbilityKind,
+    env: &mut AssemblyEnv,
+) -> bool {
+    let Some(antecedent) = relocation_antecedent(defs, base, end) else {
+        return false;
+    };
+
+    // Capture every identity before removal. `antecedent < base`, but that index
+    // relationship is an implementation fact, not a substitute for the contract.
+    let parent_id = env
+        .node_id_at(antecedent)
+        .expect("a valid antecedent is mirrored by the arena");
+    let count = end - base;
+    let mut moved_ids: Vec<NodeId> = Vec::with_capacity(count);
+    let mut moved: Vec<AbilityDefinition> = Vec::with_capacity(count);
+    for _ in 0..count {
+        // Mid-vector removal: later clause definitions can follow this range, so
+        // `sync_len` would pop the wrong arena node. Repeating at `base` preserves
+        // the printed order in `moved`.
+        moved_ids.push(env.arena.remove_at(base));
+        moved.push(defs.remove(base));
+    }
+
+    let Effect::CreateDelayedTrigger { effect, .. } = defs[antecedent].effect.as_mut() else {
+        unreachable!(
+            "the accepted antecedent remains a delayed trigger because every removal is after it"
+        )
+    };
+    for mut def in moved {
+        // CR 113.3b: a relocated continuation has no activation cost and resolves
+        // as part of the delayed ability. The Phase-2 fold normalizes ordinary
+        // sub-abilities to `continuation_kind`, but this definition leaves `defs`
+        // before that fold, so normalize it here. Do not stamp the payload head.
+        def.kind = continuation_kind;
+        append_to_deepest_sub_ability(effect, Some(Box::new(def)));
+    }
+
+    // Name the parent explicitly: `settle` would infer `order.last()`, which is
+    // not necessarily the delayed-trigger wrapper after later clauses emitted.
+    for id in moved_ids {
+        env.arena.absorb(id, parent_id);
+    }
+    true
 }
 
 /// Emit-time facts about the chain assembled so far.
@@ -1218,39 +1318,144 @@ impl AssemblyEnv {
     }
 }
 
-/// Coverage-honesty marker (issue #7046): a `DamageEachPlayer` reading "that
-/// much/that many" (`Ref(EventContextAmount)`) chained IMMEDIATELY after a mass
-/// zone move cannot be faithfully executed today. CR 608.2c requires the
-/// completed move's TOTAL for every recipient, but the runtime hand-off
-/// (`install_previous_effect_counts_by_player`) publishes a per-OWNER table that
-/// `DamageEachPlayer`'s per-recipient resolution consults first — each opponent
-/// reads their OWN swept-card count (0 in the Valakut Exploration native
-/// pattern). Emitting the parsed shape would be silently wrong at runtime,
-/// which is strictly worse than an honest residual gap (the Winnowing-class
-/// precedent in `imperative.rs`). Scoped to the immediately-chained pairing
-/// because only the next resolution step can see the table (any intermediate
-/// effect clears it), and only `DamageEachPlayer` resolves per-recipient —
-/// scalar consumers (Draw / DealDamage-to-object / Mill / LoseLife /
-/// SearchLibrary / Token) read max-over-owners, which equals the true total for
-/// every corpus pool (single-owner by CR 400.3). DELETE this gate when #7046
-/// provides the completed-sweep scalar-total channel; the T1 zero-delta
-/// assertions and the P2 marker assertion are the tripwires that force that
-/// deletion to be a conscious, tested change.
-pub(crate) const MASS_MOVE_TOTAL_DAMAGE_GAP: &str = "mass_move_total_damage";
-
 /// CR 608.2c: does `effect`'s amount expression read `EventContextAmount`
-/// ("that much"/"that many")? Leaf helper for the `MASS_MOVE_TOTAL_DAMAGE_GAP`
-/// gate above. Mirrors the game-side
-/// `quantity_expr_references_event_context_amount` (`game/effects/mod.rs`),
-/// which this parser module cannot call directly — the parser layer never
-/// reaches into game internals; both consult the single traversal authority
-/// `QuantityExpr::any_ref`.
+/// ("that much"/"that many")? Used when chain grammar proves that the
+/// antecedent is the immediately preceding resolved instruction, so assembly
+/// can bind it to `PreviousEffectAmount` rather than a triggering event.
 fn damage_amount_reads_event_context(effect: &Effect) -> bool {
     let mut reads = false;
     effect.for_each_quantity_expr(&mut |quantity| {
         reads |= quantity.any_ref(&mut |qty| matches!(qty, QuantityRef::EventContextAmount));
     });
     reads
+}
+
+/// The recipient of a single-recipient scalar instruction — the position a
+/// "… to them" / "… they lose" player anaphor occupies. Paired with
+/// [`scalar_amount_mut`], which reads the "that much" position of the same
+/// instruction; split in two because the binding below needs the recipient
+/// immutably to decide, then the amount mutably to rewrite.
+fn scalar_recipient(effect: &Effect) -> Option<&TargetFilter> {
+    match effect {
+        Effect::DealDamage { target, .. } => Some(target),
+        Effect::GainLife { player, .. } => Some(player),
+        Effect::LoseLife { target, .. } => target.as_ref(),
+        _ => None,
+    }
+}
+
+fn scalar_amount_mut(effect: &mut Effect) -> Option<&mut QuantityExpr> {
+    match effect {
+        Effect::DealDamage { amount, .. }
+        | Effect::GainLife { amount, .. }
+        | Effect::LoseLife { amount, .. } => Some(amount),
+        _ => None,
+    }
+}
+
+/// CR 109.4: the chain index of the `Choose(Player)` clause a recipient anaphor
+/// names, if it names one. A resolution-time chosen player is carried as a
+/// player-only `Typed` filter whose controller is `ChosenPlayer { index }` —
+/// the shape `subject::chosen_player_anaphor_filter` is the sole producer of.
+fn chosen_player_anaphor_index(filter: &TargetFilter) -> Option<u8> {
+    match filter {
+        TargetFilter::Typed(tf) => match tf.controller {
+            Some(ControllerRef::ChosenPlayer { index }) => Some(index),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// CR 101.4 + CR 107.1a: The extremum a "choose a player with the highest/lowest
+/// number" restriction selected by, if that is what this player filter is.
+///
+/// Recognizes exactly the shape `lower::chosen_number_player_filter` emits, and
+/// only under `EQ` — under `NE` ("an opponent who DIDN'T choose the highest
+/// number") the extremum is provably *not* the chosen player's number, so there
+/// is nothing to bind and this returns `None`.
+fn chosen_number_selection_extremum(filter: &PlayerFilter) -> Option<AggregateFunction> {
+    let PlayerFilter::PlayerAttribute {
+        attr,
+        comparator: Comparator::EQ,
+        value,
+        ..
+    } = filter
+    else {
+        return None;
+    };
+    if !matches!(
+        **attr,
+        QuantityRef::PlayerChosenNumber {
+            player: PlayerScope::ScopedPlayer
+        }
+    ) {
+        return None;
+    }
+    match &**value {
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::PlayerChosenNumber {
+                    player:
+                        PlayerScope::AllPlayers {
+                            aggregate,
+                            exclude: None,
+                        },
+                },
+        } => Some(*aggregate),
+        _ => None,
+    }
+}
+
+/// CR 608.2c + CR 101.4: Bind the "that much" of a
+/// *"Choose an opponent with the highest number. ~ deals that much damage to
+/// them."* continuation (Itazura, Lingering Wick) to the number that selection
+/// was made by.
+///
+/// `EventContextAmount` means "the amount the surrounding event supplies", and a
+/// resolving spell supplies none — left alone the instruction silently deals 0.
+/// The antecedent is provable from the assembled chain rather than guessable at
+/// lowering time, which is why this runs here: the recipient anaphor names a
+/// specific `Choose(Player)` clause by index, and that clause's own restriction
+/// says which extremum it selected by. Both halves must agree, so an
+/// intervening unrestricted player choice (which would shift the index) simply
+/// fails to match and nothing is rebound.
+///
+/// The bound reference is the chain-wide extremum, not a read of the chosen
+/// player's own number: the `EQ` restriction guarantees the chosen player HOLDS
+/// that extremum, so the two are equal by construction, and expressing it this
+/// way reuses the `PlayerChosenNumber` scalar the restriction itself is built
+/// from instead of minting a resolution-scoped `PlayerScope::ChosenPlayer` whose
+/// only consumer would be this binding.
+fn bind_chosen_number_anaphor(def: &mut AbilityDefinition, prior: &[AbilityDefinition]) {
+    let Some(index) = scalar_recipient(&def.effect).and_then(chosen_player_anaphor_index) else {
+        return;
+    };
+    let mut player_choices = prior.iter().filter_map(|d| match &*d.effect {
+        Effect::Choose {
+            choice_type: choice_type @ (ChoiceType::Player { .. } | ChoiceType::Opponent { .. }),
+            ..
+        } => Some(choice_type),
+        _ => None,
+    });
+    let Some(ChoiceType::Opponent {
+        restriction: Some(restriction),
+        ..
+    }) = player_choices.nth(index as usize)
+    else {
+        return;
+    };
+    let Some(aggregate) = chosen_number_selection_extremum(restriction) else {
+        return;
+    };
+    if let Some(amount) = scalar_amount_mut(def.effect.as_mut()) {
+        amount.rebind_event_context_amount(&QuantityRef::PlayerChosenNumber {
+            player: PlayerScope::AllPlayers {
+                aggregate,
+                exclude: None,
+            },
+        });
+    }
 }
 
 pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
@@ -1269,6 +1474,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // makes it a `SequentialSibling` (independent following instruction); a
     // `Comma`/`Then`/no boundary makes it a within-clause `ContinuationStep`.
     let mut prev_boundary: Option<ClauseBoundary> = None;
+    // CR 603.7 + CR 608.2c: record delayed-payload relocations during the clause
+    // loop and execute them only after every later clause has performed its
+    // top-level binding work against today's unchanged `defs` shape.
+    let mut pending_relocations: Vec<PendingRelocation> = Vec::new();
     for clause_ir in &ir.clauses {
         // "The arena mirrors `defs`" is load-bearing for every binding below, and it
         // is asserted HERE, at the one point every clause path must pass through.
@@ -1867,6 +2076,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // normal clause stamps its `sub_link` from the boundary AFTER this
         // clause, not the stale boundary that preceded it.
         if handled_as_special {
+            debug_assert!(
+                clause_ir.placement == ClausePlacement::Sibling,
+                "only emitted clauses may be nested into delayed payloads"
+            );
             prev_boundary = clause_ir.boundary;
             // Classify anything this handler detached; the mirror is asserted at the
             // next loop-top, or at the Phase-1/Phase-2 boundary for the last clause.
@@ -1985,24 +2198,26 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // boundary→link authority (`oracle_ir::ast::sub_link_after_boundary`),
         // which the referent walk in `oracle_effect::mod` also consults.
         def.sub_link = sub_link_after_boundary(prev_boundary);
-        // Coverage-honesty gate (issue #7046, see `MASS_MOVE_TOTAL_DAMAGE_GAP`
-        // doc comment above `assemble_effect_chain`): a `DamageEachPlayer`
-        // reading "that much/that many" chained IMMEDIATELY after a mass zone
-        // move cannot be faithfully executed today. `prev.sub_ability.is_none()`
-        // matches the runtime scope exactly — only the immediately-next
-        // resolution step can see the per-owner count table
-        // (`install_previous_effect_counts_by_player` clears it for any other
-        // consumer), and only `DamageEachPlayer` resolves per-recipient.
+        // CR 608.2c: A mass zone move immediately followed by "deals that much
+        // damage to each ..." reads ONE scalar result from the completed move,
+        // not a different per-recipient event-context amount. Bind only this
+        // explicit continuation relationship; event-fed and per-player-scoped
+        // `EventContextAmount` consumers retain their ordinary meaning.
+        // CR 608.2c + CR 101.4: bind a "that much … to them" pair back to the
+        // number the earlier player selection was made by (Itazura).
+        bind_chosen_number_anaphor(&mut def, &defs);
         if let Some(prev) = defs.last() {
-            if prev.sub_ability.is_none()
+            if def.sub_link == SubAbilityLink::ContinuationStep
+                && prev.sub_ability.is_none()
                 && matches!(&*prev.effect, Effect::ChangeZoneAll { .. })
                 && matches!(&*def.effect, Effect::DamageEachPlayer { .. })
                 && damage_amount_reads_event_context(&def.effect)
             {
-                *def.effect = Effect::unimplemented(
-                    MASS_MOVE_TOTAL_DAMAGE_GAP,
-                    clause_ir.source.fragment().unwrap_or_default(),
-                );
+                if let Effect::DamageEachPlayer { amount, .. } = def.effect.as_mut() {
+                    amount.rebind_event_context_amount(&QuantityRef::PreviousEffectAmount {
+                        channel: DamageChannel::Total,
+                    });
+                }
             }
         }
         // CR 615.5: A "(When|Whenever|If) damage [from a <type> source] is
@@ -2594,6 +2809,9 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             }
         }
 
+        // CR 608.2c: this clause's definitions begin here. A nested delayed
+        // payload relocation records exactly this range for the post-loop pass.
+        let nest_base = defs.len();
         defs.extend(current_defs);
         env.observe(&defs, Some(clause_ir.id), NodeRole::Primary);
 
@@ -2603,6 +2821,16 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             apply_clause_continuation(&mut defs, continuation.clone(), kind, &env);
             env.observe(&defs, None, NodeRole::ContinuationProduct);
             apply_where_x_to_latest_def(&mut defs, clause_ir.where_x_expression.as_deref());
+        }
+
+        // CR 603.7: a continuation of an open delayed payload resolves when the
+        // payload resolves, not with the enclosing ability. Record its complete
+        // emitted range now, but do not mutate `defs` until the clause loop ends.
+        if clause_ir.placement == ClausePlacement::NestedInDelayedPayload {
+            pending_relocations.push(PendingRelocation {
+                base: nest_base,
+                end: defs.len(),
+            });
         }
 
         // CR 608.2c: Advance the separating boundary for the next normal-path
@@ -2625,6 +2853,101 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // assert would ever run again. Phase 2 does not touch `env`, so this is the last
     // moment the mirror still means anything. Assert it here, and Phase 1 is covered
     // end to end.
+    // CR 603.7 + CR 608.2c: execute recorded relocations in printed order.
+    // `shift` turns a recorded range into its live index after earlier ranges
+    // have been removed. It advances only when the mover actually succeeded.
+    // Do not add `settle` here: `assert_mirrors` immediately below checks its
+    // detached-node invariant and stronger identity and parenthood invariants.
+    //
+    // Maximality corollary: this is the unique safe position. The locator lemma
+    // permits only recorded relocations between recording and execution; later
+    // Phase-2 folds remove definitions without records. Do not move this pass
+    // below `env.arena.assert_mirrors(&defs)`.
+    //
+    // Watchlist (structural census, md5 b6310463ac18b5bd12d5560501032136): 201
+    // post-CreateDelayedTrigger sibling nodes across 173 spines — every
+    // AbilityDefinition-shaped node reachable in card-data, deduped to spine
+    // heads, taking every node strictly after the first delayed trigger. Do not
+    // re-cut this as JSON containers. Re-run if a candidate carries Dig; if the
+    // Elemental-Appeal (a)∧(b) consumer probe exceeds one or T-ROW5 reds (the
+    // silent-wrong-binding, highest-severity exposure); if CopySpell with
+    // ParentTarget/TrackedSet(0) is nonterminal; if a bare FlipCoin/RollDie and
+    // its branch share a payload; if ChooseDamageSource/ChosenDamageSource occurs
+    // at any depth; or if an antecedent gains else_ability or an instead condition.
+    // Record the data md5 for every re-run.
+    //
+    // Additional presence-direction watchlist: a DT-holder with a strictly earlier
+    // token producer and affirmative reflexive gate (F1); the unmeasured
+    // rewire_result_anchored_subchain upper-bound-40 exposure (F2); an F3
+    // "whenever ... this turn" cleanup that would nest below a relocated
+    // continuation; or any new pass in the pre-fold range / existing payload
+    // recursion (S3).
+    //
+    // Closed at parse time — V3/V4's shield or cast-time veto remains a top-level
+    // definition and breaks the fold's contiguous relocation run, so the following
+    // continuation stays a sibling and never reaches the structural locator. The
+    // driver's assertion remains the guard for a genuine future parse/assembly
+    // divergence. Reopen only if a card establishes that a continuation must cross
+    // such a veto; carry an explicit antecedent handle rather than weakening this guard.
+    // Closed by plan-r17 §R17.4.1 — the leading-if body split's absorbed clauses are now
+    // classified against the OUTER registry, because placement is resolved by a fold over the
+    // finished clause sequence rather than at a push site. Residual: the fold cannot see a
+    // non-`Emit` disposition's relationship to its absorb TARGET — an `Absorb` rider that
+    // merges INTO the installer clause still CLEARS the registry rather than passing through,
+    // so a continuation after such a rider stays a sibling. That is today's behaviour, chosen
+    // because the alternative (pass-through) can only ADD mis-attachments. Reopen with a card
+    // whose installer carries an absorbed rider AND a following continuation; the fix is to
+    // resolve the absorb target before the fold, not to widen the disposition gate.
+    // Deferred — coin/die consolidation is top-level only. Goblin Kites, Fickle
+    // Efreet, and Frenetic Sliver keep their flip and branch on opposite sides of
+    // the payload boundary. Reopen when they share a payload, a fourth row appears,
+    // or a double-flip report arrives; a payload-descending pass needs review.
+    // Deferred — payload-`sub_ability`-invisible anaphor rewrite: the effect-space
+    // recursion below delayed-trigger payloads cannot rewrite a continuation's
+    // LastCreated binding. Reopen on T-ROW5, a wider Elemental Appeal consumer
+    // probe, or a bare-pronoun misbinding; any definition-space repair is pool-wide.
+    // Deferred — resolve_populated_token_anaphors cannot reach payload.sub_ability:
+    // its effect-space recursion receives inner.effect, never inner. Reopen when
+    // T-ROW5 reds, the consumer probe exceeds Elemental Appeal, or a bare pronoun
+    // misbinds; a definition-space recursion would be a pool-wide widening.
+    // Deferred — relocated Jodah cleanup normalization: relocation can put the
+    // `ExileFromTopUntil` → optional `CastFromZone { ParentTarget }` → bottom
+    // `PutAtLibraryPosition { TrackedSet }` triple inside a delayed payload, but
+    // `normalize_linked_exile_cast_pair` examines adjacent top-level definitions
+    // only. Its lower-layer gate documents that the parser-default `TrackedSet`
+    // has no publisher for this exile pile, leaving the pile stranded. This
+    // worktree's delayed-trigger integration test asserts Codie's three node
+    // variants but has neither a Jodah fixture nor a cleanup-target assertion.
+    // Reopen when a payload-descending normalization is designed; add a Jodah test
+    // that asserts the cleanup target, not only its `PutAtLibraryPosition` variant.
+    // Post-relocation, nine `&mut defs` passes and three pairwise-fold helpers run.
+    // Beyond the named coin/die and token-anaphor passes, the block also contains
+    // `resolve_those_tokens_anaphors`, `resolve_populated_unsuspect_anaphors`,
+    // `fold_cast_copy_of_card_defs`, `merge_search_tail_into_additional_cost_else`,
+    // `normalize_linked_exile_cast_pair`, and `rebind_condition_instead_damage_anaphor`.
+    let mut shift = 0usize;
+    for pending in &pending_relocations {
+        let base = pending.base - shift;
+        let end = pending.end - shift;
+        if relocate_clause_defs_into_delayed_payload(
+            &mut defs,
+            base,
+            end,
+            continuation_kind,
+            &mut env,
+        ) {
+            shift += end - base;
+        } else {
+            debug_assert!(
+                false,
+                "delayed-payload relocation refused: the definition preceding a \
+                 `NestedInDelayedPayload` clause is not an `Effect::CreateDelayedTrigger`, \
+                 or the clause emitted no definition — the parse-time registry and the \
+                 assembled `defs` have diverged. The definitions were left as top-level \
+                 siblings, which is the pre-change behaviour."
+            );
+        }
+    }
     env.arena.assert_mirrors(&defs);
 
     // ── Phase 2: Post-loop assembly (unchanged) ────────────────────────
@@ -2747,6 +3070,16 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             chain.kind = continuation_kind;
             // R2 — a SHAPE REPAIR, not materialization.
             normalize_linked_exile_cast_pair(&mut prev, &mut chain);
+            if prev.else_ability.is_none()
+                && are_complementary_revealed_card_type_conditions(
+                    prev.condition.as_ref(),
+                    chain.condition.as_ref(),
+                )
+            {
+                prev.else_ability = Some(Box::new(chain));
+                chain = prev;
+                continue;
+            }
             // CR 608.2c: an independent sentence after an if/otherwise choice
             // resolves after either branch (for example, Wedding Announcement's
             // three-counter transform also follows its Human-token branch).
@@ -2899,6 +3232,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
 
     // CR 607.2d: fill every committed-choice guess with the head Choose's domain.
     super::propagate_committed_choice_type_to_guesses(&mut result);
+    // CR 607.2d + CR 101.4: persist a secretly-chosen number whenever a later
+    // clause in the same chain reads it back ("the highest number", "each player
+    // who didn't choose the lowest number").
+    super::promote_chosen_number_persistence(&mut result);
     // CR 608.2d: gate the whole "if they guessed wrong/right" branch, including
     // any "and ..." continuation steps.
     super::propagate_guess_branch_condition_to_continuations(&mut result);
@@ -2956,6 +3293,51 @@ fn merge_search_tail_into_additional_cost_else(
         }
     }
     false
+}
+
+// CR 608.2c: A positive card-type rider and its matching negated rider are
+// complementary branches of the same instruction, not independent siblings.
+fn are_complementary_revealed_card_type_conditions(
+    current: Option<&AbilityCondition>,
+    next: Option<&AbilityCondition>,
+) -> bool {
+    match (current, next) {
+        (
+            Some(positive @ AbilityCondition::RevealedHasCardType { .. }),
+            Some(AbilityCondition::Not { condition }),
+        )
+        | (
+            Some(AbilityCondition::Not { condition }),
+            Some(positive @ AbilityCondition::RevealedHasCardType { .. }),
+        ) => same_revealed_card_type_condition(positive, condition.as_ref()),
+        _ => false,
+    }
+}
+
+fn same_revealed_card_type_condition(
+    positive: &AbilityCondition,
+    negated: &AbilityCondition,
+) -> bool {
+    let AbilityCondition::RevealedHasCardType {
+        card_types: positive_types,
+        additional_filter: positive_filter,
+        subtype_filter: positive_subtype,
+    } = positive
+    else {
+        return false;
+    };
+    let AbilityCondition::RevealedHasCardType {
+        card_types: negated_types,
+        additional_filter: negated_filter,
+        subtype_filter: negated_subtype,
+    } = negated
+    else {
+        return false;
+    };
+
+    positive_types == negated_types
+        && positive_filter == negated_filter
+        && positive_subtype == negated_subtype
 }
 
 /// R2 — CR 608.2c + CR 401.4: linked-exile-cast bottom cleanup.
@@ -3042,6 +3424,14 @@ fn instead_replaces_optional_payment_continuation(root: &AbilityDefinition) -> b
 #[cfg(test)]
 mod arena_tests {
     use super::*;
+    use crate::parser::oracle_effect::parse_effect_chain_ir;
+    use crate::parser::oracle_ir::ast::parsed_clause;
+    use crate::parser::oracle_ir::effect_chain::{ClauseIr, ClauseIrBuilder};
+    use crate::parser::oracle_nom::context::ParseContext;
+    use crate::types::ability::{DelayedTriggerCondition, ReplacementDefinition};
+    use crate::types::phase::Phase;
+    use crate::types::replacements::ReplacementEvent;
+    use crate::types::zones::EtbTapState;
 
     fn shuffle_def() -> AbilityDefinition {
         AbilityDefinition::new(
@@ -3169,6 +3559,369 @@ mod arena_tests {
         assert!(matches!(
             arena.node(absorbed).status,
             NodeStatus::Absorbed { into } if into == parent
+        ));
+    }
+
+    fn delayed_trigger(payload: AbilityDefinition) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(payload),
+                uses_tracked_set: false,
+            },
+        )
+    }
+
+    fn delayed_trigger_effect(payload: AbilityDefinition) -> Effect {
+        delayed_trigger(payload).effect.as_ref().clone()
+    }
+
+    fn replacement_shield_effect() -> Effect {
+        Effect::AddTargetReplacement {
+            replacement: Box::new(ReplacementDefinition::new(ReplacementEvent::DamageDone)),
+            target: TargetFilter::Any,
+        }
+    }
+
+    fn shuffle_effect() -> Effect {
+        Effect::Shuffle {
+            target: TargetFilter::Controller,
+        }
+    }
+
+    fn zone_change(destination: Zone, target: TargetFilter) -> Effect {
+        Effect::ChangeZone {
+            origin: None,
+            destination,
+            target,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        }
+    }
+
+    fn emitted_clause(
+        builder: &mut ClauseIrBuilder,
+        source: &str,
+        effect: Effect,
+        boundary: Option<ClauseBoundary>,
+    ) {
+        builder
+            .clause(
+                source,
+                parsed_clause(effect),
+                boundary,
+                ClauseDisposition::Emit {
+                    followup: None,
+                    intrinsic: None,
+                },
+            )
+            .push();
+    }
+
+    fn chain_ir(clauses: Vec<ClauseIr>, kind: AbilityKind) -> EffectChainIr {
+        EffectChainIr {
+            clauses,
+            kind,
+            continuation_kind: None,
+            player_scope_rewrite: PlayerScopeRewrite::Apply,
+            chain_rounding: None,
+            actor: None,
+            in_trigger: false,
+            repeat_until: None,
+        }
+    }
+
+    fn chain_len(def: &AbilityDefinition) -> usize {
+        1 + def.sub_ability.as_deref().map_or(0, chain_len)
+    }
+
+    fn first_delayed_after(def: &AbilityDefinition) -> &AbilityDefinition {
+        let mut current = def.sub_ability.as_deref();
+        while let Some(candidate) = current {
+            if matches!(*candidate.effect, Effect::CreateDelayedTrigger { .. }) {
+                return candidate;
+            }
+            current = candidate.sub_ability.as_deref();
+        }
+        panic!("expected a second delayed trigger in the assembled top-level chain")
+    }
+
+    fn delayed_payload_origin(def: &AbilityDefinition) -> Option<Zone> {
+        let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect else {
+            panic!("expected delayed trigger, got {:?}", def.effect);
+        };
+        let Effect::ChangeZone { origin, .. } = &*effect.effect else {
+            panic!(
+                "expected delayed payload ChangeZone, got {:?}",
+                effect.effect
+            );
+        };
+        *origin
+    }
+
+    #[test]
+    fn delayed_payload_tree_walk_finds_only_members() {
+        let inner = AbilityDefinition::new(AbilityKind::Spell, shuffle_effect());
+        let payload = AbilityDefinition::new(AbilityKind::Spell, replacement_shield_effect())
+            .sub_ability(inner);
+        let outer = delayed_trigger(payload);
+        let absent = AbilityDefinition::new(AbilityKind::Spell, shuffle_effect());
+        let Effect::CreateDelayedTrigger { effect, .. } = &*outer.effect else {
+            unreachable!("delayed_trigger always constructs a delayed trigger");
+        };
+        let contained = effect
+            .sub_ability
+            .as_deref()
+            .expect("the payload construction must retain its nested definition");
+
+        assert!(
+            def_tree_contains(&outer, def_witness(contained)),
+            "T-DTC: the CreateDelayedTrigger payload is a definition-tree slot"
+        );
+        assert!(
+            !def_tree_contains(&outer, def_witness(&absent)),
+            "T-DTC negative: the widened walk must still discriminate non-members"
+        );
+    }
+
+    #[test]
+    fn relocation_antecedent_refuses_hostile_shapes_and_accepts_the_valid_one() {
+        let delayed = delayed_trigger(AbilityDefinition::new(AbilityKind::Spell, shuffle_effect()));
+        let ordinary = AbilityDefinition::new(AbilityKind::Spell, shuffle_effect());
+        let shield = AbilityDefinition::new(AbilityKind::Spell, replacement_shield_effect());
+
+        assert_eq!(
+            relocation_antecedent(std::slice::from_ref(&ordinary), 0, 1),
+            None
+        );
+        assert_eq!(
+            relocation_antecedent(std::slice::from_ref(&ordinary), 1, 1),
+            None
+        );
+        assert_eq!(
+            relocation_antecedent(std::slice::from_ref(&ordinary), 1, 2),
+            None
+        );
+        assert_eq!(
+            relocation_antecedent(&[shield, ordinary.clone()], 1, 2),
+            None
+        );
+        assert_eq!(relocation_antecedent(&[delayed, ordinary], 1, 2), Some(0));
+    }
+
+    #[test]
+    fn relocation_mover_refusal_is_lossless_and_valid_move_shrinks_the_range() {
+        let shield = AbilityDefinition::new(AbilityKind::Spell, replacement_shield_effect());
+        let ordinary = AbilityDefinition::new(AbilityKind::Spell, shuffle_effect());
+        let mut refused_defs = vec![shield, ordinary];
+        let before = refused_defs
+            .iter()
+            .map(|def| std::mem::discriminant(def.effect.as_ref()))
+            .collect::<Vec<_>>();
+        let mut refused_env = AssemblyEnv::default();
+        refused_env
+            .arena
+            .sync_len(&refused_defs, None, NodeRole::Primary);
+
+        assert!(!relocate_clause_defs_into_delayed_payload(
+            &mut refused_defs,
+            1,
+            2,
+            AbilityKind::Spell,
+            &mut refused_env,
+        ));
+        assert_eq!(refused_defs.len(), 2);
+        assert_eq!(
+            refused_defs
+                .iter()
+                .map(|def| std::mem::discriminant(def.effect.as_ref()))
+                .collect::<Vec<_>>(),
+            before,
+            "T-AR2b: refusal leaves the effect sequence untouched"
+        );
+
+        let delayed = delayed_trigger(AbilityDefinition::new(AbilityKind::Spell, shuffle_effect()));
+        let continuation = AbilityDefinition::new(AbilityKind::Activated, shuffle_effect());
+        let mut accepted_defs = vec![delayed, continuation];
+        let mut accepted_env = AssemblyEnv::default();
+        accepted_env
+            .arena
+            .sync_len(&accepted_defs, None, NodeRole::Primary);
+
+        assert!(relocate_clause_defs_into_delayed_payload(
+            &mut accepted_defs,
+            1,
+            2,
+            AbilityKind::Spell,
+            &mut accepted_env,
+        ));
+        assert_eq!(accepted_defs.len(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "delayed-payload relocation refused")]
+    fn relocation_driver_reports_registry_assembly_divergence() {
+        let mut builder = ClauseIrBuilder::new("shield. shuffle");
+        emitted_clause(
+            &mut builder,
+            "shield",
+            replacement_shield_effect(),
+            Some(ClauseBoundary::Sentence),
+        );
+        emitted_clause(&mut builder, "shuffle", shuffle_effect(), None);
+        let mut clauses = builder.finish();
+        clauses[1].placement = ClausePlacement::NestedInDelayedPayload;
+
+        let _ = assemble_effect_chain(&chain_ir(clauses, AbilityKind::Spell));
+    }
+
+    #[test]
+    fn relocation_preserves_the_boundary_stamped_sub_link() {
+        for (boundary, expected) in [
+            (ClauseBoundary::Comma, SubAbilityLink::ContinuationStep),
+            (ClauseBoundary::Sentence, SubAbilityLink::SequentialSibling),
+        ] {
+            let mut builder = ClauseIrBuilder::new("delay. shuffle");
+            emitted_clause(
+                &mut builder,
+                "delay",
+                delayed_trigger_effect(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    shuffle_effect(),
+                )),
+                Some(boundary),
+            );
+            emitted_clause(&mut builder, "shuffle", shuffle_effect(), None);
+            let mut clauses = builder.finish();
+            clauses[1].placement = ClausePlacement::NestedInDelayedPayload;
+
+            let assembled = assemble_effect_chain(&chain_ir(clauses, AbilityKind::Spell));
+            let Effect::CreateDelayedTrigger { effect, .. } = &*assembled.effect else {
+                panic!(
+                    "expected delayed-trigger wrapper, got {:?}",
+                    assembled.effect
+                );
+            };
+            let continuation = effect
+                .sub_ability
+                .as_deref()
+                .expect("promoted clause must be appended to the payload chain");
+            assert_eq!(continuation.sub_link, expected);
+        }
+    }
+
+    fn origin_after_post_loop_relocation(
+        second_effect: Effect,
+        second_placement: ClausePlacement,
+    ) -> Option<Zone> {
+        let mut builder = ClauseIrBuilder::new("delay. second. return");
+        emitted_clause(
+            &mut builder,
+            "delay",
+            delayed_trigger_effect(AbilityDefinition::new(AbilityKind::Spell, shuffle_effect())),
+            Some(ClauseBoundary::Sentence),
+        );
+        emitted_clause(
+            &mut builder,
+            "second",
+            second_effect,
+            Some(ClauseBoundary::Sentence),
+        );
+        builder
+            .clause(
+                "return",
+                parsed_clause(zone_change(Zone::Battlefield, TargetFilter::ParentTarget)),
+                None,
+                ClauseDisposition::Emit {
+                    followup: None,
+                    intrinsic: None,
+                },
+            )
+            .delayed_condition(Some(DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::End,
+            }))
+            .push();
+        let mut clauses = builder.finish();
+        clauses[1].placement = second_placement;
+
+        let assembled = assemble_effect_chain(&chain_ir(clauses, AbilityKind::Spell));
+        delayed_payload_origin(first_delayed_after(&assembled))
+    }
+
+    #[test]
+    fn later_clause_binding_sees_the_unrelocated_definition() {
+        let battlefield_move = zone_change(Zone::Battlefield, TargetFilter::ParentTarget);
+        assert_eq!(
+            origin_after_post_loop_relocation(
+                battlefield_move.clone(),
+                ClausePlacement::NestedInDelayedPayload,
+            ),
+            Some(Zone::Battlefield),
+            "T-PLoc: post-loop relocation leaves the preceding zone move visible"
+        );
+        assert_eq!(
+            origin_after_post_loop_relocation(battlefield_move, ClausePlacement::Sibling),
+            Some(Zone::Battlefield),
+            "T-PLoc control: the stamp depends on the prior zone move, not placement"
+        );
+        assert_eq!(
+            origin_after_post_loop_relocation(
+                shuffle_effect(),
+                ClausePlacement::NestedInDelayedPayload
+            ),
+            None,
+            "T-PLoc control: a non-zone predecessor must not receive a hard-coded origin"
+        );
+    }
+
+    #[test]
+    fn codie_ranges_relocate_in_printed_order_and_shrink_by_two() {
+        let text = "Add {W}{U}{B}{R}{G}. When you next cast a spell this turn, exile cards from the \
+                    top of your library until you exile an instant or sorcery card with lesser mana \
+                    value. Until end of turn, you may cast that card without paying its mana cost. Put \
+                    each other card exiled this way on the bottom of your library in a random order.";
+        let mut context = ParseContext::default();
+        let ir = parse_effect_chain_ir(text, AbilityKind::Activated, &mut context);
+        let sibling_count = chain_len(&assemble_effect_chain(&{
+            let mut sibling = ir.clone();
+            for clause in &mut sibling.clauses {
+                clause.placement = ClausePlacement::Sibling;
+            }
+            sibling
+        }));
+        let assembled = assemble_effect_chain(&ir);
+        let Effect::CreateDelayedTrigger { effect, .. } = &*assembled
+            .sub_ability
+            .as_deref()
+            .expect("Codie's mana definition must lead to its delayed trigger")
+            .effect
+        else {
+            panic!("Codie must install a delayed trigger");
+        };
+
+        assert_eq!(chain_len(&assembled), sibling_count - 2);
+        assert_eq!(chain_len(effect), 3);
+        assert!(matches!(*effect.effect, Effect::ExileFromTopUntil { .. }));
+        assert!(matches!(
+            effect.sub_ability.as_deref().map(|def| &*def.effect),
+            Some(Effect::CastFromZone { .. })
+        ));
+        assert!(matches!(
+            effect
+                .sub_ability
+                .as_deref()
+                .and_then(|def| def.sub_ability.as_deref())
+                .map(|def| &*def.effect),
+            Some(Effect::PutAtLibraryPosition { .. })
         ));
     }
 }

@@ -138,8 +138,10 @@ fn dig_to_graveyard_enabler(name: &str, in_trigger: bool) -> CardFace {
         up_to: false,
         filter: TargetFilter::Any,
         rest_destination: Some(Zone::Graveyard),
+        rest_order: engine::types::ability::DigRestOrder::Preserve,
         reveal: true,
         enter_tapped: false,
+        enters_attacking: false,
         source: DigSource::Library,
     };
     let mut face = creature(name);
@@ -647,8 +649,10 @@ fn dig_without_graveyard_rest_is_not_an_enabler() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
+            rest_order: engine::types::ability::DigRestOrder::Preserve,
             reveal: false,
             enter_tapped: false,
+            enters_attacking: false,
             source: DigSource::Library,
         },
     )];

@@ -14,13 +14,13 @@ import { useCardHover } from "../../hooks/useCardHover.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
-import { useUnboundedCounterTypes } from "../../hooks/useUnboundedCounterTypes.ts";
+import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { renderDescription } from "../../utils/description.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { buildGrantedKeywordSources, buildPTSources } from "../../viewmodel/attribution.ts";
-import { COUNTER_COLORS, computePTDisplay, counterIconClass, formatCounterType, toRoman } from "../../viewmodel/cardProps.ts";
+import { COUNTER_COLORS, computePTDisplay, counterIconClass, formatCounterType, shouldRenderCardBack, toRoman } from "../../viewmodel/cardProps.ts";
 import { getCardDisplayColors } from "../card/cardFrame.ts";
 import { ManaFontIcon } from "../icons/ManaFontIcon.tsx";
 import { CounterTooltip } from "../ui/CounterTooltip.tsx";
@@ -303,7 +303,7 @@ export const PermanentCard = memo(function PermanentCard({
   const isCopiedPermanent = useGameStore((s) =>
     (s.gameState?.derived?.copied_permanents ?? []).includes(objectId),
   );
-  const unboundedCounterTypes = useUnboundedCounterTypes(objectId);
+  const counterDisplay = useCounterDisplay(objectId);
   const isManaPaymentPreviewSource = useGameStore((s) =>
     s.manaPaymentPreviewSourceIds.includes(objectId),
   );
@@ -500,6 +500,7 @@ export const PermanentCard = memo(function PermanentCard({
     controllerIdentity || undefined,
   );
   const { name: imgName, faceIndex: imgFace, oracleId: imgOracleId, faceName: imgFaceName } = cardImageLookup(obj);
+  const renderCardBack = shouldRenderCardBack(obj);
   const hasSummoningSickness = obj.has_summoning_sickness ?? false;
 
   const ptDisplay = computePTDisplay(obj);
@@ -603,8 +604,9 @@ export const PermanentCard = memo(function PermanentCard({
       ? undefined
       : gameObjects?.[String(temporaryCantBeBlockedSourceId)]?.name;
 
-  // Filter out loyalty counters — shown separately as the loyalty badge
-  const counters = Object.entries(obj.counters).filter((entry): entry is [string, number] => entry[1] != null && entry[0] !== "loyalty");
+  // CR 306.5c: the engine already split the loyalty TOTAL out of the pill strip, so this site
+  // classifies nothing — it renders the rows it is given, in the order it is given them.
+  const counters = pillsOf(counterDisplay);
 
   // Tap rotation: 17deg in MTGA mode (or compact-height), 90deg in classic mode
   const tapBaseOpacity = (isCompactHeight || tapRotation === "mtga") && obj.tapped ? 0.85 : 1;
@@ -887,7 +889,7 @@ export const PermanentCard = memo(function PermanentCard({
       ) : (
         <>
           <div className="relative z-10 rounded-lg overflow-hidden">
-            <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined} tokenImageRef={obj.token_image_ref} oracleText={obj.display_source === "Token" ? obj.token_rules_text : undefined} faceDown={obj.face_down} />
+            <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined} tokenImageRef={obj.token_image_ref} oracleText={obj.display_source === "Token" ? obj.token_rules_text : undefined} faceDown={renderCardBack} />
             {/* CR 702.26: phased-out tint overlay — sky-blue mix-blend-screen
                 matches the player-area treatment (PlayerArea.tsx 4d6cfb506). */}
             {isPhasedOut && (
@@ -920,6 +922,7 @@ export const PermanentCard = memo(function PermanentCard({
             <LoyaltyBadge
               amount={obj.loyalty}
               kind="total"
+              isUnbounded={isUnbounded(counterDisplay.loyalty)}
               size="battlefield"
               className="absolute bottom-0 right-0 z-30"
               style={{ position: "absolute" }}
@@ -965,17 +968,18 @@ export const PermanentCard = memo(function PermanentCard({
           {/* Top-right overlay stack: counter badges kept clear of the
               bottom-right P/T box. */}
           <div className="absolute right-0.5 top-0.5 z-[60] flex flex-col items-end gap-0.5">
-            {counters.map(([type, count]) => {
+            {counters.map((row) => {
+              const type = row.counter;
               const iconClass = counterIconClass(type);
               // CR 732.2a / CR 701.34a: an accepted counter-growth loop pumps this
               // counter unboundedly — render ∞ instead of the (still-finite) real count.
-              const isUnbounded = unboundedCounterTypes.includes(type);
+              const unbounded = isUnbounded(row);
               return (
                 <CounterTooltip
                   key={type}
                   type={type}
-                  count={count}
-                  isUnbounded={isUnbounded}
+                  count={row.count}
+                  isUnbounded={unbounded}
                 >
                   <span
                     className={`flex items-center gap-0.5 rounded px-1 text-[10px] font-bold text-white ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
@@ -987,7 +991,7 @@ export const PermanentCard = memo(function PermanentCard({
                         label={formatCounterType(type)}
                       />
                     )}
-                    {formatCounterType(type)} {isUnbounded ? "∞" : `x${count}`}
+                    {formatCounterType(type)} {unbounded ? "∞" : `x${row.count}`}
                   </span>
                 </CounterTooltip>
               );

@@ -80,6 +80,7 @@ fn stolen_goodies_can_be_cast_with_no_targets() {
         casting_restrictions: vec![],
         casting_options: vec![],
         layout_kind: None,
+        parse_warnings: vec![],
     });
 
     let pool = &mut runner.state_mut().players[P0.0 as usize].mana_pool;

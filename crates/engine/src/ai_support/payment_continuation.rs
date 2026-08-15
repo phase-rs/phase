@@ -317,6 +317,7 @@ fn finalized_root_matches(
                             card_id: event_card_id,
                             controller: event_controller,
                             object_id: event_object_id,
+                            ..
                         } if *event_card_id == *card_id
                             && *event_controller == *controller
                             && *event_object_id == *object_id
@@ -413,7 +414,12 @@ fn classify_parked_cost_move_root(state: &GameState) -> PaymentContinuationState
         | PendingCostMoveResume::ReplacementMayCost { .. }
         | PendingCostMoveResume::Foretell { .. }
         | PendingCostMoveResume::UnlessBouncePayment { .. }
-        | PendingCostMoveResume::GetPlayerCountersUnlessPayment { .. }
+        | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+        // CR 701.9b: a parked random unless-discard holds no pending cast and
+        // no mana-ability cursor — the game picks the cards with no player
+        // input — so like its counter-addition sibling it affiliates with no
+        // payment-continuation root.
+        | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
         | PendingCostMoveResume::LoyaltyActivation { .. } => {
             PaymentContinuationState::NotAffiliated
         }
@@ -658,7 +664,9 @@ fn pending_cost_move_contains_root(
         | Some(PendingCostMoveResume::Foretell { .. })
         | Some(PendingCostMoveResume::DelveManaPayment { .. })
         | Some(PendingCostMoveResume::UnlessBouncePayment { .. })
-        | Some(PendingCostMoveResume::GetPlayerCountersUnlessPayment { .. })
+        | Some(PendingCostMoveResume::CounterAdditionUnlessPayment { .. })
+        // CR 701.9b: holds no pending cast, so it can contain no root.
+        | Some(PendingCostMoveResume::RandomDiscardUnlessPayment(..))
         | Some(PendingCostMoveResume::LoyaltyActivation { .. })
         | None => false,
     }

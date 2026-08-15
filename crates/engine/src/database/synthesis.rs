@@ -8827,7 +8827,7 @@ pub fn synthesize_suspend(face: &mut CardFace) {
     // CR 702.62a: Last-counter free-cast trigger — "When the last time counter
     // is removed from this card, if it's exiled, you may play it without
     // paying its mana cost." Mirrors `synthesize_siege_intrinsics` victory
-    // trigger (CR 310.11b) — both use `CounterRemoved` with `threshold: Some(0)`.
+    // trigger (CR 310.12b) — both use `CounterRemoved` with `threshold: Some(0)`.
     // The cast itself goes through the normal casting pipeline; `prepare_spell_cast`
     // detects the variant via `obj.zone == Exile && Keyword::Suspend` and assigns
     // `CastingVariant::Suspend`, which tags `CastVariantPaid::Suspend` at
@@ -8994,16 +8994,12 @@ pub fn synthesize_read_ahead(face: &mut CardFace) {
     if !face.keywords.contains(&Keyword::ReadAhead) {
         return;
     }
-    // CR 714.2d: final chapter number = greatest lore-counter threshold among
-    // this Saga's chapter triggers. No chapter abilities → nothing to read ahead to.
-    let Some(final_chapter) = face
-        .triggers
-        .iter()
-        .filter_map(|t| t.counter_filter.as_ref())
-        .filter(|f| f.counter_type == CounterType::Lore)
-        .filter_map(|f| f.threshold)
-        .max()
-    else {
+    // CR 714.2d: final chapter number = the greatest value among this Saga's
+    // chapter abilities, read from the chapter-symbol provenance the Saga parser
+    // records. Not inferred from lore thresholds: CR 714.2b gives a chapter
+    // symbol that shape, but a lore threshold trigger acquired some other way is
+    // not a chapter ability. No chapter abilities → nothing to read ahead to.
+    let Some(final_chapter) = face.triggers.iter().filter_map(|t| t.saga_chapter).max() else {
         return;
     };
 
@@ -9015,7 +9011,9 @@ pub fn synthesize_read_ahead(face: &mut CardFace) {
         Effect::Choose {
             choice_type: ChoiceType::NumberRange {
                 min: 1,
-                max: final_chapter.min(u8::MAX as u32) as u8,
+                // CR 702.155b: the Saga states its own upper bound (the final
+                // chapter), so this range is genuinely bounded.
+                max: Some(final_chapter),
                 distinctness: crate::types::ability::NumberDistinctness::Repeatable,
             },
             persist: true,
@@ -9668,12 +9666,12 @@ pub fn synthesize_partner_with(face: &mut CardFace) {
     );
 }
 
-/// CR 310.11a + CR 310.11b: Synthesize the two intrinsic abilities every Siege has:
+/// CR 310.12a + CR 310.12b: Synthesize the two intrinsic abilities every Siege has:
 ///   1. As-enters replacement: "As this Siege enters, its controller chooses an
-///      opponent to be its protector." (CR 310.11a)
+///      opponent to be its protector." (CR 310.12a)
 ///   2. Victory trigger: "When the last defense counter is removed from this
 ///      permanent, exile it, then you may cast it transformed without paying
-///      its mana cost." (CR 310.11b)
+///      its mana cost." (CR 310.12b)
 ///
 /// The defense-counter ETB replacement (CR 310.4b) is handled directly by
 /// `apply_card_face_to_object` which seeds `CounterType::Defense` at load time,
@@ -9685,7 +9683,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
         return;
     }
 
-    // CR 310.11a: "As a Siege enters the battlefield, its controller must
+    // CR 310.12a: "As a Siege enters the battlefield, its controller must
     // choose its protector from among their opponents." Modeled as a
     // self-referential `Moved` replacement that persists the opponent choice
     // as a `ChosenAttribute::Player`, which `GameObject::protector()` reads.
@@ -9706,7 +9704,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
         protector_replacement.valid_card = Some(TargetFilter::SelfRef);
         protector_replacement.destination_zone = Some(Zone::Battlefield);
         protector_replacement.description = Some(
-            "CR 310.11a: As a Siege enters, its controller chooses an opponent as its protector."
+            "CR 310.12a: As a Siege enters, its controller chooses an opponent as its protector."
                 .to_string(),
         );
         protector_replacement.execute = Some(Box::new(AbilityDefinition::new(
@@ -9720,7 +9718,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
         face.replacements.push(protector_replacement);
     }
 
-    // CR 310.11b: Victory triggered ability — "When the last defense counter
+    // CR 310.12b: Victory triggered ability — "When the last defense counter
     // is removed from this permanent, exile it, then you may cast it
     // transformed without paying its mana cost."
     let already_has_victory_trigger = face.triggers.iter().any(|t| {
@@ -9741,7 +9739,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
-                // CR 310.11b + CR 608.2g: the Siege victory ability casts the
+                // CR 310.12b + CR 608.2g: the Siege victory ability casts the
                 // exiled back face AS this trigger resolves — a self-free-cast
                 // during resolution, structurally identical to Suspend's
                 // last-counter cast. (Pre-`driver`, the `duration.is_none()`
@@ -9780,7 +9778,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
             })
             .execute(exile_then_cast)
             .description(
-                "CR 310.11b: When the last defense counter is removed from this Siege, exile it, then you may cast it transformed without paying its mana cost.".to_string(),
+                "CR 310.12b: When the last defense counter is removed from this Siege, exile it, then you may cast it transformed without paying its mana cost.".to_string(),
             );
         face.triggers.push(trigger);
     }
@@ -17110,7 +17108,7 @@ mod siege_synthesis_tests {
         face
     }
 
-    /// CR 310.11a: Sieges get a synthesized Moved-replacement that asks the
+    /// CR 310.12a: Sieges get a synthesized Moved-replacement that asks the
     /// controller to choose an opponent as the protector.
     #[test]
     fn synthesize_adds_protector_choice_replacement() {
@@ -17133,7 +17131,7 @@ mod siege_synthesis_tests {
         ));
     }
 
-    /// CR 310.11b: Sieges get a synthesized `CounterRemoved` trigger with a
+    /// CR 310.12b: Sieges get a synthesized `CounterRemoved` trigger with a
     /// `CounterTriggerFilter` targeting defense at threshold 0 (last counter
     /// removed). The execute chain exiles the Siege then offers an optional
     /// `CastFromZone` with both `without_paying_mana_cost` and `cast_transformed`.
@@ -18600,6 +18598,33 @@ mod sorcery_speed_invariant_tests {
                 }
             )),
             "materials-exile sub-cost present (CR 702.167a/b)"
+        );
+
+        // CR 702.167a + CR 113.6m: Craft's cost EXILES THE PERMANENT FROM THE
+        // BATTLEFIELD, so CR 113.6m's `unless` clause ("a previous part of its
+        // cost … specifies that the object is put into that zone") exempts it,
+        // and CR 113.6j makes the battlefield the only zone the cost is payable
+        // from. Craft is synthesized here, never through
+        // `parse_activated_ability_ir`, so the CR 113.6m effect-side derivation
+        // cannot reach it — this pins that.
+        assert_eq!(
+            def.activation_zone, None,
+            "craft functions from the battlefield"
+        );
+        // Second, independent line of defense: even on a hypothetical parser
+        // path, `activation_zone_from_self_cost` matches this cost component
+        // FIRST and yields Battlefield, so the effect side is never consulted.
+        assert!(
+            costs.iter().any(|c| matches!(
+                c,
+                AbilityCost::Exile {
+                    zone: Some(Zone::Battlefield),
+                    filter: Some(TargetFilter::SelfRef),
+                    ..
+                }
+            )),
+            "the self-exile cost names the battlefield, so the cost-side \
+             derivation wins before the effect side is consulted"
         );
     }
 
@@ -22939,7 +22964,10 @@ mod devour_synthesis_tests {
                     .counter_filter(CounterTriggerFilter {
                         counter_type: CounterType::Lore,
                         threshold: Some(n),
-                    }),
+                    })
+                    // CR 714.2: mirror what the Saga parser records — these
+                    // fixtures stand in for real chapter symbols.
+                    .saga_chapter(n),
             );
         }
         face.replacements.push(
@@ -22984,7 +23012,7 @@ mod devour_synthesis_tests {
             panic!("read-ahead ETB should choose a number");
         };
         // CR 702.155b + CR 714.2d: between one and the final chapter number (3).
-        assert_eq!((*min, *max), (1, 3));
+        assert_eq!((*min, *max), (1, Some(3)));
         assert!(*persist, "chosen number must persist for ChosenNumber");
 
         let sub = execute

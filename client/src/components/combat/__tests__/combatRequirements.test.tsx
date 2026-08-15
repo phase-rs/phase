@@ -49,7 +49,7 @@ describe("useAttackRequirements", () => {
       data: {
         player: 0,
         valid_attacker_ids: [100],
-        attacker_constraints: { "100": { kind: "MustAttack", players: [] } },
+        attacker_constraints: { "100": { kind: "MustAttack", defenders: [] } },
       },
     });
 
@@ -85,7 +85,7 @@ describe("useAttackRequirements", () => {
       data: {
         player: 0,
         valid_attacker_ids: [100],
-        attacker_constraints: { "100": { kind: "MustAttack", players: [], sources: [200] } },
+        attacker_constraints: { "100": { kind: "MustAttack", defenders: [], sources: [200] } },
       },
     });
     const r = renderHook(() => useAttackRequirements());
@@ -221,7 +221,7 @@ describe("AttackRequirementBadges source attribution (display-only)", () => {
         player: 0,
         valid_attacker_ids: [objectId],
         attacker_constraints: {
-          [String(objectId)]: { kind: "MustAttack", players: [], sources },
+          [String(objectId)]: { kind: "MustAttack", defenders: [], sources },
         },
       },
     });

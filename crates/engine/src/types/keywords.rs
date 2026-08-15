@@ -502,6 +502,11 @@ pub enum ProtectionTarget {
     /// resolved at runtime from the source permanent's `chosen_attributes`
     /// (the `CardType` chosen as the permanent entered). Parallels `ChosenColor`.
     ChosenCardType,
+    /// CR 702.16k: "Protection from the chosen player" — resolved at runtime
+    /// from the protected permanent's persisted player choice. Covers objects
+    /// the chosen player controls and objects they own that no other player
+    /// controls.
+    ChosenPlayer,
     /// CR 702.16j: "Protection from everything" — protection from each object
     /// regardless of that object's characteristic values. Matches every source
     /// in `source_matches_protection_target`.
@@ -589,7 +594,12 @@ impl From<ManaCost> for DisguiseCost {
 ///
 /// Custom Deserialize: accepts both the typed externally-tagged format (new)
 /// and plain "Name:Param" strings (legacy card-data.json).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+///
+/// `EnumCount` is derived so the payload round-trip guard in this module's tests
+/// can assert its variant coverage against a compiler-generated total instead of
+/// a hand-maintained constant. Without it, adding a payload-bearing variant can
+/// silently escape the round-trip guard — the drift class behind issue #7234.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, strum::EnumCount)]
 pub enum Keyword {
     // Evasion / Combat
     Flying,
@@ -850,7 +860,7 @@ pub enum Keyword {
     Fuse,
     Gravestorm,
     Haunt,
-    /// CR 702.74a: Hideaway N — look at top N cards, exile one face down, rest on bottom.
+    /// CR 702.75a: Hideaway N — look at top N cards, exile one face down, rest on bottom.
     Hideaway(u32),
     Improvise,
     Ingest,
@@ -2588,7 +2598,8 @@ impl FromStr for Keyword {
                 "recover" => return Ok(Keyword::Recover(parse_keyword_mana_cost(p))),
                 // CR 702.148a: Cleave {cost}
                 "cleave" => return Ok(Keyword::Cleave(parse_keyword_mana_cost(p))),
-                // CR 702.74a
+                // CR 702.75a; the 4 default is CR 702.75b's errata for pre-errata
+                // cards printed as bare "Hideaway".
                 "hideaway" => return Ok(Keyword::Hideaway(p.parse().unwrap_or(4))),
                 "afflict" => return Ok(Keyword::Afflict(p.parse().unwrap_or(1))),
                 // CR 303.4a + CR 702.5a: When the enchant clause is unrecognized
@@ -2883,6 +2894,9 @@ pub(crate) fn parse_protection_target(s: &str) -> ProtectionTarget {
         // CR 702.16 + CR 205.2: "the chosen card type" resolves at
         // runtime from the source permanent's chosen `CardType` attribute.
         "the chosen card type" | "chosen card type" => ProtectionTarget::ChosenCardType,
+        // CR 702.16: "the chosen player" resolves from the
+        // protected permanent's persisted `ChosenAttribute::Player`.
+        "the chosen player" | "chosen player" => ProtectionTarget::ChosenPlayer,
         // CR 702.16j: "protection from everything" — typed variant, not stringly-typed
         "everything" => ProtectionTarget::Everything,
         // CR 702.16k: "protection from each of your opponents" (Figure of
@@ -3086,12 +3100,25 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Retrace" => Ok(Keyword::Retrace),
         "SplitSecond" => Ok(Keyword::SplitSecond),
         "Storm" => Ok(Keyword::Storm),
-        "Suspend" => Ok(Keyword::Suspend {
-            count: 0,
-            cost: ManaCost::default(),
-        }),
-        "Gift" => Ok(Keyword::Gift(GiftKind::Card)),
-        "Discover" => Ok(Keyword::Discover(0)),
+        "Suspend" => {
+            let object = data.as_object().ok_or("Suspend: expected object")?;
+            let count = object
+                .get("count")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or("Suspend: missing count")?;
+            let count = u32::try_from(count).map_err(|_| "Suspend: count exceeds u32")?;
+            let cost = object.get("cost").ok_or("Suspend: missing cost")?;
+            Ok(Keyword::Suspend {
+                count,
+                cost: mana(cost)?,
+            })
+        }
+        "Gift" => serde_json::from_value(data.clone())
+            .map(Keyword::Gift)
+            .map_err(|error| format!("GiftKind: {error}")),
+        "Discover" => serde_json::from_value(data.clone())
+            .map(Keyword::Discover)
+            .map_err(|error| format!("Discover: {error}")),
         "Spree" => Ok(Keyword::Spree),
         "Ravenous" => Ok(Keyword::Ravenous),
         "Daybound" => Ok(Keyword::Daybound),
@@ -3105,31 +3132,24 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Dethrone" => Ok(Keyword::Dethrone),
         "DoubleTeam" => Ok(Keyword::DoubleTeam),
         "LivingMetal" => Ok(Keyword::LivingMetal),
-        // CR 702.24a: Legacy serialized data had `Keyword::CumulativeUpkeep`
-        // carry a raw `String` cost (e.g. "{1}"). Task 3 changed the field
-        // to a typed `AbilityCost`, but parsing the legacy string requires
-        // the Oracle parser, which doesn't live in this deserialization
-        // path. Card-data.json is regenerated from MTGJSON+Oracle text by
-        // the pipeline (`./scripts/gen-card-data.sh`), so the practical
-        // fix is to re-run that pipeline rather than recover legacy data
-        // here. The zero-cost sentinel is a well-formed placeholder until
-        // the pipeline rebuilds the typed cost.
-        "Cumulative" => Ok(Keyword::CumulativeUpkeep(AbilityCost::Mana {
-            cost: ManaCost::zero(),
-        })),
-        // CR 702.24a: Legacy serialized data had `Keyword::CumulativeUpkeep`
-        // carry a raw `String` cost (e.g. "{1}"). Task 3 changed the field
-        // to a typed `AbilityCost`, but parsing the legacy string requires
-        // the Oracle parser, which doesn't live in this deserialization
-        // path. Card-data.json is regenerated from MTGJSON+Oracle text by
-        // the pipeline (`./scripts/gen-card-data.sh`), so the practical
-        // fix is to re-run that pipeline rather than recover legacy data
-        // here. The zero-cost sentinel is a well-formed placeholder until
-        // the pipeline rebuilds the typed cost.
-        "CumulativeUpkeep" => Ok(Keyword::CumulativeUpkeep(AbilityCost::Mana {
-            cost: ManaCost::zero(),
-        })),
-        "Ripple" => Ok(Keyword::Ripple(1)),
+        // CR 702.24a: Current serialized keywords carry the typed
+        // `AbilityCost` emitted by this engine. Preserve it faithfully; only
+        // the historic raw-string form falls back because parsing Oracle mana
+        // syntax is outside this deserialization boundary.
+        "Cumulative" | "CumulativeUpkeep" => {
+            let cost = if data.is_string() {
+                AbilityCost::Mana {
+                    cost: ManaCost::zero(),
+                }
+            } else {
+                serde_json::from_value(data.clone())
+                    .map_err(|error| format!("CumulativeUpkeep: {error}"))?
+            };
+            Ok(Keyword::CumulativeUpkeep(cost))
+        }
+        "Ripple" => serde_json::from_value(data.clone())
+            .map(Keyword::Ripple)
+            .map_err(|error| format!("Ripple: {error}")),
         "Totem" => Ok(Keyword::Totem),
         // Parameterized: ManaCost (new keywords)
         "Warp" => Ok(Keyword::Warp(mana(data)?)),
@@ -3598,6 +3618,7 @@ pub fn has_keyword(obj: &crate::game::game_object::GameObject, keyword: &Keyword
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::Effect;
 
     /// CR 702.143d + CR 702 (alt-cost family): `with_cost` maps each variant to
     /// its `Keyword::X(ManaCost)`, and `matches_keyword`/`from_name` round-trip.
@@ -4101,6 +4122,22 @@ mod tests {
         assert_eq!(
             parse_protection_target("from artifacts"),
             ProtectionTarget::Quality("from artifacts".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_protection_target_chosen_player() {
+        assert_eq!(
+            parse_protection_target("the chosen player"),
+            ProtectionTarget::ChosenPlayer
+        );
+        assert_eq!(
+            parse_protection_target("chosen player"),
+            ProtectionTarget::ChosenPlayer
+        );
+        assert_eq!(
+            Keyword::from_str("Protection:the chosen player").unwrap(),
+            Keyword::Protection(ProtectionTarget::ChosenPlayer)
         );
     }
 
@@ -4670,6 +4707,36 @@ mod tests {
     }
 
     #[test]
+    fn tagged_keyword_payloads_deserialize_without_substitution() {
+        let gift: Keyword = serde_json::from_str(r#"{"Gift":{"type":"TappedFish"}}"#)
+            .expect("Gift payload deserializes");
+        assert_eq!(gift, Keyword::Gift(GiftKind::TappedFish));
+
+        let discover: Keyword =
+            serde_json::from_str(r#"{"Discover": 7}"#).expect("Discover payload deserializes");
+        assert_eq!(discover, Keyword::Discover(7));
+
+        let ripple: Keyword =
+            serde_json::from_str(r#"{"Ripple": 4}"#).expect("Ripple payload deserializes");
+        assert_eq!(ripple, Keyword::Ripple(4));
+
+        let suspend: Keyword = serde_json::from_str(
+            r#"{"Suspend":{"count":4,"cost":{"type":"Cost","shards":["Blue"],"generic":0}}}"#,
+        )
+        .expect("Suspend payload deserializes");
+        assert_eq!(
+            suspend,
+            Keyword::Suspend {
+                count: 4,
+                cost: ManaCost::Cost {
+                    shards: vec![crate::types::mana::ManaCostShard::Blue],
+                    generic: 0,
+                },
+            }
+        );
+    }
+
+    #[test]
     fn keyword_count_over_fifty() {
         // Ensure we have 50+ keyword variants (excluding Unknown)
         let test_keywords = vec![
@@ -5020,5 +5087,649 @@ mod tests {
     fn awaken_kind_round_trip() {
         let kw: Keyword = "awaken:2\u{2014}{3}{u}".parse().unwrap();
         assert_eq!(kw.kind(), KeywordKind::Awaken);
+    }
+    fn mc(s: &str) -> ManaCost {
+        parse_keyword_mana_cost(s)
+    }
+
+    /// A non-mana cost — the payload shape a mana-only fallback silently eats.
+    fn pay_life_cost() -> AbilityCost {
+        AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+        }
+    }
+
+    /// One distinctive sample per payload-bearing `Keyword` variant.
+    ///
+    /// Kept in lockstep with `payload_variant_name` below, which fails to
+    /// compile when a variant is added.
+    fn payload_bearing_samples() -> Vec<Keyword> {
+        vec![
+            Keyword::HexproofFrom(HexproofFilter::Quality("multicolored".to_string())),
+            Keyword::Afflict(3),
+            Keyword::StartingIntensity(3),
+            Keyword::Dredge(3),
+            Keyword::Modular(3),
+            Keyword::Renown(3),
+            Keyword::Fabricate(3),
+            Keyword::Annihilator(3),
+            Keyword::Bushido(3),
+            Keyword::Frenzy(3),
+            Keyword::Tribute(3),
+            Keyword::Unearth(mc("{2}{R}")),
+            Keyword::Afterlife(3),
+            Keyword::Enchant(TargetFilter::SelfRef),
+            Keyword::EtbCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: 3,
+            },
+            Keyword::Reconfigure(mc("{2}{R}")),
+            Keyword::Bestow(BestowCost::NonMana(pay_life_cost())),
+            Keyword::Embalm(EmbalmCost::NonMana(pay_life_cost())),
+            Keyword::Eternalize(EternalizeCost::NonMana(pay_life_cost())),
+            Keyword::Fading(3),
+            Keyword::Vanishing(3),
+            Keyword::Protection(ProtectionTarget::Multicolored),
+            Keyword::Kicker(mc("{2}{R}")),
+            Keyword::Cycling(CyclingCost::NonMana(pay_life_cost())),
+            Keyword::Flashback(FlashbackCost::NonMana(pay_life_cost())),
+            Keyword::Ward(WardCost::PayLife(3)),
+            Keyword::Equip(mc("{2}{R}")),
+            Keyword::Landwalk("Island".to_string()),
+            Keyword::Rampage(3),
+            Keyword::Absorb(3),
+            Keyword::Crew {
+                power: 3,
+                once_per_turn: Some(Box::new(ActivationRestriction::OnlyOnceEachTurn)),
+            },
+            Keyword::Partner(PartnerType::With("Pir".to_string())),
+            Keyword::Companion(CompanionCondition::MinManaValue(3)),
+            Keyword::Ninjutsu(mc("{2}{R}")),
+            Keyword::CommanderNinjutsu(mc("{2}{R}")),
+            Keyword::Prowl(mc("{2}{R}")),
+            Keyword::Morph(mc("{2}{R}")),
+            Keyword::Megamorph(mc("{2}{R}")),
+            Keyword::Mayhem(mc("{2}{R}")),
+            Keyword::Madness(mc("{2}{R}")),
+            Keyword::Miracle(mc("{2}{R}")),
+            Keyword::Dash(mc("{2}{R}")),
+            Keyword::Emerge(mc("{2}{R}")),
+            Keyword::Escape(EscapeCost::NonMana(pay_life_cost())),
+            Keyword::Harmonize(mc("{2}{R}")),
+            Keyword::Evoke(EvokeCost::NonMana(pay_life_cost())),
+            Keyword::Foretell(mc("{2}{R}")),
+            Keyword::Mutate(mc("{2}{R}")),
+            Keyword::Disturb(mc("{2}{R}")),
+            Keyword::Disguise(DisguiseCost::Reduced {
+                cost: mc("{2}{R}"),
+                reduction: Box::new(CostReduction {
+                    mode: crate::types::statics::CostModifyMode::Reduce,
+                    amount_per: 1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    condition: None,
+                }),
+            }),
+            Keyword::Blitz(mc("{2}{R}")),
+            Keyword::Overload(mc("{2}{R}")),
+            Keyword::Spectacle(mc("{2}{R}")),
+            Keyword::Surge(mc("{2}{R}")),
+            Keyword::Encore(mc("{2}{R}")),
+            Keyword::Buyback(BuybackCost::NonMana(pay_life_cost())),
+            Keyword::Casualty(3),
+            Keyword::Echo(EchoCost::NonMana(pay_life_cost())),
+            Keyword::Entwine(mc("{2}{R}")),
+            Keyword::Outlast(mc("{2}{R}")),
+            Keyword::Scavenge(mc("{2}{R}")),
+            Keyword::Reinforce {
+                count: 3,
+                cost: mc("{2}{G}"),
+            },
+            Keyword::Fortify(mc("{2}{R}")),
+            Keyword::Prototype {
+                cost: mc("{1}{U}"),
+                power: Some(2),
+                toughness: Some(3),
+            },
+            Keyword::Plot(mc("{2}{R}")),
+            Keyword::Craft {
+                cost: mc("{3}{B}"),
+                materials: TypedFilter::new(TypeFilter::Artifact).into(),
+                count: CostObjectCount::exactly(2),
+            },
+            Keyword::Offspring(mc("{2}{R}")),
+            Keyword::Impending {
+                cost: mc("{2}{W}"),
+                counters: 4,
+            },
+            Keyword::LevelUp(mc("{2}{R}")),
+            Keyword::Affinity(TypedFilter::default()),
+            // CR 702.24a: Aboroth pays by putting a -1/-1 counter on itself.
+            Keyword::CumulativeUpkeep(AbilityCost::EffectCost {
+                effect: Box::new(Effect::PutCounter {
+                    counter_type: CounterType::Minus1Minus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SelfRef,
+                }),
+            }),
+            // Stored form is the normalized singular ("Legends" → "Legend"),
+            // and `normalize_bands_with_other_quality` is idempotent on it.
+            Keyword::BandsWithOther("Legend".to_string()),
+            // Hideaway's bare-payload fallback is 4.
+            Keyword::Hideaway(2),
+            // CR 702.60a: Surging Aether is Ripple 4; the broken arm said 1.
+            Keyword::Ripple(4),
+            // CR 702.62a: the broken arm said `{count: 0, cost: free}`.
+            Keyword::Suspend {
+                count: 2,
+                cost: mc("{1}{R}"),
+            },
+            Keyword::Warp(mc("{2}{R}")),
+            Keyword::Sneak(mc("{2}{R}")),
+            Keyword::WebSlinging(mc("{2}{R}")),
+            Keyword::Mobilize(QuantityExpr::Fixed { value: 3 }),
+            // CR 702.174a: Longstalk Brawl promises a Fish, not a card.
+            Keyword::Gift(GiftKind::TappedFish),
+            // CR 701.57a: the broken arm said 0.
+            Keyword::Discover(3),
+            Keyword::Poisonous(3),
+            Keyword::Bloodthirst(BloodthirstValue::X),
+            Keyword::Amplify(3),
+            Keyword::Graft(3),
+            // CR 702.82c: a non-`Creature` quality — the arm's back-compat
+            // default, so the sample must not be it.
+            Keyword::Devour {
+                n: 3,
+                quality: TypeFilter::Artifact,
+            },
+            Keyword::Toxic(3),
+            Keyword::Saddle(3),
+            Keyword::Teamwork(3),
+            Keyword::Soulshift(3),
+            Keyword::Backup(3),
+            Keyword::Squad(mc("{2}{R}")),
+            Keyword::Typecycling {
+                cost: mc("{2}"),
+                subtype: "Plains".to_string(),
+            },
+            Keyword::Firebending(QuantityExpr::Fixed { value: 3 }),
+            Keyword::Splice {
+                subtype: "Arcane".to_string(),
+                cost: mc("{1}{U}"),
+            },
+            Keyword::Champion("Elf".to_string()),
+            Keyword::Transmute(mc("{2}{R}")),
+            Keyword::Transfigure(mc("{2}{R}")),
+            Keyword::Escalate(pay_life_cost()),
+            Keyword::Recover(mc("{2}{R}")),
+            Keyword::Cleave(mc("{2}{R}")),
+            Keyword::Replicate(mc("{2}{R}")),
+            Keyword::Awaken {
+                count: 4,
+                cost: mc("{5}{W}{W}{W}"),
+            },
+            Keyword::MoreThanMeetsTheEye(mc("{2}{R}")),
+            Keyword::Freerunning(mc("{2}{R}")),
+            Keyword::Specialize(mc("{2}{R}")),
+            Keyword::Offering("Fox".to_string()),
+            Keyword::Unknown("Xyzzy".to_string()),
+        ]
+    }
+
+    /// Classifies every `Keyword` variant as payload-bearing (`Some(name)`) or
+    /// unit (`None`).
+    ///
+    /// **This match has no wildcard arm on purpose.** Adding a `Keyword`
+    /// variant breaks compilation here, forcing the author to classify it; if
+    /// it carries a payload, `payload_bearing_samples` must gain a distinctive
+    /// sample or the variant-count assertion in
+    /// `every_keyword_variant_is_a_listed_unit_or_has_a_distinctive_sample` fails.
+    fn payload_variant_name(kw: &Keyword) -> Option<&'static str> {
+        match kw {
+            // Unit variants carry no payload to lose.
+            Keyword::Flying
+            | Keyword::FirstStrike
+            | Keyword::DoubleStrike
+            | Keyword::Trample
+            | Keyword::TrampleOverPlaneswalkers
+            | Keyword::Deathtouch
+            | Keyword::Lifelink
+            | Keyword::Vigilance
+            | Keyword::Haste
+            | Keyword::Reach
+            | Keyword::Defender
+            | Keyword::Menace
+            | Keyword::Indestructible
+            | Keyword::Hexproof
+            | Keyword::Shroud
+            | Keyword::Flash
+            | Keyword::Fear
+            | Keyword::Intimidate
+            | Keyword::Skulk
+            | Keyword::Shadow
+            | Keyword::Horsemanship
+            | Keyword::Wither
+            | Keyword::Infect
+            | Keyword::Prowess
+            | Keyword::Undying
+            | Keyword::Persist
+            | Keyword::Cascade
+            | Keyword::Exalted
+            | Keyword::Flanking
+            | Keyword::Evolve
+            | Keyword::Extort
+            | Keyword::Exploit
+            | Keyword::Explore
+            | Keyword::Ascend
+            | Keyword::StartYourEngines
+            | Keyword::Soulbond
+            | Keyword::Convoke
+            | Keyword::Waterbend
+            | Keyword::Delve
+            | Keyword::Devoid
+            | Keyword::Changeling
+            | Keyword::Phasing
+            | Keyword::Battlecry
+            | Keyword::Decayed
+            | Keyword::Unleash
+            | Keyword::Riot
+            | Keyword::LivingWeapon
+            | Keyword::JobSelect
+            | Keyword::TotemArmor
+            | Keyword::Banding
+            | Keyword::Epic
+            | Keyword::Fuse
+            | Keyword::Gravestorm
+            | Keyword::Haunt
+            | Keyword::Improvise
+            | Keyword::Ingest
+            | Keyword::Melee
+            | Keyword::Mentor
+            | Keyword::Myriad
+            | Keyword::Provoke
+            | Keyword::Rebound
+            | Keyword::Retrace
+            | Keyword::SplitSecond
+            | Keyword::Storm
+            | Keyword::Totem
+            | Keyword::Spree
+            | Keyword::Ravenous
+            | Keyword::Daybound
+            | Keyword::Nightbound
+            | Keyword::Enlist
+            | Keyword::ReadAhead
+            | Keyword::Compleated
+            | Keyword::Conspire
+            | Keyword::Demonstrate
+            | Keyword::Dethrone
+            | Keyword::DoubleTeam
+            | Keyword::LivingMetal
+            | Keyword::Bargain
+            | Keyword::Sunburst
+            | Keyword::Training
+            | Keyword::Assist
+            | Keyword::Augment
+            | Keyword::Aftermath
+            | Keyword::JumpStart
+            | Keyword::Cipher
+            | Keyword::Undaunted
+            | Keyword::Paradigm
+            | Keyword::Station
+            | Keyword::ForMirrodin
+            | Keyword::Increment
+            | Keyword::Storied => None,
+
+            Keyword::HexproofFrom(..) => Some("HexproofFrom"),
+            Keyword::Afflict(..) => Some("Afflict"),
+            Keyword::StartingIntensity(..) => Some("StartingIntensity"),
+            Keyword::Dredge(..) => Some("Dredge"),
+            Keyword::Modular(..) => Some("Modular"),
+            Keyword::Renown(..) => Some("Renown"),
+            Keyword::Fabricate(..) => Some("Fabricate"),
+            Keyword::Annihilator(..) => Some("Annihilator"),
+            Keyword::Bushido(..) => Some("Bushido"),
+            Keyword::Frenzy(..) => Some("Frenzy"),
+            Keyword::Tribute(..) => Some("Tribute"),
+            Keyword::Unearth(..) => Some("Unearth"),
+            Keyword::Afterlife(..) => Some("Afterlife"),
+            Keyword::Enchant(..) => Some("Enchant"),
+            Keyword::EtbCounter { .. } => Some("EtbCounter"),
+            Keyword::Reconfigure(..) => Some("Reconfigure"),
+            Keyword::Bestow(..) => Some("Bestow"),
+            Keyword::Embalm(..) => Some("Embalm"),
+            Keyword::Eternalize(..) => Some("Eternalize"),
+            Keyword::Fading(..) => Some("Fading"),
+            Keyword::Vanishing(..) => Some("Vanishing"),
+            Keyword::Protection(..) => Some("Protection"),
+            Keyword::Kicker(..) => Some("Kicker"),
+            Keyword::Cycling(..) => Some("Cycling"),
+            Keyword::Flashback(..) => Some("Flashback"),
+            Keyword::Ward(..) => Some("Ward"),
+            Keyword::Equip(..) => Some("Equip"),
+            Keyword::Landwalk(..) => Some("Landwalk"),
+            Keyword::Rampage(..) => Some("Rampage"),
+            Keyword::Absorb(..) => Some("Absorb"),
+            Keyword::Crew { .. } => Some("Crew"),
+            Keyword::Partner(..) => Some("Partner"),
+            Keyword::Companion(..) => Some("Companion"),
+            Keyword::Ninjutsu(..) => Some("Ninjutsu"),
+            Keyword::CommanderNinjutsu(..) => Some("CommanderNinjutsu"),
+            Keyword::Prowl(..) => Some("Prowl"),
+            Keyword::Morph(..) => Some("Morph"),
+            Keyword::Megamorph(..) => Some("Megamorph"),
+            Keyword::Mayhem(..) => Some("Mayhem"),
+            Keyword::Madness(..) => Some("Madness"),
+            Keyword::Miracle(..) => Some("Miracle"),
+            Keyword::Dash(..) => Some("Dash"),
+            Keyword::Emerge(..) => Some("Emerge"),
+            Keyword::Escape(..) => Some("Escape"),
+            Keyword::Harmonize(..) => Some("Harmonize"),
+            Keyword::Evoke(..) => Some("Evoke"),
+            Keyword::Foretell(..) => Some("Foretell"),
+            Keyword::Mutate(..) => Some("Mutate"),
+            Keyword::Disturb(..) => Some("Disturb"),
+            Keyword::Disguise(..) => Some("Disguise"),
+            Keyword::Blitz(..) => Some("Blitz"),
+            Keyword::Overload(..) => Some("Overload"),
+            Keyword::Spectacle(..) => Some("Spectacle"),
+            Keyword::Surge(..) => Some("Surge"),
+            Keyword::Encore(..) => Some("Encore"),
+            Keyword::Buyback(..) => Some("Buyback"),
+            Keyword::Casualty(..) => Some("Casualty"),
+            Keyword::Echo(..) => Some("Echo"),
+            Keyword::Entwine(..) => Some("Entwine"),
+            Keyword::Outlast(..) => Some("Outlast"),
+            Keyword::Scavenge(..) => Some("Scavenge"),
+            Keyword::Reinforce { .. } => Some("Reinforce"),
+            Keyword::Fortify(..) => Some("Fortify"),
+            Keyword::Prototype { .. } => Some("Prototype"),
+            Keyword::Plot(..) => Some("Plot"),
+            Keyword::Craft { .. } => Some("Craft"),
+            Keyword::Offspring(..) => Some("Offspring"),
+            Keyword::Impending { .. } => Some("Impending"),
+            Keyword::LevelUp(..) => Some("LevelUp"),
+            Keyword::Affinity(..) => Some("Affinity"),
+            Keyword::CumulativeUpkeep(..) => Some("CumulativeUpkeep"),
+            Keyword::BandsWithOther(..) => Some("BandsWithOther"),
+            Keyword::Hideaway(..) => Some("Hideaway"),
+            Keyword::Ripple(..) => Some("Ripple"),
+            Keyword::Suspend { .. } => Some("Suspend"),
+            Keyword::Warp(..) => Some("Warp"),
+            Keyword::Sneak(..) => Some("Sneak"),
+            Keyword::WebSlinging(..) => Some("WebSlinging"),
+            Keyword::Mobilize(..) => Some("Mobilize"),
+            Keyword::Gift(..) => Some("Gift"),
+            Keyword::Discover(..) => Some("Discover"),
+            Keyword::Poisonous(..) => Some("Poisonous"),
+            Keyword::Bloodthirst(..) => Some("Bloodthirst"),
+            Keyword::Amplify(..) => Some("Amplify"),
+            Keyword::Graft(..) => Some("Graft"),
+            Keyword::Devour { .. } => Some("Devour"),
+            Keyword::Toxic(..) => Some("Toxic"),
+            Keyword::Saddle(..) => Some("Saddle"),
+            Keyword::Teamwork(..) => Some("Teamwork"),
+            Keyword::Soulshift(..) => Some("Soulshift"),
+            Keyword::Backup(..) => Some("Backup"),
+            Keyword::Squad(..) => Some("Squad"),
+            Keyword::Typecycling { .. } => Some("Typecycling"),
+            Keyword::Firebending(..) => Some("Firebending"),
+            Keyword::Splice { .. } => Some("Splice"),
+            Keyword::Champion(..) => Some("Champion"),
+            Keyword::Transmute(..) => Some("Transmute"),
+            Keyword::Transfigure(..) => Some("Transfigure"),
+            Keyword::Escalate(..) => Some("Escalate"),
+            Keyword::Recover(..) => Some("Recover"),
+            Keyword::Cleave(..) => Some("Cleave"),
+            Keyword::Replicate(..) => Some("Replicate"),
+            Keyword::Awaken { .. } => Some("Awaken"),
+            Keyword::MoreThanMeetsTheEye(..) => Some("MoreThanMeetsTheEye"),
+            Keyword::Freerunning(..) => Some("Freerunning"),
+            Keyword::Specialize(..) => Some("Specialize"),
+            Keyword::Offering(..) => Some("Offering"),
+            Keyword::Unknown(..) => Some("Unknown"),
+        }
+    }
+
+    /// Every payload-free variant, enumerated so the completeness assertion below
+    /// has something to count. Unit variants take no arguments, so unlike the
+    /// payload-bearing ones they can be listed as constants.
+    ///
+    /// Cross-checked against `payload_variant_name` in both directions: the test
+    /// asserts each entry here classifies as a unit, and the variant-count
+    /// assertion catches a unit variant that was added to the match but not here.
+    const UNIT_VARIANTS: &[Keyword] = &[
+        Keyword::Flying,
+        Keyword::FirstStrike,
+        Keyword::DoubleStrike,
+        Keyword::Trample,
+        Keyword::TrampleOverPlaneswalkers,
+        Keyword::Deathtouch,
+        Keyword::Lifelink,
+        Keyword::Vigilance,
+        Keyword::Haste,
+        Keyword::Reach,
+        Keyword::Defender,
+        Keyword::Menace,
+        Keyword::Indestructible,
+        Keyword::Hexproof,
+        Keyword::Shroud,
+        Keyword::Flash,
+        Keyword::Fear,
+        Keyword::Intimidate,
+        Keyword::Skulk,
+        Keyword::Shadow,
+        Keyword::Horsemanship,
+        Keyword::Wither,
+        Keyword::Infect,
+        Keyword::Prowess,
+        Keyword::Undying,
+        Keyword::Persist,
+        Keyword::Cascade,
+        Keyword::Exalted,
+        Keyword::Flanking,
+        Keyword::Evolve,
+        Keyword::Extort,
+        Keyword::Exploit,
+        Keyword::Explore,
+        Keyword::Ascend,
+        Keyword::StartYourEngines,
+        Keyword::Soulbond,
+        Keyword::Convoke,
+        Keyword::Waterbend,
+        Keyword::Delve,
+        Keyword::Devoid,
+        Keyword::Changeling,
+        Keyword::Phasing,
+        Keyword::Battlecry,
+        Keyword::Decayed,
+        Keyword::Unleash,
+        Keyword::Riot,
+        Keyword::LivingWeapon,
+        Keyword::JobSelect,
+        Keyword::TotemArmor,
+        Keyword::Banding,
+        Keyword::Epic,
+        Keyword::Fuse,
+        Keyword::Gravestorm,
+        Keyword::Haunt,
+        Keyword::Improvise,
+        Keyword::Ingest,
+        Keyword::Melee,
+        Keyword::Mentor,
+        Keyword::Myriad,
+        Keyword::Provoke,
+        Keyword::Rebound,
+        Keyword::Retrace,
+        Keyword::SplitSecond,
+        Keyword::Storm,
+        Keyword::Totem,
+        Keyword::Spree,
+        Keyword::Ravenous,
+        Keyword::Daybound,
+        Keyword::Nightbound,
+        Keyword::Enlist,
+        Keyword::ReadAhead,
+        Keyword::Compleated,
+        Keyword::Conspire,
+        Keyword::Demonstrate,
+        Keyword::Dethrone,
+        Keyword::DoubleTeam,
+        Keyword::LivingMetal,
+        Keyword::Bargain,
+        Keyword::Sunburst,
+        Keyword::Training,
+        Keyword::Assist,
+        Keyword::Augment,
+        Keyword::Aftermath,
+        Keyword::JumpStart,
+        Keyword::Cipher,
+        Keyword::Undaunted,
+        Keyword::Paradigm,
+        Keyword::Station,
+        Keyword::ForMirrodin,
+        Keyword::Increment,
+        Keyword::Storied,
+    ];
+
+    /// Closes the drift class behind issue #7234: a payload-bearing variant that
+    /// exists in production but has no round-trip coverage.
+    ///
+    /// Two mechanisms, and both are needed:
+    ///
+    /// 1. `payload_variant_name` has no wildcard arm, so *adding* a `Keyword`
+    ///    variant fails to compile until it is classified.
+    /// 2. This assertion counts the classified variants against
+    ///    `<Keyword as EnumCount>::COUNT` — generated by the compiler from the
+    ///    enum itself, so it cannot be satisfied by editing a constant. A new
+    ///    payload arm raises `COUNT` without raising the sample count, so the
+    ///    author cannot classify a variant as payload-bearing and skip its
+    ///    sample; a new unit variant must be listed in `UNIT_VARIANTS`.
+    ///
+    /// This is what the previous hand-maintained `PAYLOAD_BEARING_VARIANT_COUNT`
+    /// could not do: it was bumped by the same author in the same edit, so a new
+    /// arm and a new count agreed with each other while no sample existed.
+    #[test]
+    fn every_keyword_variant_is_a_listed_unit_or_has_a_distinctive_sample() {
+        for kw in UNIT_VARIANTS {
+            assert!(
+                payload_variant_name(kw).is_none(),
+                "{kw:?} carries a payload and must move out of UNIT_VARIANTS \
+                 into a sample"
+            );
+        }
+
+        let mut names: Vec<&'static str> = Vec::new();
+        for kw in payload_bearing_samples() {
+            let name = payload_variant_name(&kw)
+                .unwrap_or_else(|| panic!("unit keyword {kw:?} does not belong in the sample set"));
+            assert!(
+                !names.contains(&name),
+                "duplicate sample for {name} — one sample per variant"
+            );
+            names.push(name);
+        }
+
+        assert_eq!(
+            UNIT_VARIANTS.len() + names.len(),
+            <Keyword as strum::EnumCount>::COUNT,
+            "every Keyword variant must either be listed in UNIT_VARIANTS or have a \
+             distinctive sample in payload_bearing_samples. {} units + {} sampled \
+             payload variants != {} variants on the enum.",
+            UNIT_VARIANTS.len(),
+            names.len(),
+            <Keyword as strum::EnumCount>::COUNT,
+        );
+    }
+
+    #[test]
+    fn every_payload_bearing_keyword_survives_serde_round_trip() {
+        for kw in payload_bearing_samples() {
+            let json = serde_json::to_value(&kw).unwrap();
+            let back: Keyword = serde_json::from_value(json.clone()).unwrap();
+            assert_eq!(back, kw, "payload lost deserializing {json}");
+        }
+    }
+
+    /// Regression payloads for the arms that substituted constants. Every game
+    /// loads card data through this `Deserialize` via `CardDatabase::from_json_str`.
+    #[test]
+    fn real_card_data_payloads_deserialize_faithfully() {
+        // CR 702.60a: Surging Aether — `Ripple 4`, previously flattened to 1.
+        let ripple: Keyword = serde_json::from_str(r#"{"Ripple": 4}"#).unwrap();
+        assert_eq!(ripple, Keyword::Ripple(4));
+
+        // CR 702.174a: Longstalk Brawl gifts a tapped Fish, not a card.
+        let gift: Keyword = serde_json::from_str(r#"{"Gift": {"type": "TappedFish"}}"#).unwrap();
+        assert_eq!(gift, Keyword::Gift(GiftKind::TappedFish));
+
+        // CR 702.62a: Rift Bolt — Suspend 1—{R}. The count drove the time
+        // counters and the cost is what `effective_suspend_cost` reads.
+        let suspend: Keyword = serde_json::from_str(
+            r#"{"Suspend": {"count": 1, "cost": {"type": "Cost", "shards": ["Red"], "generic": 0}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            suspend,
+            Keyword::Suspend {
+                count: 1,
+                cost: parse_keyword_mana_cost("{R}"),
+            }
+        );
+
+        // CR 701.57a: Discover N is a synthetic regression case: no current
+        // card-data entry carries it, but the deserializer must retain N.
+        let discover: Keyword = serde_json::from_str(r#"{"Discover": 5}"#).unwrap();
+        assert_eq!(discover, Keyword::Discover(5));
+
+        // CR 702.24a: Aboroth — the upkeep cost is a -1/-1 counter, not mana.
+        let upkeep: Keyword = serde_json::from_str(
+            r#"{"CumulativeUpkeep":{"type":"EffectCost","effect":{"type":"PutCounter","counter_type":"M1M1","count":{"type":"Fixed","value":1},"target":{"type":"SelfRef"}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            upkeep,
+            Keyword::CumulativeUpkeep(AbilityCost::EffectCost {
+                effect: Box::new(Effect::PutCounter {
+                    counter_type: CounterType::Minus1Minus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SelfRef,
+                }),
+            })
+        );
+
+        // A mana cumulative upkeep must keep its actual cost, not go free.
+        let mana_upkeep: Keyword = serde_json::from_str(
+            r#"{"CumulativeUpkeep": {"type": "Mana", "cost": {"type": "Cost", "shards": ["White"], "generic": 1}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            mana_upkeep,
+            Keyword::CumulativeUpkeep(AbilityCost::Mana {
+                cost: parse_keyword_mana_cost("{1}{W}"),
+            })
+        );
+    }
+
+    /// The counterpart contract on this path: a payload the deserializer cannot
+    /// decode is surfaced as an error rather than silently replaced with a
+    /// constant. Substituting a default is what issue #7234 was — a malformed or
+    /// absent payload has to be visible, because the value that gets substituted
+    /// is a rules-bearing cost or count.
+    #[test]
+    fn undecodable_payloads_are_rejected_rather_than_defaulted() {
+        for json in [
+            r#"{"Ripple": null}"#,
+            r#"{"Gift": null}"#,
+            r#"{"Suspend": null}"#,
+            r#"{"Suspend": {"count": 1}}"#,
+            r#"{"Discover": null}"#,
+        ] {
+            let parsed: Result<Keyword, _> = serde_json::from_str(json);
+            assert!(
+                parsed.is_err(),
+                "{json} decoded to {:?} — an undecodable payload must not be \
+                 replaced with a default",
+                parsed.unwrap()
+            );
+        }
     }
 }

@@ -484,6 +484,7 @@ fn return_target_and_same_name_from_your_graveyard_carries_zone_and_mass_tail() 
         target,
         enters_under,
         enter_tapped,
+        enters_attacking: false,
         enter_with_counters: _,
         face_down_profile: None,
         library_position: None,

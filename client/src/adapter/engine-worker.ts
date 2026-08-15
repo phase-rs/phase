@@ -8,12 +8,15 @@ import init, {
   ping,
   take_last_panic_message,
   initialize_game,
+  initialize_multiplayer_host_game,
   submit_action,
   submit_interaction_js,
   get_game_state,
   get_filtered_game_state,
   get_ai_action_proposal,
   get_ai_action_proposal_with_diagnostics,
+  get_ai_tactical_action_proposal,
+  get_ai_tactical_action_proposal_with_diagnostics,
   get_ai_action_proposal_from_scores,
   get_ai_action_proposal_from_scores_with_diagnostics,
   get_ai_scored_candidates,
@@ -49,6 +52,7 @@ import init, {
 import type { AiActionProposal, GameAction } from "./types";
 import type { InteractionSubmission } from "./generated/interaction";
 import type { BracketDeckRequest } from "../types/bracketEstimate";
+import { classifyInitFailure, type InitFailure } from "./init-envelope";
 
 // ── Message Protocol ─────────────────────────────────────────────────────
 
@@ -57,6 +61,16 @@ type EngineRequest =
   | { type: "loadCardDb"; id: number; cardDataText: string }
   | {
       type: "initializeGame";
+      id: number;
+      deckData: unknown | null;
+      seed: number;
+      formatConfig: unknown | null;
+      matchConfig: unknown | null;
+      playerCount?: number;
+      firstPlayer?: number;
+    }
+  | {
+      type: "initializeMultiplayerHostGame";
       id: number;
       deckData: unknown | null;
       seed: number;
@@ -76,6 +90,8 @@ type EngineRequest =
   | { type: "getViewerSnapshot"; id: number; viewerId: number }
   | { type: "getAiActionProposal"; id: number; difficulty: string; playerId: number }
   | { type: "getAiActionProposalWithDiagnostics"; id: number; difficulty: string; playerId: number }
+  | { type: "getAiTacticalActionProposal"; id: number; difficulty: string; playerId: number }
+  | { type: "getAiTacticalActionProposalWithDiagnostics"; id: number; difficulty: string; playerId: number }
   | { type: "getAiScoredCandidates"; id: number; difficulty: string; playerId: number; seed: number }
   | { type: "getAiActionProposalFromScores"; id: number; scoresJson: string; difficulty: string; playerId: number; seed: number }
   | { type: "getAiActionProposalFromScoresWithDiagnostics"; id: number; scoresJson: string; difficulty: string; playerId: number; seed: number }
@@ -107,7 +123,13 @@ type EngineRequest =
 
 type EngineResponse =
   | { type: "result"; id: number; data: unknown }
-  | { type: "error"; id: number; message: string; bracketViolation?: true };
+  | {
+      type: "error";
+      id: number;
+      message: string;
+      bracketViolation?: true;
+      engineOccupied?: true;
+    };
 
 // ── State ────────────────────────────────────────────────────────────────
 
@@ -125,8 +147,23 @@ function error(id: number, message: string): void {
   respond({ type: "error", id, message });
 }
 
-function bracketViolationError(id: number, message: string): void {
-  respond({ type: "error", id, message, bracketViolation: true });
+/**
+ * Raise an initialize-envelope failure, preserving its typed discriminator so
+ * `EngineWorkerClient` can rebuild a typed `AdapterError` on the main thread
+ * rather than matching on the message text.
+ */
+function initFailureError(id: number, failure: InitFailure): void {
+  switch (failure.kind) {
+    case "bracketViolation":
+      respond({ type: "error", id, message: failure.message, bracketViolation: true });
+      break;
+    case "engineOccupied":
+      respond({ type: "error", id, message: failure.message, engineOccupied: true });
+      break;
+    case "deckValidation":
+      error(id, failure.message);
+      break;
+  }
 }
 
 // ── Message Handler ──────────────────────────────────────────────────────
@@ -219,24 +256,40 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           msg.playerCount ?? undefined,
           msg.firstPlayer ?? undefined,
         );
-        // Engine returns { error: true, cedh_bracket_violation: true, reasons: [...] }
-        // when the cEDH bracket lock fires. Preserve the violation flag so the
-        // client can throw a typed BracketViolationError rather than matching
-        // on a raw string substring.
-        if (
-          gameResult &&
-          typeof gameResult === "object" &&
-          "error" in gameResult &&
-          gameResult.error
-        ) {
-          const envelope = gameResult as { reasons?: string[]; cedh_bracket_violation?: boolean };
-          const reasons = envelope.reasons ?? [];
-          const message = `Deck validation failed: ${reasons.join("; ")}`;
-          if (envelope.cedh_bracket_violation) {
-            bracketViolationError(msg.id, message);
-          } else {
-            error(msg.id, message);
-          }
+        const failure = classifyInitFailure(gameResult);
+        if (failure) {
+          initFailureError(msg.id, failure);
+          break;
+        }
+        result(msg.id, {
+          events: gameResult.events ?? [],
+          log_entries: gameResult.log_entries ?? [],
+        });
+        break;
+      }
+
+      case "initializeMultiplayerHostGame": {
+        if (!cardDbLoaded && msg.deckData) {
+          error(
+            msg.id,
+            "Card database not loaded. Call loadCardDb or loadCardDbFromUrl first.",
+          );
+          break;
+        }
+        // The host entry point refuses an engine that already holds a game and
+        // claims the multiplayer flag alongside the install — both inside this
+        // one synchronous handler, so no other posted message can interleave.
+        const gameResult = initialize_multiplayer_host_game(
+          msg.deckData ?? null,
+          msg.seed,
+          msg.formatConfig ?? null,
+          msg.matchConfig ?? null,
+          msg.playerCount ?? undefined,
+          msg.firstPlayer ?? undefined,
+        );
+        const failure = classifyInitFailure(gameResult);
+        if (failure) {
+          initFailureError(msg.id, failure);
           break;
         }
         result(msg.id, {
@@ -247,18 +300,6 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       }
 
       case "submitAction": {
-        if (
-          !cardDbLoaded &&
-          msg.action?.type === "Debug" &&
-          msg.action?.data?.type === "CreateCard"
-        ) {
-          const resp = await fetch(__CARD_DATA_URL__);
-          if (resp.ok) {
-            const text = await resp.text();
-            load_card_database(text);
-            cardDbLoaded = true;
-          }
-        }
         const actionResult = submit_action(msg.actor, msg.action);
         if (typeof actionResult === "string") {
           // Rust's submit_action error contract: returns the error string
@@ -379,6 +420,16 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
 
       case "getAiActionProposalWithDiagnostics": {
         result(msg.id, get_ai_action_proposal_with_diagnostics(msg.difficulty, msg.playerId) ?? null);
+        break;
+      }
+
+      case "getAiTacticalActionProposal": {
+        result(msg.id, get_ai_tactical_action_proposal(msg.difficulty, msg.playerId) ?? null);
+        break;
+      }
+
+      case "getAiTacticalActionProposalWithDiagnostics": {
+        result(msg.id, get_ai_tactical_action_proposal_with_diagnostics(msg.difficulty, msg.playerId) ?? null);
         break;
       }
 

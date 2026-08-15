@@ -37,7 +37,13 @@ pub fn exact_named_choice_source(state: &GameState, object_id: ObjectId) -> Name
 
 /// Path to the full parsed card-data export, relative to the engine crate root.
 fn export_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json")
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let client_export = root.join("client/public/card-data.json");
+    if client_export.exists() {
+        client_export
+    } else {
+        root.join("data/card-data.json")
+    }
 }
 
 /// Path to the curated integration-test fixture (a subset of the export).
@@ -68,7 +74,7 @@ pub fn shared_card_db() -> Option<&'static CardDatabase> {
         }
         let path = export_path();
         if !path.exists() {
-            eprintln!("skipping: client/public/card-data.json not generated");
+            eprintln!("skipping: full card-data export not generated");
             return None;
         }
         Some(CardDatabase::from_export(&path).expect("export should load"))

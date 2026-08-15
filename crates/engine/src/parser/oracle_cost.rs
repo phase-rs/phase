@@ -66,6 +66,48 @@ pub fn parse_oracle_cost(text: &str) -> AbilityCost {
     parse_oracle_cost_no_or(text)
 }
 
+/// CR 601.2f: Parse a GERUND-form cost phrase ("discarding a card", "paying 1
+/// life", "sacrificing a creature") into an `AbilityCost` by de-conjugating the
+/// leading verb to its imperative stem and delegating to [`parse_oracle_cost`],
+/// the single cost authority.
+///
+/// The gerund construction appears in "cast … by <doing X> in addition to
+/// (paying) its other costs" ADDITIONAL-cost riders (Festival of Embers pay-life;
+/// Dragon Man, Reformed Robot discard; Demilich / Helbrute exile-from-graveyard)
+/// and in the self-flash rider in `oracle_casting.rs`. English gerund→imperative
+/// is irregular (pay→paying, discard→discarding, sacrifice→sacrificing[−e],
+/// remove→removing[−e], exile→exiling[−e], tap→tapping[+p]), so it cannot be a
+/// generic `strip_suffix("ing")`; each verb is one composed `value(stem,
+/// tag(gerund))` arm. Extend by a single arm per cost verb, only once
+/// `parse_oracle_cost` models its imperative.
+///
+/// Returns `AbilityCost::Unimplemented { .. }` when the leading verb is not a
+/// modeled cost gerund OR the delegated imperative is itself unmodeled, so
+/// callers can decline (or drop) rather than silently attach a wrong/absent cost.
+pub(crate) fn parse_gerund_cost(phrase: &str) -> AbilityCost {
+    type E<'a> = super::oracle_nom::error::OracleError<'a>;
+    let original = phrase.trim();
+    let lower = original.to_lowercase();
+    // Compose one `value(stem, tag(gerund))` arm per cost verb — each maps a
+    // gerund onto the imperative stem `parse_oracle_cost` already recognizes.
+    let Some((stem, rest)) = nom_on_lower(original, &lower, |input| {
+        alt((
+            value("pay", tag::<_, _, E<'_>>("paying ")),
+            value("discard", tag("discarding ")),
+            value("sacrifice", tag("sacrificing ")),
+            value("tap", tag("tapping ")),
+            value("remove", tag("removing ")),
+            value("exile", tag("exiling ")),
+        ))
+        .parse(input)
+    }) else {
+        return AbilityCost::Unimplemented {
+            description: original.to_string(),
+        };
+    };
+    parse_oracle_cost(&format!("{stem} {rest}"))
+}
+
 /// True when a top-level ` or ` branch parsed to a concrete activation cost
 /// rather than falling through to `Unimplemented` / `EffectCost`.
 fn is_disjunctive_alt_cost(cost: &AbilityCost) -> bool {
@@ -798,7 +840,10 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
             };
         }
-        if nom_on_lower(rest, &rest_lower, |i| value((), tag("a card")).parse(i)).is_some() {
+        if all_consuming(tag::<_, _, nom::error::Error<&str>>("a card"))
+            .parse(rest_lower.as_str())
+            .is_ok()
+        {
             return AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
@@ -1795,6 +1840,19 @@ fn extract_filter_zone(filter: &TargetFilter) -> Option<Zone> {
                 None
             }
         }),
+        // Recurse into composite filters so a multi-type source-zone cost carries
+        // the same top-level `zone` a single-type one would. "Exile four instant
+        // and/or sorcery cards from your graveyard" (Demilich) lowers to an
+        // `Or([Typed{Instant, InZone(Graveyard)}, Typed{Sorcery, InZone(Graveyard)}])`
+        // filter; without this, `zone` stayed `None` and the payment layer's
+        // no-zone default (`exile_cost_effective_zone`) looked in the hand instead
+        // of the graveyard, making the cost unpayable and the card uncastable.
+        // Every leg of these disjunctions names the same zone, so the first leg
+        // that yields a zone is authoritative.
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().find_map(extract_filter_zone)
+        }
+        TargetFilter::Not { filter } => extract_filter_zone(filter),
         _ => None,
     }
 }
@@ -1890,6 +1948,86 @@ mod tests {
     #[test]
     fn cost_tap() {
         assert_eq!(parse_oracle_cost("{T}"), AbilityCost::Tap);
+    }
+
+    /// CR 601.2f: `parse_gerund_cost` de-conjugates the gerund verb and delegates
+    /// to the single cost authority, so a gerund cost phrase lowers identically to
+    /// its imperative form across the whole verb class — and an unmodeled verb
+    /// stays honest `Unimplemented`. Tests the building block, not one card.
+    #[test]
+    fn gerund_cost_matches_imperative_authority() {
+        for (gerund, imperative) in [
+            ("discarding a card", "discard a card"),
+            ("paying 1 life", "pay 1 life"),
+            ("sacrificing a creature", "sacrifice a creature"),
+            ("sacrificing a Vehicle", "sacrifice a Vehicle"),
+            // CR 701.13a: the exile arm — Demilich / Helbrute cast-from-graveyard
+            // riders exile cards as an additional cost.
+            (
+                "exiling four instant and/or sorcery cards from your graveyard",
+                "exile four instant and/or sorcery cards from your graveyard",
+            ),
+            (
+                "exiling another creature card from your graveyard",
+                "exile another creature card from your graveyard",
+            ),
+        ] {
+            assert_eq!(
+                parse_gerund_cost(gerund),
+                parse_oracle_cost(imperative),
+                "gerund {gerund:?} must lower like imperative {imperative:?}"
+            );
+        }
+        assert!(matches!(
+            parse_gerund_cost("sacrificing a Vehicle"),
+            AbilityCost::Sacrifice(SacrificeCost {
+                target: TargetFilter::Typed(TypedFilter { type_filters, .. }),
+                ..
+            }) if type_filters == [TypeFilter::Subtype("Vehicle".to_string())]
+        ));
+        // The required-for-this-fix arm is concretely a discard-a-card cost.
+        assert!(
+            matches!(
+                parse_gerund_cost("discarding a card"),
+                AbilityCost::Discard { .. }
+            ),
+            "discarding a card must lower to a Discard cost"
+        );
+        // CR 701.13a: the exile arm lowers to a real graveyard Exile cost — the
+        // regression that turned Demilich/Helbrute from castable-with-dropped-cost
+        // into declined-and-uncastable is fixed at its root (the missing gerund).
+        assert!(
+            matches!(
+                parse_gerund_cost("exiling four instant and/or sorcery cards from your graveyard"),
+                AbilityCost::Exile {
+                    count: 4,
+                    zone: Some(Zone::Graveyard),
+                    filter: Some(_),
+                }
+            ),
+            "Demilich's exile-four rider must lower to an Exile-from-graveyard cost, got {:?}",
+            parse_gerund_cost("exiling four instant and/or sorcery cards from your graveyard")
+        );
+        assert!(
+            matches!(
+                parse_gerund_cost("exiling another creature card from your graveyard"),
+                AbilityCost::Exile {
+                    count: 1,
+                    zone: Some(Zone::Graveyard),
+                    filter: Some(_),
+                }
+            ),
+            "Helbrute's exile-another-creature rider must lower to an Exile-from-graveyard cost, got {:?}",
+            parse_gerund_cost("exiling another creature card from your graveyard")
+        );
+        // A verb the cost authority does not model stays honest.
+        assert!(
+            matches!(
+                parse_gerund_cost("frobnicating a card"),
+                AbilityCost::Unimplemented { .. }
+            ),
+            "an unmodeled gerund verb must lower to Unimplemented"
+        );
     }
 
     #[test]
@@ -2725,6 +2863,29 @@ mod tests {
                 )));
             }
             other => panic!("Expected Exile with green + CmcEQ(X), got {:?}", other),
+        }
+    }
+
+    /// CR 107.3a + CR 701.9a: the shared X in an activated discard cost is
+    /// retained as a typed mana-value filter rather than swallowed as "a card".
+    #[test]
+    fn cost_discard_card_with_mana_value_x() {
+        use crate::types::ability::{Comparator, FilterProp, QuantityExpr, QuantityRef};
+
+        match parse_oracle_cost("Discard a card with mana value X") {
+            AbilityCost::Discard {
+                filter: Some(TargetFilter::Typed(typed)),
+                ..
+            } => assert!(typed.properties.iter().any(|property| matches!(
+                property,
+                FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { name }
+                    }
+                } if name == "X"
+            ))),
+            other => panic!("expected discard with CmcEQ(X), got {other:?}"),
         }
     }
 

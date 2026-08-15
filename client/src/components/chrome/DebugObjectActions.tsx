@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import type {
   AttachTarget,
@@ -135,9 +136,11 @@ function RemoveObjectForm({ onDispatch }: Props) {
 }
 
 function CreateTokenCopyForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [sourceId, setSourceId] = useState<ObjectId | null>(null);
   const [owner, setOwner] = useState<PlayerId>(0);
   const [nonlegendary, setNonlegendary] = useState(false);
+  const [count, setCount] = useState(1);
 
   return (
     <>
@@ -149,6 +152,9 @@ function CreateTokenCopyForm({ onDispatch }: Props) {
       />
       <FieldRow label="Owner">
         <PlayerSelect value={owner} onChange={setOwner} />
+      </FieldRow>
+      <FieldRow label={t("debugCreate.copies")}>
+        <NumberInput value={count} onChange={setCount} min={0} />
       </FieldRow>
       <FieldRow label="">
         <CheckboxInput
@@ -163,7 +169,7 @@ function CreateTokenCopyForm({ onDispatch }: Props) {
           sourceId != null &&
           onDispatch({
             type: "CreateTokenCopy",
-            data: { source_id: sourceId, owner, nonlegendary },
+            data: { source_id: sourceId, owner, nonlegendary, count },
           })
         }
       >
@@ -207,12 +213,23 @@ function ModifyCountersForm({ onDispatch }: Props) {
   const [objectId, setObjectId] = useState<ObjectId | null>(null);
   const [counterType, setCounterType] = useState<CounterType>("P1P1");
   const [delta, setDelta] = useState(1);
+  const object = useGameStore((s) =>
+    objectId == null ? undefined : s.gameState?.objects[objectId],
+  );
+  const counterTypes = useMemo<CounterType[]>(
+    () => Array.from(new Set([...COUNTER_TYPES, ...Object.keys(object?.counters ?? {})])),
+    [object?.counters],
+  );
 
   return (
     <>
       <ObjectSelect value={objectId} onChange={setObjectId} filter={onBattlefield} />
       <FieldRow label="Counter">
-        <SelectInput value={counterType} onChange={setCounterType} options={COUNTER_TYPES} />
+        <SelectInput
+          value={counterType}
+          onChange={setCounterType}
+          options={counterTypes}
+        />
       </FieldRow>
       <FieldRow label="Delta">
         <NumberInput value={delta} onChange={setDelta} />

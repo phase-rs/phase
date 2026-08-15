@@ -81,17 +81,44 @@ pub struct BoundSearchFoundCandidate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(tag = "type")]
 pub enum AppliedReplacementKey {
-    Object { source: ObjectId, index: usize },
-    Floating { index: usize },
-    StepEndMana { index: usize },
+    Object {
+        source: ObjectId,
+        index: usize,
+    },
+    Floating {
+        index: usize,
+    },
+    StepEndMana {
+        index: usize,
+    },
+    /// CR 614.12a: The selected controller for an as-enters replacement.
+    /// This rides the event's existing replacement provenance so the selected
+    /// answer remains distinguishable from an originating controller override.
+    EntryControllerChoice {
+        source: ObjectId,
+        index: usize,
+        controller: PlayerId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(tag = "type")]
 enum TaggedAppliedReplacementKey {
-    Object { source: ObjectId, index: usize },
-    Floating { index: usize },
-    StepEndMana { index: usize },
+    Object {
+        source: ObjectId,
+        index: usize,
+    },
+    Floating {
+        index: usize,
+    },
+    StepEndMana {
+        index: usize,
+    },
+    EntryControllerChoice {
+        source: ObjectId,
+        index: usize,
+        controller: PlayerId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -120,6 +147,17 @@ impl AppliedReplacementKeyCompat {
             AppliedReplacementKeyCompat::Tagged(TaggedAppliedReplacementKey::StepEndMana {
                 index,
             }) => AppliedReplacementKey::StepEndMana { index },
+            AppliedReplacementKeyCompat::Tagged(
+                TaggedAppliedReplacementKey::EntryControllerChoice {
+                    source,
+                    index,
+                    controller,
+                },
+            ) => AppliedReplacementKey::EntryControllerChoice {
+                source,
+                index,
+                controller,
+            },
             AppliedReplacementKeyCompat::Legacy(ReplacementId {
                 source: ObjectId(0),
                 index,
@@ -159,7 +197,8 @@ impl AppliedReplacementKey {
 
     pub fn source(self) -> ObjectId {
         match self {
-            AppliedReplacementKey::Object { source, .. } => source,
+            AppliedReplacementKey::Object { source, .. }
+            | AppliedReplacementKey::EntryControllerChoice { source, .. } => source,
             AppliedReplacementKey::Floating { .. } | AppliedReplacementKey::StepEndMana { .. } => {
                 ObjectId(0)
             }
@@ -170,7 +209,8 @@ impl AppliedReplacementKey {
         match self {
             AppliedReplacementKey::Object { index, .. }
             | AppliedReplacementKey::Floating { index }
-            | AppliedReplacementKey::StepEndMana { index } => index,
+            | AppliedReplacementKey::StepEndMana { index }
+            | AppliedReplacementKey::EntryControllerChoice { index, .. } => index,
         }
     }
 
@@ -391,6 +431,11 @@ pub enum ProposedEvent {
         /// `Unspecified` preserves any non-replacement tapped seed from the originating effect.
         #[serde(default)]
         enter_tapped: EtbTapState,
+        /// CR 508.4: Whether this permanent enters the battlefield attacking.
+        /// Carried through the replacement pipeline because an ETB-counter or
+        /// replacement-ordering pause resumes from the approved ZoneChange.
+        #[serde(default)]
+        enters_attacking: bool,
         /// Counters to place on this permanent as it enters the battlefield.
         /// Each entry is (counter_type, count). Set by ETB-counter replacements.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -759,6 +804,7 @@ impl ProposedEvent {
             cause,
             attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
@@ -1027,7 +1073,7 @@ impl ProposedEvent {
             ProposedEvent::TokenEntry { entry_ref, .. } => state
                 .liminal_entries
                 .get(entry_ref)
-                .map(|entry| entry.object.controller)
+                .map(|entry| entry.object.projected().controller)
                 .unwrap_or(PlayerId(0)),
             // CR 701.3a: The attaching Aura/Equipment's controller is the
             // affected player — they are the one who would choose a

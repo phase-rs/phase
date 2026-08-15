@@ -15,9 +15,9 @@
 //! `match` perturbed even one event. Because the golden is pre-edit, this is not circular.
 
 use engine::analysis::decision_template::{
-    DecisionGroupKey, DecisionKind, DecisionPoint, DecisionPointKind, DecisionSlot,
-    DecisionTemplate, IterationCount, PinnedDecision, ReplayMode, ShortcutDecisionSchema,
-    TargetPin, TargetSchedule,
+    AnnouncementSubject, DecisionGroupKey, DecisionKind, DecisionPoint, DecisionPointKind,
+    DecisionSlot, DecisionTemplate, IterationCount, PinnedDecision, Ranking, ReplayMode,
+    ShortcutDecisionSchema, TargetPin, TargetSchedule,
 };
 use engine::analysis::loop_check::{LoopCertificate, ShortcutProposal, ShortcutResponse, WinKind};
 use engine::analysis::resource::{loop_states_equal_modulo_resources, BoardDelta, ResourceAxis};
@@ -39,6 +39,14 @@ use engine::types::player::PlayerId;
 const P0: PlayerId = PlayerId(0);
 const P1: PlayerId = PlayerId(1);
 const P2: PlayerId = PlayerId(2);
+
+/// The one-element ranking a schedule step carries when it names a single object: a
+/// `Ranking::one(Object(src))` IS the pre-parameterization constant subject, so every site
+/// below is a re-spelling with no behaviour delta (CR 732.2a — only the head is ever
+/// resolved within one drive).
+fn obj_rank(src: YieldTarget) -> Ranking {
+    Ranking::one(AnnouncementSubject::Object(src))
+}
 
 const DRAIN_CLERIC: &str = "Whenever you gain life, each opponent loses 1 life.";
 const BLOOD_SIPPER: &str = "Whenever an opponent loses life, you gain 1 life.";
@@ -433,6 +441,19 @@ fn on_shortcut_byte_identical_to_pre_pr7_golden() {
     let (rest, wf) = drive_collect(&mut runner, 500);
     all.extend(rest);
 
+    // The golden covers event ordering and effect payloads from before
+    // SpellCast gained its optional cast-time snapshot. That orthogonal field
+    // is asserted by the Thor quantity tests, so omit it from this legacy
+    // byte-for-byte stream comparison.
+    for event in &mut all {
+        if let GameEvent::SpellCast {
+            cast_mana_value, ..
+        } = event
+        {
+            *cast_mana_value = None;
+        }
+    }
+
     assert_eq!(
         wf,
         WaitingFor::GameOver { winner: Some(P0) },
@@ -442,9 +463,9 @@ fn on_shortcut_byte_identical_to_pre_pr7_golden() {
         life(&runner, P1) > 0,
         "ON: the shortcut fired early (P1 positive)"
     );
+    let event_stream = format!("{all:?}").replace(", cast_mana_value: None", "");
     assert_eq!(
-        format!("{all:?}"),
-        GOLDEN_ON,
+        event_stream, GOLDEN_ON,
         "ON: the accumulated event stream must be byte-identical to the pre-PR-7 golden — \
          wrapping the reconcile body in the mode `match` must not perturb any event"
     );
@@ -1079,12 +1100,14 @@ fn loop_shortcut_acting_player_reads_proposer() {
         predicted_winner: Some(P0),
         certificate: cert.clone(),
         schema: ShortcutDecisionSchema::default(),
+        declaration: None,
     };
     let wf_b = WaitingFor::LoopShortcut {
         proposer: P2,
         predicted_winner: None,
         certificate: cert.clone(),
         schema: ShortcutDecisionSchema::default(),
+        declaration: None,
     };
     assert_eq!(wf_a.acting_player(), Some(P1));
     assert_eq!(wf_b.acting_player(), Some(P2));
@@ -1118,6 +1141,7 @@ fn loop_shortcut_acting_player_reads_proposer() {
         predicted_winner: Some(P0),
         certificate: cert.clone(),
         schema: ShortcutDecisionSchema::default(),
+        declaration: None,
     };
     apply(&mut delegated, P0, GameAction::DeclineShortcut)
         .expect("the turn controller may submit the priority holder's decline");
@@ -1691,6 +1715,7 @@ fn injected_3p_one_faller_no_crown() {
         predicted_winner: Some(P0),
         certificate: synthetic_lethal_cert(),
         schema: ShortcutDecisionSchema::default(),
+        declaration: None,
     };
     runner
         .act(GameAction::DeclareShortcut {
@@ -1832,6 +1857,7 @@ fn declare_illegal_pin_falls_back_legal_ingests() {
         predicted_winner: Some(P0),
         certificate: synthetic_lethal_cert(),
         schema: schema.clone(),
+        declaration: None,
     };
     runner
         .act(GameAction::DeclareShortcut {
@@ -1852,6 +1878,7 @@ fn declare_illegal_pin_falls_back_legal_ingests() {
         predicted_winner: Some(P0),
         certificate: synthetic_lethal_cert(),
         schema,
+        declaration: None,
     };
     runner2
         .act(GameAction::DeclareShortcut {
@@ -1908,6 +1935,7 @@ fn injected_3p_unequal_life_pin_all_no_crown() {
             predicted_winner: Some(P0),
             certificate: synthetic_lethal_cert(),
             schema: ShortcutDecisionSchema::default(),
+            declaration: None,
         };
         runner
             .act(GameAction::DeclareShortcut {
@@ -2051,9 +2079,9 @@ fn piecewise_cleric_template(
         source: valid.clone(),
         index: 0,
     };
-    let mut schedule = vec![(0u32, valid.clone())];
+    let mut schedule = vec![(0u32, obj_rank(valid.clone()))];
     if let Some(at) = switch_to_bogus_at {
-        schedule.push((at, bogus));
+        schedule.push((at, obj_rank(bogus)));
     }
     DecisionTemplate {
         owner,
@@ -2124,7 +2152,9 @@ fn b3_materialize_stop_short() {
 /// PR-7 DoS cap (CR 732.2a SAFETY LIMIT): a `Fixed` count over `MAX_SHORTCUT_CYCLES` is
 /// handed back to manual play with NO drive. This is the engine-side count cap that stops the
 /// catastrophic 4-byte remote vector — `Fixed(u32)` scalar-encodes ~4.3e9 cycles in ~10 bytes,
-/// sailing through the 8 KB WS frame cap. The count is HARDCODED as `Fixed(u32::MAX)`; the cap
+/// sailing through the WS frame cap (`phase-server`'s `MAX_WS_MESSAGE_BYTES`, 64 KB). The count
+/// is HARDCODED as
+/// `Fixed(u32::MAX)`; the cap
 /// const is private to the engine crate and invisible across this integration-test boundary.
 ///
 /// VACUITY TRAP (PR-7): a handback lands on `WaitingFor::Priority`, and so does the cap-ABSENT
@@ -4131,7 +4161,7 @@ fn object_growth_random_recast_body_does_not_offer() {
 
 /// T1 ⭐: the object-growth (convoke-recast) offer carries exactly ONE `ConvokeTaps`
 /// decision-point whose `tappable` is the LIVE offer-time `is_convoke_eligible(P0)` set, and an
-/// optional-loop `Fixed(1)` iteration seed. Board-derivation (hostile): the creature TAPPED to
+/// optional-loop iteration seed EQUAL to the ceiling it publishes. Board-derivation (hostile): the creature TAPPED to
 /// pay convoke during the real cast is EXCLUDED; an untapped controlled creature is INCLUDED — a
 /// constant/hard-coded set could not track which creature was spent. Revert-probe: a builder
 /// that dropped the ConvokeTaps pin (empty points) or hard-coded the set fails these.
@@ -4165,8 +4195,13 @@ fn object_growth_offer_schema_has_live_convoke_taps() {
             schema.points[0].kind
         );
     };
-    // Optional Advantage loop ⇒ Fixed(1) frontend count seed (not a determinate drain).
-    assert_eq!(schema.iteration_count, IterationCount::Fixed(1));
+    // CR 732.2a + CR 732.2c: an optional Advantage loop narrows no CR 704 bound, so the offer
+    // STATES the same global ceiling it publishes — the frontend echoes this value verbatim and
+    // the accepted count caps the CR 500.5 collapse prompt, so a smaller seed would cap it too.
+    assert_eq!(
+        schema.iteration_count,
+        IterationCount::Fixed(schema.max_iterations)
+    );
 
     // The tappable set is LIVE-derived from the offer-time board: exactly the untapped creatures
     // P0 controls (== is_convoke_eligible(P0)), compared as a set.
@@ -4292,6 +4327,7 @@ fn loop_shortcut_schema_redacts_hidden_targets_for_non_controller() {
         predicted_winner: Some(P0),
         certificate: cert,
         schema,
+        declaration: None,
     };
 
     let targets_of = |wf: &WaitingFor| -> Vec<TargetRef> {
@@ -4333,6 +4369,714 @@ fn loop_shortcut_schema_redacts_hidden_targets_for_non_controller() {
         p2_targets.len(),
         2,
         "exactly the one hidden target is dropped"
+    );
+}
+
+/// R0-a ⭐ (SECURITY): the RESPONDER-facing copy of a declared template is redacted too.
+///
+/// `handle_declare_shortcut` moves the proposer's `DecisionTemplate` VERBATIM onto
+/// `ShortcutProposal.template` one state transition after the `LoopShortcut` offer whose
+/// `declaration` is redacted by `d5h_a_hidden_object_pin_drops_the_whole_declaration_for_a_non_proposer`
+/// (`engine/src/game/visibility.rs`). Before this row, `grep -c RespondToShortcut
+/// crates/engine/src/game/visibility.rs` was 0: the identical pin vector was public to every
+/// responder and spectator.
+///
+/// CR 732.2b, ALL-OR-NOTHING: the responder's right is to shorten "by naming a place where they
+/// will make a game choice that's different than what's been proposed", so a half-shown pin set
+/// would state a proposal that was never made. The hostile fixture pins ONE hidden hand card and
+/// ONE public seat, and the assertion is `template.is_none()` — an implementation that merely
+/// trimmed the hidden pin would hand back `Some` with a one-pin vector and fail here.
+///
+/// # Non-vacuity
+///
+/// The board is FOUR seats so that the pinned card's owner is neither the proposer nor a
+/// responder, which separates three properties a 2-seat fixture conflates. Paired positives,
+/// because a redactor that simply dropped every template would satisfy the negative for free:
+/// (1) the PROPOSER (P0) keeps it — the guard is keyed to the viewer boundary; (2) the OWNER of
+/// the pinned hand card (P3) keeps it even though they are not the proposer — so the drop is
+/// keyed to what the viewer may actually see, not to "everyone but the proposer"; (3) an all-seat
+/// template reaches the responder unchanged and byte-equal to the proposer's. The negative is
+/// asserted for the QUEUED responder P2 as well as the current one P1, which is what makes the
+/// guard's keying on `proposal.proposer` (not on the prompted `player`) observable.
+///
+/// REVERT-PROBE: delete the `WaitingFor::RespondToShortcut` arm in `filter_state_for_viewer` ⇒
+/// P1/P2 see the hidden-hand pin ⇒ the two `is_none()` assertions FAIL while all positives stay
+/// green. Flipping the shared `pins_name_hidden_source`'s inner `any` to `all` fails this row AND
+/// the pre-existing `LoopShortcut` row D5-h — which is the proof that the extraction left ONE
+/// authority behind rather than two copies.
+///
+/// *What wrong implementation would still pass this row?* One that redacts `proposal.template`
+/// but leaks the same identity through the `LoopShortcut` offer it came from — that surface is
+/// covered by D5-h and by `loop_shortcut_schema_redacts_hidden_targets_for_non_controller` above.
+#[test]
+fn respond_to_shortcut_template_redacts_a_hidden_pin_for_non_proposers() {
+    const P3: PlayerId = PlayerId(3);
+
+    let mut scenario = GameScenario::new_n_player(4, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    // The pinned card sits in a hand belonging to NEITHER the proposer (P0) nor either
+    // responder (P1 current, P2 queued), so "cannot see it" and "is not the proposer" are
+    // distinguishable properties of a viewer on this one board.
+    let hidden_hand = scenario.add_bolt_to_hand(P3);
+    let runner = scenario.build();
+
+    let source = YieldTarget::ThisObject {
+        source_id: ObjectId(999),
+        incarnation: None,
+        trigger_description: None,
+    };
+    let window = |pins: Vec<TargetPin>| -> GameState {
+        let mut state = runner.state().clone();
+        state.waiting_for = WaitingFor::RespondToShortcut {
+            player: P1,
+            remaining_players: vec![P2],
+            proposal: ShortcutProposal {
+                proposer: P0,
+                predicted_winner: Some(P0),
+                count: IterationCount::Fixed(3),
+                unbounded: vec![],
+                win_kind: WinKind::LethalDamage,
+                template: Some(DecisionTemplate {
+                    owner: P0,
+                    decisions: vec![PinnedDecision::Targets {
+                        slot: DecisionSlot {
+                            source: source.clone(),
+                            index: 0,
+                        },
+                        targets: pins,
+                    }],
+                    replay: ReplayMode::Scheduled {
+                        count: IterationCount::Fixed(3),
+                    },
+                    key: DecisionGroupKey::from_sources(
+                        std::slice::from_ref(&source),
+                        DecisionKind::LoopChoice,
+                    ),
+                }),
+                per_cycle: None,
+            },
+        };
+        state
+    };
+    let projected = |state: &GameState, viewer: PlayerId| -> Option<DecisionTemplate> {
+        match engine::game::visibility::filter_state_for_viewer(state, viewer).waiting_for {
+            WaitingFor::RespondToShortcut { proposal, .. } => proposal.template,
+            other => panic!("the fixture parks on the CR 732.2b response window, got {other:?}"),
+        }
+    };
+
+    // ── the hostile arm: one hidden hand card + one public seat in the SAME pin vector ──
+    let hidden_state = window(vec![
+        TargetPin::ByIdentity(YieldTarget::ThisObject {
+            source_id: hidden_hand,
+            incarnation: None,
+            trigger_description: None,
+        }),
+        TargetPin::Player(P1),
+    ]);
+    assert!(
+        projected(&hidden_state, P0).is_some(),
+        "reach-guard + positive: the PROPOSER's own projection keeps the template, so the drops \
+         below are keyed to the viewer boundary rather than to the fixture"
+    );
+    assert!(
+        projected(&hidden_state, P1).is_none(),
+        "CR 732.2b: the CURRENT responder must not receive a proposal whose pin names a card in \
+         a hand they cannot see — and all-or-nothing means the public seat pin goes with it"
+    );
+    assert!(
+        projected(&hidden_state, P2).is_none(),
+        "the QUEUED responder is projected the same way: the guard keys on `proposal.proposer`, \
+         not on the prompted `player`"
+    );
+    assert!(
+        projected(&hidden_state, P3).is_some(),
+        "positive: the OWNER of the pinned hand card keeps the template even though they are not \
+         the proposer — the drop is keyed to what this viewer may actually see, so a redactor \
+         that dropped the template for every non-proposer fails here"
+    );
+
+    // ── the paired positive: an all-seat template carries no hidden identity ──
+    let public_state = window(vec![TargetPin::Player(P1)]);
+    assert_eq!(
+        projected(&public_state, P1),
+        projected(&public_state, P0),
+        "an all-seat template reaches the responder UNCHANGED — without this arm a redactor that \
+         dropped every template would pass the negatives above"
+    );
+    assert!(
+        projected(&public_state, P1).is_some(),
+        "and it is genuinely present, not two matching `None`s"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────
+// R3-c — the `DecisionTemplate` carrier census over `WaitingFor`
+// ─────────────────────────────────────────────────────────────────────────────────────────
+
+/// HOW a `WaitingFor` variant reaches a `DecisionTemplate`: in its own body, or through a
+/// field type that carries one. The intermediate type is NAMED rather than flattened to a
+/// bool — "via which type" is a real axis (`RespondToShortcut` reaches the template through
+/// `ShortcutProposal`) and a bool would erase it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CarrierKind {
+    Direct,
+    Via(String),
+}
+
+use syn::{GenericArgument, Item, PathArguments, Type};
+
+/// Every type identifier `ty` names, outermost first: `Option<Vec<Foo>>` ⇒
+/// `["Option", "Vec", "Foo"]`.
+///
+/// A NAME list rather than a `contains(marker)` over rendered text: the latter answers yes for
+/// `DecisionTemplateAudit` and for the word inside a doc comment, and both would be carriers
+/// this census invented.
+fn type_names(ty: &Type) -> Vec<String> {
+    fn walk(ty: &Type, out: &mut Vec<String>) {
+        match ty {
+            Type::Path(p) => {
+                for seg in &p.path.segments {
+                    out.push(seg.ident.to_string());
+                    if let PathArguments::AngleBracketed(args) = &seg.arguments {
+                        for arg in &args.args {
+                            if let GenericArgument::Type(inner) = arg {
+                                walk(inner, out);
+                            }
+                        }
+                    }
+                }
+            }
+            Type::Reference(r) => walk(&r.elem, out),
+            Type::Slice(s) => walk(&s.elem, out),
+            Type::Array(a) => walk(&a.elem, out),
+            Type::Group(g) => walk(&g.elem, out),
+            Type::Paren(p) => walk(&p.elem, out),
+            Type::Tuple(t) => t.elems.iter().for_each(|e| walk(e, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(ty, &mut out);
+    out
+}
+
+/// Every item in `items`, INCLUDING the ones nested in inline `mod` blocks — a holder does not
+/// stop being a holder for living inside a module.
+fn flatten<'a>(items: &'a [Item], out: &mut Vec<&'a Item>) {
+    for item in items {
+        out.push(item);
+        if let Item::Mod(m) = item {
+            if let Some((_, inner)) = &m.content {
+                flatten(inner, out);
+            }
+        }
+    }
+}
+
+/// `(variant name, its field types)` for `enum_name`, in declaration order.
+fn enum_variants(src: &str, enum_name: &str) -> Vec<(String, Vec<Type>)> {
+    let parsed =
+        syn::parse_file(src).unwrap_or_else(|e| panic!("parse the `{enum_name}` source: {e}"));
+    let mut items = Vec::new();
+    flatten(&parsed.items, &mut items);
+    items
+        .iter()
+        .find_map(|item| match item {
+            Item::Enum(e) if e.ident == enum_name => Some(
+                e.variants
+                    .iter()
+                    .map(|v| {
+                        (
+                            v.ident.to_string(),
+                            v.fields.iter().map(|f| f.ty.clone()).collect(),
+                        )
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("`{enum_name}` must be declared in the parsed source"))
+}
+
+/// Every type declaration in the walked corpus whose own body names `marker` — struct, enum or
+/// alias, at any visibility, generic or not, nested in a `mod` or not. THE DEPTH-1 STEP, and
+/// the whole of it — see the row's disclosed limitation.
+///
+/// # Why `syn` and not string ops
+///
+/// This step used to scan for `pub struct <Ident> {` at column 0, which is a small fraction of
+/// the declarations that can hold a `marker`. MEASURED over this walk root: that shape matches
+/// **491** declarations, while **654** `pub enum`, **108** `pub(crate) struct` and **12**
+/// generic `pub struct` heads are invisible to it — and a carrier the depth-1 step cannot see
+/// is scored as a clean GREEN, which is the one failure mode a census must not have. `syn` is
+/// already a `[dev-dependencies]` entry of this crate and already the instrument
+/// `deterministic_game_state_serde` parses production sources with, so this is reuse and not a
+/// new dependency. `PLANT 5` below is the arm that holds the four recovered forms.
+///
+/// Computed ONCE per corpus rather than re-scanned per candidate identifier: the walk is 500+
+/// files and the enum is 128 variants, so the per-identifier form is quadratic in the corpus
+/// for no extra signal.
+fn types_carrying(corpus: &[(String, String)], marker: &str) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for (file, src) in corpus {
+        // A SOUND prefilter, not a shortcut: a declaration can only NAME `marker` if its file
+        // text contains `marker`, so this skips ~500 parses without narrowing the answer.
+        if !src.contains(marker) {
+            continue;
+        }
+        let parsed = syn::parse_file(src).unwrap_or_else(|e| panic!("parse {file}: {e}"));
+        let mut items = Vec::new();
+        flatten(&parsed.items, &mut items);
+        for item in items {
+            let (name, field_types): (String, Vec<&Type>) = match item {
+                Item::Struct(s) => (
+                    s.ident.to_string(),
+                    s.fields.iter().map(|f| &f.ty).collect(),
+                ),
+                Item::Enum(e) => (
+                    e.ident.to_string(),
+                    e.variants
+                        .iter()
+                        .flat_map(|v| v.fields.iter().map(|f| &f.ty))
+                        .collect(),
+                ),
+                Item::Type(t) => (t.ident.to_string(), vec![t.ty.as_ref()]),
+                _ => continue,
+            };
+            if field_types
+                .iter()
+                .flat_map(|t| type_names(t))
+                .any(|n| n == marker)
+            {
+                out.insert(name);
+            }
+        }
+    }
+    out
+}
+
+/// Every variant of `enum_name` in `enum_src` that reaches `marker`, DIRECTLY or through one
+/// field type found in `corpus`.
+///
+/// SOURCE-PARAMETERIZED on purpose: every probe below plants into an in-memory `String`, so the
+/// census's own discrimination costs no compile and mutates no worktree file. Mirrors
+/// `super::loop_shortcut_offer_writer_census::classify`'s `(src, needle, file)` shape.
+fn carriers_in_source(
+    enum_src: &str,
+    enum_name: &str,
+    corpus: &[(String, String)],
+    marker: &str,
+    walk_via: bool,
+) -> Vec<(String, CarrierKind)> {
+    let via_types = types_carrying(corpus, marker);
+    let mut out = Vec::new();
+    for (name, field_types) in enum_variants(enum_src, enum_name) {
+        // Outermost-first across the variant's fields in declaration order, so `Via` names the
+        // holder a reader would name.
+        let named: Vec<String> = field_types.iter().flat_map(type_names).collect();
+        if named.iter().any(|n| n == marker) {
+            out.push((name, CarrierKind::Direct));
+            continue;
+        }
+        if !walk_via {
+            continue;
+        }
+        if let Some(via) = named.into_iter().find(|n| via_types.contains(n)) {
+            out.push((name, CarrierKind::Via(via)));
+        }
+    }
+    out
+}
+
+/// Does `filter_state_for_viewer`'s body carry an `if let WaitingFor::<name>` dispatch arm?
+fn redaction_arm_present(visibility_src: &str, name: &str) -> bool {
+    let needle = format!("if let {}::{name}", "WaitingFor");
+    let mut inside = false;
+    for line in visibility_src.lines() {
+        if !inside {
+            inside = line.starts_with("pub fn filter_state_for_viewer(");
+            continue;
+        }
+        if line == "}" {
+            break;
+        }
+        if line.contains(&needle) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Splice `injected` in immediately above `enum_name`'s closing brace, on a COPY of `src`.
+fn plant_into_enum(src: &str, enum_name: &str, injected: &str) -> String {
+    let open = format!("pub enum {enum_name} {{");
+    let mut out = String::new();
+    let mut inside = false;
+    let mut planted = false;
+    for line in src.lines() {
+        if !planted {
+            if inside && line == "}" {
+                out.push_str(injected);
+                planted = true;
+            } else if !inside && line.trim_start().starts_with(&open) {
+                inside = true;
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    assert!(
+        planted,
+        "the plant anchor `{open}` … `}}` must exist in the copy"
+    );
+    out
+}
+
+/// **R3-c** — exactly TWO `WaitingFor` variants carry a `DecisionTemplate`, and both have a
+/// redaction arm inside `filter_state_for_viewer`.
+///
+/// MEASURED at this tip: `{(LoopShortcut, Direct), (RespondToShortcut, Via(ShortcutProposal))}`
+/// out of 128 variants; the VIA target is `analysis::loop_check::ShortcutProposal`'s
+/// `pub template: Option<DecisionTemplate>`.
+///
+/// # Why a census exists here at all
+///
+/// The REDACTION DISPATCH in `filter_state_for_viewer` is two `if let`s, not a `match`, so a
+/// THIRD carrier gets no compile error THERE — that is the gap this row closes. It is not true
+/// elsewhere: **at least 9** exhaustive `match`es on `WaitingFor` would fail E0004, spread over
+/// two crates (`engine`, `phase-ai`) — measured by whole-workspace AST enumeration over
+/// `crates/`, which is a **lower bound**, not a total. Those matches make a new variant hard to
+/// ADD; not one of them makes it hard to add UNREDACTED. **The site list is deliberately not
+/// enumerated here** — a frozen list in a doc comment is a claim no test defends, and it rots
+/// the moment a crate is added.
+///
+/// # Why the probes plant into a `String` instead of adding a variant
+///
+/// MEASURED: a real third variant yields 6 E0004 under `cargo check -p phase-engine --lib` and
+/// 7 with `--features test-support`, and BOTH runs abort at the lib — so the dependent crates
+/// and this ~4 800-row integration target are never type-checked, and the repair list is
+/// neither stable nor bounded. Source injection has neither problem and needs no build.
+///
+/// # Discrimination — five plant arms, all RUN, all over in-memory copies
+///
+/// * a 3rd DIRECT and a 4th VIA carrier planted into a copy of the enum source ⇒ the set
+///   assertion fails NAMING both new variants (`n = 4`);
+/// * the depth-1 VIA step disabled ⇒ the set shrinks to `{LoopShortcut}` ⇒ fails, so the
+///   transitive step is load-bearing rather than decoration;
+/// * a synthetic enum with no carrier at all ⇒ `n = 0`, so the classifier cannot only ever
+///   return the answer this row wants;
+/// * the `RespondToShortcut` arm deleted from a copy of `visibility.rs` ⇒ the redaction half
+///   flips to `false` for that carrier while `LoopShortcut` stays `true`. The mutation is on a
+///   COPY, so the shipped row `respond_to_shortcut_template_redacts_a_hidden_pin_for_non_proposers`
+///   above is not perturbed;
+/// * a `pub(crate)`, a GENERIC, an ENUM, an ALIAS and a `mod`-NESTED holder planted at once ⇒
+///   all five are NAMED as `Via` carriers, and a non-carrier planted beside them is not. These
+///   are the forms the retired `pub struct <Ident> {{` string scan could not see, and each was
+///   a false GREEN rather than a false alarm.
+///
+/// # DISCLOSED LIMITATIONS
+///
+/// 1. **The walk is DEPTH-1.** A `WaitingFor` field whose type reaches a `DecisionTemplate` two
+///    levels down is invisible to it. Measured today: zero such types exist. That is a latent
+///    gap, not a covered case.
+/// 2. **The E0004 figure above is a LOWER BOUND from a named instrument**, not a total, and this
+///    row must never be "helpfully" upgraded into a site list.
+#[test]
+fn exactly_two_waiting_for_variants_carry_a_decision_template_and_both_are_redacted() {
+    use super::loop_shortcut_offer_writer_census::rs_files;
+
+    // Assembled at runtime for the same reason both sibling censuses assemble their anchors:
+    // an instrument that can count its own needle after a future move is one that lies about
+    // the surface it measures.
+    let marker = format!("{}{}", "Decision", "Template");
+    let engine_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let corpus: Vec<(String, String)> = rs_files(&engine_src)
+        .into_iter()
+        .map(|path| {
+            let src =
+                std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+            let rel = path
+                .strip_prefix(&engine_src)
+                .expect("walked path is under its root")
+                .to_string_lossy()
+                .replace('\\', "/");
+            (rel, src)
+        })
+        .collect();
+    let file_of = |suffix: &str| -> String {
+        corpus
+            .iter()
+            .find(|(f, _)| f.ends_with(suffix))
+            .unwrap_or_else(|| panic!("the walk must reach {suffix}"))
+            .1
+            .clone()
+    };
+    let enum_src = file_of("types/game_state.rs");
+    let visibility_src = file_of("game/visibility.rs");
+
+    // ── the classifier's own reach-guard: the enum was actually found ──
+    let total = enum_variants(&enum_src, "WaitingFor").len();
+    assert_eq!(
+        total, 130,
+        "`WaitingFor` has 130 variants at this tip, read off the `syn` parse. This number is \
+         pinned so a variant REMOVED is as visible as one added; if you added a variant and it \
+         carries no `DecisionTemplate`, update this number. A wildly different count means the \
+         reader lost its anchor, and every assertion below would then be measuring an empty enum"
+    );
+    // 128 ⇒ 129 is ADJUDICATED, not bumped: upstream #7336 ("make dig entries attack") added
+    // `EntryAttackTargetChoice { player, object_id, valid_targets }`. Measured, because the
+    // number alone cannot say it: that variant carries NO `DecisionTemplate` (zero matches in
+    // its body), so it is not a third carrier and the assertion below is unchanged by it. The
+    // count moved for a reason that does not touch this row's subject — which is exactly the
+    // case this reach-guard exists to make visible rather than silent.
+    // 129 ⇒ 130 is ADJUDICATED on the same terms: upstream #7382 ("choose pre-entry opponent
+    // controller") added `EntryControllerChoice { player: PlayerId, candidates: Vec<PlayerId> }`
+    // (CR 614.12a). Measured, not inferred from the diff: that body holds NO `DecisionTemplate`,
+    // so it is not a third carrier, and both the carrier vec and the redaction loop below are
+    // unchanged by it. The count itself was read from THIS assertion's own failure (`left: 130`)
+    // rather than from a hand-written variant counter — one was tried and returned 49 while
+    // contradicting itself, and a second instrument that disagrees with the `syn` parse is worth
+    // less than no second instrument. The reach-guard did its whole job here: this drift produced
+    // no merge conflict and could not have, so CI was the only thing between it and shipping.
+
+    let carriers = carriers_in_source(&enum_src, "WaitingFor", &corpus, &marker, true);
+    assert_eq!(
+        carriers,
+        vec![
+            ("LoopShortcut".to_string(), CarrierKind::Direct),
+            (
+                "RespondToShortcut".to_string(),
+                CarrierKind::Via("ShortcutProposal".to_string())
+            ),
+        ],
+        "CR 732.2a / CR 723.4: exactly TWO `WaitingFor` variants carry a `DecisionTemplate` — \
+         `LoopShortcut` directly and `RespondToShortcut` through `ShortcutProposal` — and both \
+         are named rather than counted, because a census asserting `>= 1 carrier` is vacuous. A \
+         THIRD carrier is a new per-viewer redaction obligation: the dispatch in \
+         `filter_state_for_viewer` is `if let`s, so nothing will fail to compile. got {carriers:?}"
+    );
+
+    // ── the redaction half, read from the production source ──
+    for (name, kind) in &carriers {
+        assert!(
+            redaction_arm_present(&visibility_src, name),
+            "CR 723.4: every `DecisionTemplate` carrier needs its own dispatch arm inside \
+             `filter_state_for_viewer`; `{name}` ({kind:?}) has none"
+        );
+    }
+
+    // ── PLANT 1 — a 3rd DIRECT and a 4th VIA carrier, into COPIES ──
+    let planted_src = plant_into_enum(
+        &enum_src,
+        "WaitingFor",
+        &format!(
+            "    ProbeThirdCarrier {{\n        template: Option<{marker}>,\n    }},\n\
+             \x20   ProbeFourthCarrier {{\n        holder: ProbeViaHolder,\n    }},\n"
+        ),
+    );
+    let mut planted_corpus = corpus.clone();
+    planted_corpus.push((
+        "planted.rs".to_string(),
+        format!("pub struct ProbeViaHolder {{\n    pub template: Option<{marker}>,\n}}\n"),
+    ));
+    let planted = carriers_in_source(&planted_src, "WaitingFor", &planted_corpus, &marker, true);
+    assert_eq!(
+        planted
+            .iter()
+            .map(|(n, k)| (n.as_str(), k.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("LoopShortcut", CarrierKind::Direct),
+            (
+                "RespondToShortcut",
+                CarrierKind::Via("ShortcutProposal".to_string())
+            ),
+            ("ProbeThirdCarrier", CarrierKind::Direct),
+            (
+                "ProbeFourthCarrier",
+                CarrierKind::Via("ProbeViaHolder".to_string())
+            ),
+        ],
+        "ANTI-VACUITY: the census must NAME a planted third (direct) and fourth (transitive) \
+         carrier, else the two-carrier answer above is what a dead instrument returns. \
+         got {planted:?}"
+    );
+
+    // ── PLANT 2 — the depth-1 VIA step disabled ──
+    let no_via = carriers_in_source(&enum_src, "WaitingFor", &corpus, &marker, false);
+    assert_eq!(
+        no_via,
+        vec![("LoopShortcut".to_string(), CarrierKind::Direct)],
+        "the transitive step is LOAD-BEARING: without it `RespondToShortcut` is invisible and \
+         the shipped set assertion above would be a one-element claim. got {no_via:?}"
+    );
+
+    // ── PLANT 3 — a synthetic enum with no carrier ──
+    let synthetic = "pub enum WaitingFor {\n    Alpha {\n        player: PlayerId,\n    },\n    \
+                     Beta {\n        x: u32,\n    },\n}\n";
+    let none = carriers_in_source(synthetic, "WaitingFor", &corpus, &marker, true);
+    assert!(
+        none.is_empty(),
+        "a carrier-free enum must classify as carrier-free; an instrument that can only ever \
+         return {{LoopShortcut, RespondToShortcut}} is what this arm forecloses. got {none:?}"
+    );
+
+    // ── PLANT 4 — the redaction arm deleted, on a COPY of `visibility.rs` ──
+    let mutated_visibility = visibility_src.replace(
+        &format!("if let {}::RespondToShortcut", "WaitingFor"),
+        &format!("if let {}::ZzzDeletedArm", "WaitingFor"),
+    );
+    assert!(
+        redaction_arm_present(&mutated_visibility, "LoopShortcut")
+            && !redaction_arm_present(&mutated_visibility, "RespondToShortcut"),
+        "the redaction half must FLIP when its arm is deleted from the copy, and only for the \
+         carrier whose arm was deleted — otherwise the `for` loop above asserts nothing"
+    );
+
+    // ── PLANT 5 — the four holder FORMS the retired string scan could not see, plus a
+    //    non-carrier control. Each is a real declaration shape from this walk root: over
+    //    `crates/engine/src` the old `pub struct <Ident> {` shape matched 491 declarations
+    //    while 654 `pub enum`, 108 `pub(crate) struct` and 12 generic `pub struct` heads were
+    //    invisible — every one of them a carrier that would have scored a clean GREEN. ──
+    let forms = format!(
+        "pub(crate) struct CrateVisHolder {{\n    pub template: Option<{marker}>,\n}}\n\
+         pub struct GenericHolder<'a, T> {{\n    pub template: &'a {marker},\n    pub t: T,\n}}\n\
+         pub enum EnumHolder {{\n    WithTemplate({marker}),\n    Without,\n}}\n\
+         pub type AliasHolder = Option<{marker}>;\n\
+         pub struct NotAHolder {{\n    pub seat: PlayerId,\n}}\n\
+         mod inner {{\n    pub struct NestedHolder {{\n        pub template: \
+         Option<super::{marker}>,\n    }}\n}}\n"
+    );
+    let mut forms_corpus = corpus.clone();
+    forms_corpus.push(("forms.rs".to_string(), forms));
+    let forms_src = plant_into_enum(
+        &enum_src,
+        "WaitingFor",
+        "    ProbeCrateVis {\n        h: CrateVisHolder,\n    },\n\
+         \x20   ProbeGeneric {\n        h: GenericHolder<'static, u8>,\n    },\n\
+         \x20   ProbeEnumHolder {\n        h: EnumHolder,\n    },\n\
+         \x20   ProbeAlias {\n        h: AliasHolder,\n    },\n\
+         \x20   ProbeNested {\n        h: NestedHolder,\n    },\n\
+         \x20   ProbeNonCarrier {\n        h: NotAHolder,\n    },\n",
+    );
+    let by_forms: Vec<(String, CarrierKind)> =
+        carriers_in_source(&forms_src, "WaitingFor", &forms_corpus, &marker, true)
+            .into_iter()
+            .filter(|(n, _)| n.starts_with("Probe"))
+            .collect();
+    assert_eq!(
+        by_forms,
+        vec![
+            (
+                "ProbeCrateVis".to_string(),
+                CarrierKind::Via("CrateVisHolder".to_string())
+            ),
+            (
+                "ProbeGeneric".to_string(),
+                CarrierKind::Via("GenericHolder".to_string())
+            ),
+            (
+                "ProbeEnumHolder".to_string(),
+                CarrierKind::Via("EnumHolder".to_string())
+            ),
+            (
+                "ProbeAlias".to_string(),
+                CarrierKind::Via("AliasHolder".to_string())
+            ),
+            (
+                "ProbeNested".to_string(),
+                CarrierKind::Via("NestedHolder".to_string())
+            ),
+        ],
+        "the depth-1 step must see a `pub(crate)`, a GENERIC, an ENUM, an ALIAS and a \
+         `mod`-NESTED holder alike — and `ProbeNonCarrier` must be ABSENT, because an \
+         instrument that reports every variant is as useless as one that reports too few. \
+         got {by_forms:?}"
+    );
+}
+
+/// F4 (review finding): the THIRD carrier of the same `Vec<PinnedDecision>` —
+/// `GameState::last_loop_action_sequence[].pins` — routes through the same authority.
+///
+/// It is serialized whenever non-empty (`skip_serializing_if = "Vec::is_empty"`, not `skip`) and
+/// had zero hits in `visibility.rs` before this change. Its three production writers (the
+/// `record_loop_pin` call sites: a mana-ability tap cost, a mana-color choice, a proliferate
+/// target) can only name battlefield permanents and seats, so no board the engine mints today
+/// reaches the redaction — this row constructs the pin a fourth writer would produce, which is
+/// the only way to hold the seam closed before that writer exists.
+///
+/// # Non-vacuity
+///
+/// The owner arm (P1 sees their own hand card) is the paired positive: a sweep that cleared every
+/// recorded pin would satisfy the negative and fail it. The step itself is asserted to survive in
+/// both arms, so "the whole sequence was dropped" cannot masquerade as a pass.
+///
+/// REVERT-PROBE: delete the `for step in &mut filtered.last_loop_action_sequence` sweep ⇒ P2 keeps
+/// the hidden-hand pin ⇒ the `is_empty()` assertion FAILS while both positives stay green.
+///
+/// *What wrong implementation would still pass this row?* One that clears `pins` unconditionally
+/// for every non-owner — the owner arm is what rejects it.
+#[test]
+fn recorded_loop_pins_are_redacted_for_a_viewer_who_cannot_see_the_pinned_object() {
+    use engine::types::game_state::{BuybackUsage, LoopAction, LoopActionContext};
+
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let hidden_hand = scenario.add_bolt_to_hand(P1); // a hidden card in P1's hand
+    let runner = scenario.build();
+
+    let mut state = runner.state().clone();
+    let card_id = state.objects[&hidden_hand].card_id;
+    state.last_loop_action_sequence = vec![LoopActionContext {
+        card_id,
+        controller: P1,
+        action: LoopAction::Recast {
+            from_zone: engine::types::zones::Zone::Hand,
+            uses_buyback: BuybackUsage::NotUsed,
+        },
+        convoke: None,
+        pins: vec![PinnedDecision::Targets {
+            slot: DecisionSlot {
+                source: YieldTarget::ThisObject {
+                    source_id: ObjectId(999),
+                    incarnation: None,
+                    trigger_description: None,
+                },
+                index: 0,
+            },
+            targets: vec![
+                TargetPin::ByIdentity(YieldTarget::ThisObject {
+                    source_id: hidden_hand,
+                    incarnation: None,
+                    trigger_description: None,
+                }),
+                TargetPin::Player(P1),
+            ],
+        }],
+    }];
+
+    let pins_for = |viewer: PlayerId| -> Vec<PinnedDecision> {
+        let seq = engine::game::visibility::filter_state_for_viewer(&state, viewer)
+            .last_loop_action_sequence;
+        assert_eq!(
+            seq.len(),
+            1,
+            "the recorded step itself is never dropped — only its pin vector is redacted"
+        );
+        seq[0].pins.clone()
+    };
+
+    assert_eq!(
+        pins_for(P1).len(),
+        1,
+        "positive: the hand's OWNER keeps the recorded pin — `target_hidden` answers false for a \
+         card this viewer may privately see"
+    );
+    assert!(
+        pins_for(P2).is_empty(),
+        "a viewer who cannot see P1's hand receives no pin naming that card — all-or-nothing, so \
+         the public seat pin in the same vector goes with it"
     );
 }
 
@@ -5733,6 +6477,215 @@ fn a_wire_zero_shortcut_bound_fails_the_load_and_a_wire_five_does_not() {
     );
 }
 
+/// R0e — the wire pair NO PRODUCER MINTS: a persisted `LoopShortcut` offer that NARROWS its
+/// repetition bound (`schema.is_bounded()`) while recording the PROPOSER'S OWN driving period
+/// (`loop_period_controller() == Some(proposer)`) must fail the load.
+///
+/// The engine's three mints partition that cross-product and none lands in this cell: the
+/// object-growth and Path A drain mints both publish `MAX_SHORTCUT_CYCLES` (never
+/// `is_bounded()`), and the bounded mint's gate (1b) refuses `ProposerHasDrivingPeriod`. Accepting
+/// the pair anyway routes the accepted proposal through `materialize_fixed_shortcut`'s
+/// period-ownership early return into `materialize_object_growth_shortcut` — the table agreed to
+/// `n` cycles and gets NONE.
+///
+/// ⚠ NOT A CR REFUSAL, and the row asserts on the engine-invariant message accordingly. CR 732.2a's
+/// Example is a proposer repeating THEIR OWN activation a specified 999,999 more times, so this
+/// state class is legal at the table; what it violates is producer reachability in this engine.
+///
+/// THE PERIOD IS A PRODUCTION-SERIALIZED VALUE lifted whole out of the real object-growth capture,
+/// never hand-authored JSON — the discipline the `frames_per_period` row above states.
+///
+/// MATCHED REVERT-PROBE TABLE — each conjunct has its own failing arm, and the three
+/// single-conjunct reverts produce three DISTINCT failing sets:
+///
+/// | mutation to `reject_zero_bound_shortcut_offer` | flips | stays green |
+/// |---|---|---|
+/// | delete the whole own-period `if` block | A1 → `Ok` | A2, A3, A4, A5, A6 |
+/// | delete `schema.is_bounded() &&` | A3, A5 → `Err` | A1, A2, A4, A6 |
+/// | delete `&& loop_period_controller() == …` | A2, A4 → `Err` | A1, A3, A5, A6 |
+/// | hoist the block ABOVE the `max_iterations == 0` block | A6's message | A1–A5 |
+#[test]
+fn a_wire_bounded_offer_carrying_the_proposers_own_period_fails_the_load() {
+    let json = gunzip_dump(include_bytes!(
+        "../fixtures/tenacity_exquisite_blood_4p.json.gz"
+    ));
+    let envelope: serde_json::Value =
+        serde_json::from_str(&json).expect("dump envelope parses as JSON");
+    let base = envelope["gameState"].clone();
+
+    // ── REACH-GUARDS ON THE BASE: both splices below must CREATE their key ──────────────
+    assert_eq!(
+        base["waiting_for"]["type"].as_str(),
+        Some("LoopShortcut"),
+        "the invariant is scoped to the one variant that carries a schema AND a proposer"
+    );
+    assert!(
+        base["waiting_for"]["data"]["schema"].is_object(),
+        "the tenacity offer carries a schema object for the bound to live on"
+    );
+    assert!(
+        base["waiting_for"]["data"]["schema"]
+            .get("max_iterations")
+            .is_none(),
+        "the fixture predates the field, so the bound splice CREATES the key (absent ⇒ \
+         MAX_SHORTCUT_CYCLES ⇒ NOT is_bounded, which is what arms A3/A5 rest on)"
+    );
+    assert!(
+        base.get("last_loop_action_sequence").is_none(),
+        "the fixture records no driving period, so the period splice CREATES the key"
+    );
+    let proposer = base["waiting_for"]["data"]["proposer"].clone();
+
+    let donor_json = gunzip_dump(include_bytes!(
+        "../fixtures/combo_infinite_pile_4p_offer.json.gz"
+    ));
+    // The combo capture is BARE (no `gameState` envelope) — it is the other decode ingress, and
+    // A5 rides it as itself below.
+    let donor_state: serde_json::Value =
+        serde_json::from_str(&donor_json).expect("the combo dump parses as JSON");
+    let donor_period = donor_state["last_loop_action_sequence"].clone();
+    let donor_steps = donor_period
+        .as_array()
+        .expect("the real object-growth capture records a driving period to donate");
+    assert!(
+        !donor_steps.is_empty(),
+        "an empty donated sequence would make loop_period_controller() None and every arm vacuous"
+    );
+    assert!(
+        donor_steps
+            .iter()
+            .all(|step| step["controller"] == proposer),
+        "the donated period must belong to the SAME seat as the tenacity proposer, or A1 would \
+         be testing a FOREIGN period — which is A4's job, not A1's"
+    );
+
+    let spliced = |bound: Option<u64>, period: Option<&serde_json::Value>| {
+        let mut v = base.clone();
+        if let Some(n) = bound {
+            v["waiting_for"]["data"]["schema"]["max_iterations"] = serde_json::json!(n);
+            assert_eq!(
+                v["waiting_for"]["data"]["schema"]["max_iterations"].as_u64(),
+                Some(n),
+                "the bound splice must reach schema.max_iterations"
+            );
+        }
+        if let Some(seq) = period {
+            v["last_loop_action_sequence"] = seq.clone();
+            assert_eq!(
+                &v["last_loop_action_sequence"], seq,
+                "the period splice must reach last_loop_action_sequence"
+            );
+        }
+        v
+    };
+    let decode_persisted = |value: serde_json::Value| {
+        serde_json::from_value::<engine::types::game_state::PersistedGameState>(value)
+    };
+
+    // ── A1 — THE GUARD FIRES. Also the reach-guard for A2/A3/A4: the predicate reads the period
+    // from the state AS DECODED FROM THE WIRE, so an `Err` here is proof the splice landed and
+    // survived `decode_persisted_resolution_state`. Were it dropped, this would be `Ok` and the
+    // three `Ok` arms below would mean nothing.
+    let message = decode_persisted(spliced(Some(5), Some(&donor_period)))
+        .expect_err("a narrowed bound carrying the proposer's own period must fail the load")
+        .to_string();
+    assert!(
+        message.contains("narrows its repetition bound"),
+        "the rejection must NAME the invariant it enforces and must not be either sibling zero \
+         guard firing instead, got: {message}"
+    );
+
+    // ── A6 — ORDERING PROBE. `0 < MAX_SHORTCUT_CYCLES`, so a zero bound is ALSO `is_bounded()`:
+    // the two blocks are not disjoint and the zero check must keep answering first. No pre-existing
+    // row observes this — the sibling zero row's fixture carries no period, so the new predicate is
+    // false there regardless of order.
+    let message = decode_persisted(spliced(Some(0), Some(&donor_period)))
+        .expect_err("a zero bound must still fail the load when a period rides with it")
+        .to_string();
+    assert!(
+        message.contains("max_iterations 0"),
+        "ORDERING: hoisting the own-period block above the zero-bound block relabels a corrupt \
+         zero with the wrong invariant, got: {message}"
+    );
+
+    // ── A2 — THE PERIOD CONJUNCT. A narrowed bound ALONE is the ordinary bounded offer.
+    assert!(
+        decode_persisted(spliced(Some(5), None)).is_ok(),
+        "a narrowed bound with NO recorded period is exactly what the bounded mint publishes"
+    );
+
+    // ── A3 — THE `is_bounded()` CONJUNCT. Own period ALONE is the object-growth route's own
+    // admission condition; rejecting it would refuse every legitimate growth capture.
+    assert!(
+        decode_persisted(spliced(None, Some(&donor_period))).is_ok(),
+        "an UNNARROWED offer (absent bound ⇒ MAX_SHORTCUT_CYCLES) carrying the proposer's own \
+         period is the legitimate object-growth shape and must still load"
+    );
+
+    // ── A4 — SEAT-RELATIVITY. It must be THIS proposer's period, not merely A period.
+    let foreign_period = {
+        let mut seq = donor_period.clone();
+        for step in seq
+            .as_array_mut()
+            .expect("the donated period is an array of steps")
+        {
+            step["controller"] = serde_json::json!(1);
+        }
+        assert!(
+            seq.as_array()
+                .expect("still an array")
+                .iter()
+                .all(|step| step["controller"] != proposer),
+            "the controller rewrite must reach every step, or A4 would re-run A1"
+        );
+        seq
+    };
+    assert!(
+        decode_persisted(spliced(Some(5), Some(&foreign_period))).is_ok(),
+        "a period recorded from a DIFFERENT seat describes no sequence this proposer can take \
+         (SITE B's seat-relative form), so it must not reject the offer"
+    );
+
+    // ── A5 — THE REAL OBJECT-GROWTH CAPTURE, UNMUTATED, ON THE OTHER GUARDED INGRESS ──────
+    // `reject_zero_bound_shortcut_offer` is called from BOTH decoders; A1-A4 ride
+    // `decode_persisted_resolution_state`, this one rides `GameStateDecode::decode` through
+    // `impl Deserialize for GameState`.
+    let combo: GameState = serde_json::from_str(&donor_json)
+        .expect("the real object-growth capture must still load through the bare ingress");
+    // REACH-GUARD, INLINE — A1 cannot stand in for it (different fixture, different ingress).
+    // Without these three, `Ok` would also be explained by the period never surviving THIS
+    // decode, and the `is_bounded()` revert (delete it ⇒ this arm must flip to `Err`) would not
+    // fire.
+    let WaitingFor::LoopShortcut {
+        proposer: combo_proposer,
+        schema,
+        ..
+    } = &combo.waiting_for
+    else {
+        panic!(
+            "fixture precondition: the combo capture is AT a LoopShortcut offer, got {:?}",
+            combo.waiting_for
+        )
+    };
+    assert!(
+        !combo.last_loop_action_sequence.is_empty(),
+        "the period must SURVIVE this decode, or A5's Ok is unattributable"
+    );
+    assert!(
+        combo
+            .last_loop_action_sequence
+            .iter()
+            .all(|step| step.controller == *combo_proposer),
+        "the surviving period must be homogeneous on the PROPOSER's seat — that is what makes \
+         loop_period_controller() == Some(proposer) and puts this arm on the guard's own predicate"
+    );
+    assert!(
+        !schema.is_bounded(),
+        "and the offer must be UNNARROWED, so A5's Ok is attributable to the is_bounded() \
+         conjunct alone rather than to a missing period"
+    );
+}
+
 /// Opponents the ENGINE considers living. `Player::is_eliminated` is the authority the
 /// CR 732.2a detector uses when it builds its `living` set — `eliminated_players` and
 /// `life > 0` are not sufficient on their own, so this reads the field the detector reads.
@@ -5778,6 +6731,19 @@ fn dump_beat_actor(state: &GameState) -> Option<(PlayerId, Vec<GameAction>)> {
 /// Returns the beat's `GameEvent`s so a caller can key on what the beat actually DID
 /// (`CombatDamageDealtToPlayer` / `DamageDealt` for the CR 510.2 rows) instead of
 /// inferring it from phase and life deltas. Callers that only need liveness ignore it.
+///
+/// ⚠ THE `pin` PREFERENCE IS INERT ON EVERY TRACKED DUMP, and that is MEASURED, not
+/// inferred from this function's body. Driving all five tracked 4p dumps for 60 beats each:
+/// only `dellian_emblem_conqueror_4p` reaches a `WaitingFor::TriggerTargetSelection` window
+/// at all (seven of them, at beats 0/9/18/27/36/45/54, all on `ObjectId(541)`), and every
+/// one of those windows enumerates **`GameAction::ChooseTarget` ×3 and
+/// `GameAction::SelectTargets` ×0** — so the `SelectTargets` preference above never fires
+/// and the fallback answers with a `ChooseTarget`. `dina`, `tenacity`,
+/// `witherbloom_sprout_lumaret` and `witherbloom_sprout_lumaret_simple` reach NO
+/// `TriggerTargetSelection` window in 60 beats. This is the same trap
+/// `fantastic_four_bounded_loop.rs` already records for the F4 dump, and it means NO TRACKED
+/// FIXTURE CAN EXERCISE THE `SelectTargets` REDUCER ARM at the wire tier — see
+/// [`c2a_row_t1b_both_trigger_target_selection_arms_route_through_the_single_writer`].
 fn dump_drive_one_beat(
     state: &mut GameState,
     pin: Option<PlayerId>,
@@ -6286,6 +7252,7 @@ fn template_none_against_a_pin_consuming_schema_falls_back_to_manual_play() {
             predicted_winner: Some(P0),
             certificate: synthetic_lethal_cert(),
             schema: schema.clone(),
+            declaration: None,
         };
         runner
             .act(GameAction::DeclareShortcut {
@@ -7529,7 +8496,7 @@ fn scheduled_collapse_still_renders_the_unbounded_badge() {
         let scheduled_families: Vec<UnboundedFamily> = views
             .unbounded_families
             .iter()
-            .filter(|f| matches!(f.state, FamilyCollapseState::Scheduled(_)))
+            .filter(|f| matches!(f.state, FamilyCollapseState::Scheduled { .. }))
             .map(|f| f.family)
             .collect();
         assert!(
@@ -7611,8 +8578,10 @@ fn stale_pile_member_is_omitted_from_the_wire_but_kept_in_the_store() {
     assert!(
         stored.len() >= 2,
         "reach-guard: this rig's pile has >= 2 members, so removing ONE leaves a non-empty \
-         wire — the case is about a STALE member, not about the whole backing set dying \
-         (that is `object_growth_infinity_row_dies_with_its_last_pile_member`), got {}",
+         wire — the case is about a STALE member, not about the whole backing set dying. The \
+         whole-set case is `accepted_object_growth_row_survives_losing_its_entire_pile`, which \
+         asserts the row SURVIVES it, because that rig's collapse has been accepted (CR 732.2c); \
+         got {}",
         stored.len()
     );
     assert!(
@@ -7757,7 +8726,7 @@ fn unregistered_axis_still_renders_its_infinity_badge() {
         assert!(
             v.unbounded_families
                 .iter()
-                .any(|f| matches!(f.state, FamilyCollapseState::Scheduled(_)))
+                .any(|f| matches!(f.state, FamilyCollapseState::Scheduled { .. }))
                 && j.contains("\"Scheduled\""),
             "R3/pre-clear: a registered materialization SCHEDULES a family AND emits it, got {:?}",
             v.unbounded_families
@@ -8127,6 +9096,7 @@ fn bounded_offer_parts(
             predicted_winner: None,
             certificate,
             schema,
+            declaration: _,
         } => (*proposer, certificate, schema),
         other => panic!("expected a bounded LoopShortcut offer, got {other:?}"),
     }
@@ -8367,6 +9337,92 @@ fn dina_untargeted_drain_4p_offers_at_three_live_opponents() {
          must not be written by raising a bounded offer; got {:?}",
         state.unbounded_resources
     );
+
+    // ── F6: THE PREVIEW REACHES A REAL GAME ──
+    //
+    // Every other row that asserts anything about the CR 732.2a count preview hand-builds a
+    // `WaitingFor` and projects it. That leaves one hole none of them can see: the preview is
+    // published only when the offer pairs `per_cycle: Some` with a FINITE count, and the
+    // producer that pairs them is the bounded one. Route the bound through
+    // `shortcut_iteration_count` — which returns `UntilLethal` for `LethalDamage | PoisonLoss`,
+    // and this fixture's `win_kind` is exactly `LethalDamage` — and the preview vanishes from
+    // EVERY real game while all three hand-built rows stay green. This row closes that by
+    // reading the preview off the real 4p dump the engine itself raised the offer on.
+    //
+    // WHAT WRONG IMPLEMENTATION WOULD STILL PASS THIS ROW? One that publishes the preview only
+    // on this fixture's exact per-period shape (the hand-built rows cover the shape space), and
+    // one that previews the right numbers for a count the player did not pick — the reserved
+    // per-selected-count question, deliberately not answered here.
+    //
+    // REVERT-PROBE, RUN: mint this offer's count through `shortcut_iteration_count` (i.e.
+    // `UntilLethal` for a lethal drain) ⇒ `preview` is `None` ⇒ the expect below FAILS.
+    let suggested = i64::from(schema.max_iterations);
+    let life_deltas: Vec<(PlayerId, i64)> = per_cycle
+        .delta
+        .life
+        .iter()
+        .filter(|(_, delta)| **delta != 0)
+        .map(|(seat, delta)| (*seat, *delta))
+        .collect();
+    assert!(
+        life_deltas.len() >= 2,
+        "reach-guard: the preview's per-seat fold only discriminates when the period moves \
+         MORE THAN ONE seat's life — a single-seat period is satisfiable by an implementation \
+         that keys every entry to the proposer; measured {life_deltas:?}"
+    );
+
+    engine::game::interaction::bind_interaction_authority(
+        &mut state,
+        engine::types::interaction::InteractionSessionId("dina-preview".to_string()),
+    )
+    .expect("the offer beat binds an interaction authority");
+    let filtered = engine::game::visibility::filter_state_for_viewer(&state, proposer);
+    let view = engine::game::interaction::derive_viewer_interaction(&state, &filtered, proposer);
+    let engine::types::interaction::InteractionOpportunityResponse::Schema {
+        spec: engine::types::interaction::InteractionResponseSpec::Shortcut { preview, .. },
+        ..
+    } = &view.opportunities[0].response
+    else {
+        panic!("the bounded offer publishes a shortcut schema to its proposer");
+    };
+    let preview = preview.as_ref().expect(
+        "CR 732.2a: the offer the engine raised on a REAL 4p drain must publish what its \
+         declared count does. A `None` here means every preview has vanished from every real \
+         game while the hand-built projection rows stayed green.",
+    );
+    assert_eq!(
+        i64::from(preview.count),
+        suggested,
+        "the magnitudes are stated for the offer's own suggested count and no other"
+    );
+
+    let mut expected: Vec<(Option<u8>, i32)> = life_deltas
+        .iter()
+        .map(|(seat, delta)| (Some(seat.0), (delta * suggested) as i32))
+        .collect();
+    let mut published: Vec<(Option<u8>, i32)> = preview
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.family == engine::types::interaction::InteractionShortcutPreviewFamily::Life
+        })
+        .map(|entry| (entry.player, entry.amount))
+        .collect();
+    expected.sort_unstable();
+    published.sort_unstable();
+    assert_eq!(
+        published, expected,
+        "CR 119.3: every seat the certified period moves life on is previewed at that seat, \
+         multiplied out by the declared count — recomputed here from the offer-beat certificate"
+    );
+    for (seat, _, loss) in losses.iter().filter(|(id, _, _)| *id != proposer) {
+        assert!(
+            published.contains(&(Some(seat.0), (-loss * suggested) as i32)),
+            "CR 704.5a: victim seat {seat:?} loses {loss} per cycle, so its previewed life \
+             entry must be the NEGATIVE finished magnitude on that seat's own key — a \
+             proposer-keyed subject map publishes it on the wrong HUD; got {published:?}"
+        );
+    }
 }
 
 /// The dina 4p drain DRIVEN through `apply()` to the beat the engine itself raises the
@@ -9602,7 +10658,7 @@ fn bloodloop_state(players: u8) -> GameState {
 /// commit CHANGED; pinning it is what stops a later change from moving it silently.
 #[test]
 fn bloodloop_mandatory_draw_cascade_offers_at_2p_3p_and_4p() {
-    for (players, expected_beat, expected_turn) in [(2u8, 33usize, 4u32), (3, 67, 5), (4, 113, 6)] {
+    for (players, expected_beat, expected_turn) in [(2u8, 37usize, 4u32), (3, 76, 5), (4, 129, 6)] {
         let mut state = bloodloop_state(players);
         let beat = drive_to_bounded_offer(&mut state, 400).unwrap_or_else(|| {
             panic!(
@@ -10787,6 +11843,34 @@ fn bounded_fixed_drive_rolls_back_a_partial_crossing_cycle() {
              crossing eliminates at most one of three, so there is no winner to crown and the \
              aborted drive hands back ordinary priority rather than ending the game"
         );
+
+        // (d) R3-a's ABORT ARM — the drive-end seam is the CR 732.2a ending point for this
+        //     entry path too, and it discards the detection window before handing back.
+        //     MEASURED: this fixture enters that seam with a LIVE ring (`ring=16`), so the
+        //     emptiness below is a CLEARED ring and not an absent one. Its journal is
+        //     ALREADY empty there (`answers=0`) — the populated-journal half of the same
+        //     seam is pinned on the f4 dump by
+        //     `fantastic_four_bounded_loop::r3a_the_accepted_drive_ends_at_the_priority_point_with_the_window_cleared`,
+        //     the only fixture measured reaching this seam with answers recorded.
+        assert!(
+            doctored.loop_detect_ring.is_empty(),
+            "n={n}: CR 732.2a — the aborted drive ends at the priority handback with the \
+             detection window DISCARDED, so a later beat re-detects genuinely instead of this \
+             same `apply()` re-offering the interrupted loop; ring still carries {} sample(s)",
+            doctored.loop_detect_ring.len()
+        );
+        assert_eq!(
+            doctored.loop_answers_recorded(),
+            0,
+            "n={n}: CR 603.5 — the recorded `may` answers describe the window that just ended, \
+             and the same seam drops them together with the ring. ⚠ FORWARD TRIPWIRE, not a \
+             co-equal half of that claim: MEASURED non-discriminating on THIS fixture — under a \
+             mutant neutering only the seam's `loop_answer_journal = None` this clause stays \
+             green (the journal already reads 0 when this fixture reaches the seam) while the \
+             f4 row fails `left: 3, right: 0`. It earns its place by failing if a future writer \
+             ever populates the journal on this entry path and the seam stops clearing it; the \
+             DISCRIMINATING statement of the journal half is the f4 row named above"
+        );
     }
 }
 
@@ -11056,7 +12140,9 @@ fn g1_declare_verdict(
     if pin_twice {
         // E-neg: two pins against a `min_targets == max_targets == 1` point. The cardinality
         // check sits OUTSIDE the per-index loop, so it must still refuse at count 0.
-        targets.push(TargetPin::Scheduled(TargetSchedule::Constant(a.clone())));
+        targets.push(TargetPin::Scheduled(TargetSchedule::Constant(obj_rank(
+            a.clone(),
+        ))));
     }
     let template = DecisionTemplate {
         owner: P0,
@@ -11072,6 +12158,7 @@ fn g1_declare_verdict(
         predicted_winner: Some(P0),
         certificate: synthetic_lethal_cert(),
         schema,
+        declaration: None,
     };
     runner
         .act(GameAction::DeclareShortcut {
@@ -11083,15 +12170,15 @@ fn g1_declare_verdict(
 }
 
 fn piecewise_a_then_b(a: &YieldTarget, b: &YieldTarget) -> TargetSchedule {
-    TargetSchedule::Piecewise(vec![(0, a.clone()), (5, b.clone())])
+    TargetSchedule::Piecewise(vec![(0, obj_rank(a.clone())), (5, obj_rank(b.clone()))])
 }
 
 fn piecewise_b_then_a(a: &YieldTarget, b: &YieldTarget) -> TargetSchedule {
-    TargetSchedule::Piecewise(vec![(0, b.clone()), (5, a.clone())])
+    TargetSchedule::Piecewise(vec![(0, obj_rank(b.clone())), (5, obj_rank(a.clone()))])
 }
 
 fn round_robin_a_b(a: &YieldTarget, b: &YieldTarget) -> TargetSchedule {
-    TargetSchedule::RoundRobin(vec![a.clone(), b.clone()])
+    TargetSchedule::RoundRobin(vec![obj_rank(a.clone()), obj_rank(b.clone())])
 }
 
 /// R6 arms A / B / C — the validated range must COVER the driven range.
@@ -11759,6 +12846,7 @@ fn r28_empty_schema_offer(runner: &mut GameRunner) {
         predicted_winner,
         certificate,
         schema,
+        declaration: _,
     } = runner.state().waiting_for.clone()
     else {
         panic!("staged from the live offer, never from thin air");
@@ -11771,6 +12859,11 @@ fn r28_empty_schema_offer(runner: &mut GameRunner) {
             points: vec![],
             ..schema
         },
+        // `None` is a RULING, not a default. Passing the live field through would stage the R5
+        // board's measured `Some` declaration into a control whose whole purpose is to be
+        // declaration-free — and it would contradict the invariant that an empty schema
+        // publishes no declaration, at the very fixture that stages an empty schema.
+        declaration: None,
     };
 }
 
@@ -11786,6 +12879,7 @@ fn r28_nonempty_schema_offer(runner: &mut GameRunner, slot: DecisionSlot) {
         predicted_winner,
         certificate,
         schema,
+        declaration: _,
     } = runner.state().waiting_for.clone()
     else {
         panic!("staged from the live offer, never from thin air");
@@ -11810,6 +12904,10 @@ fn r28_nonempty_schema_offer(runner: &mut GameRunner, slot: DecisionSlot) {
             }],
             ..schema
         },
+        // Same ruling as [`r28_empty_schema_offer`]: both helpers exist to stage `schema.points`
+        // and NOTHING else, so the two must keep differing in exactly one field. Staging a live
+        // `Some` here would add a second axis to a pair whose whole value is being one apart.
+        declaration: None,
     };
 }
 
@@ -12132,22 +13230,41 @@ fn r28_c_a_restored_proposal_with_a_foreign_template_owner_is_refused_at_consump
 /// candidate was emitted), and the answer-beat sampling site now announces the Bond's trigger
 /// entry, so it publishes one `Targets` point. This row is the pin for that transition.
 ///
-/// * **arm (a), the live board:** one published point ⇒ the candidate set is `DeclineShortcut`
-///   alone, and specifically carries NO `Fixed` declaration.
+/// * **arm (a), the live board:** one published point, and the offer carries the engine's own
+///   declaration for it ⇒ the `Fixed` candidate is emitted CARRYING THAT DECLARATION.
 /// * **arm (b), the POSITIVE CONTROL, same board one field apart:** stage the schema's `points`
-///   empty ([`r28_empty_schema_offer`]) ⇒ the `Fixed` candidate RETURNS. Without this arm,
-///   arm (a) would be satisfied by a generator that had stopped emitting `Fixed` for any
-///   reason at all — including not running.
+///   empty ([`r28_empty_schema_offer`]) ⇒ the `Fixed` candidate is emitted with `template: None`.
+///   Without this arm, arm (a) would be satisfied by a generator that emitted `Fixed`
+///   unconditionally.
+///
+/// ⚠ **ARM (a)'S PREVIOUS CLAIM WAS THE OPPOSITE, AND IT IS SUPERSEDED, NOT BROKEN.** As
+/// `ai1_the_bounded_declare_candidate_withdraws_when_the_offer_publishes_a_pin` it asserted
+/// `assert_eq!(live, vec![GameAction::DeclineShortcut])` — that a published pin set WITHDREW the
+/// declare candidate, because the only declaration the generator could emit carried
+/// `template: None` and would be accepted-then-discarded. item-4 C2b gives the generator the
+/// offer's own declaration to carry, so the withdrawal is exactly the behaviour this commit
+/// replaces, and the name had to stop saying "withdraws".
+///
+/// **ARM (b) IS BYTE-IDENTICAL AND THAT IS EARNED, NOT LUCK.** [`r28_empty_schema_offer`] is a
+/// rest-less destructure plus a rebuild literal, so C2b had to CHOOSE a value for `declaration`
+/// there; it passes `None`. Threading the live field through would stage this board's measured
+/// `Some` declaration into a control that exists to be declaration-free, and arm (b)'s
+/// `template: None` match would fail. See that helper's own comment.
 ///
 /// Both arms read the ENGINE's candidate set through `legal_actions`, the same seam
 /// `phase-ai`'s search calls, so this is not a re-implementation of the gate agreeing with
 /// itself. The row is deliberately NOT `#[ignore]`d: the two pre-existing `phase-ai` bounded
 /// rows are, and an ignored row reports `ok` while executing nothing.
 #[test]
-fn ai1_the_bounded_declare_candidate_withdraws_when_the_offer_publishes_a_pin() {
+fn ai1_the_bounded_declare_candidate_carries_the_offers_own_pin_when_one_is_published() {
     // ── arm (a): the LIVE offer, which now publishes one point ──
     let (mut runner, _slot, _bond, _hexproof, _lives) = r5_reach_offer();
-    let WaitingFor::LoopShortcut { schema, .. } = runner.state().waiting_for.clone() else {
+    let WaitingFor::LoopShortcut {
+        schema,
+        declaration,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
         panic!("r5_reach_offer returns at the offer");
     };
     assert!(
@@ -12161,13 +13278,23 @@ fn ai1_the_bounded_declare_candidate_withdraws_when_the_offer_publishes_a_pin() 
         "REACH-GUARD: the published pin set is the conjunct this row is about; got {:?}",
         schema.points
     );
+    let declaration = declaration.expect(
+        "REACH-GUARD: this board's proposer answered its one published point, so the offer \
+         publishes a declaration — without one arm (a) would measure the fail-closed path \
+         `d6n_a_points_carrying_offer_without_a_declaration_enumerates_only_decline` covers",
+    );
     let live = engine::ai_support::legal_actions(runner.state());
     assert_eq!(
         live,
-        vec![GameAction::DeclineShortcut],
-        "AI1(a): against a points-carrying bounded offer the ONLY legal candidate is the \
-         decline — a `template: None` declaration is accepted and then discarded by \
-         `handle_declare_shortcut`, which is worse than no candidate at all"
+        vec![
+            GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(schema.max_iterations),
+                template: Some(declaration),
+            },
+            GameAction::DeclineShortcut,
+        ],
+        "AI1(a): against a points-carrying bounded offer that HAS a declaration, the generator \
+         emits it — carrying the ENGINE's own pin set, never one the AI built"
     );
 
     // ── arm (b): the POSITIVE CONTROL — the same board with an EMPTY point set ──
@@ -12189,6 +13316,110 @@ fn ai1_the_bounded_declare_candidate_withdraws_when_the_offer_publishes_a_pin() 
         staged.contains(&GameAction::DeclineShortcut),
         "AI1(b): the decline stays legal on both arms — only the `Fixed` candidate moves, which \
          is what makes the pair one axis apart"
+    );
+}
+
+/// **Row D7 — a PRE-DECLARATION save decodes with `declaration: None`, i.e. today's refusal.**
+///
+/// CR 732.2a. `WaitingFor::LoopShortcut.declaration` carries `#[serde(default)]`, following
+/// `schema`'s precedent on the same variant. The consequence is CHOSEN, not discovered: a
+/// snapshot written before this field existed decodes with `None`, the AI's declare candidate
+/// stays withheld (`declaration.is_some()` is false) and the human path is unchanged — the same
+/// behaviour that shipped before the field. Fail-closed by construction.
+///
+/// # Non-vacuity
+///
+/// The positive control is the round-trip WITH the key present: a decoder that always produced
+/// `None` — or a `declaration` that never serialized at all — fails it. And the key's removal is
+/// asserted to have actually removed something, so a typo in the field name cannot make the
+/// "old save" arm pass by decoding an unmodified payload.
+///
+/// # ⚠ REVERT-PROBE, MEASURED — and the OBVIOUS probe is INERT, which is why it is named here
+///
+/// Deleting `#[serde(default)]` from the field does **NOT** red this row: measured, the stripped
+/// payload still decodes and this test still passes. `serde_derive` routes a missing field
+/// through `serde::__private::de::missing_field`, whose deserializer answers `deserialize_option`
+/// with `visit_none` — so an `Option<T>` field is already missing-tolerant, and the attribute is
+/// belt-and-braces here (it follows `schema`'s precedent on the same variant and states the
+/// intent explicitly; it becomes load-bearing the moment the field stops being an `Option`).
+///
+/// The two probes that DO red this row, one per arm, both RUN:
+///
+/// * `#[serde(skip)]` in place of `#[serde(default)]` ⇒ the declaration never reaches the wire
+///   ⇒ the POSITIVE CONTROL round-trip fails (a `Some(..)` decodes back as `None`);
+/// * `#[serde(default = "…")]` pointing at a function returning `Some(..)` ⇒ the stripped
+///   payload decodes with a fabricated declaration ⇒ the old-save arm's `matches!` fails.
+#[test]
+fn d7_a_pre_declaration_save_decodes_with_no_declaration() {
+    let slot = DecisionSlot::target(YieldTarget::ThisObject {
+        source_id: ObjectId(881),
+        incarnation: Some(1),
+        trigger_description: None,
+    });
+    let offer = WaitingFor::LoopShortcut {
+        proposer: P0,
+        predicted_winner: None,
+        certificate: synthetic_lethal_cert(),
+        schema: ShortcutDecisionSchema {
+            iteration_count: IterationCount::Fixed(3),
+            max_iterations: 3,
+            points: vec![DecisionPoint {
+                slot: slot.clone(),
+                kind: DecisionPointKind::Targets {
+                    legal_targets: vec![TargetRef::Player(P1)],
+                    min_targets: 1,
+                    max_targets: 1,
+                    ordered: false,
+                },
+            }],
+            convoke_tappable_count: 0,
+        },
+        declaration: Some(DecisionTemplate {
+            owner: P0,
+            decisions: vec![PinnedDecision::Targets {
+                slot: slot.clone(),
+                targets: vec![TargetPin::Player(P1)],
+            }],
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::Fixed(3),
+            },
+            key: DecisionGroupKey::from_sources(&[slot.source], DecisionKind::LoopChoice),
+        }),
+    };
+
+    let mut json = serde_json::to_value(&offer).expect("the offer serializes");
+    // POSITIVE CONTROL: with the key present the declaration survives the wire intact.
+    assert_eq!(
+        serde_json::from_value::<WaitingFor>(json.clone()).expect("round-trips"),
+        offer,
+        "a live offer's declaration must survive serialization — otherwise the `None` below \
+         would prove nothing about the DEFAULT"
+    );
+
+    // The pre-C2b payload: the same offer with no `declaration` key at all.
+    let removed = json["data"]
+        .as_object_mut()
+        .expect("the adjacently-tagged payload is an object")
+        .remove("declaration");
+    assert!(
+        removed.is_some(),
+        "reach-guard: the key must have been present to remove, else the 'old save' arm below \
+         decodes an unmodified payload and asserts nothing"
+    );
+    let decoded: WaitingFor = serde_json::from_value(json).expect(
+        "an OLD save must still decode (CR 732.2a offers \
+             predate this field)",
+    );
+    assert!(
+        matches!(
+            decoded,
+            WaitingFor::LoopShortcut {
+                declaration: None,
+                ..
+            }
+        ),
+        "the forward-compatible default is `None`, which is today's refusal — fail-closed. got \
+         {decoded:?}"
     );
 }
 
@@ -12779,5 +14010,105 @@ fn a_clearing_beat_rebuilds_the_ring_inside_the_same_beat() {
          none of the frames the answer-beat row claims — and where the clear is shallower than \
          the rebuild the scalar is positive but still short. Net growth is `minted - cleared`; \
          it can never name `minted`"
+    );
+}
+
+/// **Row T1b — STRUCTURAL, and the tier is FORCED.** CR 608.2b + CR 601.2c (reached via
+/// CR 603.3d): BOTH `WaitingFor::TriggerTargetSelection` reducer arms route their
+/// announcement through the single write authority `record_trigger_target_answer`.
+///
+/// # ⚠ WHY THIS IS A SOURCE CENSUS AND NOT A WIRE ROW — measured, not conceded
+///
+/// The `ChooseTarget` arm is covered end-to-end at the wire tier by
+/// `fantastic_four_bounded_loop.rs`'s
+/// `c2a_row_t1_the_announced_target_is_journalled_at_the_f4_offers_published_slot` and its
+/// P2 provenance sibling. **The `SelectTargets` arm has NO tracked fixture that reaches it.**
+/// Driving all five tracked 4p dumps in this file for 60 beats each through production
+/// `apply()`: only `dellian_emblem_conqueror_4p` reaches a `TriggerTargetSelection` window,
+/// it reaches seven of them, and every one enumerates `ChooseTarget` ×3 / `SelectTargets` ×0;
+/// the other four reach none. See [`dump_drive_one_beat`]'s doc for the per-dump numbers.
+/// A wire row for that arm is therefore not writable from this repo's fixtures today —
+/// recorded as a BACKLOG item (needs a dump whose trigger declares a multi-slot or
+/// object-target announcement), never as a silently-absent row.
+///
+/// This census covers exactly what it can: that the arm is WIRED. The writer's BEHAVIOUR is
+/// proven separately and at a tier that can carry it — `game::engine`'s
+/// `c2a_row_t5_an_unresolvable_target_abandons_the_whole_journal_write` drives the helper
+/// itself, and both arms call that one helper, which is the point of it being one helper.
+/// It is the same instrument class, and the same reasoning, as
+/// `fantastic_four_bounded_loop.rs`'s ring-clear census.
+///
+/// # Discrimination
+///
+/// Delete the `record_trigger_target_answer(..)` call from EITHER arm ⇒ that arm lands in
+/// `unwired` and this row reds NAMING the arm and its line. The mutation compiles (the other
+/// caller survives), so it reds on the assert, not on a compile error. Without this row, r2's
+/// own finding stands: deleting the `SelectTargets` call reds nothing in the suite.
+///
+/// # Reach-guard
+///
+/// The arm COUNT is asserted first and is independent of the call: a pattern reflow that hid
+/// an arm from this scanner would read 1 or 0 and fail here rather than passing on a census
+/// that found nothing to check.
+#[test]
+fn c2a_row_t1b_both_trigger_target_selection_arms_route_through_the_single_writer() {
+    use std::path::Path;
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("game/engine.rs");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+    let lines: Vec<&str> = text.lines().collect();
+
+    let (mut wired, mut unwired) = (Vec::new(), Vec::new());
+    for (i, line) in lines.iter().enumerate() {
+        let action = if line.contains("GameAction::SelectTargets {") {
+            "SelectTargets"
+        } else if line.contains("GameAction::ChooseTarget {") {
+            "ChooseTarget"
+        } else {
+            continue;
+        };
+        // A reducer arm's `WaitingFor` half sits a few lines above its `GameAction` half in
+        // the tuple pattern; anything further away is a different construct.
+        if !lines[i.saturating_sub(10)..i]
+            .join("\n")
+            .contains("WaitingFor::TriggerTargetSelection {")
+        {
+            continue;
+        }
+        if lines[i..(i + 14).min(lines.len())]
+            .join("\n")
+            .contains("record_trigger_target_answer(")
+        {
+            wired.push(action);
+        } else {
+            unwired.push(format!("game/engine.rs:{} ({action})", i + 1));
+        }
+    }
+
+    assert_eq!(
+        wired.len() + unwired.len(),
+        2,
+        "reach-guard: `apply_action` has exactly TWO `WaitingFor::TriggerTargetSelection` \
+         reducer arms (`SelectTargets` and `ChooseTarget`). A different count means an arm \
+         was added, removed, or reflowed out of this scanner's reach — re-derive this census, \
+         do not re-number it. wired={wired:?} unwired={unwired:?}"
+    );
+    assert!(
+        unwired.is_empty(),
+        "CR 608.2b: every `TriggerTargetSelection` reducer arm must journal its announcement \
+         through `record_trigger_target_answer`, the single write authority. Unwired: \
+         {unwired:?}"
+    );
+    assert_eq!(
+        {
+            let mut w = wired.clone();
+            w.sort_unstable();
+            w
+        },
+        vec!["ChooseTarget", "SelectTargets"],
+        "both arms by NAME, not just by count: a census that found the same arm twice would \
+         satisfy a bare count while leaving the other one unmeasured"
     );
 }

@@ -339,6 +339,14 @@ export class DraftPodGuestAdapter {
     await this.guest.submitPick(cardInstanceId);
   }
 
+  async submitPickWithDraftEffect(
+    effectCardInstanceId: string,
+    cardInstanceIds: string[],
+  ): Promise<void> {
+    if (!this.guest) throw new Error("Guest not initialized");
+    await this.guest.submitPickWithDraftEffect(effectCardInstanceId, cardInstanceIds);
+  }
+
   async submitDeck(mainDeck: string[]): Promise<void> {
     if (!this.guest) throw new Error("Guest not initialized");
     await this.guest.submitDeck(mainDeck);

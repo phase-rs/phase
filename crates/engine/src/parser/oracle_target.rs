@@ -148,6 +148,62 @@ pub(crate) fn parse_anaphoric_target_ref(
     matches!(filter, TargetFilter::ParentTarget).then_some((filter, rest))
 }
 
+/// CR 201.5 + CR 109.5: Recognize a leading **source-anaphoric gendered
+/// pronoun** ("him" / "himself" / "her" / "herself") and bind it to
+/// [`TargetFilter::SelfRef`] — the ability's own source object.
+///
+/// CR 201.5 is the governing rule: "Text that refers to the object it's on by
+/// name means just that particular object." Magic's templating substitutes a
+/// gendered pronoun for the printed name on cards with a personified character
+/// (Gideon Jura's "dealt to him" is "dealt to Gideon Jura"), so the pronoun is
+/// that same self-reference rather than a CR 608.2c anaphor to something named
+/// earlier in the instruction — which is why it needs no anaphor gate below.
+///
+/// Unlike the neuter "it" (which may anaphor an earlier clause's chosen target
+/// and therefore needs the `parent_target_available` gate in
+/// [`parse_anaphoric_target_ref`]), a gendered pronoun on a Magic card is
+/// UNAMBIGUOUSLY the printed-name self-reference: the templating uses it only
+/// where the card's own name would otherwise repeat (Gideon Jura, "Prevent all
+/// damage that would be dealt to **him** this turn"; Gideon of the Trials;
+/// Winter Soldier, "Equipment attached to **him**"). No printed card uses a
+/// gendered pronoun for a chosen target, so the binding needs no gate.
+///
+/// The singular-they "them" is DELIBERATELY excluded: it is recipient-anaphoric
+/// for player-enchanting Auras (Curse of Thirst's "Curses attached to them" =
+/// the enchanted player, not the Aura source), so accepting it here would bind
+/// the wrong object. This mirrors the identical carve-out documented on
+/// `oracle_nom::quantity`'s `AttachedToSource` arm.
+///
+/// Returns the bound filter and the remainder of the ORIGINAL-case `text`
+/// following the matched pronoun, so callers can keep parsing trailing
+/// duration/qualifier phrases.
+pub(crate) fn parse_source_anaphoric_pronoun_ref(text: &str) -> Option<(TargetFilter, &str)> {
+    let trimmed = text.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    let (rest, ()) = parse_source_anaphoric_pronoun(lower.as_str()).ok()?;
+    // `parse_word_bounded` never splits a char boundary (ASCII pronouns only),
+    // so the consumed byte count maps 1:1 onto the original-case slice.
+    Some((
+        TargetFilter::SelfRef,
+        &trimmed[trimmed.len() - rest.len()..],
+    ))
+}
+
+/// The raw combinator behind [`parse_source_anaphoric_pronoun_ref`], for callers
+/// that need to compose it (e.g. under `all_consuming` when the pronoun must be
+/// the WHOLE phrase). Input must already be lowercase. Reflexive forms are tried
+/// before their bare stems so "himself" is never truncated to "him" plus a
+/// dangling "self".
+pub(crate) fn parse_source_anaphoric_pronoun(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        |i| parse_word_bounded(i, "himself"),
+        |i| parse_word_bounded(i, "herself"),
+        |i| parse_word_bounded(i, "him"),
+        |i| parse_word_bounded(i, "her"),
+    ))
+    .parse(input)
+}
+
 /// Parse a word with a word boundary check: the next char after the word must be
 /// non-alphanumeric (whitespace, comma, period, etc.) or end-of-input.
 /// Prevents "it" from matching "item", "you" from matching "your", etc.
@@ -1564,6 +1620,28 @@ pub fn parse_target_with_syntax<'a>(
         parse_word_bounded(i, "them")
     }) {
         return (TargetFilter::ParentTarget, rest, syntax);
+    }
+
+    // CR 608.2c + CR 603.7: "each card(s) they exiled this way" refers to
+    // the exiled members published by the preceding effect, not every card
+    // matching the generic `each card` descriptor. Preserve the producer
+    // action so a tracked set containing other object movements is excluded.
+    if let Ok((rest_lower, _)) = (
+        opt(tag::<_, _, OracleError<'_>>("each ")),
+        alt((tag("cards"), tag("card"))),
+        tag(" they exiled this way"),
+    )
+        .parse(lower.as_str())
+    {
+        return (
+            TargetFilter::TrackedSetFiltered {
+                id: TrackedSetId(0),
+                filter: Box::new(TargetFilter::Typed(TypedFilter::card())),
+                caused_by: Some(ThisWayCause::Exiled),
+            },
+            &text[lower.len() - rest_lower.len()..],
+            syntax,
+        );
     }
 
     // CR 601.2c: "each of <count> target <type>" is an exact-count multi-target
@@ -6772,20 +6850,12 @@ pub(crate) fn parse_that_clause_suffix<'a>(
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
 
-    // CR 303.4 + CR 301.5: "that's enchanted or equipped" / "that's enchanted" /
+    // CR 303.4b + CR 301.5a: "that's enchanted or equipped" / "that's enchanted" /
     // "that's equipped" — relative clause attaching an attachment-presence
     // predicate to the enclosing type phrase. Covers the compound-subject grant
     // class (Reyav, Master Smith; Dogmeat, Ever Loyal). Composes with disjunction
     // via `FilterProp::HasAnyAttachmentOf` (kinds.len() == 2 for the "or" form).
-    let intro = alt((
-        tag::<_, _, OracleError<'_>>("that's "),
-        tag("that is "),
-        tag("that are "),
-    ))
-    .parse(trimmed);
-    if let Ok((after_intro, _)) = intro {
-        // Note: `parse_that_isnt_subtype_suffix` runs first in `parse_type_phrase`
-        // and consumes "that's not …", so this branch only sees positive forms.
+    if let Some((after_intro, intro_len, negated)) = parse_relative_clause_intro(trimmed) {
         if let Ok((rest, kinds)) = parse_attachment_kind_disjunction(after_intro) {
             // Word-boundary check: the next char must terminate the adjective so
             // we don't false-match e.g. "that's enchanted by something else".
@@ -6795,8 +6865,15 @@ pub(crate) fn parse_that_clause_suffix<'a>(
                 .next()
                 .is_none_or(|c| !c.is_alphanumeric() && c != '_');
             if next_char_is_boundary {
-                let consumed = leading_ws + trimmed.len() - rest.len();
+                let consumed = leading_ws + intro_len + after_intro.len() - rest.len();
                 let prop = attachment_kinds_filter_prop(kinds, None);
+                let prop = if negated {
+                    FilterProp::Not {
+                        prop: Box::new(prop),
+                    }
+                } else {
+                    prop
+                };
                 return Some((vec![prop], consumed));
             }
         }
@@ -14982,6 +15059,121 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn that_isnt_enchanted_negates_aura_attachment() {
+        let (props, consumed) = parse_that_clause_suffix(" that isn't enchanted", None)
+            .expect("negated Aura attachment clause must parse");
+        assert_eq!(consumed, " that isn't enchanted".len());
+        assert_eq!(
+            props,
+            vec![FilterProp::Not {
+                prop: Box::new(FilterProp::HasAttachment {
+                    kind: AttachmentKind::Aura,
+                    controller: None,
+                    exclude_source: crate::types::ability::SourceExclusion::Include,
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn that_isnt_equipped_negates_equipment_attachment() {
+        let (props, consumed) = parse_that_clause_suffix(" that isn't equipped", None)
+            .expect("negated Equipment attachment clause must parse");
+        assert_eq!(consumed, " that isn't equipped".len());
+        assert_eq!(
+            props,
+            vec![FilterProp::Not {
+                prop: Box::new(FilterProp::HasAttachment {
+                    kind: AttachmentKind::Equipment,
+                    controller: None,
+                    exclude_source: crate::types::ability::SourceExclusion::Include,
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn that_isnt_enchanted_or_equipped_negates_attachment_disjunction() {
+        let (props, consumed) = parse_that_clause_suffix(" that isn't enchanted or equipped", None)
+            .expect("negated compound attachment clause must parse");
+        assert_eq!(consumed, " that isn't enchanted or equipped".len());
+        assert_eq!(
+            props,
+            vec![FilterProp::Not {
+                prop: Box::new(FilterProp::HasAnyAttachmentOf {
+                    kinds: vec![AttachmentKind::Aura, AttachmentKind::Equipment],
+                    controller: None,
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn that_arent_enchanted_negates_aura_attachment() {
+        let clause = " that aren't enchanted";
+        let (props, consumed) =
+            parse_that_clause_suffix(clause, None).expect("plural negated Aura clause must parse");
+        assert_eq!(
+            consumed,
+            clause.len(),
+            "the complete plural clause must be consumed"
+        );
+        assert_eq!(
+            props,
+            vec![FilterProp::Not {
+                prop: Box::new(FilterProp::HasAttachment {
+                    kind: AttachmentKind::Aura,
+                    controller: None,
+                    exclude_source: crate::types::ability::SourceExclusion::Include,
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn that_arent_equipped_negates_equipment_attachment() {
+        let clause = " that aren't equipped";
+        let (props, consumed) = parse_that_clause_suffix(clause, None)
+            .expect("plural negated Equipment clause must parse");
+        assert_eq!(
+            consumed,
+            clause.len(),
+            "the complete plural clause must be consumed"
+        );
+        assert_eq!(
+            props,
+            vec![FilterProp::Not {
+                prop: Box::new(FilterProp::HasAttachment {
+                    kind: AttachmentKind::Equipment,
+                    controller: None,
+                    exclude_source: crate::types::ability::SourceExclusion::Include,
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn that_arent_enchanted_or_equipped_negates_attachment_disjunction() {
+        let clause = " that aren't enchanted or equipped";
+        let (props, consumed) = parse_that_clause_suffix(clause, None)
+            .expect("plural negated compound attachment clause must parse");
+        assert_eq!(
+            consumed,
+            clause.len(),
+            "the complete plural clause must be consumed"
+        );
+        assert_eq!(
+            props,
+            vec![FilterProp::Not {
+                prop: Box::new(FilterProp::HasAnyAttachmentOf {
+                    kinds: vec![AttachmentKind::Aura, AttachmentKind::Equipment],
+                    controller: None,
+                }),
+            }]
+        );
     }
 
     #[test]

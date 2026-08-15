@@ -120,6 +120,7 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::Discarded { .. }
         | GameEvent::Cycled { .. }
         | GameEvent::CardsRevealed { .. }
+        | GameEvent::ChosenNumbersRevealed { .. }
         | GameEvent::BecomesTarget { .. }
         | GameEvent::ReplacementApplied { .. }
         | GameEvent::SpeedChanged { .. }
@@ -134,6 +135,7 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::ZoneChanged { .. }
         | GameEvent::ManaAdded { .. }
         | GameEvent::TappedForMana { .. }
+        | GameEvent::ManaAbilityProduced { .. }
         | GameEvent::ManaPoolEmptied { .. }
         | GameEvent::ManaRecolored { .. }
         | GameEvent::PermanentTapped { .. }
@@ -152,6 +154,10 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::BecomesPlotted { .. }
         | GameEvent::StackPushed { .. }
         | GameEvent::StackResolved { .. }
+        // CR 714.2: bookkeeping the engine publishes so meta-triggers can
+        // observe a chapter ability finishing; the chapter's own effects carry
+        // the player-visible signal.
+        | GameEvent::SagaChapterAbilityResolved { .. }
         | GameEvent::DamageCleared { .. }
         | GameEvent::ResolutionHalted { .. }
         | GameEvent::DamagePrevented { .. }
@@ -279,6 +285,7 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::ZoneChanged { .. }
         | GameEvent::ManaAdded { .. }
         | GameEvent::TappedForMana { .. }
+        | GameEvent::ManaAbilityProduced { .. }
         | GameEvent::ManaPoolEmptied { .. }
         | GameEvent::ManaRecolored { .. }
         | GameEvent::PermanentTapped { .. }
@@ -296,6 +303,9 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::LandPlayed { .. }
         | GameEvent::StackPushed { .. }
         | GameEvent::StackResolved { .. }
+        // CR 714.2: neither good nor bad news on its own — the drain or token
+        // the observing trigger produces is what carries tone.
+        | GameEvent::SagaChapterAbilityResolved { .. }
         | GameEvent::Discarded { .. }
         | GameEvent::Cycled { .. }
         | GameEvent::DamageCleared { .. }
@@ -321,6 +331,7 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::TurnedFaceUp { .. }
         | GameEvent::TurnedFaceDown { .. }
         | GameEvent::CardsRevealed { .. }
+        | GameEvent::ChosenNumbersRevealed { .. }
         | GameEvent::CombatDamageDealtToPlayer { .. }
         | GameEvent::CrimeCommitted { .. }
         | GameEvent::Regenerated { .. }
@@ -404,9 +415,22 @@ fn should_exclude_event(event: &GameEvent, state: &GameState) -> bool {
         {
             true
         }
+        // PlayerPerformedAction { Draw } is an internal ledger signal consumed by
+        // "for each player who drew a card this way" counting and
+        // the player-action trigger index), not a user-facing event. Unlike
+        // CardDrawn, which remains available as a HiddenInformation diagnostic,
+        // excluding it keeps the visible log from narrating internal ledger events.
+        GameEvent::PlayerPerformedAction {
+            action: crate::types::events::PlayerActionKind::Draw,
+            ..
+        } => true,
         // StackPushed/StackResolved are low-signal bookkeeping —
         // the meaningful info is in SpellCast/AbilityActivated and EffectResolved
         GameEvent::StackPushed { .. } | GameEvent::StackResolved { .. } => true,
+        // CR 714.2: the chapter-resolution notification exists so meta-triggers
+        // can observe it; the player already saw the chapter ability itself
+        // resolve. Same low-signal bookkeeping class as StackResolved.
+        GameEvent::SagaChapterAbilityResolved { .. } => true,
         _ => false,
     }
 }
@@ -482,6 +506,8 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::KeywordAbilityActivated { .. }
         | GameEvent::StackPushed { .. }
         | GameEvent::StackResolved { .. }
+        // CR 714.2: a chapter ability finishing resolution is a stack event.
+        | GameEvent::SagaChapterAbilityResolved { .. }
         | GameEvent::SpellCountered { .. } => LogCategory::Stack,
 
         GameEvent::AttackersDeclared { .. }
@@ -509,6 +535,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::Discarded { .. }
         | GameEvent::Cycled { .. }
         | GameEvent::CardsRevealed { .. }
+        | GameEvent::ChosenNumbersRevealed { .. }
         | GameEvent::Foretold { .. }
         | GameEvent::BecameForetold { .. } => LogCategory::Zone,
 
@@ -516,6 +543,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
 
         GameEvent::ManaAdded { .. }
         | GameEvent::TappedForMana { .. }
+        | GameEvent::ManaAbilityProduced { .. }
         | GameEvent::ManaPoolEmptied { .. }
         | GameEvent::ManaRecolored { .. } => LogCategory::Mana,
 
@@ -647,6 +675,22 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         }
 
         GameEvent::PlayerPerformedAction {
+            player_id,
+            action: crate::types::events::PlayerActionKind::Scry,
+            look_count: Some(look_count),
+            scry_bottom_count: Some(scry_bottom_count),
+            ..
+        } => vec![
+            player_seg(state, *player_id),
+            text(" scries "),
+            num(*look_count as i32),
+            text(": "),
+            num(look_count.saturating_sub(*scry_bottom_count) as i32),
+            text(" on top and "),
+            num(*scry_bottom_count as i32),
+            text(" on bottom"),
+        ],
+        GameEvent::PlayerPerformedAction {
             player_id, action, ..
         } => vec![
             player_seg(state, *player_id),
@@ -772,6 +816,10 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             vec![card_seg(state, *object_id), text(" resolves")]
         }
 
+        // CR 714.2: filtered out by `is_low_signal` above — the chapter
+        // ability's own resolution line already told the player what happened.
+        GameEvent::SagaChapterAbilityResolved { .. } => vec![],
+
         GameEvent::SpellCountered {
             object_id,
             countered_by,
@@ -885,6 +933,22 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(" reveals: "),
             text(&card_names.join(", ")),
         ],
+
+        // CR 101.4: one line for the whole simultaneous reveal — the numbers
+        // become public together, so rendering them per-player would imply an
+        // ordering the rules do not have.
+        GameEvent::ChosenNumbersRevealed { numbers } => {
+            let mut segments = vec![text("Chosen numbers revealed: ")];
+            for (index, (player, value)) in numbers.iter().enumerate() {
+                if index > 0 {
+                    segments.push(text(", "));
+                }
+                segments.push(player_seg(state, *player));
+                segments.push(text(" "));
+                segments.push(num(crate::game::arithmetic::u32_to_i32_saturating(*value)));
+            }
+            segments
+        }
 
         GameEvent::LifeChanged { player_id, amount } => {
             if *amount >= 0 {
@@ -1095,6 +1159,11 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             object_id,
             counter_type,
             count,
+            // CR 122.1: the log line names the counters and recipient; the placing
+            // player is implied by the entry's stack/ability context, consistent
+            // with every other counter-placement log line (actor deliberately
+            // not surfaced).
+            ..
         } => vec![
             num(*count as i32),
             text(" "),
@@ -1260,7 +1329,9 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(&format!("{kind:?}")),
         ],
 
-        GameEvent::BecomesTarget { target, source_id } => {
+        GameEvent::BecomesTarget {
+            target, source_id, ..
+        } => {
             let mut segments = Vec::new();
             match target {
                 TargetRef::Object(object_id) => segments.push(card_seg(state, *object_id)),
@@ -1675,7 +1746,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         // `TapsForMana` matchers. The per-unit `ManaAdded` events already
         // produce the user-facing "adds X mana" log lines, so this event is
         // internal plumbing and emits no segments of its own.
-        GameEvent::TappedForMana { .. } => vec![],
+        GameEvent::TappedForMana { .. } | GameEvent::ManaAbilityProduced { .. } => vec![],
     }
 }
 
@@ -1704,6 +1775,7 @@ mod tests {
             card_id: CardId(1),
             controller: PlayerId(0),
             object_id: id,
+            cast_mana_value: None,
         };
         let entries = resolve_log_entries(&[event], &state, &state);
         assert_eq!(entries.len(), 1);
@@ -1716,6 +1788,41 @@ mod tests {
         assert!(
             has_card_name,
             "Expected CardName segment with 'Lightning Bolt'"
+        );
+    }
+
+    #[test]
+    fn completed_scry_has_a_public_count_only_log_entry() {
+        let state = GameState::new_two_player(42);
+        let entries = resolve_log_entries(
+            &[GameEvent::PlayerPerformedAction {
+                player_id: PlayerId(0),
+                action: crate::types::events::PlayerActionKind::Scry,
+                look_count: Some(3),
+                scry_bottom_count: Some(2),
+                scry_top_count: Some(1),
+            }],
+            &state,
+            &state,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].presentation.visibility, LogVisibility::Public);
+        assert_eq!(
+            entries[0].segments,
+            vec![
+                LogSegment::PlayerName {
+                    name: "Player 1".to_string(),
+                    player_id: PlayerId(0),
+                },
+                LogSegment::Text(" scries ".to_string()),
+                LogSegment::Number(3),
+                LogSegment::Text(": ".to_string()),
+                LogSegment::Number(1),
+                LogSegment::Text(" on top and ".to_string()),
+                LogSegment::Number(2),
+                LogSegment::Text(" on bottom".to_string()),
+            ]
         );
     }
 
@@ -1812,6 +1919,44 @@ mod tests {
             [LogSegment::PlayerName { player_id, .. }, LogSegment::Text(text)]
                 if *player_id == PlayerId(1) && text == " foretold a card"
         ));
+    }
+
+    #[test]
+    fn draw_player_action_is_excluded_but_other_actions_are_logged() {
+        use crate::types::events::PlayerActionKind;
+
+        let state = GameState::new_two_player(42);
+        // The Draw ledger signal must not reach the visible log —
+        // this assertion flips (entries.len() == 1) if the exclusion is reverted.
+        let draw_event = GameEvent::PlayerPerformedAction {
+            player_id: PlayerId(0),
+            action: PlayerActionKind::Draw,
+            look_count: None,
+            scry_bottom_count: None,
+            scry_top_count: None,
+        };
+        let draw_entries = resolve_log_entries(&[draw_event], &state, &state);
+        assert!(
+            draw_entries.is_empty(),
+            "PlayerPerformedAction {{ Draw }} is a ledger-only signal and must be excluded from the log"
+        );
+
+        // Reach-guard against an over-broad exclusion: a non-Draw player action
+        // (Scry) must still produce a log entry. Fails if someone excludes all
+        // PlayerPerformedAction variants instead of just Draw.
+        let scry_event = GameEvent::PlayerPerformedAction {
+            player_id: PlayerId(0),
+            action: PlayerActionKind::Scry,
+            look_count: Some(1),
+            scry_bottom_count: Some(0),
+            scry_top_count: Some(1),
+        };
+        let scry_entries = resolve_log_entries(&[scry_event], &state, &state);
+        assert_eq!(
+            scry_entries.len(),
+            1,
+            "Non-Draw player actions must remain visible in the log"
+        );
     }
 
     #[test]

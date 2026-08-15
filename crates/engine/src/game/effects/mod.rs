@@ -9,11 +9,12 @@ use crate::game::conditions::{
 use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityKind, CardPlayMode, CardTypeSetSource, ControllerRef,
-    CopyRetargetPermission, CostPaidObjectSnapshot, EachDamageRecipient, Effect, EffectError,
-    EffectKind, EffectOutcomeSignal, EffectScope, FilterProp, OpponentMayScope, PlayerFilter,
-    PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
-    RevealUntilDisposition, SacrificeCost, SacrificeRequirement, SharedQuality,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode, CardTypeSetSource,
+    ChosenAttribute, CommanderOwnership, ControllerRef, CopyRetargetPermission,
+    CostPaidObjectSnapshot, EachDamageRecipient, Effect, EffectError, EffectKind,
+    EffectOutcomeSignal, EffectResolutionResult, EffectScope, FilterProp, ManaProduction,
+    OpponentMayScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation,
+    ResolvedAbility, RevealUntilDisposition, SacrificeCost, SacrificeRequirement, SharedQuality,
     SharedQualityRelation, SiblingCondition, SubAbilityLink, TapStateChange, TargetChoiceTiming,
     TargetFilter, TargetRef, ThisWayCause,
 };
@@ -71,6 +72,7 @@ pub mod choose_one_of;
 pub mod clash;
 pub mod cleanup;
 pub mod collect_evidence;
+pub mod complete_player_action;
 pub mod conjure;
 pub mod connive;
 pub mod control_next_turn;
@@ -184,6 +186,7 @@ pub mod remove_from_combat;
 pub mod renown;
 pub mod return_as_aura;
 pub mod reveal;
+pub mod reveal_chosen_numbers;
 pub mod reveal_from_hand;
 pub mod reveal_hand;
 pub mod reveal_top;
@@ -644,6 +647,13 @@ pub(crate) fn candidate_player_scalar(p: &Player, attr: &QuantityRef) -> Option<
         QuantityRef::CardsDrawnThisTurn { .. } => {
             Some(u32_to_i32_saturating(p.cards_drawn_this_turn))
         }
+        // CR 101.4 + CR 608.2d: the number this candidate secretly chose during
+        // the current resolution. `None` for a player who chose nothing, which
+        // fails the candidate predicate CLOSED — "each player who didn't choose
+        // the lowest number" must not sweep in a player who never chose at all.
+        QuantityRef::PlayerChosenNumber { .. } => p
+            .chosen_number()
+            .map(crate::game::arithmetic::u32_to_i32_saturating),
         _ => None,
     }
 }
@@ -920,6 +930,9 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
         ResolutionFrame::CopyToken(_) => {
             token_copy::drain_pending_copy_token_resolution(state, events);
         }
+        ResolutionFrame::DebugCardEntries(_) => {
+            crate::game::engine_debug::drain_pending_debug_card_entries(state, events);
+        }
         ResolutionFrame::EachPlayerCopyChosen(_) => {
             each_player_copy_chosen::drain_pending(state, events);
         }
@@ -1181,14 +1194,12 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                 )
                 .expect("replacement-resumed ChangeZone delivery retains its exact segment");
             }
-            if let Some(terminal_completion) = paused_current.terminal_completion {
-                logical_zone_change_group
-                    .record_delivery_completion(
-                        paused_current.member.object_id,
-                        terminal_completion,
-                    )
-                    .expect("resumed ChangeZone member records its exact terminal outcome");
-            }
+            logical_zone_change_group
+                .record_delivery_completion(
+                    paused_current.member.object_id,
+                    paused_current.terminal_completion_after_resume(),
+                )
+                .expect("resumed ChangeZone member records its exact terminal outcome");
             if matches!(
                 paused_current.count,
                 crate::types::game_state::PausedZoneChangeDeliveryCount::NeedsCount
@@ -1344,15 +1355,21 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                     return;
                 }
                 crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsChoice(player) => {
-                    let paused_current = state
-                        .pending_zone_change_delivery_from_replacement()
-                        .or_else(|| {
-                            anticipated_pause.map(|mut boundary| {
-                                boundary.append_delivery_events(&events[delivery_start..]);
-                                boundary
+                    let entry_target_choice = matches!(
+                        state.waiting_for,
+                        WaitingFor::EntryAttackTargetChoice { .. }
+                    );
+                    let paused_current = (!entry_target_choice).then(|| {
+                        state
+                            .pending_zone_change_delivery_from_replacement()
+                            .or_else(|| {
+                                anticipated_pause.map(|mut boundary| {
+                                    boundary.append_delivery_events(&events[delivery_start..]);
+                                    boundary
+                                })
                             })
-                        })
-                        .expect("zone-change pause must retain its exact boundary");
+                            .expect("replacement pause must retain its exact boundary")
+                    });
                     let trigger_events: Vec<GameEvent> = events[events_before_drain..]
                         .iter()
                         .filter(|event| !matches!(event, GameEvent::PhaseChanged { .. }))
@@ -1367,7 +1384,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                     state.replace_active_change_zone_iteration_after_child(
                         crate::types::game_state::PendingChangeZoneIteration {
                             logical_zone_change_group,
-                            paused_current: Some(paused_current),
+                            paused_current,
                             remaining: remaining[i + 1..].to_vec(),
                             source_id: ctx.source_id,
                             controller: ctx.controller,
@@ -1382,7 +1399,8 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                                 .clone(),
                             duration: ctx.duration.clone(),
                             track_exiled_by_source: ctx.track_exiled_by_source,
-                            moved_count,
+                            moved_count: moved_count
+                                .map(|count| count + i32::from(entry_target_choice)),
                             // CR 708.2a + CR 708.3: preserve the face-down profile
                             // across a further pause so resumed members stay face down.
                             face_down_profile: ctx.face_down_profile.clone(),
@@ -1433,6 +1451,17 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             .expect("settled ChangeZone must consume the active owner once");
         if let Some(count) = moved_count {
             state.last_effect_count = Some(count);
+            if let Some(cause) = this_way_cause_for_zone(destination) {
+                stamp_active_player_action_completion(
+                    state,
+                    source_id,
+                    EffectResolutionResult {
+                        cause,
+                        count: usize::try_from(count.max(0))
+                            .expect("nonnegative moved count fits usize"),
+                    },
+                );
+            }
         }
         events.push(GameEvent::EffectResolved {
             kind: effect_kind,
@@ -1495,7 +1524,7 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
             let iter_effective: &ResolvedAbility = if member.is_some() || kind.is_some() {
                 iter_ability = (*ability).clone();
                 if let Some(member) = member {
-                    rebind_first_object_target(&mut iter_ability.targets, member);
+                    rebind_member_driven_parent_target(&mut iter_ability, member);
                 }
                 if let Some(kind) = kind {
                     rebind_iterated_counter_kind(&mut iter_ability, kind);
@@ -1640,6 +1669,46 @@ pub(crate) fn append_to_pending_continuation(
     } else {
         state.park_ability_continuation(PendingContinuation::new(tail, state));
     }
+}
+
+/// CR 608.2c: Stamp an operation result onto only the active, same-source
+/// completion head whose producer-action requirement matches. This is a typed
+/// adjacency check; it never searches past another resolution frame.
+pub(crate) fn stamp_active_player_action_completion(
+    state: &mut GameState,
+    source_id: ObjectId,
+    result: EffectResolutionResult,
+) {
+    let Some(frame) = state.active_ability_continuation_frame_mut() else {
+        return;
+    };
+    let chain = frame.pending.chain.as_mut();
+    let Effect::CompletePlayerAction {
+        required_result, ..
+    } = &chain.effect
+    else {
+        return;
+    };
+    if chain.source_id == source_id && required_result.cause == result.cause {
+        chain.set_prior_effect_result_for_immediate_node(result);
+    }
+}
+
+pub(crate) fn active_player_action_completion_requires(
+    state: &GameState,
+    source_id: ObjectId,
+    cause: ThisWayCause,
+) -> bool {
+    state.active_ability_continuation().is_some_and(|pending| {
+        pending.chain.source_id == source_id
+            && matches!(
+                &pending.chain.effect,
+                Effect::CompletePlayerAction {
+                    required_result,
+                    ..
+                } if required_result.cause == cause
+            )
+    })
 }
 
 fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbility) {
@@ -2462,6 +2531,29 @@ fn apply_parent_chain_context(
     state: &mut GameState,
 ) {
     child.context = parent.context.clone();
+    // CR 701.20e + CR 608.2c: Look-result membership is owned by precisely
+    // one immediate looping child. Ordinary hand-offs must not let it leak to
+    // a later grandchild with a different instruction scope.
+    child.context.parent_target_iteration_members = None;
+    // CR 608.2c: A completed effect result is a one-hop input. Clear the
+    // inherited copy first, then stamp it only onto the same-source immediate
+    // `CompletePlayerAction` child whose requirement names the same producer
+    // action. Count mismatches are intentionally retained so the completion
+    // node can resolve as a failed action rather than observing no result.
+    let prior_effect_result = child.context.prior_effect_result.take();
+    if child.source_id == parent.source_id {
+        if let (
+            Some(result),
+            Effect::CompletePlayerAction {
+                required_result, ..
+            },
+        ) = (prior_effect_result, &child.effect)
+        {
+            if result.cause == required_result.cause {
+                child.set_prior_effect_result_for_immediate_node(result);
+            }
+        }
+    }
     // CR 701.9a + CR 608.2c: A discard result is visible only to the direct
     // contingent child. Every ordinary hand-off clears it, preventing a later
     // grandchild (or an unrelated chain branch) from reading stale provenance.
@@ -2597,6 +2689,7 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
         waiting_for,
         WaitingFor::MeldPairChoice { .. }
             | WaitingFor::MeldAttackTargetChoice { .. }
+            | WaitingFor::EntryAttackTargetChoice { .. }
             | WaitingFor::ScryChoice { .. }
             | WaitingFor::ArrangePlanarDeckTopChoice { .. }
             | WaitingFor::RedistributeLifeTotals { .. }
@@ -2849,6 +2942,81 @@ fn condition_depends_on_effect_performed(condition: &AbilityCondition) -> bool {
     }
 }
 
+/// CR 603.12 + CR 615.5: Whether a SUB-ability's own gate makes it resolve even
+/// though its parent's condition was FALSE — the single authority for that
+/// question, with two consumers.
+///
+/// * `resolve_ability_chain` (below) uses it on the condition-false path to
+///   decide which sub-abilities still run.
+/// * `triggers::delayed_body_outlives_a_false_gate` uses it so the CR 603.4
+///   fire-time hoist of a DELAYED body's intervening-`if` declines on exactly the
+///   sub shapes this resolution path would still have run. If the two predicates
+///   drifted, the hoist would either delete printed work (hoisting a body whose
+///   sub survives) or leave CR 603.4 unenforced (declining a body whose sub does
+///   not).
+///
+/// The two classes: a CR 603.12 performed/reflexive gate, whose truth is only
+/// knowable at resolution and is re-evaluated on its own; and a CR 615.5
+/// INDEPENDENT per-event gate (Comeuppance's mutually-exclusive
+/// creature/noncreature reflection riders), which references the event rather
+/// than the parent's effect.
+///
+/// NOT included, deliberately: an unconditional `SequentialSibling` (it also
+/// runs on the false path, but as the next clause of the SAME gated sentence —
+/// CR 603.4 says it must not happen either, which is precisely why the delayed
+/// hoist must still apply to it) and `SiblingCondition::ReplicatedOrBranch`
+/// (a structural marker on the sub, not a condition, so it is tested against
+/// the sub itself by [`sub_outlives_false_parent_gate`], which wraps this).
+pub(crate) fn condition_survives_false_parent_gate(condition: &AbilityCondition) -> bool {
+    condition_depends_on_effect_performed(condition)
+        || matches!(
+            condition,
+            AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
+        )
+}
+
+/// CR 603.12 + CR 615.5 + CR 702.1c: whether a SUB-ability still resolves even
+/// though its parent's condition was FALSE, for a reason INDEPENDENT of the
+/// parent's gate — the single authority for that whole question.
+///
+/// Two components, and both must stay together:
+///
+/// * the sub's own gate is one of the classes
+///   [`condition_survives_false_parent_gate`] names (a CR 603.12 performed /
+///   reflexive gate, or a CR 615.5 independent per-event gate);
+/// * the sub is a per-item keyword-list REPLICATION branch (CR 702.1c "the same
+///   is true" — Kathril / Mutable Pupa). That is a structural marker on the sub
+///   (`SiblingCondition::ReplicatedOrBranch`) rather than a condition, and it
+///   only means "independent OR-branch" on a `SequentialSibling` link, so BOTH
+///   conjuncts are part of the test.
+///
+/// Two consumers, which is why this is factored out rather than spelled twice:
+/// `resolve_ability_chain` (below) on its condition-false path, and
+/// `triggers::delayed_body_outlives_a_false_gate`, so the CR 603.4 fire-time
+/// hoist of a DELAYED body's intervening-`if` declines on EXACTLY the sub shapes
+/// this resolution path still runs. When the two spellings drifted, the hoist
+/// could either delete printed work (hoisting a body whose sub survives) or
+/// leave CR 603.4 unenforced (declining a body whose sub does not).
+///
+/// Both consumers ask the question of the DIRECT sub only. This call site never
+/// looks deeper: when the direct sub does not qualify, `resolve_chain_body`
+/// returns and nothing further down the chain resolves, so a grandchild's
+/// `else_ability` or reflexive gate is reachable only THROUGH a qualifying direct
+/// sub. `delayed_body_outlives_a_false_gate` matches that exactly (it used to
+/// recurse, which declined the hoist for chains whose resolution does nothing).
+///
+/// NOT included: an UNCONDITIONAL `SequentialSibling`. It also runs on the false
+/// path, but as the next clause of the SAME gated sentence, so CR 603.4 says it
+/// must not happen either — the delayed hoist must still apply to it. That
+/// disjunct therefore stays at the `resolve_ability_chain` call site alone.
+pub(crate) fn sub_outlives_false_parent_gate(sub: &ResolvedAbility) -> bool {
+    sub.condition
+        .as_ref()
+        .is_some_and(condition_survives_false_parent_gate)
+        || (sub.sibling_condition == SiblingCondition::ReplicatedOrBranch
+            && sub.sub_link == SubAbilityLink::SequentialSibling)
+}
+
 /// CR 603.12 + CR 608.2c: Whether a reflexive condition reads the per-resolution
 /// `last_zone_changed_ids` ledger ("if a [noun] was [verb]ed this way"). Unlike
 /// `condition_depends_on_effect_performed` (which gates on the
@@ -2863,53 +3031,203 @@ fn filter_contains_last_zone_changed(filter: &TargetFilter) -> bool {
     crate::game::filter::filter_contains_last_zone_changed(filter)
 }
 
-fn quantity_expr_depends_on_zone_change_this_way(expr: &QuantityExpr) -> bool {
-    match expr {
-        QuantityExpr::Ref { qty } => quantity_ref_depends_on_zone_change_this_way(qty),
-        QuantityExpr::DivideRounded { inner, .. }
-        | QuantityExpr::Multiply { inner, .. }
-        | QuantityExpr::ClampMin { inner, .. }
-        | QuantityExpr::Offset { inner, .. } => {
-            quantity_expr_depends_on_zone_change_this_way(inner)
-        }
-        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => exprs
-            .iter()
-            .any(quantity_expr_depends_on_zone_change_this_way),
-        QuantityExpr::UpTo { max } => quantity_expr_depends_on_zone_change_this_way(max),
-        QuantityExpr::Power { exponent, .. } => {
-            quantity_expr_depends_on_zone_change_this_way(exponent)
-        }
-        QuantityExpr::Difference { left, right } => {
-            quantity_expr_depends_on_zone_change_this_way(left)
-                || quantity_expr_depends_on_zone_change_this_way(right)
-        }
-        QuantityExpr::Fixed { .. } => false,
+fn filter_contains_last_created(filter: &TargetFilter) -> bool {
+    crate::game::filter::filter_contains_last_created(filter)
+}
+
+/// Whether the object population a `CardTypeSetSource` reads is selected by a
+/// filter satisfying `filter_pred`.
+///
+/// Exhaustive: the three fixed-vocabulary sources name a zone, the source's
+/// exile set, or a tracked set, none of which carries a `TargetFilter`. The
+/// journal carries an optional narrowing filter, and `AnyOf` recurses.
+fn card_type_set_source_counts_population_matching(
+    source: &crate::types::ability::CardTypeSetSource,
+    filter_pred: &dyn Fn(&TargetFilter) -> bool,
+) -> bool {
+    let mut found = false;
+    let complete =
+        source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
+            if !found {
+                found = card_type_set_leaf_counts_population_matching(leaf, filter_pred);
+            }
+        });
+    // A truncated walk claims the match: an unreported anaphor is the silent
+    // failure this predicate exists to prevent.
+    found || !complete
+}
+
+fn card_type_set_leaf_counts_population_matching(
+    source: &crate::types::ability::CardTypeSetSource,
+    filter_pred: &dyn Fn(&TargetFilter) -> bool,
+) -> bool {
+    use crate::types::ability::CardTypeSetSource;
+    match source {
+        CardTypeSetSource::Objects { filter } => filter_pred(filter),
+        // The journal's optional narrowing filter is a population selector like
+        // any other, so an anaphor inside it must be reported. Uncited: this is
+        // an engine claim about where filters live, not a rule. (It cited
+        // CR 601.2a, which describes putting a spell on the stack as it is cast
+        // — the event the journal records, not its narrowing filter.)
+        CardTypeSetSource::TurnJournal { filter, .. } => filter.as_ref().is_some_and(filter_pred),
+        // Unrolled by the bounded walker in the caller, so a union never reaches
+        // this arm. Uncited for the same reason as the union arm in
+        // `ability_rw::characteristic_source_read`: no CR rule defines set union
+        // of populations. (It cited CR 109.2, the battlefield-default rule for a
+        // bare type description.)
+        CardTypeSetSource::AnyOf { .. } => false,
+        CardTypeSetSource::Zone { .. }
+        | CardTypeSetSource::ExiledBySource
+        | CardTypeSetSource::TrackedSet { .. } => false,
     }
 }
 
-fn quantity_ref_depends_on_zone_change_this_way(qty: &QuantityRef) -> bool {
+/// Whether the population `qty` counts over is selected by a `TargetFilter`
+/// satisfying `filter_pred`.
+///
+/// Single enumeration of the "this ref reads a population" variant set, shared
+/// by every predicate that asks whether a magnitude depends on a particular
+/// resolution-local anaphor ledger (`LastZoneChanged`, `LastCreated`, …).
+/// Without it each such predicate re-listed the same variants and a new
+/// population-counting `QuantityRef` had to be threaded once per predicate.
+///
+/// EXHAUSTIVE, no `_` arm. The wildcard this replaced classified every unlisted
+/// variant as filter-free, which was wrong for thirteen variants that already
+/// carried one (`SacrificedThisTurn`, `ZoneChangeCountThisTurn`,
+/// `DamageDealtThisTurn`, `TokensCreatedThisTurn`, …) and would have been wrong
+/// by default for every future one. A new `QuantityRef` now has to be classified
+/// here before it compiles, which is the point: "does this magnitude read a
+/// population?" is a decision, not a default.
+///
+/// Returning a predicate rather than an `Option<&TargetFilter>` is what lets
+/// `DamageDealtThisTurn` report BOTH of its filters; a single-filter accessor
+/// structurally could not.
+fn quantity_ref_counts_population_matching(
+    qty: &QuantityRef,
+    filter_pred: &dyn Fn(&TargetFilter) -> bool,
+) -> bool {
     match qty {
+        // Owned `TargetFilter` naming the counted population.
         QuantityRef::ObjectCount { filter }
         | QuantityRef::ObjectCountDistinct { filter, .. }
         | QuantityRef::ObjectCountBySharedQuality { filter, .. }
         | QuantityRef::CountersOnObjects { filter, .. }
         | QuantityRef::Aggregate { filter, .. }
         | QuantityRef::ControlledByEachPlayer { filter, .. }
-        | QuantityRef::DistinctColorsAmongPermanents { filter }
         | QuantityRef::DistinctCounterKindsAmong { filter }
         | QuantityRef::EnteredThisTurn { filter }
-        | QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => {
-            filter_contains_last_zone_changed(filter)
+        | QuantityRef::SacrificedThisTurn { filter, .. }
+        | QuantityRef::BattlefieldEntriesThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
+        | QuantityRef::TokensCreatedThisTurn { filter, .. } => filter_pred(filter),
+        // Same, under a field named for what it selects rather than `filter`.
+        QuantityRef::CounterAddedThisTurn { target, .. } => filter_pred(target),
+        // Boxed.
+        QuantityRef::TargetObjectManaValue { filter }
+        | QuantityRef::FilteredTrackedSetSize { filter, .. } => filter_pred(filter),
+        // Optional narrowing on an otherwise unfiltered count.
+        QuantityRef::ZoneCardCount { filter, .. }
+        | QuantityRef::SpellsCastThisTurn { filter, .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
+        | QuantityRef::AttackedThisTurn { filter, .. }
+        | QuantityRef::SpellsCastThisGame { filter, .. } => {
+            filter.as_ref().is_some_and(filter_pred)
         }
-        QuantityRef::DistinctCardTypes {
-            source: crate::types::ability::CardTypeSetSource::Objects { filter },
+        // CR 120.1 + CR 120.2: two independent populations — what dealt the damage
+        // and what received it. Either one can carry the anaphor.
+        QuantityRef::DamageDealtThisTurn { source, target, .. } => {
+            filter_pred(source) || filter_pred(target)
         }
-        | QuantityRef::DistinctSubtypes {
-            source: crate::types::ability::CardTypeSetSource::Objects { filter },
-            ..
-        } => filter_contains_last_zone_changed(filter),
-        _ => false,
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => {
+            card_type_set_source_counts_population_matching(source, filter_pred)
+        }
+        // No `TargetFilter` anywhere: player-scoped totals, per-object scopes,
+        // resolution/turn counters, and cost bookkeeping.
+        QuantityRef::HandSize { .. }
+        | QuantityRef::LifeTotal { .. }
+        | QuantityRef::GraveyardSize { .. }
+        | QuantityRef::LifeAboveStarting
+        | QuantityRef::StartingLifeTotal
+        | QuantityRef::TriggeringDiscoverValue
+        | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount
+        | QuantityRef::PlayerCount { .. }
+        | QuantityRef::CountersOn { .. }
+        | QuantityRef::PlayerCounter { .. }
+        // CR 101.4: reads a per-player scalar off `Player::chosen_attributes`.
+        // It counts no POPULATION of objects — its `PlayerScope` selects which
+        // players contribute and how they fold, never a `TargetFilter`.
+        | QuantityRef::PlayerChosenNumber { .. }
+        | QuantityRef::TargetControllerCounter { .. }
+        | QuantityRef::Variable { .. }
+        | QuantityRef::Power { .. }
+        | QuantityRef::Intensity { .. }
+        | QuantityRef::Toughness { .. }
+        | QuantityRef::ObjectManaValue { .. }
+        | QuantityRef::ObjectColorCount { .. }
+        | QuantityRef::ObjectNameWordCount { .. }
+        | QuantityRef::ObjectTypelineComponentCount { .. }
+        | QuantityRef::ManaSymbolsInManaCost { .. }
+        | QuantityRef::SelfManaValue
+        | QuantityRef::TargetZoneCardCount { .. }
+        | QuantityRef::Devotion { .. }
+        | QuantityRef::CardsExiledBySource
+        | QuantityRef::ExiledCardPower { .. }
+        | QuantityRef::BasicLandTypeCount { .. }
+        | QuantityRef::TrackedSetSize
+        | QuantityRef::TrackedSetAggregate { .. }
+        | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::PartySize { .. }
+        | QuantityRef::UnspentMana { .. }
+        | QuantityRef::Speed { .. }
+        | QuantityRef::EventContextAmount
+        | QuantityRef::EventContextPlayerCount { .. }
+        | QuantityRef::AttachmentsOnLeavingObject { .. }
+        | QuantityRef::EventContextSourceCostX
+        | QuantityRef::EventContextSourceModesChosen
+        | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::BendTypesThisTurn
+        | QuantityRef::LifeGainedThisTurn { .. }
+        | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::LandsPlayedThisTurn { .. }
+        | QuantityRef::TurnsTaken
+        | QuantityRef::ChosenNumber
+        | QuantityRef::DescendedThisTurn
+        | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
+        | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::CardsDiscardedThisTurn { .. }
+        | QuantityRef::PlayerActionsThisTurn { .. }
+        | QuantityRef::DungeonsCompleted
+        | QuantityRef::CostXPaid
+        | QuantityRef::KickerCount
+        | QuantityRef::AdditionalCostPaymentCount
+        | QuantityRef::AdditionalCostPaymentCountFor { .. }
+        | QuantityRef::ConvokedCreatureCount
+        | QuantityRef::TimesCostPaidThisResolution
+        | QuantityRef::ManaSpentToCast { .. }
+        | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderManaValue { .. }
+        | QuantityRef::VoteCount { .. } => false,
     }
+}
+
+/// Whether any magnitude in `expr` counts a population selected by a filter
+/// satisfying `filter_pred`. Traversal delegates to `QuantityExpr::any_ref`
+/// (the single composition-form authority) and the variant set to
+/// [`quantity_ref_counts_population_matching`].
+fn quantity_expr_counts_population_matching(
+    expr: &QuantityExpr,
+    filter_pred: &dyn Fn(&TargetFilter) -> bool,
+) -> bool {
+    quantity_expr_any_ref(expr, &mut |qty| {
+        quantity_ref_counts_population_matching(qty, filter_pred)
+    })
 }
 
 fn condition_depends_on_zone_change_this_way(condition: &AbilityCondition) -> bool {
@@ -2917,14 +3235,142 @@ fn condition_depends_on_zone_change_this_way(condition: &AbilityCondition) -> bo
         AbilityCondition::ZoneChangedThisWay { .. }
         | AbilityCondition::DiscardedCardMatchesFilter { .. } => true,
         AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
-            quantity_expr_depends_on_zone_change_this_way(lhs)
-                || quantity_expr_depends_on_zone_change_this_way(rhs)
+            quantity_expr_counts_population_matching(lhs, &filter_contains_last_zone_changed)
+                || quantity_expr_counts_population_matching(rhs, &filter_contains_last_zone_changed)
         }
         AbilityCondition::Not { condition } => condition_depends_on_zone_change_this_way(condition),
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => conditions
             .iter()
             .any(condition_depends_on_zone_change_this_way),
         _ => false,
+    }
+}
+
+/// CR 608.2c + CR 111.1: Whether a condition reads the resolution-local
+/// `last_created_token_ids` ledger — the "the token created this way" / "it"
+/// anaphor a token-creating instruction publishes when it COMPLETES
+/// (`record_last_created_token`, the tail of the liminal entry finalization).
+///
+/// Structural twin of [`condition_depends_on_zone_change_this_way`], and used at
+/// the same gate for the same reason: while the parent instruction is suspended
+/// on a player choice mid-entry (a CR 616.1 replacement ordering prompt, or the
+/// CR 303.4f Aura-host prompt raised when a token copy of an Aura enters), the
+/// ledger does not yet name the token being created. Evaluating "If the token is
+/// an Aura, …" against it there reads a stale population and silently drops the
+/// gated sub-ability (Yenna, Redtooth Regent). Deferring the sub WITH its
+/// condition re-evaluates it at chain top once the entry completes, which is
+/// also the CR 608.2c order: the gated sentence is the NEXT instruction and
+/// cannot begin before this one finishes.
+///
+/// Predicate helper, not rule-implementing code — the CR annotation lives at the
+/// gate.
+fn condition_depends_on_last_created(condition: &AbilityCondition) -> bool {
+    condition_reads_filter_population(condition, &filter_contains_last_created)
+}
+
+/// Whether any filter or counted population anywhere inside `condition`
+/// satisfies `leaf`.
+///
+/// EXHAUSTIVE on `AbilityCondition`, no `_` arm, for the same reason
+/// `filter::filter_contains` is exhaustive on `TargetFilter`. The wildcard this
+/// replaced classified EVERY filter-bearing condition as anaphor-free:
+/// `TargetMatchesFilter`, `ControllerControlsMatching`, `SourceMatchesFilter`,
+/// `ZoneChangeObjectMatchesFilter` and `DiscardedCardMatchesFilter` all read as
+/// mentioning nothing, so a sub-ability gated on "if the token is an Aura" was
+/// not deferred and evaluated against a ledger the suspended parent had not
+/// published yet — the exact CR 608.2c defect this predicate family exists to
+/// prevent.
+///
+/// Both carriers of a filter are covered: a `TargetFilter` mentioned directly
+/// (via `filter_contains`, which also descends `FilterProp` and `PlayerFilter`),
+/// and a population COUNTED by a `QuantityExpr` (via
+/// `quantity_expr_counts_population_matching`).
+fn condition_reads_filter_population(
+    condition: &AbilityCondition,
+    leaf: &dyn Fn(&TargetFilter) -> bool,
+) -> bool {
+    let has_filter = |filter: &TargetFilter| crate::game::filter::filter_contains(filter, leaf);
+    let has_quantity =
+        |quantity: &QuantityExpr| quantity_expr_counts_population_matching(quantity, leaf);
+    let recurse = |inner: &AbilityCondition| condition_reads_filter_population(inner, leaf);
+    match condition {
+        // Compound / wrapping conditions.
+        AbilityCondition::Not { condition } => recurse(condition),
+        AbilityCondition::ConditionInstead { inner } => recurse(inner),
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().any(recurse)
+        }
+        // Conditions that name a population by filter.
+        AbilityCondition::ObjectsShareQuality {
+            subject, reference, ..
+        } => has_filter(subject) || has_filter(reference),
+        AbilityCondition::TargetSharesNameWithOtherExiledThisWay { target } => has_filter(target),
+        AbilityCondition::DiscardedCardMatchesFilter { filter }
+        | AbilityCondition::TargetMatchesFilter { filter, .. }
+        | AbilityCondition::TriggeringSpellTargetsFilter { filter }
+        | AbilityCondition::SourceMatchesFilter { filter }
+        | AbilityCondition::PostReplacementDamageSourceMatchesFilter { filter }
+        | AbilityCondition::ZoneChangeObjectMatchesFilter { filter, .. }
+        | AbilityCondition::ControllerControlsMatching { filter }
+        | AbilityCondition::ControllerControlledMatchingAsCast { filter }
+        | AbilityCondition::ZoneChangedThisWay { filter }
+        | AbilityCondition::CostPaidObjectMatchesFilter { filter } => has_filter(filter),
+        AbilityCondition::RevealedHasCardType {
+            additional_filter,
+            subtype_filter,
+            ..
+        } => {
+            subtype_filter.as_deref().is_some_and(has_filter)
+                || additional_filter
+                    .as_ref()
+                    .is_some_and(|prop| crate::game::filter::filter_prop_contains(prop, leaf))
+        }
+        AbilityCondition::ScopedPlayerMatches { filter } => {
+            crate::game::filter::player_filter_contains(filter, leaf)
+        }
+        // Conditions that COUNT a population.
+        AbilityCondition::QuantityCheck { lhs, rhs, .. } => has_quantity(lhs) || has_quantity(rhs),
+        AbilityCondition::PreviousEffectAmount { rhs, .. } => has_quantity(rhs),
+        // Leaves: nothing filter- or quantity-shaped to read.
+        AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+        | AbilityCondition::AdditionalCostPaid { .. }
+        | AbilityCondition::AdditionalCostPaidInstead
+        | AbilityCondition::AlternativeManaCostPaid
+        | AbilityCondition::EffectOutcome { .. }
+        | AbilityCondition::EventOutcomeWon
+        | AbilityCondition::CoinFlipOutcome { .. }
+        | AbilityCondition::WhenYouDo
+        | AbilityCondition::WasCast { .. }
+        | AbilityCondition::CastDuringPhase { .. }
+        | AbilityCondition::CurrentPhaseIs { .. }
+        | AbilityCondition::CastTimingPermission { .. }
+        | AbilityCondition::ManaColorSpent { .. }
+        | AbilityCondition::SourceEnteredThisTurn
+        | AbilityCondition::CastVariantPaid { .. }
+        | AbilityCondition::CastVariantPaidInstead { .. }
+        | AbilityCondition::HasMaxSpeed
+        | AbilityCondition::IsMonarch
+        | AbilityCondition::IsInitiative
+        | AbilityCondition::HasCityBlessing
+        | AbilityCondition::HasEnduringStory
+        // CR 903.3d: a commander-designation predicate — carries neither a
+        // `TargetFilter` nor a `QuantityExpr`, so it reads no filter population.
+        | AbilityCondition::ControlsCommander { .. }
+        | AbilityCondition::IsRingBearer
+        | AbilityCondition::CompletedDungeon { .. }
+        | AbilityCondition::TargetHasKeywordInstead { .. }
+        | AbilityCondition::HasObjectTarget
+        | AbilityCondition::IsYourTurn
+        | AbilityCondition::WasStartingPlayer { .. }
+        | AbilityCondition::SpellCastWithVariantThisTurn { .. }
+        | AbilityCondition::FirstCombatPhaseOfTurn
+        | AbilityCondition::FirstEndStepOfTurn
+        | AbilityCondition::SourceIsTapped
+        | AbilityCondition::SourceAttachedToCreature
+        | AbilityCondition::DayNightIsNeither
+        | AbilityCondition::DayNightIs { .. }
+        | AbilityCondition::NthResolutionThisTurn { .. }
+        | AbilityCondition::SourceLacksKeyword { .. } => false,
     }
 }
 
@@ -3016,6 +3462,22 @@ fn effect_manages_own_outcome_flag(effect: &Effect) -> bool {
             // (whiff → `cost_payment_failed_flag`; beheld → the rider fires), so
             // the mandatory-rider seed must not race it.
             | Effect::Behold { .. }
+            // CR 608.2g + CR 608.2c: a paid during-resolution graveyard cast
+            // (Conduit of Worlds) is lowered mandatory because the interactive
+            // `GraveyardPaidCast` offer IS its "you may". Its "if you do" outcome
+            // is decided by that offer — the commit-point latch
+            // (casting_costs.rs) sets the flag only when the cast actually
+            // commits, and a decline leaves it false. The mandatory-rider seed
+            // must not pre-set the flag, or a declined offer would wrongly fire
+            // the "you can't cast additional spells this turn" rider.
+            | Effect::CastFromZone {
+                driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
+                without_paying_mana_cost: false,
+                ..
+            }
+            // CR 608.2c: this node derives success from its exact one-hop
+            // operation result and propagates that boolean to its printed tail.
+            | Effect::CompletePlayerAction { .. }
     )
 }
 
@@ -3069,6 +3531,26 @@ fn inject_last_revealed_targets(
         .iter()
         .map(|&id| TargetRef::Object(id))
         .collect()
+}
+
+/// Stamps the exact forwarded result collection onto an immediate executable
+/// member-driven child. Call only after `apply_parent_chain_context`, which
+/// intentionally clears resolution-local direct-child provenance.
+fn stamp_parent_target_iteration_members(child: &mut ResolvedAbility) {
+    if child.targets.is_empty() || !has_member_driven_repeat(child) {
+        return;
+    }
+
+    child.context.parent_target_iteration_members = Some(
+        child
+            .targets
+            .iter()
+            .filter_map(|target| match target {
+                TargetRef::Object(id) => Some(*id),
+                TargetRef::Player(_) => None,
+            })
+            .collect(),
+    );
 }
 
 /// CR 608.2c: Locate the `Not(OptionalEffectPerformed)` decline clause anywhere
@@ -3248,6 +3730,9 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             // optional-decline branch selector — it reads the flip, not the
             // declined effect.
             | AbilityCondition::CoinFlipOutcome { .. }
+            // The frozen trigger-event damage read is independent of an
+            // optional-effect decision, so it cannot select a decline branch.
+            | AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
             | AbilityCondition::WhenYouDo
             | AbilityCondition::WasCast { .. }
             | AbilityCondition::CastDuringPhase { .. }
@@ -3272,6 +3757,10 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::IsInitiative
             | AbilityCondition::HasCityBlessing
             | AbilityCondition::HasEnduringStory
+            // CR 903.3d: a live game-state gate, not a decline-alternative
+            // selector — declining the optional effect does not pick a
+            // commander-control branch. Same reading as `IsMonarch` above.
+            | AbilityCondition::ControlsCommander { .. }
             | AbilityCondition::DiscardedCardMatchesFilter { .. }
             | AbilityCondition::IsRingBearer
             | AbilityCondition::TargetHasKeywordInstead { .. }
@@ -3622,8 +4111,24 @@ fn detach_after_player_scope_local_chain(
     // "Each opponent may X and Y" makes the whole same-sentence X/Y clause
     // optional for that opponent. Keep the continuation inside the scoped
     // template so accepting the offer performs both instructions.
-    let next_is_optional_clause_continuation =
-        node.optional && next.sub_link == SubAbilityLink::ContinuationStep;
+    //
+    // CR 608.2c + CR 109.5: EXCEPT a child that carries its OWN distinct
+    // `player_scope` (a different population than this fan-out's) is a SEPARATE
+    // scoped instruction, not a continuation of this optional clause — e.g.
+    // Kwain, Itinerant Meddler's "each player may draw a card, then each player
+    // who drew a card this way gains 1 life": the GainLife is scoped to the
+    // drawers (`PerformedActionThisWay`), not to this "each player" (`All`)
+    // fan-out. Keeping it co-scoped would re-enter the fan-out driver once per
+    // outer iteration and re-count the incrementally growing this-way ledger,
+    // over-applying to the earlier-iterated players (a triangular over-gain). It
+    // must detach and resolve ONCE over its own population after the parent
+    // fan-out completes.
+    let next_is_optional_clause_continuation = node.optional
+        && next.sub_link == SubAbilityLink::ContinuationStep
+        && next
+            .player_scope
+            .as_ref()
+            .is_none_or(|child_scope| child_scope == scope);
     // CR 701.23i + CR 701.24a: A shuffle explicitly scoped to players who
     // searched this way is a once-after-all-searches tail, not the ordinary
     // per-player SearchLibrary → ChangeZone → Shuffle continuation. Keep the
@@ -4152,7 +4657,7 @@ pub fn resolve_effect(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
-) -> Result<(), EffectError> {
+) -> Result<Option<EffectResolutionResult>, EffectError> {
     match &ability.effect {
         Effect::StartYourEngines { .. } => speed_effects::resolve_start(state, ability, events),
         Effect::ChangeSpeed { .. } => speed_effects::resolve_change_speed(state, ability, events),
@@ -4181,7 +4686,7 @@ pub fn resolve_effect(
         // dispatched inside `resolve_set_tap_state`.
         Effect::SetTapState { .. } => tap_untap::resolve_set_tap_state(state, ability, events),
         Effect::RemoveCounter { .. } => counters::resolve_remove(state, ability, events),
-        Effect::Sacrifice { .. } => sacrifice::resolve(state, ability, events),
+        Effect::Sacrifice { .. } => return sacrifice::resolve(state, ability, events),
         Effect::DiscardCard { .. } => discard::resolve(state, ability, events),
         Effect::Mill { .. } => mill::resolve(state, ability, events),
         Effect::Scry { .. } => scry::resolve(state, ability, events),
@@ -4189,7 +4694,7 @@ pub fn resolve_effect(
         Effect::DamageAll { .. } => deal_damage::resolve_all(state, ability, events),
         Effect::DamageEachPlayer { .. } => deal_damage::resolve_each_player(state, ability, events),
         Effect::DestroyAll { .. } => destroy::resolve_all(state, ability, events),
-        Effect::ChangeZone { .. } => change_zone::resolve(state, ability, events),
+        Effect::ChangeZone { .. } => return change_zone::resolve(state, ability, events),
         Effect::ChangeZoneAll { .. } => change_zone::resolve_all(state, ability, events),
         Effect::Dig { .. } => dig::resolve(state, ability, events),
         Effect::GainControl { .. } => gain_control::resolve(state, ability, events),
@@ -4278,6 +4783,9 @@ pub fn resolve_effect(
         }
         Effect::ChooseCard { .. } => choose_card::resolve(state, ability, events),
         Effect::PutCounter { .. } => counters::resolve_add(state, ability, events),
+        Effect::ReproduceEventCounters { .. } => {
+            counters::resolve_reproduce_event_counters(state, ability, events)
+        }
         Effect::PutCounterAll { .. } => counters::resolve_add_all(state, ability, events),
         Effect::MultiplyCounter { .. } => counters::resolve_multiply(state, ability, events),
         Effect::DoublePT { .. } => pump::resolve_double_pt(state, ability, events),
@@ -4301,6 +4809,9 @@ pub fn resolve_effect(
         Effect::RevealHand { .. } => reveal_hand::resolve(state, ability, events),
         Effect::RevealFromHand { .. } => reveal_from_hand::resolve(state, ability, events),
         Effect::Reveal { .. } => reveal::resolve(state, ability, events),
+        Effect::RevealChosenNumbers { .. } => {
+            reveal_chosen_numbers::resolve(state, ability, events)
+        }
         Effect::RevealTop { .. } => reveal_top::resolve(state, ability, events),
         Effect::ExileTop { .. } => exile_top::resolve(state, ability, events),
         Effect::ExileFaceDownPile { .. } => exile_face_down_pile::resolve(state, ability, events),
@@ -4498,6 +5009,9 @@ pub fn resolve_effect(
         Effect::BlightEffect { .. } => blight::resolve(state, ability, events),
         Effect::Endure { .. } => endure::resolve(state, ability, events),
         Effect::Forage => forage::resolve(state, ability, events),
+        Effect::CompletePlayerAction { .. } => {
+            complete_player_action::resolve(state, ability, events)
+        }
         Effect::Harness => harness::resolve(state, ability, events),
         Effect::CollectEvidence { .. } => collect_evidence::resolve(state, ability, events),
         Effect::SetLifeTotal { .. } => life::resolve_set_life_total(state, ability, events),
@@ -4559,7 +5073,8 @@ pub fn resolve_effect(
             }
             Ok(())
         }
-    }
+    }?;
+    Ok(None)
 }
 
 /// Returns true if the given effect has a handler in the engine.
@@ -4681,7 +5196,14 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
         }
     }
     if let Effect::ChangeZoneAll { target, .. } = effect {
-        if filter_references_tracked_set(target) {
+        // CR 608.2c: a mass zone move can consume the selected set through a
+        // typed property as well as a bare `TrackedSet` leg. In particular,
+        // "exile the rest" uses `Not(InTrackedSet)` inside its typed filter;
+        // the search choice must publish its chosen set before this effect
+        // resolves or that complement would include the chosen cards too.
+        if filter_references_tracked_set(target)
+            || filter_properties_reference_tracked_membership(target)
+        {
             return true;
         }
     }
@@ -5030,26 +5552,18 @@ fn affected_objects_with_causes(
 /// effect kind (and its declared destination), so it is independent of any
 /// replacement that later redirects the members' landing zone.
 pub(crate) fn this_way_cause_for_effect(effect: &Effect) -> Option<ThisWayCause> {
-    use crate::types::zones::Zone;
-    // CR 400.7: a generic zone change names a "this way" verb only for the
-    // destinations a consumer references — Exile (exiled), Battlefield
-    // (returned/put onto the battlefield), Hand (bounced/returned to hand).
-    let cause_for_zone = |destination: Zone| match destination {
-        Zone::Exile => Some(ThisWayCause::Exiled),
-        Zone::Battlefield => Some(ThisWayCause::Returned),
-        Zone::Hand => Some(ThisWayCause::Bounced),
-        _ => None,
-    };
     match effect {
         Effect::Destroy { .. } | Effect::DestroyAll { .. } => Some(ThisWayCause::Destroyed),
         Effect::Sacrifice { .. } => Some(ThisWayCause::Sacrificed),
         Effect::Mill { .. } => Some(ThisWayCause::Milled),
         Effect::Discard { .. } | Effect::DiscardCard { .. } => Some(ThisWayCause::Discarded),
         Effect::ChangeZone { destination, .. } | Effect::ChangeZoneAll { destination, .. } => {
-            cause_for_zone(*destination)
+            this_way_cause_for_zone(*destination)
         }
         // CR 611.2c: mass-bounce destination defaults to Hand.
-        Effect::BounceAll { destination, .. } => cause_for_zone(destination.unwrap_or(Zone::Hand)),
+        Effect::BounceAll { destination, .. } => {
+            this_way_cause_for_zone(destination.unwrap_or(Zone::Hand))
+        }
         Effect::ExileTop { .. } | Effect::ExileFromTopUntil { .. } => Some(ThisWayCause::Exiled),
         // CR 608.2c: a coercion (mass MustAttack) names no "<verb>ed this way" set —
         // "those creatures" is a bare frozen population, so its members carry no
@@ -5058,6 +5572,17 @@ pub(crate) fn this_way_cause_for_effect(effect: &Effect) -> Option<ThisWayCause>
         // Reveals, taps, counter producers, the RevealUntil kept card, and any
         // other producer do not name a "<verb>ed this way" set — leave them
         // unstamped (matched only by `caused_by: None`).
+        _ => None,
+    }
+}
+
+/// CR 400.7 + CR 608.2c: Map a requested one-shot zone destination to the
+/// producer-action vocabulary used by typed "this way" and completion data.
+pub(crate) fn this_way_cause_for_zone(destination: Zone) -> Option<ThisWayCause> {
+    match destination {
+        Zone::Exile => Some(ThisWayCause::Exiled),
+        Zone::Battlefield => Some(ThisWayCause::Returned),
+        Zone::Hand => Some(ThisWayCause::Bounced),
         _ => None,
     }
 }
@@ -5089,7 +5614,7 @@ fn affected_objects_from_events(
         // Mirrors the broadcast-static binding in `effect.rs` (`Some(filter)`
         // arm). Broader than the parser-side `is_mass_coerce_static`
         // (oracle_effect/mod.rs), which still gates only the MustAttack/
-        // MustAttackPlayer coercion pair for its own (unrelated)
+        // MustAttackDefender coercion pair for its own (unrelated)
         // ParentTarget-rewrite purpose.
         Effect::GenericEffect {
             static_abilities,
@@ -5103,7 +5628,7 @@ fn affected_objects_from_events(
                 matches!(
                     sd.mode,
                     crate::types::statics::StaticMode::MustAttack
-                        | crate::types::statics::StaticMode::MustAttackPlayer { .. }
+                        | crate::types::statics::StaticMode::MustAttackDefender { .. }
                         | crate::types::statics::StaticMode::Continuous
                 )
             }) else {
@@ -5182,6 +5707,7 @@ fn affected_objects_from_events(
         Effect::PutCounter { .. }
         | Effect::PutCounterAll { .. }
         | Effect::MultiplyCounter { .. }
+        | Effect::ReproduceEventCounters { .. }
         | Effect::MoveCounters { .. } => events
             .iter()
             .filter_map(|event| match event {
@@ -5359,6 +5885,7 @@ fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> b
         Effect::PutCounter { .. }
         | Effect::PutCounterAll { .. }
         | Effect::MultiplyCounter { .. }
+        | Effect::ReproduceEventCounters { .. }
         | Effect::MoveCounters { .. } => events
             .iter()
             .any(|event| matches!(event, GameEvent::CounterAdded { .. })),
@@ -5655,6 +6182,10 @@ fn optional_head_declined_all_object_targets(ability: &ResolvedAbility) -> bool 
 ///    "when you lose control of this, unattach it" trigger rebinds the per-source
 ///    `attachment` through this hidden slot (Stolen Uniform, Ogre Geargrabber);
 ///    without the arm the `_ => {}` fallback snapshots nothing and it resolves inert.
+///  * `Effect::ChangeZoneAll` intentionally has no generic `target_filter()` slot:
+///    its filter selects a mass operation rather than a declared target. It still
+///    needs inspection here when it carries a delayed `ParentTarget` anaphor, so
+///    the delayed trigger snapshots and pins that object before the mass scan.
 ///
 /// NOTE: the `_ => {}` arm means "no hidden object slot beyond `target_filter()`".
 /// Any FUTURE effect that hides an object slot behind `target_filter()` MUST add
@@ -5673,6 +6204,9 @@ fn effect_parent_ref_slots(effect: &Effect) -> Vec<&TargetFilter> {
         Effect::Attach { attachment, .. } if attachment.is_context_ref() => slots.push(attachment),
         Effect::UnattachAll { attachment, .. } if attachment.is_context_ref() => {
             slots.push(attachment)
+        }
+        Effect::ChangeZoneAll { target, .. } if filter_refs_parent_target(target) => {
+            slots.push(target)
         }
         _ => {}
     }
@@ -5721,7 +6255,7 @@ fn effect_iterates_over_parent_target(effect: &Effect) -> bool {
 
 /// Recurse into compound filters so a wrapped `ParentTargetController` is
 /// detected wherever it appears (`Or { filters: [..., ParentTargetController, ...] }`).
-fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
+pub(crate) fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
     match filter {
         // CR 603.7c + CR 608.2c: a `ParentTargetSlot { index }` delayed effect
         // must snapshot the parent targets at creation, exactly like the broad
@@ -5750,6 +6284,7 @@ fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
             filters.iter().any(filter_refs_parent_target)
         }
         TargetFilter::Not { filter } => filter_refs_parent_target(filter),
+        TargetFilter::TrackedSetFiltered { filter, .. } => filter_refs_parent_target(filter),
         _ => false,
     }
 }
@@ -5828,6 +6363,30 @@ fn rebind_first_object_target(
     }
 }
 
+/// CR 701.20e + CR 608.2c: A carried look-result collection owns every object
+/// target on its immediate looping child, so each iteration must replace the
+/// complete object list with its one current member while retaining independent
+/// player targets. Ordinary member loops retain the established first-slot
+/// binding for their independent target slots.
+fn rebind_member_driven_parent_target(ability: &mut ResolvedAbility, member: ObjectId) {
+    if ability.context.parent_target_iteration_members.is_some() {
+        let insertion_index = ability
+            .targets
+            .iter()
+            .position(|target| matches!(target, TargetRef::Object(_)))
+            .unwrap_or(ability.targets.len());
+        ability
+            .targets
+            .retain(|target| !matches!(target, TargetRef::Object(_)));
+        ability.targets.insert(
+            insertion_index.min(ability.targets.len()),
+            TargetRef::Object(member),
+        );
+    } else {
+        rebind_first_object_target(&mut ability.targets, member);
+    }
+}
+
 /// CR 122.1 + CR 608.2c: Rebind a counter-kind-driven `ChooseOneOf` to the
 /// current iteration's counter kind. For each branch tagged
 /// `iteration_kind_binding == Some(RebindToIteratedKind)`, rewrites that
@@ -5900,6 +6459,9 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
         Effect::RemoveCounter { .. } => {
             counters::remove_counter_optional_is_infeasible(state, ability)
         }
+        // CR 701.61a + CR 608.2d: A player cannot choose to forage unless at
+        // least one complete forage mode is currently available.
+        Effect::Forage => !forage::can_forage(state, ability),
         Effect::CastFromZone {
             mode,
             target,
@@ -6641,6 +7203,13 @@ pub(crate) fn resolve_player_for_context_ref(
             return player;
         }
     }
+    // CR 608.2h + CR 113.7a: "~'s controller" reads the source's exact
+    // live-or-LKI incarnation. Do not fall through to `ability.controller`,
+    // which is the activating player for an activated ability.
+    if matches!(target_filter, TargetFilter::SourceController) {
+        return crate::game::targeting::resolve_effect_player_ref(state, ability, target_filter)
+            .unwrap_or(ability.controller);
+    }
     if let Some(target_ref) = crate::game::targeting::resolve_event_context_target(
         state,
         target_filter,
@@ -6691,6 +7260,16 @@ pub(crate) fn optional_prompt_player(state: &GameState, ability: &ResolvedAbilit
     if let Effect::PayCost { payer, .. } = &ability.effect {
         if let Some(player) =
             crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
+        {
+            return player;
+        }
+    }
+    // CR 608.2d: a parser-stamped subject such as "they may" names the player
+    // who receives this choice. The reference resolves from the trigger event,
+    // preserving the event-time controller rather than inferring from effect shape.
+    if let Some(optional_player) = &ability.optional_player {
+        if let Some(player) =
+            crate::game::targeting::resolve_effect_player_ref(state, ability, optional_player)
         {
             return player;
         }
@@ -7167,14 +7746,10 @@ fn amount_channel(effect: &Effect) -> Option<AmountChannel> {
         // CR 118.1: `PayCost`'s `cost` is an arbitrary `AbilityCost`, and only a
         // life payment emits the negative `LifeChanged` events this channel sums;
         // a mana / sacrifice / discard payment owns no amount here at all.
-        // CR 119.4b makes paying 0 life a real, always-legal payment whose result
-        // is zero, so a life payment SHOULD report it — but `pay::resolve` pushes
-        // no events whatsoever, so it emits no `EffectResolved` terminal marker
-        // and the completion half of the zero rule cannot be established for it.
-        // Closing this arm means first giving cost payment a terminal marker,
-        // which is its own change with its own blast radius (the per-player
-        // counts helper, the trigger matchers and the game log all read that
-        // event class).
+        // CR 118.1 + CR 119.4b: `PayCost` has no life-loss event of its own;
+        // the cost authority therefore stamps its completed life-payment result
+        // directly. Keep this event channel indistinguishable so mana-only
+        // costs still preserve the preceding amount.
         Effect::PayCost { .. } => (AmountEvents::LifeLost, ZeroSemantics::Indistinguishable),
         // CR 119.3 + CR 119.9: gaining zero life is not a life-GAIN EVENT, so
         // "whenever you gain life" correctly does not trigger — but CR 119.9
@@ -7517,7 +8092,7 @@ fn install_previous_effect_counts_by_player(
 ) -> bool {
     match counts_by_player {
         Some(counts_by_player) => {
-            let amount = counts_by_player.values().copied().max().unwrap_or(0);
+            let amount = counts_by_player.values().copied().sum();
             state.last_effect_count = Some(amount);
             state.last_effect_amount = Some(amount);
             state.last_effect_counts_by_player = counts_by_player;
@@ -7600,6 +8175,7 @@ pub(crate) enum PendingPlayerScopeSacrificeOutcome {
     Completed {
         events_before_sacrifice: usize,
         events_after_sacrifice: usize,
+        sacrificed_count: usize,
     },
 }
 
@@ -7608,6 +8184,7 @@ enum PlayerScopeSacrificePerformOutcome {
     Completed {
         events_before_sacrifice: usize,
         events_after_sacrifice: usize,
+        sacrificed_count: usize,
     },
 }
 
@@ -7870,6 +8447,7 @@ fn perform_player_scope_sacrifices(
             }
         }
     }
+    let sacrificed_count = completion.sacrificed.len();
     events.push(GameEvent::EffectResolved {
         kind: completion
             .effect_kind
@@ -7883,6 +8461,7 @@ fn perform_player_scope_sacrifices(
     Ok(PlayerScopeSacrificePerformOutcome::Completed {
         events_before_sacrifice,
         events_after_sacrifice,
+        sacrificed_count,
     })
 }
 
@@ -8040,9 +8619,11 @@ pub(crate) fn perform_collected_player_scope_sacrifices_with_completion(
         PlayerScopeSacrificePerformOutcome::Completed {
             events_before_sacrifice,
             events_after_sacrifice,
+            sacrificed_count,
         } => Ok(PendingPlayerScopeSacrificeOutcome::Completed {
             events_before_sacrifice,
             events_after_sacrifice,
+            sacrificed_count,
         }),
     }
 }
@@ -8141,9 +8722,11 @@ pub(crate) fn advance_pending_player_scope_sacrifice_choice(
         PlayerScopeSacrificePerformOutcome::Completed {
             events_before_sacrifice,
             events_after_sacrifice,
+            sacrificed_count,
         } => Ok(PendingPlayerScopeSacrificeOutcome::Completed {
             events_before_sacrifice,
             events_after_sacrifice,
+            sacrificed_count,
         }),
     }
 }
@@ -8170,9 +8753,11 @@ pub(crate) fn drain_pending_player_scope_sacrifice_after_replacement(
         PlayerScopeSacrificePerformOutcome::Completed {
             events_before_sacrifice,
             events_after_sacrifice,
+            sacrificed_count,
         } => Ok(PendingPlayerScopeSacrificeOutcome::Completed {
             events_before_sacrifice,
             events_after_sacrifice,
+            sacrificed_count,
         }),
     }
 }
@@ -8279,6 +8864,25 @@ pub fn resolve_ability_chain(
         // alongside `last_zone_changed_ids` so cross-resolution leakage is
         // impossible.
         state.last_vote_ballots = crate::im::Vector::new();
+        // CR 101.4 + CR 608.2d: Per-resolution secret-number ledger. A per-player
+        // `Effect::Choose { NumberRange }` fan-out records each answer as
+        // `ChosenAttribute::Number` on the chooser (`bind_named_choice`), and
+        // `QuantityRef::PlayerChosenNumber` folds those into "the highest/lowest
+        // number". `Player::chosen_attributes` is otherwise DURABLE (players never
+        // change zones), so without this reset a later card whose choosers are a
+        // SUBSET of the table — Life at Stake's "you and target creature's
+        // controller" — would fold in bystanders' numbers left over from an
+        // earlier Wheel of Misfortune. Cleared alongside `last_vote_ballots`, the
+        // sibling per-player choice ledger, for the same reason. The player axis
+        // stores no other `Number`, so nothing else is disturbed.
+        for player in state.players.iter_mut() {
+            player.chosen_attributes.retain(|attribute| {
+                !matches!(
+                    attribute,
+                    ChosenAttribute::Number(_) | ChosenAttribute::RevealedNumber(_)
+                )
+            });
+        }
         state.last_effect_amount = None;
         // CR 120.10: resolution-local excess channel resets with its total twin.
         state.last_effect_excess_amount = None;
@@ -9242,10 +9846,6 @@ fn resolve_chain_body(
                 // must be evaluated on its own regardless of whether this node's
                 // gate held. Without this, the noncreature rider never fires when
                 // the creature rider's gate is false (and vice-versa).
-                let sub_has_independent_event_gate = matches!(
-                    sub.condition.as_ref(),
-                    Some(AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. })
-                );
                 // CR 702.1c ("the same is true") + CR 608.2c (written order): A
                 // sub produced by per-item keyword-list replication
                 // (`SiblingCondition::ReplicatedOrBranch`) is an INDEPENDENT
@@ -9261,15 +9861,16 @@ fn resolve_chain_body(
                 // above, keyed on the replication marker rather than the condition
                 // variant (the gate here is a plain `ZoneChangeObjectMatchesFilter`
                 // / `QuantityCheck` that would otherwise look dependent).
-                let sub_is_replicated_or_branch = sub.sibling_condition
-                    == SiblingCondition::ReplicatedOrBranch
-                    && sub.sub_link == SubAbilityLink::SequentialSibling;
-                if sub
-                    .condition
-                    .as_ref()
-                    .is_some_and(condition_depends_on_effect_performed)
-                    || sub_has_independent_event_gate
-                    || sub_is_replicated_or_branch
+                //
+                // All THREE of the above independent-sub classes are the single
+                // authority `sub_outlives_false_parent_gate`, which
+                // `triggers::delayed_body_outlives_a_false_gate` also consults so
+                // the CR 603.4 fire-time hoist declines on EXACTLY the sub shapes
+                // this resolution path still runs. Only the unconditional
+                // `SequentialSibling` escape below is local to this call site —
+                // CR 603.4 says that clause must NOT survive a false gate on a
+                // delayed body, so the hoist deliberately does not mirror it.
+                if sub_outlives_false_parent_gate(sub)
                     || (sub.sub_link == SubAbilityLink::SequentialSibling
                         && sub.condition.is_none())
                 {
@@ -9385,17 +9986,22 @@ fn resolve_chain_body(
                 .collect();
             if let Some(first) = opponent_order.first().copied() {
                 let remaining = opponent_order.split_off(1);
-                state.push_optional_effect_frame(OptionalEffectFrame {
-                    ability: Box::new(ability_with_event_context_targets(state, ability)),
-                    trigger_event: state.current_trigger_event.clone(),
-                    trigger_match_count: state.current_trigger_match_count,
-                });
-                state.waiting_for = WaitingFor::OpponentMayChoice {
-                    player: first,
-                    source_id: ability.source_id,
-                    description,
-                    remaining,
-                };
+                state
+                    .install_direct_choice_frame(
+                        ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+                            ability: Box::new(ability_with_event_context_targets(state, ability)),
+                            trigger_event: state.current_trigger_event.clone(),
+                            trigger_events: state.current_trigger_events.clone(),
+                            trigger_match_count: state.current_trigger_match_count,
+                        }),
+                        WaitingFor::OpponentMayChoice {
+                            player: first,
+                            source_id: ability.source_id,
+                            description,
+                            remaining,
+                        },
+                    )
+                    .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
             }
             return Ok(());
         }
@@ -9460,26 +10066,34 @@ fn resolve_chain_body(
                 return Ok(());
             }
         }
-        state.push_optional_effect_frame(OptionalEffectFrame {
-            ability: Box::new(ability_with_event_context_targets(state, ability)),
-            // CR 608.2: capture the triggering event in lockstep with the stashed
-            // ability while `current_trigger_event` is still live (we are inside
-            // `execute_effect`). Restored when the optional decision resumes so an
-            // optional ("may") trigger's effect resolves `TriggeringPlayer` and
-            // other event-context refs exactly as a non-optional trigger would.
-            trigger_event: state.current_trigger_event.clone(),
-            // CR 603.2c + CR 608.2: mirror the batched-trigger subject count so a
-            // "you may" sub-ability of a batched trigger (Ur-Dragon's optional
-            // permanent-from-hand sub-effect) resumes with the same
-            // `EventContextAmount` the pre-pause resolution observed.
-            trigger_match_count: state.current_trigger_match_count,
-        });
-        state.waiting_for = WaitingFor::OptionalEffectChoice {
-            player: prompt_player,
-            source_id: ability.source_id,
-            description,
-            may_trigger_key,
-        };
+        state
+            .install_direct_choice_frame(
+                ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+                    ability: Box::new(ability_with_event_context_targets(state, ability)),
+                    // CR 608.2: capture the triggering event in lockstep with the stashed
+                    // ability while `current_trigger_event` is still live (we are inside
+                    // `execute_effect`). Restored when the optional decision resumes so an
+                    // optional ("may") trigger's effect resolves `TriggeringPlayer` and
+                    // other event-context refs exactly as a non-optional trigger would.
+                    trigger_event: state.current_trigger_event.clone(),
+                    // CR 603.2c + CR 608.2: capture the PLURAL event batch in lockstep so a
+                    // "you may" reproduction (Captain Marvel, Apex Avenger) folds every
+                    // `CounterAdded` occurrence when the decision resumes.
+                    trigger_events: state.current_trigger_events.clone(),
+                    // CR 603.2c + CR 608.2: mirror the batched-trigger subject count so a
+                    // "you may" sub-ability of a batched trigger (Ur-Dragon's optional
+                    // permanent-from-hand sub-effect) resumes with the same
+                    // `EventContextAmount` the pre-pause resolution observed.
+                    trigger_match_count: state.current_trigger_match_count,
+                }),
+                WaitingFor::OptionalEffectChoice {
+                    player: prompt_player,
+                    source_id: ability.source_id,
+                    description,
+                    may_trigger_key,
+                },
+            )
+            .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
         return Ok(());
     }
 
@@ -9496,7 +10110,15 @@ fn resolve_chain_body(
     // CR 118.12 + CR 118.12a: "Effect unless [player] pays {cost}" —
     // intercepted here for both tax triggers and counter-target-spell unless
     // costs. Post-fold, the cost is the unified `AbilityCost` taxonomy.
-    if let Some(ref unless_pay) = ability.unless_pay {
+    // CR 608.2c + CR 118.12a: A member-driven "for each" loop offers its
+    // unless payment once for each bound member, not once against the full
+    // parent target collection. Defer interception until the loop below
+    // re-enters this chain with its singleton iteration ability.
+    if let Some(unless_pay) = ability
+        .unless_pay
+        .as_ref()
+        .filter(|_| !has_member_driven_repeat_after_hydration(state, ability))
+    {
         // CR 603.2 + CR 118.12a: Hydrate event-context targets before payer
         // resolution so trigger unless-costs ("that player ... unless they pay")
         // do not silently fall through when `ability.targets` is still empty
@@ -9788,6 +10410,7 @@ fn resolve_chain_body(
 
     // CR 603.7: Snapshot event count so we can detect objects moved by this effect.
     let events_before = events.len();
+    let mut immediate_effect_result = None;
 
     // Skip no-op unimplemented/runtime-handled effects, and a random
     // `Effect::Choose` already resolved above by `resolve_random_in_chain`.
@@ -9868,12 +10491,24 @@ fn resolve_chain_body(
                         // the same `effective` ability, so members and count match
                         // (including `OtherThanTriggerObject` handling).
                         let ctx = filter::FilterContext::from_ability(effective);
-                        crate::game::quantity::object_count_matching_ids(
-                            state,
-                            filter,
-                            &ctx,
-                            effective.source_id,
-                        )
+                        if let Some(candidate_ids) =
+                            effective.context.parent_target_iteration_members.clone()
+                        {
+                            crate::game::quantity::object_count_matching_candidate_ids(
+                                state,
+                                candidate_ids,
+                                filter,
+                                &ctx,
+                                effective.source_id,
+                            )
+                        } else {
+                            crate::game::quantity::object_count_matching_ids(
+                                state,
+                                filter,
+                                &ctx,
+                                effective.source_id,
+                            )
+                        }
                     }
                     _ => Vec::new(),
                 };
@@ -9970,9 +10605,13 @@ fn resolve_chain_body(
             // exiled cards…" — Disorder in the Court) and runs exactly once AFTER
             // the loop — it falls through to the generic sub tail below.
             let repeated_full_chain = ability.repeat_for.is_some()
-                && effective.sub_ability.as_deref().is_some_and(|sub| {
+                && (effective.sub_ability.as_deref().is_some_and(|sub| {
                     member_driven || kind_driven || sub.sub_link == SubAbilityLink::ContinuationStep
-                });
+                })
+                    // CR 118.12a: a per-member/per-kind unless payment must run
+                    // through resolve_ability_chain so its individual bound
+                    // target reaches the payment gate before the effect resolves.
+                    || ((member_driven || kind_driven) && effective.unless_pay.is_some()));
             while iteration < iterations {
                 // Snapshot per-iteration ability with parent-target rebinding when
                 // applicable. CR 109.5: the rebind is SINGLE-slot — every reachable
@@ -9991,7 +10630,7 @@ fn resolve_chain_body(
                     if member.is_some() || is_replacement_added_copy || kind_driven {
                         iter_ability = effective.clone();
                         if let Some(member) = member {
-                            rebind_first_object_target(&mut iter_ability.targets, member);
+                            rebind_member_driven_parent_target(&mut iter_ability, member);
                         }
                         // CR 122.1 + CR 608.2c: rebind this iteration's dynamic
                         // ChooseOneOf branch to the current counter kind.
@@ -10007,7 +10646,7 @@ fn resolve_chain_body(
                         // so each iteration fires its own `OptionalEffectChoice`.
                         // Clear `repeat_for` on the clone so the inner chain does
                         // not re-enter this outer loop.
-                        if kind_driven || (member_driven && iter_ability.optional) {
+                        if kind_driven || member_driven {
                             iter_ability.repeat_for = None;
                         }
                         if let (true, Effect::CopySpell { retarget, .. }) =
@@ -10039,7 +10678,11 @@ fn resolve_chain_body(
                     // resolution, mirroring the drain-path resume at depth 1.
                     let _ = resolve_ability_chain(state, iter_effective, events, depth.max(1));
                 } else {
-                    let _ = resolve_effect(state, iter_effective, events);
+                    if let Ok(result) = resolve_effect(state, iter_effective, events) {
+                        if iterations == 1 {
+                            immediate_effect_result = result;
+                        }
+                    }
                 }
                 // CR 608.2c + CR 109.5: When the inner effect enters an
                 // interactive WaitingFor (e.g. SearchChoice), stash the
@@ -10104,6 +10747,22 @@ fn resolve_chain_body(
         } // end shares_quality_failed else
     }
 
+    // CR 701.61a + CR 608.2c: Forage owns the nested B→C→tail chain it
+    // constructs at runtime. Its nested completion node is the sole publisher
+    // of the action and its ledgers; the outer frame must not walk or publish
+    // the same tail a second time.
+    if matches!(ability.effect, Effect::Forage) {
+        return Ok(());
+    }
+    // CR 608.2c + CR 701.55d: ChooseOneOf snapshots its runtime tail in the
+    // typed branch-choice carrier and attaches it only to the final selected
+    // branch. The generic walker must not also park the same sub-ability.
+    if matches!(ability.effect, Effect::ChooseOneOf { .. })
+        && matches!(state.waiting_for, WaitingFor::ChooseOneOfBranch { .. })
+    {
+        return Ok(());
+    }
+
     if matches!(ability.effect, Effect::ChangeZone { .. })
         && matches!(state.waiting_for, WaitingFor::Priority { .. })
         && state.active_change_zone_frame().is_none()
@@ -10154,6 +10813,15 @@ fn resolve_chain_body(
             _ => None,
         })
         .collect();
+    let result_context_owned;
+    let ability = if let Some(result) = immediate_effect_result {
+        let mut owned = ability.clone();
+        owned.context.prior_effect_result = Some(result);
+        result_context_owned = owned;
+        &result_context_owned
+    } else {
+        ability
+    };
     // CR 701.9a + CR 608.2c + CR 400.7: Capture the result from the active,
     // operation-owned discard frame. Unlike an event-slice or global ledger,
     // the frame remains exact through replacement redirection and cannot be
@@ -10217,6 +10885,19 @@ fn resolve_chain_body(
             state.player_actions_this_turn.push((*player_id, *action));
         }
     }
+
+    // CR 608.2c: Normalize the actual completion outcome before the printed
+    // tail is evaluated. A count/cause mismatch remains a resolved no-op and
+    // therefore keeps `WhenYouDo` / `IfYouDo` descendants false.
+    let completion_outcome_owned;
+    let ability = if matches!(ability.effect, Effect::CompletePlayerAction { .. }) {
+        let mut owned = ability.clone();
+        owned.set_optional_effect_performed_recursive(complete_player_action::succeeded(ability));
+        completion_outcome_owned = owned;
+        &completion_outcome_owned
+    } else {
+        ability
+    };
 
     // CR 603.7: Record the objects affected by this effect as a tracked set so
     // downstream sub-abilities can resolve "this way" references (pronouns,
@@ -10665,9 +11346,22 @@ fn resolve_chain_body(
             // resolution choice would mis-defer e.g. a `Sacrifice`→`EffectZoneChoice`
             // →`TargetMatchesFilter`-gated sibling, whose completion leaves
             // `cont.chain.targets` empty (it uses the tracked-set/ParentTarget path).
+            // CR 608.2c + CR 111.1 + CR 303.4f: The `last_created_token_ids`
+            // twin of the `last_zone_changed_ids` deferral above. A token entry
+            // publishes "the token created this way" only when the entry
+            // FINISHES; while it is suspended mid-entry — on a CR 616.1
+            // replacement-ordering prompt, or on the CR 303.4f host prompt a
+            // token copy of an Aura raises — the ledger still names the previous
+            // instruction's tokens (or nothing at all). Evaluating a gate like
+            // Yenna, Redtooth Regent's "If the token is an Aura, untap Yenna,
+            // then scry 2" there reads that stale population, so the whole
+            // trailing sentence was silently dropped. Defer it WITH its
+            // condition; the drain re-evaluates it at chain top after the entry
+            // completes, which is the order CR 608.2c requires anyway.
             if waits_for_resolution_choice(&state.waiting_for)
                 && (condition_depends_on_effect_performed(condition)
                     || condition_depends_on_zone_change_this_way(condition)
+                    || condition_depends_on_last_created(condition)
                     || matches!(condition, AbilityCondition::WhenYouDo)
                     || (matches!(state.waiting_for, WaitingFor::SearchChoice { .. })
                         && condition_depends_on_result_object(condition))
@@ -10748,11 +11442,8 @@ fn resolve_chain_body(
                         && !state.last_revealed_ids.is_empty()
                         && effect_writes_last_revealed_ids(&ability.effect)
                     {
-                        else_resolved.targets = state
-                            .last_revealed_ids
-                            .iter()
-                            .map(|&id| TargetRef::Object(id))
-                            .collect();
+                        else_resolved.targets =
+                            inject_last_revealed_targets(state, ability, else_branch.as_ref());
                     } else if should_propagate_parent_targets(ability, &else_resolved) {
                         else_resolved.targets = ability.targets.clone();
                     }
@@ -10762,6 +11453,7 @@ fn resolve_chain_body(
                         effect_context_object.as_ref(),
                         state,
                     );
+                    stamp_parent_target_iteration_members(&mut else_resolved);
                     if try_begin_deferred_else_branch_target_selection(
                         state,
                         &mut else_resolved,
@@ -11088,6 +11780,27 @@ fn resolve_chain_body(
                 );
                 resolve_ability_chain(state, &trailing_resolved, events, depth + 1)?;
             }
+        } else if ability.forward_result
+            && forwarded_objects.is_empty()
+            && ability_chain_refs_parent_target(sub)
+        {
+            // CR 608.2c: A forward-result continuation is anchored to the object
+            // moved by the preceding instruction. If no object moved, that
+            // instruction has no referent for dependent riders such as "it gains
+            // haste" or "sacrifice it"; do not let ParentTarget fall back to the
+            // original ability source. Walk past dependent sequential siblings
+            // and resume at the first independent sibling instead of terminating
+            // the entire printed instruction chain.
+            if let Some(mut remaining) = without_missing_forward_result_dependencies(sub) {
+                apply_parent_chain_context(
+                    &mut remaining,
+                    ability,
+                    effect_context_object.as_ref(),
+                    state,
+                );
+                resolve_ability_chain(state, &remaining, events, depth + 1)?;
+            }
+            return Ok(());
         } else if !forwarded_objects.is_empty() {
             let mut sub_with_context = sub.as_ref().clone();
             // CR 707.10: `CopySpell { SelfRef }` copies the resolving spell
@@ -11239,6 +11952,7 @@ fn resolve_chain_body(
                 effect_context_object.as_ref(),
                 state,
             );
+            stamp_parent_target_iteration_members(&mut sub_with_targets);
             resolve_ability_chain(state, &sub_with_targets, events, depth + 1)?;
         } else if sub.targets.is_empty()
             && !state.last_zone_changed_ids.is_empty()
@@ -11417,6 +12131,83 @@ fn resolve_chain_body(
     Ok(())
 }
 
+/// CR 608.2c + CR 603.7c: Detect a ParentTarget dependency anywhere in a
+/// continuation, including a delayed-trigger payload whose AbilityDefinition
+/// is nested inside the current effect. This keeps a missing forward-result
+/// object from rebinding an inner rider to the original source while allowing
+/// independent sequential siblings to continue.
+fn ability_chain_refs_parent_target(ability: &ResolvedAbility) -> bool {
+    effect_chain_refs_parent_target(&ability.effect)
+        || ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_chain_refs_parent_target)
+        || ability
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_chain_refs_parent_target)
+}
+
+fn ability_definition_chain_refs_parent_target(definition: &AbilityDefinition) -> bool {
+    effect_chain_refs_parent_target(&definition.effect)
+        || definition
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_definition_chain_refs_parent_target)
+        || definition
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_definition_chain_refs_parent_target)
+}
+
+fn effect_chain_refs_parent_target(effect: &Effect) -> bool {
+    effect_refs_parent_target(effect)
+        || matches!(
+            effect,
+            Effect::CreateDelayedTrigger { effect: definition, .. }
+                if ability_definition_chain_refs_parent_target(definition)
+        )
+}
+
+/// CR 608.2c: Remove only continuation nodes whose effects require the absent
+/// forward-result object. Preserve independent instructions and both of their
+/// continuation edges; when a dependent node is removed, resume at its next
+/// `SequentialSibling` rather than treating a dependent `ContinuationStep` as
+/// independently executable.
+fn without_missing_forward_result_dependencies(
+    ability: &ResolvedAbility,
+) -> Option<ResolvedAbility> {
+    if effect_chain_refs_parent_target(&ability.effect) {
+        return first_independent_forward_result_sibling(ability.sub_ability.as_deref());
+    }
+
+    let mut remaining = ability.clone();
+    remaining.sub_ability = ability
+        .sub_ability
+        .as_deref()
+        .and_then(without_missing_forward_result_dependencies)
+        .map(Box::new);
+    remaining.else_ability = ability
+        .else_ability
+        .as_deref()
+        .and_then(without_missing_forward_result_dependencies)
+        .map(Box::new);
+    Some(remaining)
+}
+
+fn first_independent_forward_result_sibling(
+    ability: Option<&ResolvedAbility>,
+) -> Option<ResolvedAbility> {
+    let mut current = ability;
+    while let Some(sibling) = current {
+        if sibling.sub_link == SubAbilityLink::SequentialSibling {
+            return without_missing_forward_result_dependencies(sibling);
+        }
+        current = sibling.sub_ability.as_deref();
+    }
+    None
+}
+
 fn effect_depends_on_missing_chosen_player(ability: &ResolvedAbility) -> bool {
     ability
         .effect
@@ -11489,6 +12280,35 @@ pub(crate) fn evaluate_condition(
     ability: &ResolvedAbility,
 ) -> bool {
     match condition {
+        AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn => {
+            let Some(dying_object) =
+                state
+                    .current_trigger_event
+                    .as_ref()
+                    .and_then(|event| match event {
+                        GameEvent::CreatureDestroyed { object_id }
+                        | GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
+                        _ => None,
+                    })
+            else {
+                return false;
+            };
+            let source_incarnation = ability
+                .trigger_source_incarnation()
+                .or(ability.source_incarnation);
+            state.damage_dealt_this_turn.iter().any(|record| {
+                record.source_id == ability.source_id
+                    && record
+                        .source_incarnation
+                        .is_none_or(|recorded| source_incarnation == Some(recorded))
+                    && crate::game::triggers::damage_record_matches_dying_object(
+                        state,
+                        record,
+                        dying_object,
+                        state.current_trigger_event.as_ref(),
+                    )
+            })
+        }
         // CR 702.33d + CR 702.33f + CR 608.2c: Parameterized additional-cost
         // gating. The default shape (`variant: None`, `min_count: 1`) reads the
         // legacy single-bool flag used by Gift / Buyback / Bargain / Evidence /
@@ -11585,7 +12405,8 @@ pub(crate) fn evaluate_condition(
             | crate::types::ability::ObjectScope::OtherRevealedCard
             | crate::types::ability::ObjectScope::OwnedLinkedExileCard
             | crate::types::ability::ObjectScope::EventTarget
-            | crate::types::ability::ObjectScope::AmassedArmy => false,
+            | crate::types::ability::ObjectScope::AmassedArmy
+            | crate::types::ability::ObjectScope::BatchSource => false,
         },
         AbilityCondition::AlternativeManaCostPaid => ability.context.alternative_mana_cost_paid,
         AbilityCondition::EffectOutcome {
@@ -11811,7 +12632,8 @@ pub(crate) fn evaluate_condition(
                 | crate::types::ability::ObjectScope::OtherRevealedCard
                 | crate::types::ability::ObjectScope::OwnedLinkedExileCard
                 | crate::types::ability::ObjectScope::EventTarget
-                | crate::types::ability::ObjectScope::AmassedArmy => None,
+                | crate::types::ability::ObjectScope::AmassedArmy
+                | crate::types::ability::ObjectScope::BatchSource => None,
             };
             object_id
                 .and_then(|id| state.objects.get(&id))
@@ -11915,6 +12737,29 @@ pub(crate) fn evaluate_condition(
             crate::game::restrictions::spell_cast_with_variant_this_turn(state, variant)
         }
         AbilityCondition::IsMonarch => eval_is_monarch(state, ability.controller),
+        // CR 903.3d: "If an effect refers to controlling a commander, it refers to
+        // a permanent on the battlefield that is a commander." CR 903.3 + CR 109.5
+        // narrow the Lieutenant reading ("your commander") to a commander the
+        // player also OWNS, because the designation is an attribute of the card
+        // itself — a stolen commander is still its owner's.
+        //
+        // Delegates to the single `game::commander` authority — the same helpers
+        // `layers::evaluate_static_condition`, `triggers` and `restrictions` use
+        // for the three sibling mirrors — so `Own` cannot be silently widened to
+        // "any commander you control", and the CR 702.26b phased-out exclusion is
+        // applied once, in one place.
+        //
+        // CR 109.5 + CR 603.7d: "you" is the resolving ability's controller; for a
+        // delayed triggered ability that is the player who controlled the creating
+        // spell as it resolved, which is already stamped onto the delayed ability.
+        AbilityCondition::ControlsCommander { ownership } => match ownership {
+            CommanderOwnership::Own => {
+                crate::game::commander::controls_own_commander(state, ability.controller)
+            }
+            CommanderOwnership::Any => {
+                crate::game::commander::controls_any_commander(state, ability.controller)
+            }
+        },
         // CR 309.7: dungeon completion is a controller-state predicate, evaluated
         // as the ability resolves. Delegates to the single truth function shared
         // with `TriggerCondition::CompletedDungeon` so the intervening-if reading
@@ -12532,6 +13377,48 @@ fn expand_per_counter(base: &AbilityCost, n: u32) -> AbilityCost {
             zone: Some(Zone::Library),
             filter: None,
         },
+        // CR 702.24a: Aboroth-class cumulative upkeep repeats the source
+        // counter placement once for every age counter. Scaling its quantity
+        // keeps it a single deterministic effect-cost payment, so the shared
+        // counter replacement pipeline sees the complete payment at once.
+        AbilityCost::EffectCost { effect } => match effect.as_ref() {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target: TargetFilter::SelfRef,
+            } => AbilityCost::EffectCost {
+                effect: Box::new(Effect::PutCounter {
+                    counter_type: counter_type.clone(),
+                    count: count.scaled_by(n),
+                    target: TargetFilter::SelfRef,
+                }),
+            },
+            // CR 702.24a: Every age counter requires a separate instance of
+            // the fixed mana-producing cost. Combining its fixed color vector
+            // keeps the result a single deterministic EffectCost while adding
+            // the same number of mana units as N separate resolutions.
+            Effect::Mana {
+                produced: ManaProduction::Fixed { .. },
+                target: None,
+                ..
+            } => {
+                let mut scaled_effect = effect.as_ref().clone();
+                let Effect::Mana {
+                    produced: ManaProduction::Fixed { colors, .. },
+                    ..
+                } = &mut scaled_effect
+                else {
+                    unreachable!("matched fixed mana effect cost")
+                };
+                *colors = colors.repeat(n as usize);
+                AbilityCost::EffectCost {
+                    effect: Box::new(scaled_effect),
+                }
+            }
+            _ => AbilityCost::Composite {
+                costs: vec![base.clone(); n as usize],
+            },
+        },
         // YAGNI fallback: no current cumulative-upkeep card uses these
         // base variants. If a future mechanic does, the
         // Composite-of-N-copies expansion is semantically correct for
@@ -12610,6 +13497,9 @@ fn resolve_grant_next_spell_ability(
         | PlayerScope::AllPlayers { .. }
         | PlayerScope::RecipientController
         | PlayerScope::AnyTurn
+        // CR 611.2 + CR 514.2: duration-timing-only, like `AnyTurn` — never reached
+        // from a value/quantity/player-selection position.
+        | PlayerScope::SpecificPlayer { .. }
         | PlayerScope::DefendingPlayer
         | PlayerScope::ParentObjectTargetController
         | PlayerScope::SourceChosenPlayer => ability.controller,
@@ -12752,6 +13642,85 @@ mod tests {
     // that much damage. Before the fix the returned card was not bound as the
     // earlier-instruction referent (only PUBLIC-zone moves were), so the damage
     // resolved to 0.
+    /// CR 903.3 vs CR 903.3d: the `evaluate_condition` commander arm's TWO
+    /// ownership readings must stay distinct, and BOTH must be driven.
+    ///
+    /// `Own` (CR 903.3 + CR 109.5, the Lieutenant reading) is owned AND
+    /// controlled; `Any` (CR 903.3d) is controlled by any owner. The single
+    /// discriminating fixture is a STOLEN commander: P1 owns it, P0 controls it.
+    /// `Any` must be true and `Own` must be false against the same state — an
+    /// `Any` arm that collapsed to the `Own` helper (or vice versa) fails here
+    /// even though every card shipping today produces only `Own`.
+    ///
+    /// This is deliberately a unit assertion on the production resolver arm
+    /// rather than a card fixture: a card-data census shows Fight for the Throne
+    /// is the sole producer of `AbilityCondition::ControlsCommander` and it is
+    /// `Own`, so the `Any` arm has no reachable card to drive it yet.
+    #[test]
+    fn evaluate_condition_commander_ownership_arms_are_distinct() {
+        let mut state = GameState::new_two_player(42);
+        // CR 903.3: the designation is an attribute of the CARD, so this
+        // commander stays P1's however control moves.
+        let stolen = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Opposing Commander".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&stolen).expect("staged commander");
+            obj.is_commander = true;
+            // CR 613.1b (Layer 2): control moved to P0, ownership unchanged.
+            obj.base_controller = Some(PlayerId(0));
+            obj.controller = PlayerId(0);
+        }
+        // Non-vacuity guard: the owner/controller divergence must really exist,
+        // or neither assertion below discriminates anything.
+        let staged = state.objects.get(&stolen).expect("staged commander");
+        assert_eq!(
+            staged.owner,
+            PlayerId(1),
+            "the fixture only isolates the owner conjunct if P1 still OWNS it"
+        );
+        assert_eq!(
+            staged.controller,
+            PlayerId(0),
+            "the fixture only isolates the controller conjunct if P0 CONTROLS it"
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::BecomeMonarch,
+            Vec::new(),
+            ObjectId(999),
+            PlayerId(0),
+        );
+
+        assert!(
+            evaluate_condition(
+                &AbilityCondition::ControlsCommander {
+                    ownership: CommanderOwnership::Any,
+                },
+                &state,
+                &ability,
+            ),
+            "CR 903.3d: \"a commander\" is controller-only, so a stolen opponent's \
+             commander satisfies it"
+        );
+        assert!(
+            !evaluate_condition(
+                &AbilityCondition::ControlsCommander {
+                    ownership: CommanderOwnership::Own,
+                },
+                &state,
+                &ability,
+            ),
+            "CR 903.3 + CR 109.5: \"your commander\" also requires ownership, so the \
+             stolen commander must NOT satisfy it. A true here means the Own arm was \
+             widened to controls_any_commander"
+        );
+    }
+
     #[test]
     fn continuation_resume_preserves_live_delayed_trigger_firing() {
         let mut state = GameState::new_two_player(42);
@@ -12775,6 +13744,117 @@ mod tests {
             Some(live),
             "a disagreeing continuation carrier must not overwrite active delayed identity"
         );
+    }
+
+    #[test]
+    fn carried_member_rebind_retains_independent_player_target() {
+        let mut ability = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "member rebind probe".to_string(),
+                description: None,
+            },
+            vec![
+                TargetRef::Object(ObjectId(1)),
+                TargetRef::Player(PlayerId(2)),
+                TargetRef::Object(ObjectId(3)),
+            ],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        ability.context.parent_target_iteration_members = Some(vec![ObjectId(1), ObjectId(3)]);
+
+        rebind_member_driven_parent_target(&mut ability, ObjectId(4));
+
+        assert_eq!(
+            ability.targets,
+            vec![TargetRef::Object(ObjectId(4)), TargetRef::Player(PlayerId(2))],
+            "a carried collection replaces all of its object members but retains an independent selected player target"
+        );
+    }
+
+    /// CR 608.2c + CR 118.12a: Every member-driven iteration must re-enter the
+    /// unless-payment gate with exactly one bound parent target. In particular,
+    /// a non-optional loop with no sub-ability must re-enter
+    /// `resolve_ability_chain`, because that chain owns the unless-payment gate.
+    #[test]
+    fn member_driven_unless_loop_prompts_for_its_first_bound_member() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Loop source".to_string(),
+            Zone::Battlefield,
+        );
+        let first = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "First creature".to_string(),
+            Zone::Battlefield,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Second creature".to_string(),
+            Zone::Battlefield,
+        );
+        for object_id in [first, second] {
+            state
+                .objects
+                .get_mut(&object_id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let creature_filter = TargetFilter::Typed(TypedFilter::creature());
+        let mut ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::ParentTarget,
+                cant_regenerate: false,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: creature_filter,
+            },
+        });
+        ability.unless_pay = Some(UnlessPayModifier {
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+            },
+            payer: TargetFilter::Controller,
+        });
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("member-driven unless loop should arm its first payment prompt");
+
+        let WaitingFor::UnlessPayment { pending_effect, .. } = &state.waiting_for else {
+            panic!(
+                "expected an unless-payment prompt, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert!(
+            pending_effect.repeat_for.is_none(),
+            "the bound iteration must not re-enter the outer repeat loop"
+        );
+        assert_eq!(
+            pending_effect.targets.len(),
+            1,
+            "the prompt must be bound to one loop member"
+        );
+        assert!(matches!(
+            pending_effect.targets.as_slice(),
+            [TargetRef::Object(id)] if *id == first || *id == second
+        ));
     }
 
     #[test]
@@ -14283,6 +15363,7 @@ mod tests {
             action: crate::types::events::PlayerActionKind::SearchedLibrary,
             look_count: None,
             scry_bottom_count: None,
+            scry_top_count: None,
         });
         let ability = ResolvedAbility::new(
             Effect::Draw {
@@ -14543,6 +15624,7 @@ mod tests {
             card_id: CardId(99),
             controller: PlayerId(1),
             object_id: ObjectId(99),
+            cast_mana_value: None,
         });
 
         let mut events = Vec::new();
@@ -17373,6 +18455,7 @@ mod tests {
                     target: TargetFilter::Any,
                     enters_under: None,
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
                     enter_with_counters: vec![],
                     face_down_profile: None,
                     library_position: None,
@@ -18409,6 +19492,7 @@ mod tests {
                     },
                     enters_under: None,
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
                     enter_with_counters: vec![],
                     face_down_profile: None,
                     library_position: None,
@@ -18508,6 +19592,7 @@ mod tests {
                     },
                     enters_under: None,
                     enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
                     enter_with_counters: vec![],
                     face_down_profile: None,
                     library_position: None,
@@ -18581,6 +19666,7 @@ mod tests {
                 target: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -20602,6 +21688,7 @@ mod tests {
                 target: TargetFilter::ExiledBySource,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -20668,6 +21755,7 @@ mod tests {
                 target: TargetFilter::ExiledBySource,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -20748,6 +21836,7 @@ mod tests {
                 target: TargetFilter::ExiledBySource,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -22106,6 +23195,50 @@ mod tests {
             state.players[1].hand.len(),
             0,
             "P1 should not draw — ledger cleared at chain depth 0"
+        );
+    }
+
+    /// CR 101.4 + CR 608.2d: the per-player secret-number ledger is cleared at
+    /// chain depth 0 too, for the same reason as `last_vote_ballots`. Players
+    /// never change zones, so `Player::chosen_attributes` is otherwise durable:
+    /// without the reset, a card whose choosers are a SUBSET of the table (Life
+    /// at Stake's two choosers) would fold bystanders' numbers left over from an
+    /// earlier Wheel of Misfortune into its "highest number".
+    ///
+    /// Fail-on-revert: drop the reset and the stale `Number(9)` below survives,
+    /// so the extremum reads 9 instead of 0.
+    #[test]
+    fn player_chosen_numbers_clear_at_chain_boundary() {
+        use crate::types::ability::{AggregateFunction, ChosenAttribute, PlayerScope};
+
+        let mut state = GameState::new_two_player(42);
+        // A number left behind by an earlier resolution.
+        state.players[1].chosen_attributes = vec![ChosenAttribute::Number(9)];
+
+        let ability = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(100), PlayerId(0));
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(
+            state.players[1].chosen_attributes.is_empty(),
+            "a fresh top-level resolution must not inherit a prior one's secret numbers"
+        );
+        assert_eq!(
+            crate::game::quantity::resolve_quantity(
+                &state,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::PlayerChosenNumber {
+                        player: PlayerScope::AllPlayers {
+                            aggregate: AggregateFunction::Max,
+                            exclude: None,
+                        },
+                    },
+                },
+                PlayerId(0),
+                ObjectId(100),
+            ),
+            0,
+            "with no numbers chosen this resolution the extremum is empty"
         );
     }
 
@@ -27065,8 +28198,10 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_order: crate::types::ability::DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             },
         )
@@ -27699,8 +28834,10 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_order: crate::types::ability::DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             },
         )
@@ -27758,6 +28895,7 @@ mod tests {
             card_id: CardId(9000),
             controller: PlayerId(1),
             object_id: ObjectId(9000),
+            cast_mana_value: None,
         });
 
         assert!(
@@ -27888,6 +29026,7 @@ mod tests {
             card_id: CardId(9000),
             controller: PlayerId(0),
             object_id: ObjectId(9000),
+            cast_mana_value: None,
         });
 
         // The caster (seat 0) and its teammate (seat 1) are NOT opponents.
@@ -27936,6 +29075,7 @@ mod tests {
             target,
             enters_under: None,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: None,
@@ -27950,6 +29090,7 @@ mod tests {
             target,
             enters_under: None,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: None,
@@ -28075,6 +29216,23 @@ mod tests {
             ),
             Some(HashMap::new()),
             "a completed no-move ChangeZoneAll must replace stale counts with an empty map"
+        );
+    }
+
+    #[test]
+    fn count_producer_installs_total_scalar_alongside_per_player_counts() {
+        let mut state = GameState::new_two_player(42);
+        install_previous_effect_counts_by_player(
+            &mut state,
+            Some(HashMap::from([(PlayerId(0), 1), (PlayerId(1), 1)])),
+            false,
+        );
+
+        assert_eq!(state.last_effect_count, Some(2));
+        assert_eq!(state.last_effect_amount, Some(2));
+        assert_eq!(
+            state.last_effect_counts_by_player,
+            HashMap::from([(PlayerId(0), 1), (PlayerId(1), 1)])
         );
     }
 
@@ -28814,16 +29972,10 @@ mod tests {
         );
     }
 
-    /// NOT CLOSED (#6956): CR 118.1 + CR 119.4b say paying 0 life is a real,
-    /// always-legal payment whose result is zero, so this SHOULD read 0 — but
-    /// `pay::resolve` emits no `EffectResolved` terminal marker, so the
-    /// completion half of the zero rule cannot be established for
-    /// `Effect::PayCost`. Pinned at the PREDECESSOR behaviour
-    /// (the preceding step's 7 survives) so the arm's status is a visible,
-    /// asserted fact rather than an untested assumption. Flipping this
-    /// expectation to 0 is the acceptance test for the follow-up.
+    /// CR 118.1 + CR 119.4b: Paying 0 life is a real, always-legal payment,
+    /// so its completed result overwrites the preceding amount with zero.
     #[test]
-    fn zero_life_pay_cost_is_not_yet_distinguished_from_an_absent_producer() {
+    fn zero_life_pay_cost_overwrites_the_preceding_amount() {
         let (mut state, source) = state_for_previous_amount_probe();
         let drawn = previous_effect_amount_seen_by_next_clause(
             &mut state,
@@ -28838,9 +29990,8 @@ mod tests {
             vec![],
         );
         assert_eq!(
-            drawn, 7,
-            "PayCost has no terminal marker, so its zero cannot yet be told apart \
-             from an absent producer; see `amount_channel`'s PayCost arm"
+            drawn, 0,
+            "a completed zero-life PayCost must not leave the preceding amount in place"
         );
     }
 
@@ -29034,5 +30185,185 @@ mod tests {
             "CR 122.1: only 2 counters existed, so the re-anchoring consumer must \
              read the 2 actually removed — not the 7 the relay asked for"
         );
+    }
+    /// CR 608.2c: the deferral gate asks whether a gated sub-ability's CONDITION
+    /// reads a resolution-local anaphor ledger. That question is answered by
+    /// walking every `TargetFilter` a `QuantityRef` counts over — and the
+    /// wildcard this replaced answered "no filter" for thirteen variants that
+    /// already carried one, so a magnitude like "damage dealt this turn by the
+    /// token created this way" silently read as anaphor-free and the trailing
+    /// sentence evaluated against a stale ledger mid-prompt.
+    ///
+    /// One representative per shape the exhaustive match had to classify: a
+    /// two-filter variant, an optional filter, a boxed filter, and a differently
+    /// named field.
+    #[test]
+    fn population_predicate_sees_filters_the_wildcard_arm_used_to_swallow() {
+        let counts = |qty: QuantityRef| {
+            condition_depends_on_last_created(&AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref { qty },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            })
+        };
+        let anaphor = || TargetFilter::LastCreated;
+        let plain = || TargetFilter::Typed(TypedFilter::creature());
+
+        // Two independent populations: either side carries the anaphor.
+        assert!(counts(QuantityRef::DamageDealtThisTurn {
+            source: Box::new(anaphor()),
+            target: Box::new(plain()),
+            aggregate: AggregateFunction::Sum,
+            group_by: None,
+            damage_kind: Default::default(),
+            channel: DamageChannel::Total,
+        }));
+        assert!(counts(QuantityRef::DamageDealtThisTurn {
+            source: Box::new(plain()),
+            target: Box::new(anaphor()),
+            aggregate: AggregateFunction::Sum,
+            group_by: None,
+            damage_kind: Default::default(),
+            channel: DamageChannel::Total,
+        }));
+        // Optional narrowing filter.
+        assert!(counts(QuantityRef::SpellsCastThisTurn {
+            scope: crate::types::ability::CountScope::Controller,
+            filter: Some(anaphor()),
+        }));
+        // Boxed filter.
+        assert!(counts(QuantityRef::TargetObjectManaValue {
+            filter: Box::new(anaphor()),
+        }));
+        // Field named for what it selects rather than `filter`.
+        assert!(counts(QuantityRef::CounterAddedThisTurn {
+            actor: crate::types::ability::CountScope::Controller,
+            counters: CounterMatch::Any,
+            target: anaphor(),
+        }));
+        // Nested one level down through a compound, and through the
+        // `ChosenDamageSource` inner filter the traversal used to skip.
+        assert!(counts(QuantityRef::TokensCreatedThisTurn {
+            player: PlayerScope::Controller,
+            filter: TargetFilter::ChosenDamageSource {
+                filter: Some(Box::new(anaphor())),
+            },
+        }));
+
+        // Negatives: the same variants without the anaphor, and a genuinely
+        // filter-free ref.
+        assert!(!counts(QuantityRef::SpellsCastThisTurn {
+            scope: crate::types::ability::CountScope::Controller,
+            filter: Some(plain()),
+        }));
+        assert!(!counts(QuantityRef::SpellsCastThisTurn {
+            scope: crate::types::ability::CountScope::Controller,
+            filter: None,
+        }));
+        assert!(!counts(QuantityRef::HandSize {
+            player: PlayerScope::Controller,
+        }));
+    }
+
+    /// CR 608.2c + CR 111.1: every FILTER-bearing `AbilityCondition` must be
+    /// classified, not just the counting one.
+    ///
+    /// The `_ => false` this replaced read every one of these as anaphor-free, so
+    /// a sub-ability gated on "the token created this way" was evaluated against a
+    /// ledger the suspended parent had not published yet and silently dropped —
+    /// the defect this whole predicate family exists to prevent. Each assertion
+    /// below flips to `false` if its arm is removed from
+    /// `condition_reads_filter_population`.
+    #[test]
+    fn every_filter_bearing_condition_sees_the_last_created_anaphor() {
+        let anaphor = || TargetFilter::LastCreated;
+        let cases: Vec<AbilityCondition> = vec![
+            AbilityCondition::TargetMatchesFilter {
+                filter: anaphor(),
+                use_lki: false,
+                subject_slot: None,
+            },
+            AbilityCondition::ControllerControlsMatching { filter: anaphor() },
+            AbilityCondition::SourceMatchesFilter { filter: anaphor() },
+            AbilityCondition::ZoneChangeObjectMatchesFilter {
+                origin: None,
+                destination: Zone::Battlefield,
+                filter: anaphor(),
+            },
+            AbilityCondition::DiscardedCardMatchesFilter { filter: anaphor() },
+            AbilityCondition::CostPaidObjectMatchesFilter { filter: anaphor() },
+            AbilityCondition::TriggeringSpellTargetsFilter { filter: anaphor() },
+            AbilityCondition::ControllerControlledMatchingAsCast { filter: anaphor() },
+            AbilityCondition::ZoneChangedThisWay { filter: anaphor() },
+            AbilityCondition::PostReplacementDamageSourceMatchesFilter { filter: anaphor() },
+            AbilityCondition::TargetSharesNameWithOtherExiledThisWay { target: anaphor() },
+            AbilityCondition::ObjectsShareQuality {
+                subject: anaphor(),
+                reference: TargetFilter::Any,
+                quality: crate::types::ability::SharedQuality::Color,
+            },
+            AbilityCondition::ScopedPlayerMatches {
+                filter: PlayerFilter::ControlsCount {
+                    relation: crate::types::ability::PlayerRelation::Controller,
+                    filter: anaphor(),
+                    comparator: Comparator::GE,
+                    count: Box::new(QuantityExpr::Fixed { value: 1 }),
+                },
+            },
+        ];
+        for condition in cases {
+            assert!(
+                condition_depends_on_last_created(&condition),
+                "CR 608.2c: {condition:?} names the last-created population"
+            );
+        }
+    }
+
+    /// The same predicate must still say NO to a condition that mentions no
+    /// anaphor, or the deferral gate would defer every gated sub-ability.
+    #[test]
+    fn a_condition_without_the_anaphor_is_not_deferred() {
+        assert!(!condition_depends_on_last_created(
+            &AbilityCondition::TargetMatchesFilter {
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                use_lki: false,
+                subject_slot: None,
+            }
+        ));
+        assert!(!condition_depends_on_last_created(
+            &AbilityCondition::IsMonarch
+        ));
+        assert!(!condition_depends_on_last_created(
+            &AbilityCondition::ZoneChangedThisWay {
+                filter: TargetFilter::LastZoneChanged,
+            }
+        ));
+    }
+
+    /// Compound and prop-nested carriers reach the anaphor too: `Not`/`And`/`Or`,
+    /// `ConditionInstead`, and a filter buried inside a `Typed` filter's
+    /// properties — the `TargetFilter::Typed(_)` leaf arm this pass removed.
+    #[test]
+    fn nested_carriers_still_reach_the_last_created_anaphor() {
+        let nested_in_props = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::DistinctFrom {
+                reference: Box::new(TargetFilter::LastCreated),
+            },
+        ]));
+        let leaf = AbilityCondition::SourceMatchesFilter {
+            filter: nested_in_props,
+        };
+        assert!(condition_depends_on_last_created(&leaf));
+        assert!(condition_depends_on_last_created(&AbilityCondition::Not {
+            condition: Box::new(leaf.clone()),
+        }));
+        assert!(condition_depends_on_last_created(&AbilityCondition::And {
+            conditions: vec![AbilityCondition::IsMonarch, leaf.clone()],
+        }));
+        assert!(condition_depends_on_last_created(
+            &AbilityCondition::ConditionInstead {
+                inner: Box::new(leaf),
+            }
+        ));
     }
 }

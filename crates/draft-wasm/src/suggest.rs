@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use draft_core::types::{DeckAddableCardPolicy, DeckAddableCards, DraftCardInstance};
+use draft_core::types::{
+    type_line_is_land, DeckAddableCardPolicy, DeckAddableCards, DraftCardInstance,
+};
 use engine::database::CardDatabase;
 use engine::types::mana::ManaType;
 use phase_ai::config::AiDifficulty;
@@ -423,6 +425,7 @@ mod tests {
             cmc,
             type_line: type_line.to_string(),
             is_land: type_line_is_land(type_line),
+            draft_effect: None,
         }
     }
 

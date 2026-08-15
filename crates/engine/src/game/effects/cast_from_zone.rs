@@ -592,7 +592,7 @@ pub fn resolve(
         );
     }
 
-    // CR 310.11b + CR 608.2c: "exile it, then you may cast it transformed" —
+    // CR 310.12b + CR 608.2c: "exile it, then you may cast it transformed" —
     // the SelfRef filter resolves to the source object itself. When
     // `ability.targets` is empty (no pre-selected target, as is typical for
     // Siege defeat and Suspend self-cast triggers), fall back to the source
@@ -731,24 +731,39 @@ pub fn resolve(
             .get(&target_ids[0])
             .is_some_and(|obj| obj.zone == Zone::Graveyard);
 
-    // CR 608.2g + CR 609.4b: paid during-resolution graveyard cast (Quistis Trepe,
-    // Tinybones the Pickpocket). Not without_paying — the caster pays the real cost
-    // with any-type mana. Offered accept/decline, resolved by
-    // initiate_cast_during_resolution with ResolutionCastCost::FullCost. Replaces
-    // the wrong lingering-permission path (#2884: the offer was inert on
-    // opponent-graveyard targets, and own-graveyard targets deferred the cast to a
-    // later priority window instead of a resolution-time offer).
-    let graveyard_paid_cast = !without_paying
-        && mana_spend_permission.is_some()
+    // CR 608.2g + CR 609.4b: paid during-resolution cast of a CHOSEN target. The
+    // caster pays the real printed cost as the granting ability resolves; the mana
+    // is any-type when `mana_spend_permission` is `Some` (Quistis Trepe, Tinybones
+    // the Pickpocket) and NORMAL mana at the printed cost when it is `None`
+    // (Conduit of Worlds: "Choose target nonland permanent card in your graveyard
+    // … you may cast that card."). Both thread `ResolutionCastCost::FullCost`
+    // through `initiate_cast_during_resolution`, which defaults a `None`
+    // permission to normal mana. Offered accept/decline. Replaces the wrong
+    // lingering-permission path (#2884: the offer was inert on opponent-graveyard
+    // targets, and own-graveyard targets deferred the cast to a later priority
+    // window instead of a resolution-time offer).
+    //
+    // CR 608.2g: during-resolution timing is a property of the resolving
+    // INSTRUCTION (the `DuringResolution` driver, set by the parser from a paid
+    // chosen-target "you may cast that card" with no lingering duration), NOT of
+    // the chosen card's zone. This gate therefore accepts any castable
+    // non-battlefield origin — graveyard (Conduit), hand, exile, or library — rather
+    // than requiring `Zone::Graveyard`; `initiate_cast_during_resolution` casts
+    // the card from whichever zone it currently occupies. Emry's "you may cast
+    // that card THIS TURN" carries `duration: Some(_)` and is lowered to
+    // `LingeringPermission` by the parser, so it never reaches this branch.
+    let paid_during_resolution_cast = !without_paying
         && driver.is_during_resolution()
         && alt_ability_cost.is_none()
         && duration.is_none()
         && target_ids.len() == 1
-        && state
-            .objects
-            .get(&target_ids[0])
-            .is_some_and(|o| o.zone == Zone::Graveyard);
-    if graveyard_paid_cast {
+        && state.objects.get(&target_ids[0]).is_some_and(|o| {
+            matches!(
+                o.zone,
+                Zone::Graveyard | Zone::Hand | Zone::Exile | Zone::Library
+            )
+        });
+    if paid_during_resolution_cast {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::CastFromZone,
             source_id: ability.source_id,
@@ -1058,6 +1073,7 @@ fn cast_stack_spell_copy_during_resolution(
         card_id: obj.card_id,
         controller: ability.controller,
         object_id: copy_id,
+        cast_mana_value: Some(obj.spell_mana_value()),
     });
     crate::game::restrictions::record_spell_cast_from_zone(
         state,
@@ -2080,7 +2096,7 @@ mod tests {
         );
     }
 
-    /// CR 310.11b (#2876): Siege defeat — "exile it, then you may cast it
+    /// CR 310.12b (#2876): Siege defeat — "exile it, then you may cast it
     /// transformed". The `CastFromZone { target: SelfRef }` sub-ability fires
     /// with an EMPTY `ability.targets` (the exile step doesn't pre-select a
     /// target; the source IS the card to cast). Without the SelfRef fallback in
@@ -2167,7 +2183,7 @@ mod tests {
         assert_eq!(
             state.stack.len(),
             1,
-            "CR 310.11b: Siege defeat must put the card on the stack (cast it), \
+            "CR 310.12b: Siege defeat must put the card on the stack (cast it), \
              not silently return with it still in exile"
         );
         assert_eq!(

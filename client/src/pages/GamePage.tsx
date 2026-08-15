@@ -41,6 +41,7 @@ import { AnimationOverlay } from "../components/animation/AnimationOverlay.tsx";
 import { RevealOverlay } from "../components/animation/RevealOverlay.tsx";
 import { TurnBanner } from "../components/animation/TurnBanner.tsx";
 import { DiceRollOverlay } from "../components/animation/DiceRollOverlay.tsx";
+import { ScryOutcomeOverlay } from "../components/animation/ScryOutcomeOverlay.tsx";
 import { flashStartingPlayerContest } from "../game/diceContest.ts";
 import { loopDetectionModeFromQuery } from "../game/loopDetectionMode.ts";
 import { BattlefieldBackground } from "../components/board/BattlefieldBackground.tsx";
@@ -110,6 +111,7 @@ import { ZoneOpponentChooserModal } from "../components/modal/ZoneOpponentChoose
 import { PileOpponentModal } from "../components/modal/PileOpponentModal.tsx";
 import { AnnouncingOpponentModal } from "../components/modal/AnnouncingOpponentModal.tsx";
 import { GiftRecipientModal } from "../components/modal/GiftRecipientModal.tsx";
+import { EntryControllerModal } from "../components/modal/EntryControllerModal.tsx";
 import { TributeModal } from "../components/modal/TributeModal.tsx";
 import { CombatTaxModal } from "../components/modal/CombatTaxModal.tsx";
 import { TopOrBottomChoiceModalContent } from "../components/modal/TopOrBottomChoiceModal.tsx";
@@ -1824,6 +1826,7 @@ function GamePageContent({
       <RevealOverlay />
       <TurnBanner />
       <DiceRollOverlay />
+      <ScryOutcomeOverlay />
 
       {/* Combat SVG overlays: blocker assignments + attack target arrows */}
       <BlockAssignmentLines effectiveMultiplayerBoardLayout={effectiveMultiplayerBoardLayout} />
@@ -1875,6 +1878,7 @@ function GamePageContent({
         <PileOpponentModal />
         <AnnouncingOpponentModal />
         <GiftRecipientModal />
+        <EntryControllerModal />
         <TributeModal />
         <CombatTaxModal />
         <AlternativeCostModal />
@@ -3667,7 +3671,10 @@ function MeldChoiceModal() {
     );
   }
 
-  if (waitingFor?.type === "MeldAttackTargetChoice") {
+  if (
+    waitingFor?.type === "MeldAttackTargetChoice" ||
+    waitingFor?.type === "EntryAttackTargetChoice"
+  ) {
     const targets = waitingFor.data.valid_targets;
     return (
       <ChoiceModal

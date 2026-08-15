@@ -430,6 +430,7 @@ fn ensure_terminal_cast_spell_triggers_collected(
         card_id: object.card_id,
         controller: object.controller,
         object_id,
+        cast_mana_value: Some(object.spell_mana_value()),
     };
     triggers::collect_triggers_into_deferred(state, &[event]);
 }

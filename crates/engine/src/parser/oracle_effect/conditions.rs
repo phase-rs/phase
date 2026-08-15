@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use crate::parser::oracle_nom::error::{OracleError, OracleResult};
+use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::char;
@@ -3168,6 +3168,25 @@ fn parse_colored_mana_symbol_count_target_condition(text: &str) -> Option<Abilit
     })
 }
 
+/// Parses the source-damage predicate of a trailing trigger-effect rider.
+///
+/// The source grammar is shared with replacement effects; this layer owns the
+/// event-target anaphor and resolution-time turn qualifier.
+fn parse_trigger_event_target_damaged_by_source_this_turn(input: &str) -> OracleResult<'_, ()> {
+    let (rest, source) = crate::parser::oracle_replacement::parse_damage_history_source(input)
+        .ok_or_else(|| oracle_err(input))?;
+    let (rest, _) = tag(" dealt damage").parse(rest)?;
+    let (rest, _) = tag(" to it").parse(rest)?;
+    let (rest, _) = tag(" this turn").parse(rest)?;
+    match source {
+        TargetFilter::SelfRef => Ok((rest, ())),
+        _ => Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        ))),
+    }
+}
+
 pub(super) fn strip_suffix_conditional(
     text: &str,
     ctx: &mut ParseContext,
@@ -3178,6 +3197,19 @@ pub(super) fn strip_suffix_conditional(
     };
 
     let condition_text = lower[if_pos + " if ".len()..].trim_end_matches('.').trim();
+    // CR 608.2c + CR 603.4: trailing "if ~ dealt damage to it this turn" is
+    // a resolution-time rider, not an intervening-if. The event target is
+    // carried by the resolving trigger entry.
+    if ctx.in_trigger
+        && all_consuming(parse_trigger_event_target_damaged_by_source_this_turn)
+            .parse(condition_text)
+            .is_ok()
+    {
+        return (
+            Some(AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn),
+            text[..if_pos].trim().to_string(),
+        );
+    }
     // CR 608.2d: "it has " is in NON_REHOMEABLE_CONDITION_PREFIXES, so this
     // source-referential mana-symbol eligibility check must be recognized BEFORE
     // the rehomeable bail or it would never run. effect_prefix/effect_text are
@@ -4203,6 +4235,7 @@ pub(crate) fn try_parse_dig_instead_alternative(
         player: prev_player,
         count: prev_count,
         rest_destination: prev_rest,
+        rest_order: prev_rest_order,
         reveal: prev_reveal,
         ..
     } = &*prev.effect
@@ -4280,7 +4313,9 @@ pub(crate) fn try_parse_dig_instead_alternative(
         filter: alt_filter,
         destination: alt_destination,
         rest_destination: alt_rest,
+        rest_order: alt_rest_order,
         enter_tapped: alt_enter_tapped,
+        enters_attacking: alt_enters_attacking,
         ..
     } = alt_continuation
     else {
@@ -4316,8 +4351,10 @@ pub(crate) fn try_parse_dig_instead_alternative(
         up_to: alt_up_to,
         filter: alt_filter,
         rest_destination: alt_rest.or(*prev_rest),
+        rest_order: alt_rest.map_or(*prev_rest_order, |_| alt_rest_order),
         reveal: *prev_reveal,
         enter_tapped: alt_enter_tapped,
+        enters_attacking: alt_enters_attacking,
         source: DigSource::Library,
     };
 
@@ -4533,6 +4570,25 @@ pub(crate) fn static_condition_to_ability_condition(
         StaticCondition::HasCityBlessing => Some(AbilityCondition::HasCityBlessing),
         // CR 702.195b: The enduring story designation is available to effects.
         StaticCondition::HasEnduringStory => Some(AbilityCondition::HasEnduringStory),
+        // CR 903.3d ("If an effect refers to controlling a commander, it refers to
+        // a permanent on the battlefield that is a commander") + CR 608.2c:
+        // commander control is a plain game-state predicate about the resolving
+        // ability's CONTROLLER, evaluated as the ability resolves — it is not
+        // source-bound, layer-bound, or cost-bound like the unbridgeable statics
+        // below. `AbilityCondition::ControlsCommander` is its exact
+        // effect-resolution equivalent and carries the same `ownership` axis, so
+        // CR 903.3's owner-scoped "your commander" reading survives lowering.
+        //
+        // Listing it among the "no equivalent -> None" arms was a vocabulary
+        // asymmetry — the same defect the `CompletedADungeon` arm below fixed —
+        // and it silently dropped Fight for the Throne's intervening-if "if you
+        // control your commander", making the delayed trigger grant the monarch
+        // unconditionally.
+        StaticCondition::ControlsCommander { ownership } => {
+            Some(AbilityCondition::ControlsCommander {
+                ownership: *ownership,
+            })
+        }
         StaticCondition::IsRingBearer => Some(AbilityCondition::IsRingBearer),
         StaticCondition::OpponentPoisonAtLeast { count } => {
             Some(opponent_poison_at_least_as_quantity_check(*count))
@@ -4791,7 +4847,6 @@ pub(crate) fn static_condition_to_ability_condition(
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
         | StaticCondition::RingLevelAtLeast { .. }
-        | StaticCondition::ControlsCommander { .. }
         | StaticCondition::EnchantedIsFaceDown
         // CR 311.2 / CR 901.7: plane face-up status is a duration-only continuous-
         // effect condition (evaluated in the layer system), never an
@@ -4822,6 +4877,11 @@ pub(crate) fn static_condition_to_ability_condition(
         // no `AbilityCondition` counterpart yet. Return `None` rather than
         // lowering it to `Not(IsYourTurn)`, which would be wrong in 2HG.
         | StaticCondition::DuringOpponentsTurn
+        // CR 508.6: the existential "a player attacked you during their last turn"
+        // gate drives a self-spell cost reduction (Avenge), not an
+        // effect-resolution rider; no `AbilityCondition` equivalent — lowering
+        // returns `None`.
+        | StaticCondition::AnyPlayerAttackedYouLastTurn
         | StaticCondition::None => None,
     }
 }
@@ -4860,6 +4920,21 @@ pub(crate) fn ability_condition_to_static_condition(
         // creature" gate can ride per-`StaticDefinition`).
         AbilityCondition::SourceAttachedToCreature => {
             Some(StaticCondition::SourceAttachedToCreature)
+        }
+        // CR 903.3d: round-trips `static_condition_to_ability_condition`'s
+        // commander arm, carrying the CR 903.3 `ownership` axis unchanged so
+        // "your commander" can never widen to "a commander" in either direction.
+        //
+        // This inverse has TWO consumers, not just the per-`StaticDefinition`
+        // keyword-grant push-down: `triggers::delayed_intervening_if` composes it
+        // with `static_condition_to_trigger_condition` to recover the CR 603.4
+        // fire-time reading of a delayed triggered ability's intervening-`if`
+        // (Fight for the Throne). Declining here would leave that half of CR 603.4
+        // unenforceable.
+        AbilityCondition::ControlsCommander { ownership } => {
+            Some(StaticCondition::ControlsCommander {
+                ownership: *ownership,
+            })
         }
         AbilityCondition::QuantityCheck {
             lhs,
@@ -4907,7 +4982,8 @@ pub(crate) fn ability_condition_to_static_condition(
         // outcomes, reveals, resolved targets, zone-change events, player-scope
         // iteration); only meaningful inside `resolve_ability_chain`, never as
         // a continuous-effect gate.
-        AbilityCondition::EffectOutcome { .. }
+        AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+        | AbilityCondition::EffectOutcome { .. }
         | AbilityCondition::EventOutcomeWon
         | AbilityCondition::CoinFlipOutcome { .. }
         | AbilityCondition::WhenYouDo
@@ -7236,8 +7312,94 @@ mod tests {
     use super::*;
     use crate::parser::oracle_nom::condition::parse_inner_condition;
     use crate::parser::parse_oracle_text;
-    use crate::types::ability::{AggregateFunction, PlayerFilter, SharedQuality};
+    use crate::types::ability::{
+        AggregateFunction, CommanderOwnership, PlayerFilter, SharedQuality,
+    };
     use crate::types::counter::{CounterMatch, CounterType};
+
+    /// CR 903.3d + CR 603.4: the `StaticCondition` -> `AbilityCondition` bridge
+    /// must lower a commander-control gate, and must keep the two `ownership`
+    /// arms DISTINCT — CR 903.3 + CR 109.5 "your commander" (owned and
+    /// controlled) is a strictly narrower predicate than CR 903.3d "a commander"
+    /// (controlled, any owner). A bridge that collapsed the arms would pass a
+    /// single-arm test and fail this one.
+    ///
+    /// The inverse assertions pin the ROUND TRIP. The inverse is not merely the
+    /// keyword-grant push-down any more: `triggers::delayed_intervening_if`
+    /// composes `ability_condition_to_static_condition` with
+    /// `static_condition_to_trigger_condition` to recover the CR 603.4 fire-time
+    /// reading of a delayed triggered ability's intervening-`if`. A declined
+    /// inverse silently disables that half of CR 603.4, so the round trip is
+    /// load-bearing and asserted in both directions, per `ownership` arm.
+    #[test]
+    fn commander_control_bridges_round_trip_preserving_ownership() {
+        for ownership in [CommanderOwnership::Own, CommanderOwnership::Any] {
+            assert_eq!(
+                static_condition_to_ability_condition(
+                    &StaticCondition::ControlsCommander { ownership },
+                    &mut ParseContext::default(),
+                ),
+                Some(AbilityCondition::ControlsCommander { ownership }),
+                "CR 903.3d: the {ownership:?} commander gate must lower to its exact \
+                 effect-resolution equivalent, preserving the ownership axis"
+            );
+            assert_eq!(
+                ability_condition_to_static_condition(&AbilityCondition::ControlsCommander {
+                    ownership
+                }),
+                Some(StaticCondition::ControlsCommander { ownership }),
+                "CR 903.3: the {ownership:?} gate must invert back to its exact static \
+                 counterpart — the CR 603.4 fire-time hoist composes this inverse with \
+                 static_condition_to_trigger_condition"
+            );
+            assert_eq!(
+                crate::parser::oracle_trigger::static_condition_to_trigger_condition(
+                    &StaticCondition::ControlsCommander { ownership }
+                ),
+                Some(crate::types::ability::TriggerCondition::ControlsCommander { ownership }),
+                "CR 603.4: the second leg of the hoist must also preserve {ownership:?}"
+            );
+
+            // CR 603.4 + CR 903.3d, NEGATED form ("if you don't control your
+            // commander"). Both legs must carry the negation, or a negated gate
+            // round-trips through the first leg and dies at the second — leaving
+            // `delayed_intervening_if` with only the RESOLUTION-time half of
+            // CR 603.4 for that card, silently.
+            let negated_static = StaticCondition::Not {
+                condition: Box::new(StaticCondition::ControlsCommander { ownership }),
+            };
+            let negated_ability = AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::ControlsCommander { ownership }),
+            };
+            assert_eq!(
+                static_condition_to_ability_condition(
+                    &negated_static,
+                    &mut ParseContext::default()
+                ),
+                Some(negated_ability.clone()),
+                "the negated {ownership:?} gate must lower with its negation intact"
+            );
+            assert_eq!(
+                ability_condition_to_static_condition(&negated_ability),
+                Some(negated_static.clone()),
+                "the negated {ownership:?} gate must invert back to its exact static \
+                 counterpart"
+            );
+            assert_eq!(
+                crate::parser::oracle_trigger::static_condition_to_trigger_condition(
+                    &negated_static
+                ),
+                Some(crate::types::ability::TriggerCondition::Not {
+                    condition: Box::new(
+                        crate::types::ability::TriggerCondition::ControlsCommander { ownership }
+                    ),
+                }),
+                "CR 603.4: the second leg must bridge the NEGATED {ownership:?} gate too — \
+                 a `None` here is the asymmetry that makes a negated commander \
+                 intervening-if resolution-only"
+            );
+        }
+    }
 
     /// CR 608.2c: Aven Courier's chosen-counter predicate depends on a value
     /// selected by the immediately preceding instruction. The generic suffix

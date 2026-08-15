@@ -56,6 +56,13 @@ client/public/parser-warning-patterns.json
 # Atomic-write staging files from gen-card-data.sh (cleaned on normal exit,
 # but may linger after SIGKILL / power loss).
 client/public/*.tmp
+# The same, for callers that stage through mktemp and so carry a random tail
+# after `.tmp` (gen-scryfall-token-images.sh). The template cannot be
+# `.XXXXXX.tmp` instead: BSD/macOS mktemp rejects anything after the X run.
+client/public/*.tmp.*
+# scryfall_finalize_download stages its rename diagnostic beside the target;
+# gen-scryfall-token-images.sh is the first caller to aim it at a tracked dir.
+client/public/*.mv-error.*
 
 # Coverage
 client/coverage/

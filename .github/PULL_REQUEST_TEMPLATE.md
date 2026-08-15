@@ -12,12 +12,16 @@
 
 ## LLM
 
-Model: <actual Frontier model identifier | not-applicable (no LLM)>
+Model: <actual Frontier model identifier or reported name | not-applicable (no LLM)>
 Tier: <Frontier | not-applicable (no LLM)>
 Thinking: <high | max | not-applicable (no LLM)>
 
 <!-- Keep Model and Tier as exact, standalone canonical lines. AI-assisted PRs
-must report their actual Frontier model, Tier: Frontier, and thinking level. -->
+must report their actual Frontier model, Tier: Frontier, and thinking level.
+If your harness does not expose an exact model identifier, report the name it
+does give you — e.g. "Model: gpt-5.6-sol (via GitHub Copilot; canonical id not
+exposed)" — rather than guessing an identifier. See AI-CONTRIBUTOR.md
+§0.1.1. -->
 
 ## Implementation method (required)
 

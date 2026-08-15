@@ -87,7 +87,7 @@ impl PackSource for PackGenerator {
             let Some(sheet) = self.set_pool.sheets.get(sheet_name) else {
                 continue;
             };
-            for idx in weighted_select_n(rng, sheet, slot.count as usize) {
+            for idx in select_sheet_cards(rng, sheet, slot.count as usize) {
                 picks.push(&sheet.cards[idx]);
             }
         }
@@ -129,6 +129,7 @@ impl PackSource for PackGenerator {
                 cmc: card.cmc,
                 type_line: card.type_line.clone(),
                 is_land: type_line_is_land(&card.type_line),
+                draft_effect: card.draft_effect,
             })
             .collect();
 
@@ -163,6 +164,42 @@ fn weighted_select_n(
     count: usize,
 ) -> Vec<usize> {
     weighted_select_n_excluding(rng, sheet, count, &HashSet::new())
+}
+
+/// Select card positions using the collation behavior MTGJSON declares for a
+/// sheet. Fixed sheets emit every weighted position; duplicate-permitting
+/// sheets draw each slot independently; all other sheets draw distinct cards.
+fn select_sheet_cards(
+    rng: &mut dyn rand::RngCore,
+    sheet: &SheetDefinition,
+    count: usize,
+) -> Vec<usize> {
+    if sheet.fixed {
+        return sheet
+            .cards
+            .iter()
+            .enumerate()
+            .flat_map(|(index, card)| std::iter::repeat_n(index, card.weight as usize))
+            .collect();
+    }
+
+    if sheet.allow_duplicates {
+        return (0..count)
+            .map(|_| {
+                weighted_select(
+                    rng,
+                    sheet.total_weight,
+                    sheet
+                        .cards
+                        .iter()
+                        .enumerate()
+                        .map(|(i, card)| (i, card.weight)),
+                )
+            })
+            .collect();
+    }
+
+    weighted_select_n(rng, sheet, count)
 }
 
 /// Like [`weighted_select_n`], but skips any card whose `(set_code, collector_number)`
@@ -232,6 +269,7 @@ mod tests {
                 colors: Vec::new(),
                 cmc: 0,
                 type_line: String::new(),
+                draft_effect: None,
             })
             .collect()
     }
@@ -259,6 +297,7 @@ mod tests {
                 foil: false,
                 balance_colors: false,
                 cards: common_cards,
+                ..Default::default()
             },
         );
         sheets.insert(
@@ -268,6 +307,7 @@ mod tests {
                 foil: false,
                 balance_colors: false,
                 cards: uncommon_cards,
+                ..Default::default()
             },
         );
         sheets.insert(
@@ -277,6 +317,7 @@ mod tests {
                 foil: false,
                 balance_colors: false,
                 cards: rare_mythic_cards,
+                ..Default::default()
             },
         );
 
@@ -326,6 +367,7 @@ mod tests {
                 foil: false,
                 balance_colors: false,
                 cards: common_cards,
+                ..Default::default()
             },
         );
         sheets.insert(
@@ -335,6 +377,7 @@ mod tests {
                 foil: false,
                 balance_colors: false,
                 cards: uncommon_cards,
+                ..Default::default()
             },
         );
         sheets.insert(
@@ -344,6 +387,7 @@ mod tests {
                 foil: false,
                 balance_colors: false,
                 cards: rare_cards,
+                ..Default::default()
             },
         );
         sheets.insert(
@@ -353,6 +397,7 @@ mod tests {
                 foil: false,
                 balance_colors: false,
                 cards: bonus_cards,
+                ..Default::default()
             },
         );
 
@@ -522,6 +567,7 @@ mod tests {
                 foil: false,
                 balance_colors: false,
                 cards: common_cards,
+                ..Default::default()
             },
         );
         sheets.insert(
@@ -531,6 +577,7 @@ mod tests {
                 foil: false,
                 balance_colors: false,
                 cards: rare_cards,
+                ..Default::default()
             },
         );
         // The empty sheet — present in the data, but no cards survived extraction.
@@ -541,6 +588,7 @@ mod tests {
                 foil: false,
                 balance_colors: false,
                 cards: vec![],
+                ..Default::default()
             },
         );
 
@@ -626,5 +674,64 @@ mod tests {
             found_bonus,
             "Expected at least one pack with bonus sheet card in 100 iterations"
         );
+    }
+
+    #[test]
+    fn fixed_sheet_emits_every_weighted_card_position() {
+        let sheet = SheetDefinition {
+            cards: vec![
+                SheetCard {
+                    name: "Repeated".to_string(),
+                    set_code: "TST".to_string(),
+                    collector_number: "1".to_string(),
+                    rarity: Rarity::Common,
+                    weight: 2,
+                    colors: vec![],
+                    cmc: 0,
+                    type_line: String::new(),
+                    draft_effect: None,
+                },
+                SheetCard {
+                    name: "Single".to_string(),
+                    set_code: "TST".to_string(),
+                    collector_number: "2".to_string(),
+                    rarity: Rarity::Common,
+                    weight: 1,
+                    colors: vec![],
+                    cmc: 0,
+                    type_line: String::new(),
+                    draft_effect: None,
+                },
+            ],
+            total_weight: 3,
+            fixed: true,
+            ..Default::default()
+        };
+        let mut rng = ChaCha8Rng::seed_from_u64(1);
+
+        assert_eq!(select_sheet_cards(&mut rng, &sheet, 3), vec![0, 0, 1]);
+    }
+
+    #[test]
+    fn duplicate_permitting_sheet_can_repeat_a_card() {
+        let sheet = SheetDefinition {
+            cards: vec![SheetCard {
+                name: "Only Card".to_string(),
+                set_code: "TST".to_string(),
+                collector_number: "1".to_string(),
+                rarity: Rarity::Common,
+                weight: 1,
+                colors: vec![],
+                cmc: 0,
+                type_line: String::new(),
+                draft_effect: None,
+            }],
+            total_weight: 1,
+            allow_duplicates: true,
+            ..Default::default()
+        };
+        let mut rng = ChaCha8Rng::seed_from_u64(1);
+
+        assert_eq!(select_sheet_cards(&mut rng, &sheet, 2), vec![0, 0]);
     }
 }

@@ -38,8 +38,11 @@ import type {
  *   5 — bind match settlement to a durable pod-issued capability
  *   6 — durable authorized Bo3 intergame command ledger
  *   7 — forward authenticated match-host between-games observations
+ *   8 — add Sealed event kind and deckbuilding-first start flow
+ *   9 — add engine-owned limited-pool presentation groups
+ *  10 — add authenticated draft-effect pick actions
  */
-export const DRAFT_PROTOCOL_VERSION = 7 as const;
+export const DRAFT_PROTOCOL_VERSION = 10 as const;
 
 /**
  * Typed reason for a draft pause, used over the wire and on the i18n key path.
@@ -139,7 +142,7 @@ export type DraftMatchLaunch =
  * Discriminated union of all draft-specific P2P messages.
  *
  * Flow:
- *   Guest → Host: `draft_join`, `draft_reconnect`, `draft_pick`, `draft_submit_deck`,
+ *   Guest → Host: `draft_join`, `draft_reconnect`, `draft_pick`, `draft_pick_with_draft_effect`, `draft_submit_deck`,
  *                 `draft_request_advance`
  *   Host → Guest: `draft_welcome`, `draft_reconnect_ack`, `draft_reconnect_rejected`,
  *                 `draft_state_update`, `draft_pick_ack`, `draft_error`,
@@ -160,6 +163,11 @@ export type DraftP2PMessage =
   | {
       type: "draft_pick";
       cardInstanceId: string;
+    }
+  | {
+      type: "draft_pick_with_draft_effect";
+      effectCardInstanceId: string;
+      cardInstanceIds: string[];
     }
   | {
       type: "draft_submit_deck";
@@ -352,6 +360,7 @@ const VALID_DRAFT_TYPES = new Set([
   "draft_join",
   "draft_reconnect",
   "draft_pick",
+  "draft_pick_with_draft_effect",
   "draft_submit_deck",
   "draft_welcome",
   "draft_reconnect_ack",
@@ -384,6 +393,76 @@ const VALID_DRAFT_TYPES = new Set([
   "draft_bo3_match_complete",
 ]);
 
+const MAX_DRAFT_CARD_INSTANCE_ID_LENGTH = 256;
+
+function requireDraftCardInstanceId(value: unknown, field: string): string {
+  if (
+    typeof value !== "string"
+    || value.length === 0
+    || value.length > MAX_DRAFT_CARD_INSTANCE_ID_LENGTH
+  ) {
+    throw new Error(`Invalid draft-effect pick: ${field} must be a bounded string`);
+  }
+  return value;
+}
+
+function validateDraftEffectPick(raw: Record<string, unknown>): DraftP2PMessage {
+  const effectCardInstanceId = requireDraftCardInstanceId(
+    raw.effectCardInstanceId,
+    "effectCardInstanceId",
+  );
+  if (!Array.isArray(raw.cardInstanceIds) || raw.cardInstanceIds.length !== 2) {
+    throw new Error("Invalid draft-effect pick: cardInstanceIds must contain exactly two cards");
+  }
+  const cardInstanceIds = raw.cardInstanceIds.map((cardId, index) =>
+    requireDraftCardInstanceId(cardId, `cardInstanceIds[${index}]`),
+  );
+  if (cardInstanceIds[0] === cardInstanceIds[1]) {
+    throw new Error("Invalid draft-effect pick: cardInstanceIds must be distinct");
+  }
+  return {
+    ...raw,
+    type: "draft_pick_with_draft_effect",
+    effectCardInstanceId,
+    cardInstanceIds,
+  } as DraftP2PMessage;
+}
+
+function normalizeArrayField<T>(record: Record<string, unknown>, field: string): T[] {
+  if (!(field in record)) return [];
+  const value = record[field];
+  if (!Array.isArray(value)) {
+    throw new Error(`Invalid draft message: ${field} must be an array`);
+  }
+  return value as T[];
+}
+
+function normalizeSeatPublicView(raw: unknown): SeatPublicView {
+  if (typeof raw !== "object" || raw === null) {
+    throw new Error("Invalid draft message: malformed public seat");
+  }
+  const seat = raw as Record<string, unknown>;
+  return {
+    ...seat,
+    face_up_draft_cards: normalizeArrayField(seat, "face_up_draft_cards"),
+  } as SeatPublicView;
+}
+
+function normalizeDraftPlayerView(raw: unknown): DraftPlayerView {
+  if (raw === undefined) {
+    return { draft_effects: [], seats: [] } as unknown as DraftPlayerView;
+  }
+  if (typeof raw !== "object" || raw === null) {
+    throw new Error("Invalid draft message: malformed player view");
+  }
+  const view = raw as Record<string, unknown>;
+  return {
+    ...view,
+    draft_effects: normalizeArrayField(view, "draft_effects"),
+    seats: normalizeArrayField(view, "seats").map(normalizeSeatPublicView),
+  } as DraftPlayerView;
+}
+
 /** Validate a parsed object as a DraftP2PMessage. Throws on malformed data. */
 export function validateDraftMessage(raw: unknown): DraftP2PMessage {
   if (typeof raw !== "object" || raw === null || !("type" in raw)) {
@@ -392,6 +471,23 @@ export function validateDraftMessage(raw: unknown): DraftP2PMessage {
   const msg = raw as { type: string };
   if (!VALID_DRAFT_TYPES.has(msg.type)) {
     throw new Error(`Invalid draft message type: ${msg.type}`);
+  }
+  if (msg.type === "draft_pick_with_draft_effect") {
+    return validateDraftEffectPick(raw as Record<string, unknown>);
+  }
+  const viewMessage = raw as { type: string; view?: unknown; seats?: unknown };
+  if (["draft_welcome", "draft_reconnect_ack", "draft_state_update", "draft_pick_ack"].includes(msg.type)) {
+    return {
+      ...viewMessage,
+      view: normalizeDraftPlayerView(viewMessage.view),
+    } as DraftP2PMessage;
+  }
+  if (msg.type === "draft_lobby_update") {
+    const lobby = raw as Record<string, unknown>;
+    return {
+      ...viewMessage,
+      seats: normalizeArrayField(lobby, "seats").map(normalizeSeatPublicView),
+    } as DraftP2PMessage;
   }
   return raw as DraftP2PMessage;
 }

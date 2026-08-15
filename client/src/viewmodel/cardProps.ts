@@ -3,6 +3,15 @@ import { isChangeling } from "./keywordProps";
 
 const ROMAN = ["", "I", "II", "III", "IV", "V"] as const;
 export const FACE_DOWN_CARD_NAME = "Face-down card";
+
+/**
+ * Whether the engine's viewer-scoped projection requires rendering this card
+ * face down. The display layer consumes the projection rather than deriving
+ * hidden-information permissions from controller or zone state.
+ */
+export function shouldRenderCardBack(obj: Pick<GameObject, "face_down" | "display_visible_to_viewer"> | undefined): boolean {
+  return obj?.face_down === true && obj.display_visible_to_viewer !== true;
+}
 /** Convert a small integer (1–5) to a Roman numeral string. Values outside the
  *  table fall back to the arabic numeral for a positive integer, or "" for a
  *  non-positive / non-integer input — so a missing/NaN class level renders blank
@@ -26,7 +35,6 @@ export interface CardViewProps {
   isPowerDebuffed: boolean;
   isToughnessBuffed: boolean;
   isToughnessDebuffed: boolean;
-  counters: Array<{ type: string; count: number }>;
   isCreature: boolean;
   isLand: boolean;
   attachedTo: AttachTarget | null;
@@ -45,7 +53,7 @@ export interface PTDisplay {
 }
 
 export function publicName(obj: GameObject): string {
-  return obj.face_down ? FACE_DOWN_CARD_NAME : obj.name;
+  return shouldRenderCardBack(obj) ? FACE_DOWN_CARD_NAME : obj.name;
 }
 
 export function toCardProps(obj: GameObject): CardViewProps {
@@ -74,9 +82,6 @@ export function toCardProps(obj: GameObject): CardViewProps {
     isPowerDebuffed,
     isToughnessBuffed,
     isToughnessDebuffed,
-    counters: Object.entries(obj.counters)
-      .filter((entry): entry is [string, number] => entry[1] != null)
-      .map(([type, count]) => ({ type, count })),
     isCreature: obj.card_types.core_types.includes("Creature"),
     isLand: obj.card_types.core_types.includes("Land"),
     attachedTo: obj.attached_to,

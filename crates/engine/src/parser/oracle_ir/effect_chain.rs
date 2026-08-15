@@ -673,6 +673,42 @@ pub(crate) enum AbsorbKind {
     CantBeRegenerated,
 }
 
+/// CR 608.2c + CR 603.7a: WHERE a clause's lowered definition lives in the
+/// assembled tree — an axis orthogonal to [`ClauseDisposition`], which says WHAT
+/// the clause does relative to its neighbours.
+///
+/// The two are genuinely independent. A payload continuation *emits* its own
+/// definition (so its disposition is `Emit`, with `Emit`'s continuation channels
+/// intact), but that definition belongs inside a delayed trigger's payload chain
+/// rather than beside it. Folding this into `ClauseDisposition` would either
+/// duplicate `Emit`'s channels on a second variant or force every one of `Emit`'s
+/// construction sites to restate "not nested".
+///
+/// CR 608.2c: later text can modify the meaning of earlier text. A continuation
+/// whose referent was minted by a delayed payload must be followed when that
+/// payload is followed — CR 603.7a: at the delayed ability's resolution, not at
+/// its creation.
+///
+/// Set to `Sibling` for every clause by construction; only
+/// `classify_continuation_clause` (`oracle_effect/mod.rs`) ever promotes a clause
+/// to `NestedInDelayedPayload`, and only `assemble_effect_chain` ever reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+pub(crate) enum ClausePlacement {
+    /// The clause's definition joins the chain as a top-level sibling.
+    #[default]
+    Sibling,
+    /// CR 603.7a: the clause's definition is relocated into the nearest still-open
+    /// delayed trigger installed earlier in this chain.
+    NestedInDelayedPayload,
+}
+
+impl ClausePlacement {
+    /// `skip_serializing_if` predicate — the default needs no JSON byte.
+    pub(crate) fn is_sibling(placement: &Self) -> bool {
+        matches!(placement, Self::Sibling)
+    }
+}
+
 /// CR 608.2c: a field-level modification folded onto the prior emitted def
 /// (emits no sibling). Promoted from the former special-clause markers
 /// `AltCostRider` / `ManaRetention` / `EntersTappedAttacking` (U5-M2). Each
@@ -811,6 +847,11 @@ pub(crate) struct ClauseIr {
     /// targeted "of their choice" controlled by the phase-trigger active player.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) target_chooser: Option<TargetFilter>,
+    /// CR 608.2c + CR 603.7a: where this clause's lowered definition attaches.
+    /// `Sibling` (default) is promoted only when this clause continues an open
+    /// delayed payload and is consumed by `assemble_effect_chain`'s relocation step.
+    #[serde(default, skip_serializing_if = "ClausePlacement::is_sibling")]
+    pub(crate) placement: ClausePlacement,
     /// Construction seal: a private field forces all construction through
     /// [`ClauseIrBuilder`], so no call site can mint a clause without identity,
     /// source, disposition, and provenance (Plan 01 §5 construction gate).
@@ -968,6 +1009,7 @@ impl ClauseIrBuilder {
             unless_pay: None,
             target_selection_mode: TargetSelectionMode::Chosen,
             target_chooser: None,
+            placement: ClausePlacement::Sibling,
         }
     }
 
@@ -1000,6 +1042,14 @@ impl ClauseIrBuilder {
     /// THIS chain), preserving all content. Keeps single-construction — still
     /// routes through [`ClauseIrBuilder::clause`] + [`ClauseDraft::push`].
     pub(crate) fn absorb_clause(&mut self, c: ClauseIr) {
+        // CR 608.2c: `placement` is deliberately NOT propagated. Every field below is
+        // an intrinsic property of the clause; `placement` is a RELATIONAL verdict
+        // about one position in one chain's delayed-payload placement registry, and a
+        // verdict computed against a nested chain's registry has no meaning in this
+        // one. The re-minted clause starts at `ClausePlacement::Sibling` (the
+        // `#[default]`, set by `ClauseIrBuilder::clause`), and only this chain's own
+        // `classify_continuation_clause` may promote it. Same reasoning as §R8.1.1's
+        // rejection of a recursively-lowered rider, one chain level down.
         self.clause(
             c.source.fragment().unwrap_or_default(),
             c.parsed,
@@ -1051,6 +1101,7 @@ pub(crate) struct ClauseDraft<'a> {
     unless_pay: Option<UnlessPayModifier>,
     target_selection_mode: TargetSelectionMode,
     target_chooser: Option<TargetFilter>,
+    placement: ClausePlacement,
 }
 
 impl ClauseDraft<'_> {
@@ -1144,6 +1195,7 @@ impl ClauseDraft<'_> {
             unless_pay: self.unless_pay,
             target_selection_mode: self.target_selection_mode,
             target_chooser: self.target_chooser,
+            placement: self.placement,
             _sealed: (),
         });
     }

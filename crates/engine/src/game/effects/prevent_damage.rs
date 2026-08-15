@@ -201,6 +201,16 @@ fn untargeted_damage_filter(
         // matching is `typed_recipient_valid_card_filter`'s job, so this
         // arm must be checked BEFORE the generic `is_context_ref()` catch-all.
         TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => None,
+        // CR 615 + CR 201.5: the printed-name self-reference ("prevent all
+        // damage that would be dealt to HIM this turn" — Gideon Jura, Gideon of
+        // the Trials) names the source OBJECT, not a player. `SelfRef` is in
+        // `is_context_ref()`, so without this arm the catch-all below would
+        // lower it to a PLAYER shield on the source's controller — preventing
+        // all damage to the player instead of to the Gideon. Object matching is
+        // `typed_recipient_valid_card_filter`'s job, so this arm must precede
+        // the generic `is_context_ref()` catch-all (same ordering contract as
+        // the `TrackedSet` carve-out above).
+        TargetFilter::SelfRef => None,
         filter if filter.is_context_ref() => Some(player_damage_filter(
             super::resolve_player_for_context_ref(state, ability, filter),
         )),
@@ -229,6 +239,14 @@ fn typed_recipient_valid_card_filter(target: &TargetFilter) -> Option<TargetFilt
         filter @ (TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }) => {
             Some(filter.clone())
         }
+        // CR 615 + CR 201.5: the printed-name self-reference IS an object
+        // recipient — the shield rides on the source permanent (the untargeted
+        // branch of `resolve`) and `valid_card: SelfRef` scopes it to damage
+        // dealt to that host. Checked before the generic `is_context_ref()`
+        // exclusion below, which would otherwise reject it; mirrors the
+        // `TrackedSet` carve-out and pairs with `untargeted_damage_filter`'s
+        // matching `SelfRef => None` arm.
+        filter @ TargetFilter::SelfRef => Some(filter.clone()),
         filter if filter.is_context_ref() => None,
         filter => Some(filter.clone()),
     }
@@ -1305,6 +1323,134 @@ mod tests {
             deal_damage::DamageResult::Applied(0)
         ));
         assert_eq!(state.players[0].life, 20);
+    }
+
+    /// CR 615 + CR 201.5: a `SelfRef` recipient ("prevent all damage that would
+    /// be dealt to HIM this turn" — Gideon Jura, Gideon of the Trials) scopes the
+    /// shield to the SOURCE OBJECT.
+    ///
+    /// Two revert-failing halves, because the bug had two independent ways to
+    /// manifest:
+    ///   * `untargeted_damage_filter` must NOT lower `SelfRef` (a context ref) to
+    ///     a PLAYER shield on the source's controller — that would prevent damage
+    ///     to the Gideon's controller instead of to the Gideon.
+    ///   * the shield must carry `valid_card: SelfRef` so it fires only on damage
+    ///     to its host. With the pre-fix `TargetFilter::Any` recipient the shield
+    ///     carried NO constraint at all and Fogged every damage event that turn —
+    ///     which the negative half below catches.
+    #[test]
+    fn self_ref_recipient_prevention_scopes_the_shield_to_its_host() {
+        let mut state = GameState::new_two_player(42);
+        let gideon = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Gideon Jura".to_string(),
+            Zone::Battlefield,
+        );
+        let damage_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        let bystander = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Bystander".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [gideon, bystander] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(6);
+            obj.toughness = Some(6);
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::SelfRef,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: None,
+                prevention_duration: None,
+            },
+            vec![],
+            gideon,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // The shield rides on the source permanent, object-scoped — never in the
+        // global pending registry, which is the un-constrained Fog placement.
+        assert!(
+            state.pending_damage_replacements.is_empty(),
+            "a SelfRef recipient is object-scoped, not a global Fog: {:?}",
+            state.pending_damage_replacements
+        );
+        let shield = state
+            .objects
+            .get(&gideon)
+            .unwrap()
+            .replacement_definitions
+            .last()
+            .expect("the shield hosts on the source");
+        assert_eq!(shield.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            shield.damage_target_filter, None,
+            "SelfRef is an OBJECT recipient — lowering it to a player shield \
+             would protect the controller instead of the Gideon"
+        );
+
+        let ctx = deal_damage::DamageContext::from_source(&state, damage_source).unwrap();
+        // Damage to the host is prevented.
+        let to_host = deal_damage::apply_damage_to_target(
+            &mut state,
+            &ctx,
+            TargetRef::Object(gideon),
+            3,
+            false,
+            &mut events,
+        )
+        .unwrap();
+        assert!(
+            matches!(to_host, deal_damage::DamageResult::Applied(0)),
+            "damage to the shield's host is prevented"
+        );
+
+        // Negative half: everything else still takes damage. This is what fails
+        // on the pre-fix `Any` recipient, which prevented all damage in the game.
+        let to_bystander = deal_damage::apply_damage_to_target(
+            &mut state,
+            &ctx,
+            TargetRef::Object(bystander),
+            3,
+            false,
+            &mut events,
+        )
+        .unwrap();
+        assert!(
+            matches!(to_bystander, deal_damage::DamageResult::Applied(3)),
+            "another permanent is untouched by a host-scoped shield"
+        );
+        let to_controller = deal_damage::apply_damage_to_target(
+            &mut state,
+            &ctx,
+            TargetRef::Player(PlayerId(0)),
+            3,
+            false,
+            &mut events,
+        )
+        .unwrap();
+        assert!(
+            matches!(to_controller, deal_damage::DamageResult::Applied(3)),
+            "the source's CONTROLLER is not the recipient"
+        );
+        assert_eq!(state.players[0].life, 17);
     }
 
     #[test]

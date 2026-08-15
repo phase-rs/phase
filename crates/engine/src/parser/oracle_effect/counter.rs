@@ -8,8 +8,8 @@ use nom::Parser;
 
 use crate::types::ability::{
     ChosenCounterCountCondition, Comparator, CounterMoveSelection, CounterTransferMode,
-    DoublePTMode, DoubleTarget, Effect, MultiTargetSpec, ObjectScope, QuantityExpr, QuantityRef,
-    TargetFilter,
+    DoublePTMode, DoubleTarget, Effect, EventCounterReproductionCount, MultiTargetSpec,
+    ObjectScope, QuantityExpr, QuantityRef, TargetFilter,
 };
 use crate::types::counter::{parse_counter_type, CounterType};
 use crate::types::mana::ManaColor;
@@ -43,24 +43,27 @@ fn is_self_ref(text: &str) -> bool {
 /// through the same resolver so ETB-self triggers like "put X counters on
 /// him" bind to `SelfRef` when the trigger subject is the source permanent.
 fn is_it_pronoun(text: &str) -> bool {
-    matches!(text, "it" | "him" | "her" | "them")
-        || nom_on_lower(text, text, |i| {
-            value(
-                (),
-                alt((
-                    tag("itself"),
-                    tag("himself"),
-                    tag("herself"),
-                    tag("themselves"),
-                    tag("it "),
-                    tag("him "),
-                    tag("her "),
-                    tag("them "),
-                )),
-            )
-            .parse(i)
-        })
-        .is_some()
+    nom_on_lower(text, text, |i| {
+        value(
+            (),
+            alt((
+                // Bare object pronoun as the whole token or immediately followed
+                // by a space, routed through the shared recipient-pronoun
+                // combinator (single authority for the it/them/him/her set).
+                terminated(
+                    nom_primitives::parse_object_recipient_pronoun,
+                    alt((eof, peek(tag(" ")))),
+                ),
+                // Reflexive "*self" forms — a distinct set, matched here directly.
+                tag("itself"),
+                tag("himself"),
+                tag("herself"),
+                tag("themselves"),
+            )),
+        )
+        .parse(i)
+    })
+    .is_some()
 }
 
 /// CR 608.2c + CR 111.10 + CR 122.1: a same-chain counter anaphor placed AFTER a
@@ -628,6 +631,48 @@ pub(super) fn try_parse_put_counter<'a>(
                 count_expr
             },
             target,
+        },
+        remainder,
+        multi_target,
+    ))
+}
+
+/// CR 122.1 + CR 603.2c: Parse the counter-reproduction effect body — "put the
+/// same number and kind of counters on <target>" (Captain Marvel, Apex Avenger;
+/// Bold Plagiarist) or "put one of each of those kinds of counters on <target>"
+/// (Aragorn, Company Leader). Each axis (per-kind magnitude, target) is its own
+/// combinator; no verbatim full-line match. Reuses `resolve_counter_placement_target`
+/// so `~`→`SelfRef` and "up to one other target creature" are handled exactly as
+/// for `PutCounter`.
+pub(super) fn try_parse_reproduce_event_counters<'a>(
+    lower: &str,
+    text: &'a str,
+    ctx: &mut ParseContext,
+) -> Option<(Effect, &'a str, Option<MultiTargetSpec>)> {
+    fn reproduce_counter_phrase(input: &str) -> OracleResult<'_, EventCounterReproductionCount> {
+        let (rest, _) = tag("put ").parse(input)?;
+        let (rest, per_kind) = alt((
+            value(
+                EventCounterReproductionCount::SameNumber,
+                tag("the same number and kind of counters"),
+            ),
+            value(
+                EventCounterReproductionCount::PerKind(1),
+                tag("one of each of those kinds of counters"),
+            ),
+        ))
+        .parse(rest)?;
+        let (rest, _) = tag(" on ").parse(rest)?;
+        Ok((rest, per_kind))
+    }
+
+    let (on_rest, per_kind_count) = reproduce_counter_phrase(lower).ok()?;
+    let (target, remainder, multi_target) =
+        resolve_counter_placement_target(on_rest, lower, text, ctx);
+    Some((
+        Effect::ReproduceEventCounters {
+            target,
+            per_kind_count,
         },
         remainder,
         multi_target,

@@ -209,7 +209,7 @@ fn quantity_offers_up_to_choice(q: &QuantityExpr) -> bool {
 fn effect_offers_choice(e: &Effect) -> bool {
     match e {
         // Engine-set from the activation-payment snapshot, never a player prompt.
-        Effect::NoteManaSpent => false,
+        Effect::NoteManaSpent | Effect::CompletePlayerAction { .. } => false,
         // ---- SCOPE FILTER. DESTRUCTURED WITHOUT `..` on every arm, exactly as
         //      HEAD's three allow arms are, so a new field on any of them forces
         //      a re-audit of whether the class is still in scope.
@@ -280,6 +280,12 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::OpponentGuess { .. }
         | Effect::SwapChosenLabels { .. }
+        // CR 101.4: `RevealChosenNumbers` publishes an ALREADY-made choice and
+        // raises no `WaitingFor` of its own. It is nonetheless left in the
+        // fail-closed group: claiming choice-free is a soundness claim that
+        // requires a resolver trace and a pinned-guard update, and the only cost
+        // of `MayPrompt` here is a conservative probe verdict.
+        | Effect::RevealChosenNumbers { .. }
         | Effect::Pump { .. }
         | Effect::PairWith { .. }
         | Effect::Destroy { .. }
@@ -353,6 +359,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::ChoosePermanent { .. }
         | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::ChooseCard { .. }
+        | Effect::ReproduceEventCounters { .. }
         | Effect::PutCounterAll { .. }
         | Effect::MultiplyCounter { .. }
         | Effect::DoublePT { .. }
@@ -528,6 +535,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         sub_ability,
         else_ability,
         optional,
+        optional_player: _, // selects the optional actor; `optional` already records the choice
         optional_for,
         optional_targeting,
         unless_pay,
@@ -554,6 +562,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         trigger_definition_ref: _, // exact trigger occurrence, no choice
         force_block_attacker: _, // exact force-block referent, no choice
         target_incarnations: _, // CR 400.7 referent pins, no choice
+        selected_target_incarnations: _, // CR 400.7 selected-target pins, no choice
         controller: _, // player id
         original_controller: _, // player id
         scoped_player: _, // player id (iteration binding)

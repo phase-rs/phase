@@ -266,6 +266,15 @@ pub(crate) struct ParseContext {
     /// `ExileFromTopUntil` referent (Territorial Bruntar) that
     /// `parent_target_available` would otherwise include.
     pub parent_target_is_chosen: bool,
+    /// CR 608.2c + CR 601.2a: the chain's prior chosen-target FILTER — the
+    /// `Effect::TargetOnly { target }` filter that `parent_target_is_chosen`
+    /// reports the presence of (Emry's / Conduit of Worlds' "Choose target …
+    /// card in your graveyard"). It binds a downstream "you may cast that card"
+    /// anaphor to the chosen object; timing comes independently from the
+    /// instruction plus its duration, never from this target's zone. Seeded
+    /// alongside `parent_target_is_chosen` in the chunk loop; `None` on every
+    /// standalone and non-chosen parse.
+    pub chain_prior_chosen_target: Option<TargetFilter>,
     /// CR 608.2c + CR 400.7: Source zone of the tracked set that a downstream
     /// "put those cards / put them onto the battlefield" anaphor (a
     /// `TargetFilter::TrackedSet`) must scan. Set by a producer clause that

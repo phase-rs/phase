@@ -28,7 +28,7 @@ import type {
   UnboundedFamily,
 } from "../../adapter/types";
 import { familyOf, UNBOUNDED_FAMILY_FOR_TEST } from "../../components/hud/HudBadges";
-import { useUnboundedCounterTypes } from "../../hooks/useUnboundedCounterTypes";
+import { pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay";
 import { buildGameObject } from "../../test/factories/gameObjectFactory";
 import { buildGameState } from "../../test/factories/gameStateFactory";
 import counterWire from "../../test/fixtures/unbounded-counter-wire.json";
@@ -54,10 +54,18 @@ describe("unbounded ∞ wire seam (engine-emitted goldens)", () => {
     // (2) reach-guard + the two counter seam facts: the map key is a JSON STRING, and
     // `CounterType` serializes FLAT ("charge", not {"Generic":"charge"}). A regressed Serialize
     // would silently blank every ∞ pill.
-    expect(counterWire.unbounded_counters).toEqual({ "405": ["charge"] });
+    // The value is a PRE-PARTITIONED row set carrying the engine's live count, not a bare type
+    // list — and `magnitude` is only written for the exceptional `Unbounded` case.
+    expect(counterWire.counter_display).toEqual({
+      "405": { pills: [{ counter: "charge", count: 4, magnitude: "Unbounded" }] },
+    });
+    // (2b) the discriminator against a `skip_serializing_if` INVERSION. Without it, an inversion
+    // that made every row read `Finite` would leave the golden above looking plausible — the TS
+    // mirror types `magnitude` as optional, so `tsc` cannot see it either.
+    expect(counterWire.counter_display["405"].pills[0].magnitude).toBe("Unbounded");
     // (3) omit-when-empty, engine-attested in BOTH directions.
     expect("unbounded_pile" in counterWire).toBe(false);
-    expect("unbounded_counters" in tokenWire).toBe(false);
+    expect("counter_display" in tokenWire).toBe(false);
     // (4) the ROW no longer carries a schedule at all — the flag was deleted. Pinning the exact
     // row shape is what catches a partial revert that leaves the field on one side.
     expect(tokenWire.unbounded_resources).toEqual([{ axis: "TokensCreated", player: 0 }]);
@@ -73,11 +81,31 @@ describe("unbounded ∞ wire seam (engine-emitted goldens)", () => {
     //   - declined wire: the post-decline frame ⇒ Unscheduled, axis still ∞, promise withdrawn.
     // Certainty is the discriminator here: the first two are both "scheduled", and a projection
     // that collapsed them into one answer reds this row.
+    //
+    // EXHAUSTIVE OBJECT EQUALITY, not a property read, and that choice is the discriminator for
+    // `prompted`: `toEqual` on the whole row reds if the engine silently stops emitting the seat,
+    // whereas `expect(row.state.data.prompted).toBe(0)` would read `undefined` off a dropped field
+    // and... still pass on a golden regenerated without it. The seat is a real wire field, so it
+    // is pinned like one.
+    //
+    // HONEST BOUND: both goldens carry `prompted: 0`, and 0 is also the attributed seat, because
+    // each golden's single axis attributes to its own controller. So this file pins the ENCODING
+    // of the seat, never the divergence between the prompted seat and the badge's seat — that is
+    // `derived_views::tests::two_controllers_draining_one_victim_do_not_cross_schedule` arms B/C
+    // engine-side and `UnboundedBadge.test.tsx`'s U8 client-side.
     expect(tokenWire.unbounded_families).toEqual([
-      { player: 0, family: "tokens", state: { type: "Scheduled", data: "Conditional" } },
+      {
+        player: 0,
+        family: "tokens",
+        state: { type: "Scheduled", data: { certainty: "Conditional", prompted: 0 } },
+      },
     ]);
     expect(counterWire.unbounded_families).toEqual([
-      { player: 0, family: "counters", state: { type: "Scheduled", data: "Committed" } },
+      {
+        player: 0,
+        family: "counters",
+        state: { type: "Scheduled", data: { certainty: "Committed", prompted: 0 } },
+      },
     ]);
     expect(declinedWire.unbounded_families).toEqual([
       { player: 0, family: "counters", state: { type: "Unscheduled" } },
@@ -135,7 +163,7 @@ describe("unbounded ∞ wire seam (engine-emitted goldens)", () => {
       }),
     ];
 
-    const groups = groupByName(objects, new Set(), unboundedPileIds);
+    const groups = groupByName(objects, new Set(), unboundedPileIds, undefined);
     const groupOf = (id: ObjectId) => {
       const group = groups.find((g) => g.ids.includes(id));
       expect(group, `no group contains ${id}`).toBeDefined();
@@ -171,13 +199,37 @@ describe("unbounded ∞ wire seam (engine-emitted goldens)", () => {
     );
   });
 
-  it("feeds the real useUnboundedCounterTypes hook from the engine wire", () => {
+  it("feeds the real useCounterDisplay hook from the engine wire", () => {
     setGameStoreForTest({
       gameState: buildGameState({ derived: counterWire as unknown as DerivedViews }),
     });
-    // (10) paired POSITIVE through the real zustand selector.
-    expect(renderHook(() => useUnboundedCounterTypes(405)).result.current).toEqual(["charge"]);
-    // (11) paired NEGATIVE: 404 is on the same battlefield and carries no ∞ mark.
-    expect(renderHook(() => useUnboundedCounterTypes(404)).result.current).toEqual([]);
+    // (10) paired POSITIVE through the real zustand selector — the engine's row reaches the hook
+    // verbatim, not re-derived from the object (which is absent from this state).
+    expect(renderHook(() => useCounterDisplay(405)).result.current).toEqual({
+      pills: [{ counter: "charge", count: 4, magnitude: "Unbounded" }],
+    });
+    // (11) paired NEGATIVE: 404 is on the same battlefield and has no projection entry.
+    expect(pillsOf(renderHook(() => useCounterDisplay(404)).result.current)).toEqual([]);
+  });
+
+  // The zustand v5 hazard the hook's shape exists to avoid: v5 has no shallow default, so the
+  // selector result IS React's `getSnapshot` return, compared with `Object.is`. An allocating
+  // selector returns a fresh ref on every store read and trips the getSnapshot cache. `tsc`
+  // cannot see it; this asserts the referential stability directly.
+  it("returns a referentially STABLE value across re-renders (zustand v5 getSnapshot)", () => {
+    setGameStoreForTest({
+      gameState: buildGameState({ derived: counterWire as unknown as DerivedViews }),
+    });
+    const marked = renderHook(() => useCounterDisplay(405));
+    const firstMarked = marked.result.current;
+    marked.rerender();
+    expect(marked.result.current).toBe(firstMarked);
+
+    // The dominant no-row case must be stable too — that is what the module constants are for.
+    const bare = renderHook(() => useCounterDisplay(404));
+    const firstBare = bare.result.current;
+    bare.rerender();
+    expect(bare.result.current).toBe(firstBare);
+    expect(pillsOf(bare.result.current)).toBe(pillsOf(firstBare));
   });
 });

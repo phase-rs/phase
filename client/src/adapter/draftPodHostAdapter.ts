@@ -11,7 +11,7 @@
  */
 
 import { DraftAdapter } from "./draft-adapter";
-import type { DraftPlayerView, PairingView, PodPolicy, PoolInput, SeatPublicView, TournamentFormat } from "./draft-adapter";
+import type { DraftKind, DraftPlayerView, PairingView, PodPolicy, PoolInput, SeatPublicView, TournamentFormat } from "./draft-adapter";
 import type { MatchScore } from "./types";
 import { P2PDraftHost, type DraftHostEvent } from "./p2p-draft-host";
 import { hostRoom, type HostResult } from "../network/connection";
@@ -105,7 +105,7 @@ function hostStatusForView(view: DraftPlayerView): DraftPodHostStatus {
 
 export interface DraftPodHostConfig {
   poolInput: PoolInput;
-  kind: "Premier" | "Traditional";
+  kind: Exclude<DraftKind, "Quick">;
   podSize: number;
   hostDisplayName: string;
   /** Swiss (3 rounds) or Single Elimination bracket. */
@@ -292,7 +292,7 @@ export class DraftPodHostAdapter {
         this.emit({ type: "lobbyFull" });
         break;
       case "draftStarted":
-        this.setStatus("drafting");
+        this.setStatus(hostStatusForView(event.view));
         this.emit({ type: "draftStarted", view: event.view });
         break;
       case "pickReceived":
@@ -398,6 +398,14 @@ export class DraftPodHostAdapter {
   async submitPick(cardInstanceId: string): Promise<DraftPlayerView> {
     if (!this.host) throw new Error("Host not initialized");
     return this.host.submitHostPick(cardInstanceId);
+  }
+
+  async submitPickWithDraftEffect(
+    effectCardInstanceId: string,
+    cardInstanceIds: string[],
+  ): Promise<DraftPlayerView> {
+    if (!this.host) throw new Error("Host not initialized");
+    return this.host.submitHostPickWithDraftEffect(effectCardInstanceId, cardInstanceIds);
   }
 
   async submitDeck(mainDeck: string[]): Promise<DraftPlayerView> {

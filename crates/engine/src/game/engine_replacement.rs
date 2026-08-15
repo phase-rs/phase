@@ -987,6 +987,11 @@ pub(super) fn handle_replacement_choice(
                 // CR 101.4: a simultaneous each-player sacrifice paused by a
                 // CR 616.1 replacement choice resumes the already-announced
                 // remaining sacrifices before any parked continuation can run.
+                let sacrifice_source_id = state
+                    .pending_player_scope_sacrifice_choice
+                    .as_ref()
+                    .map(|pending| pending.ability.source_id)
+                    .expect("active sacrifice choice owns its source identity");
                 match effects::drain_pending_player_scope_sacrifice_after_replacement(state, events)
                     .map_err(|error| EngineError::InvalidAction(error.to_string()))?
                 {
@@ -994,7 +999,18 @@ pub(super) fn handle_replacement_choice(
                     effects::PendingPlayerScopeSacrificeOutcome::PausedForReplacement => {
                         waiting_for = state.waiting_for.clone();
                     }
-                    effects::PendingPlayerScopeSacrificeOutcome::Completed { .. } => {
+                    effects::PendingPlayerScopeSacrificeOutcome::Completed {
+                        sacrificed_count,
+                        ..
+                    } => {
+                        effects::stamp_active_player_action_completion(
+                            state,
+                            sacrifice_source_id,
+                            crate::types::ability::EffectResolutionResult {
+                                cause: crate::types::ability::ThisWayCause::Sacrificed,
+                                count: sacrificed_count,
+                            },
+                        );
                         effects::drain_pending_continuation(state, events);
                         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                             waiting_for = state.waiting_for.clone();
@@ -1405,11 +1421,71 @@ pub(super) fn handle_replacement_choice(
                     }
                 }
             }
-            Ok(WaitingFor::Priority {
+            state.waiting_for = WaitingFor::Priority {
                 player: state.active_player,
-            })
+            };
+            super::engine::resume_pending_continuation_if_priority(state, events)?;
+            Ok(state.waiting_for.clone())
         }
     }
+}
+
+/// CR 614.12a: Commit a pre-entry controller choice onto the exact parked
+/// ZoneChange, then resume through the ordinary replacement-choice handler so
+/// delivery, trigger collection, and any later replacement ordering retain
+/// their existing single authorities.
+pub(super) fn handle_entry_controller_choice(
+    state: &mut GameState,
+    opponent: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let (player, candidates) = match &state.waiting_for {
+        WaitingFor::EntryControllerChoice { player, candidates } => (*player, candidates),
+        _ => {
+            return Err(EngineError::InvalidAction(
+                "entry controller choice is not pending".to_string(),
+            ));
+        }
+    };
+    if !candidates.contains(&opponent)
+        || !crate::game::players::choosable_opponents(state, player).contains(&opponent)
+    {
+        return Err(EngineError::InvalidAction(
+            "chosen entry controller is not eligible".to_string(),
+        ));
+    }
+    let Some(pending) = state.pending_replacement.as_mut() else {
+        return Err(EngineError::InvalidAction(
+            "entry controller choice has no pending replacement".to_string(),
+        ));
+    };
+    if pending.candidates.len() != 1 || pending.is_optional {
+        return Err(EngineError::InvalidAction(
+            "entry controller choice has an invalid replacement resume".to_string(),
+        ));
+    }
+    let ProposedEvent::ZoneChange {
+        controller_override,
+        to: Zone::Battlefield,
+        ..
+    } = &mut pending.proposed
+    else {
+        return Err(EngineError::InvalidAction(
+            "entry controller choice does not own a battlefield entry".to_string(),
+        ));
+    };
+    *controller_override = Some(opponent);
+    pending.proposed.applied_set_mut().insert(
+        crate::types::proposed_event::AppliedReplacementKey::EntryControllerChoice {
+            source: pending.candidates[0].source,
+            index: pending.candidates[0].index,
+            controller: opponent,
+        },
+    );
+    // Mark before re-entering the ordinary handler so the pre-entry chooser
+    // is not offered again while that handler applies this same replacement.
+    pending.proposed.mark_applied(pending.candidates[0]);
+    handle_replacement_choice(state, 0, events)
 }
 
 /// CR 707.2c + CR 614.12a + CR 613.1a: Answer path for Metamorphic Alteration's
@@ -1502,8 +1578,17 @@ fn handle_persist_chosen_attribute_choice(
             .is_some_and(|aura| aura.attached_to.is_none())
     {
         match crate::game::zone_pipeline::resolve_entering_aura_attachment(state, source_id) {
+            // CR 303.4g does NOT apply on this route: `NoLegalHost` here means the
+            // entrant already ENTERED the battlefield as a non-Aura and only became
+            // an Aura when its `BecomeCopy` replacement realized post-entry. There is
+            // no un-entering it — CR 303.4g's "isn't created" / "remains in its
+            // current zone" clause governs an object still in the act of entering —
+            // so the CR 704.5m unattached-Aura state-based action owns it from here,
+            // exactly as it did before the `Resolved` split. Same disposition as
+            // `Attached`: nothing further to do at this seam.
             crate::game::zone_pipeline::EnteringAuraAttachment::NotApplicable
-            | crate::game::zone_pipeline::EnteringAuraAttachment::Resolved => {}
+            | crate::game::zone_pipeline::EnteringAuraAttachment::Attached
+            | crate::game::zone_pipeline::EnteringAuraAttachment::NoLegalHost => {}
             crate::game::zone_pipeline::EnteringAuraAttachment::NeedsChoice { .. } => {
                 return Err(EngineError::InvalidAction(
                     "PersistChosenAttribute requires a resolved Aura host before the copy installs"
@@ -1771,7 +1856,7 @@ pub(super) fn handle_copy_target_choice(
             entry.copy_resume.as_ref().and_then(|copy| {
                 (entry.remaining_count > 0).then(|| {
                     (
-                        entry.object.owner,
+                        entry.object.projected().owner,
                         copy.clone(),
                         entry.enter_tapped,
                         entry.enter_with_counters.clone(),
@@ -2089,22 +2174,53 @@ fn finish_copy_target_choice_entry(
     // to priority, and any entry trigger already placed on the stack resolves with
     // the host chosen (CR 303.4f). The auto-attach (0/1 host) branch never pauses.
     //
-    // Liminal-path caveat: the copy-token caller (`handle_copy_target_choice`,
-    // ~1236) has a `copy_continuation` / committed-token-entry tail that runs only
-    // if this function returns `Ok(None)`. A multi-host `NeedsChoice` pause here
-    // would return `Ok(Some(..))` and skip that tail — the same drop the existing
-    // `replay_deferred_entry_events` pause above already causes. No card reaches
-    // that intersection today (the liminal accept path requires the COPIED card to
-    // carry its own enter-as-a-copy replacement, and none of those realize into a
-    // multi-host Aura with a token continuation); if one ever does, thread the
-    // continuation through the resume like the ETB-counter pause does.
+    // CR 616.1: the `NeedsChoice` arm below is a PAUSE, so it owes the same
+    // carrier the ETB-counter pause above owes — `counter_pause_post_actions`
+    // holds the liminal copy-token caller's committed-entry emit and its
+    // remaining-batch continuation, and returning `Ok(Some(..))` without parking
+    // them would drop both (`handle_copy_target_choice` runs that tail only on
+    // `Ok(None)`). Parked rather than reasoned about: the current card pool does
+    // not reach the intersection (the liminal accept path requires the COPIED card
+    // to carry its own enter-as-a-copy replacement, and none of those realize into
+    // a multi-host Aura with a token continuation), but "no card does this today"
+    // is not a property the engine should depend on.
     match crate::game::zone_pipeline::resolve_entering_aura_attachment(state, source_id) {
+        // CR 303.4g does NOT apply on this route: this entrant already ENTERED the
+        // battlefield as a non-Aura (Copy Enchantment enters as a plain enchantment)
+        // and only became an Aura when `BecomeCopy` realized post-entry. It cannot be
+        // un-entered, and CR 303.4g's "isn't created" clause governs only an object
+        // still in the act of entering — so the CR 704.5m unattached-Aura state-based
+        // action owns it. Same disposition as `Attached`: nothing to do here.
         crate::game::zone_pipeline::EnteringAuraAttachment::NotApplicable
-        | crate::game::zone_pipeline::EnteringAuraAttachment::Resolved => {}
+        | crate::game::zone_pipeline::EnteringAuraAttachment::Attached
+        | crate::game::zone_pipeline::EnteringAuraAttachment::NoLegalHost => {}
         crate::game::zone_pipeline::EnteringAuraAttachment::NeedsChoice {
             controller,
             legal_targets,
         } => {
+            // CR 616.1 carrier for the host pause. Same vehicle the non-liminal
+            // copy-token path uses for its own `ReturnAsAuraTarget` pause
+            // (`token_copy::apply_copy_token_after_replacement_with_created_ids`,
+            // the `ContinueCopyTokenEntryAfterAuraHost` stash): an empty counter
+            // queue whose completion carries the post-actions, drained by
+            // `drain_pending_counter_additions` when the `ReturnAsAuraTarget`
+            // handler in `engine.rs` returns to priority and calls
+            // `resume_pending_continuation_if_priority`.
+            //
+            // Only stashed when there is something to carry — the non-liminal
+            // caller (real Copy Enchantment) passes an empty list and must not
+            // acquire a spurious pending-counter frame. `EmitCommittedCopyTokenEntry`
+            // in the list is idempotent (`flush_pending_token_battlefield_entry`
+            // above already realized the parked entry), so re-running it after the
+            // host choice is a no-op rather than a double emit.
+            if !counter_pause_post_actions.is_empty() {
+                super::effects::counters::stash_pending_counter_post_actions(
+                    state,
+                    crate::types::ability::EffectKind::CopyTokenOf,
+                    source_id,
+                    counter_pause_post_actions,
+                );
+            }
             state.waiting_for = WaitingFor::ReturnAsAuraTarget {
                 player: controller,
                 source_id,
@@ -2210,6 +2326,7 @@ fn copy_effect_for_source(state: &GameState, source_id: ObjectId) -> Option<&Abi
     if let Some(entry) = state.liminal_entries.get(&source_id) {
         return entry
             .object
+            .projected()
             .replacement_definitions
             .iter_all()
             .filter_map(|replacement| replacement.execute.as_deref())
@@ -2262,7 +2379,7 @@ pub(super) fn apply_post_replacement_effect(
                     state
                         .liminal_entries
                         .get(&obj_id)
-                        .map(|entry| &entry.object)
+                        .map(|entry| entry.object.projected())
                 })
                 .map(|obj| {
                     (
@@ -4138,6 +4255,7 @@ mod tests {
             cause: None,
             attach_to: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
@@ -6056,6 +6174,7 @@ mod tests {
             cause: None,
             attach_to: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
@@ -6261,6 +6380,7 @@ mod tests {
             cause: None,
             attach_to: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
@@ -6382,6 +6502,7 @@ mod tests {
             cause: None,
             attach_to: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
@@ -6488,6 +6609,147 @@ mod tests {
             state.objects[&copy_ench].zone,
             Zone::Graveyard,
             "CR 303.4g: the unattached Aura copy goes to its owner's graveyard"
+        );
+    }
+
+    /// CR 616.1: the CR 303.4f host pause must CARRY the caller's entry tail, not
+    /// drop it.
+    ///
+    /// `finish_copy_target_choice_entry` returns `Ok(Some(..))` on that pause, and
+    /// its liminal copy-token caller runs the committed-entry emit and the
+    /// remaining-batch continuation only on `Ok(None)`. Before the carrier, a
+    /// multi-host Aura realized by a liminal copy token would therefore have
+    /// abandoned the rest of the batch and never published its created ids.
+    ///
+    /// Driven at the seam rather than through a card, because no card in the pool
+    /// reaches the intersection today (see the comment at the `NeedsChoice` arm) —
+    /// which is exactly why the behaviour needs a test that does not depend on
+    /// one. The post-action chosen is the real batch continuation, and the
+    /// prompt is answered through the production `apply` path, so the assertion
+    /// is "the second token actually got created", not "a struct was stored".
+    #[test]
+    fn the_aura_host_pause_carries_the_liminal_copy_token_continuation() {
+        use crate::game::printed_cards::intrinsic_copiable_values;
+        use crate::types::game_state::PendingCounterPostAction;
+        use crate::types::keywords::Keyword;
+        use crate::types::proposed_event::{CopyTokenSpec, EtbTapState};
+
+        let mut state = GameState::new_two_player(42);
+        let hosts: Vec<ObjectId> = (0..2)
+            .map(|i| make_creature(&mut state, PlayerId(0), &format!("Grizzly Bears {i}")))
+            .collect();
+
+        // An unattached Aura on the battlefield with two legal hosts: the shape
+        // `resolve_entering_aura_attachment` answers with `NeedsChoice`.
+        let entering_aura = create_object(
+            &mut state,
+            CardId(400),
+            PlayerId(0),
+            "Entering Aura".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&entering_aura).unwrap();
+            obj.base_card_types.core_types = vec![CoreType::Enchantment];
+            obj.card_types.core_types = vec![CoreType::Enchantment];
+            obj.base_card_types.subtypes = vec!["Aura".to_string()];
+            obj.card_types.subtypes = vec!["Aura".to_string()];
+            let enchant = Keyword::Enchant(TargetFilter::Typed(
+                crate::types::ability::TypedFilter::new(
+                    crate::types::ability::TypeFilter::Creature,
+                ),
+            ));
+            obj.base_keywords = vec![enchant.clone()];
+            obj.keywords = vec![enchant];
+        }
+
+        // The tail the caller would otherwise have run itself: one more token in
+        // this batch, a copy of a Treasure.
+        let copied = create_object(
+            &mut state,
+            CardId(401),
+            PlayerId(0),
+            "Treasure".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&copied).unwrap();
+            obj.base_card_types.core_types = vec![CoreType::Artifact];
+            obj.card_types = obj.base_card_types.clone();
+        }
+        let values = intrinsic_copiable_values(state.objects.get(&copied).unwrap());
+        let continuation = PendingCounterPostAction::ContinueCopyTokenCreation {
+            owner: PlayerId(0),
+            copy: Box::new(CopyTokenSpec {
+                values: Box::new(values),
+                display_source: crate::game::game_object::DisplaySource::Token,
+                printed_ref: None,
+                token_image_ref: None,
+                extra_keywords: Vec::new(),
+                additional_modifications: Vec::new(),
+                tapped: false,
+                enters_attacking: false,
+                sacrifice_at: None,
+                source_id: entering_aura,
+                controller: PlayerId(0),
+            }),
+            enter_tapped: EtbTapState::Unspecified,
+            enter_with_counters: Vec::new(),
+            remaining_count: 1,
+        };
+
+        let tokens_before = state
+            .battlefield
+            .iter()
+            .filter(|id| state.objects[id].is_token)
+            .count();
+
+        let mut events = Vec::new();
+        let paused = finish_copy_target_choice_entry(
+            &mut state,
+            entering_aura,
+            &mut events,
+            vec![continuation],
+            false,
+        )
+        .expect("the host pause is not an error");
+
+        assert!(
+            matches!(paused, Some(WaitingFor::ReturnAsAuraTarget { .. })),
+            "two legal hosts must pause on the CR 303.4f host choice, got {paused:?}"
+        );
+        assert!(
+            state.active_counter_additions().is_some(),
+            "CR 616.1: the pause must park the caller's tail, not drop it"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(hosts[1])),
+            },
+        )
+        .expect("answer the CR 303.4f host choice");
+
+        assert_eq!(
+            state.objects[&entering_aura].attached_to,
+            Some(crate::game::game_object::AttachTarget::Object(hosts[1])),
+            "the host choice still applies"
+        );
+        let tokens_after = state
+            .battlefield
+            .iter()
+            .filter(|id| state.objects[id].is_token)
+            .count();
+        assert_eq!(
+            tokens_after,
+            tokens_before + 1,
+            "CR 616.1: the parked batch continuation must run once the host is chosen \
+             — this is the assertion that fails if the carrier is removed"
+        );
+        assert!(
+            state.active_counter_additions().is_none(),
+            "the parked frame is consumed, not left resident"
         );
     }
 
@@ -6697,6 +6959,7 @@ mod tests {
             cause: None,
             attach_to: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
@@ -6862,6 +7125,7 @@ mod tests {
             branch_descriptions: Vec::new(),
             parent_targets: Vec::new(),
             context: Default::default(),
+            continuation: None,
             replacement_applied: Default::default(),
             remaining_players: Vec::new(),
         };
@@ -7072,7 +7336,9 @@ mod tests {
         state.liminal_entries.insert(
             liminal_id,
             LiminalEntry {
-                object: liminal,
+                object: crate::types::game_state::LiminalEntrant::Token(
+                    crate::types::game_state::TokenProjection::materialize(liminal),
+                ),
                 name: "Liminal Mockingbird".to_string(),
                 source_id: ObjectId(999),
                 controller: PlayerId(0),

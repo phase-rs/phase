@@ -5,6 +5,16 @@
     "close": "Zamknij",
     "closeNamed": "Zamknij {{name}}"
   },
+  "quantityRef": {
+    "highestNumber": "najwyższa liczba",
+    "lowestNumber": "najniższa liczba",
+    "chosenNumber": "wybrana liczba"
+  },
+  "scryOutcome": {
+    "title": "Wróżenie zakończone",
+    "you": "Ty",
+    "result": "{{player}} — {{top}} na górze · {{bottom}} na dole"
+  },
   "modal": {
     "defaultEyebrow": "Narzędzie warsztatu"
   },

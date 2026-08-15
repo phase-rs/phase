@@ -57,7 +57,7 @@
  *   2. Apply this migration:
  *          node scripts/migrate-mana-target-roles.mjs
  *   3. Verify:
- *          cargo test -p engine --test integration
+ *          cargo test -p phase-engine --test integration
  *      In particular `mana_role_fixture_migration` asserts Carpet of Flowers is
  *      a CountSource and Belbe is a Recipient — it is the canary for a mapping
  *      that silently flipped.
@@ -459,4 +459,4 @@ if (lineCount !== 1) {
   process.exit(1);
 }
 console.log(`\nWrote ${fixturePath} (canonical gzip -9 -n; ${out.length} JSON bytes).`);
-console.log("Verify with: cargo test -p engine --test integration");
+console.log("Verify with: cargo test -p phase-engine --test integration");

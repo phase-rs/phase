@@ -1,0 +1,245 @@
+# The engine-census pin: the offer-writer census's own claims, MEASURED rather than restated.
+#
+# Why this manifest exists: this census's module header carried "22 production + 14 test sites"
+# while its assert read `(22, 21)`. The prose was hand-corrected across five adjudications
+# (12 => 13 => 14 => 16 => 17 => 21) and drifted out of sync with its own live assert anyway.
+# Rows P1-P4 below anchor `right: (22, 21)`, and P1 anchors the adjudication sentence inside the
+# assert, so moving either without regenerating this block turns `probe-pin check` red.
+#
+# mode = "runtime-read" is the ENABLING CONDITION, not a formality: `census()` reads its sources
+# with `std::fs::read_to_string` under `Path::new(env!("CARGO_MANIFEST_DIR")).join("src")`. `env!`
+# bakes the PATH at compile time, the CONTENT is read at execution -- so a bind-mounted mutant is
+# visible WITHOUT rebuilding the engine (measured end-to-end). Had the census used `include_str!`,
+# probe-pin could not pin it at all.
+#
+# The walk roots are `crates/engine/src` and `crates/phase-ai/src`. NOTHING in this commit is
+# written into either of them, and this manifest is deliberately NOT stored under them: a
+# documentation-adding change over the very constructs a census counts is how a prose mention
+# becomes a counted site. ⚠ State the REACHABLE form of that hazard, not a bigger one: `census()`
+# collects through `rs_files()`, whose predicate is `extension == "rs"`, so a `.toml` under a walk
+# root is never read at all -- the walk roots hold non-`.rs` files (insta snapshots, docs) that the
+# green assert does not count. NO count of them is quoted here, for the same reason the workflow
+# count below is omitted: nothing turns red when it moves, and `rs_files()`'s predicate is the
+# whole proof. The real hazard is this file's TEXT being moved under a walk root **into a `.rs` file**,
+# where P1's `find` string alone would add a production hit and move the number it pins.
+#
+# NOTE ON `assert_count`: it counts RAW substring occurrences over the whole mutant text
+# (`str::matches`), including comments. The census counts NON-COMMENT LINES. The two numbers
+# differ on purpose -- P3 asserts 4 raw occurrences for a mutation the census must see as +1.
+#
+# ============================ WHERE THIS IS ENFORCED, AND WHERE IT IS NOT ====================
+# ENFORCED: locally, by the Tiltfile's `probe-pin-census` resource, on every edit under
+#   `crates/engine/src` or `crates/phase-ai/src` -- in ANY running Tilt session, including a plain
+#   `tilt up`. MEASURED against the live session, because the weaker reading is the tempting one:
+#   the `lint` group gates `auto_init` ONLY, i.e. whether the resource also runs once at startup.
+#   It does not gate the file watch. RE-RUNNABLE CHECK rather than a quoted timing: in a `tilt up`
+#   started with no profile, `tilt get filewatch` lists `local:probe-pin-check` -- same
+#   `auto_init = 'lint' in enabled` shape as this resource -- and for any such resource the
+#   FileWatch `lastEventTime` is followed within milliseconds by a `buildHistory` entry, i.e. a
+#   file-change-triggered build on a resource that never auto-inits. Deliberately NO session
+#   timestamps are quoted: they die with the Tilt session, and the recipe reproduces without them.
+#   The Tiltfile header states the same rule in prose: "opt-in groups just control which auto-start".
+# NOT ENFORCED IN CI. MEASURED, not assumed: ZERO files under `.github/workflows/` reference
+#   probe-pin (positive control: `clippy` matches at least one workflow, so the instrument
+#   discriminates and the zero is a result). NO workflow COUNT is quoted here: nothing in this
+#   repo turns red when a workflow is added, and a zero that went stale would go stale in the
+#   SAFE direction -- a workflow that DID reference probe-pin would make this pin more enforced
+#   than this comment claims, not less. CI enrollment is not merely undone, it is POLICY-BLOCKED
+#   -- `.agents/pr-review-policy.toml` `[hard_stops]` lists `.github/workflows/**`, so an agent
+#   change cannot add it.
+# READ THAT AS A LIMIT, NOT AS COVERAGE. A merged pin is not a CI-enforced pin. If the local
+#   Tilt resource is not running, these claims are measured by NOTHING -- which is why the
+#   resource is an AUTOMATIC trigger and not a manual knob (see the Tiltfile comment there).
+# This manifest also does NOT retire the OUT-OF-TREE `.r3-drift-gate.sh` (it lives in the working
+#   run directory and is not committed, so a reader will not find it here): FOUR of its rows (seat-pin assert
+#   hash, the `WaitingFor` variant set, the CR 603.5 producer pin, clear-site counts) are still
+#   uncovered here. This pins the INTEGRATION-venue census; the lib-venue CR 603.5 producer
+#   census is NOT pinned and remains covered by the shell drift-gate.
+# ============================================================================================
+version = 1
+
+[target]
+mode         = "runtime-read"
+package      = "phase-engine"          # the PACKAGE; the lib target is named `engine`
+test         = "integration"
+# Selects exactly ONE test. MEASURED, NOT ENFORCED -- the same distinction this file draws for CI
+# above, drawn here because the opposite reading was written first and was WRONG. Nothing in the
+# tool compels the "one": `DigestInput` (`crates/probe-pin/src/block.rs`) carries the [target]
+# TABLE, the probes, the control, the projections and the instruments -- not the number of tests
+# SELECTED -- so a filter that grew to match a second PASSING test yields `selected: 2` with
+# `probe-pin check` still exit 0 and the digest UNMOVED (refuted by experiment; the claim that such
+# a filter "would change the run and move the digest" was false). What IS enforced is the EXECUTION
+# FLOOR in `verdict.rs`: `passed + failed == 0` aborts, i.e. AT LEAST one test body must have run
+# (`NothingRan::NoneSelected` when the filter matches nothing, `AllSkipped` under an `#[ignore]`).
+# One-ness is therefore a property of the MATCH SET, not of the string. Be precise about which,
+# because the first correction here was wrong in the other direction: the filter STRING **is**
+# digest-covered -- `DigestInput` carries `&manifest.target`, and `filter` is a field of that table,
+# so editing the string turns the pin RED even when every verdict is identical
+# (`crates/probe-pin/tests/pure_logic.rs::digest_target` asserts exactly this). What nothing guards
+# is the string being left AS AUTHORED while its matched set GROWS -- a newly added test whose NAME
+# happens to contain it. That is the unguarded direction, and it is the only one.
+# No test-count denominator is quoted either: the binary's test population is a live external
+# number nothing here turns red on.
+# Deliberately NOT the whole census module: the
+# sibling test `the_cfg_scope_classifier_sees_four_foreign_forms_...` builds its input as an
+# in-binary String, so no bind-mount can reach it and no row here may imply it was pinned.
+filter       = "the_loop_shortcut_offer_writer_surface_is_pinned"
+filter_match = "substring"
+timeout_secs = 120
+
+[output]
+file   = "crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs"
+marker = "PROBE-PIN"
+
+[[probe]]
+id    = "P0_control"
+claim = "no mounts, unmodified tree -- the instrument itself"
+  [probe.expect]
+  outcome = "pass"
+
+[[probe]]
+id    = "P1_production_site_removed"
+claim = "the production half fails DOWNWARD, and the pinned tuple + adjudication prose are what they say"
+  [[probe.mutation]]
+  kind    = "replace"
+  file    = "crates/engine/src/game/scenario.rs"
+  find    = "            WaitingFor::LoopShortcut { .. } => \"LoopShortcut\",\n"
+  replace = ""
+  [[probe.assert_count]]
+  file  = "crates/engine/src/game/scenario.rs"
+  text  = "WaitingFor::LoopShortcut {"
+  count = 0
+  [probe.expect]
+  outcome = "fail"
+  anchor  = ["left: (21, 21)",
+             "right: (22, 21)",
+             "THE TEST HALF HAS BEEN ADJUDICATED FIVE TIMES"]
+
+[[probe]]
+id    = "P2_test_site_removed"
+claim = "the cfg(test) half is pinned INDEPENDENTLY of the production half"
+  [[probe.mutation]]
+  kind    = "replace"
+  file    = "crates/phase-ai/src/projection.rs"
+  find    = "        state.waiting_for = WaitingFor::LoopShortcut {\n"
+  replace = ""
+  [[probe.assert_count]]
+  file  = "crates/phase-ai/src/projection.rs"
+  text  = "WaitingFor::LoopShortcut {"
+  count = 1
+  [probe.expect]
+  outcome = "fail"
+  anchor  = ["left: (22, 20)", "right: (22, 21)"]
+
+[[probe]]
+id    = "P3_walk_reaches_phase_ai_and_skips_comments"
+claim = "the phase-ai root is walked, zero-hit files are visited, and COMMENT lines are not counted"
+  [[probe.mutation]]
+  kind   = "prepend"
+  files  = ["crates/phase-ai/src/lib.rs"]
+  text   = "let _pp = WaitingFor::LoopShortcut { proposer };\n// pad WaitingFor::LoopShortcut { proposer };\n// pad WaitingFor::LoopShortcut { proposer };\n// pad WaitingFor::LoopShortcut { proposer };\n"
+  repeat = 1
+  # FOUR raw occurrences in the mutant; the census must count ONE. That gap IS the claim.
+  [[probe.assert_count]]
+  file  = "crates/phase-ai/src/lib.rs"
+  text  = "WaitingFor::LoopShortcut {"
+  count = 4
+  [probe.expect]
+  outcome = "fail"
+  anchor  = ["left: (23, 21)", "right: (22, 21)"]
+
+[[probe]]
+id    = "P4_counting_is_per_line"
+claim = "the count sums LINES, not files -- two planted lines in one file move it by two"
+  [[probe.mutation]]
+  kind   = "prepend"
+  files  = ["crates/engine/src/lib.rs"]
+  text   = "let _pp = WaitingFor::LoopShortcut { proposer };\n"
+  repeat = 2
+  [[probe.assert_count]]
+  file  = "crates/engine/src/lib.rs"
+  text  = "WaitingFor::LoopShortcut {"
+  count = 2
+  [probe.expect]
+  outcome = "fail"
+  anchor  = ["left: (24, 21)", "right: (22, 21)"]
+
+[[probe]]
+id    = "P5_relocation_preserves_the_count"
+claim = "the per-file multiset is pinned INDEPENDENTLY of the total -- the relocation the count cannot see"
+  [[probe.mutation]]
+  kind    = "replace"
+  file    = "crates/engine/src/game/scenario.rs"
+  find    = "            WaitingFor::LoopShortcut { .. } => \"LoopShortcut\",\n"
+  replace = ""
+  [[probe.mutation]]
+  kind   = "prepend"
+  files  = ["crates/engine/src/game/interaction.rs"]
+  text   = "let _pp = WaitingFor::LoopShortcut { proposer };\n"
+  repeat = 1
+  [[probe.assert_count]]
+  file  = "crates/engine/src/game/scenario.rs"
+  text  = "WaitingFor::LoopShortcut {"
+  count = 0
+  [[probe.assert_count]]
+  file  = "crates/engine/src/game/interaction.rs"
+  text  = "WaitingFor::LoopShortcut {"
+  count = 6
+  [probe.expect]
+  outcome = "fail"
+  # The integer in the second anchor is a COUNT, not a line number -- see the DISCLOSURE in the
+  # census file's own prose. No lint distinguishes the two in that slot.
+  anchor  = ["the COUNT can be preserved by a move that relocates a writer",
+             "(\"engine/src/game/interaction.rs\", 6)"]
+
+[[probe]]
+id    = "P6_second_validate_pins_consumer"
+claim = "pin-VALUE legality has exactly ONE production consumer"
+  [[probe.mutation]]
+  kind   = "prepend"
+  files  = ["crates/engine/src/game/scenario.rs"]
+  text   = "let _pp = validate_pins(schema, template, 1, state);\n"
+  repeat = 1
+  [[probe.assert_count]]
+  file  = "crates/engine/src/game/scenario.rs"
+  text  = "validate_pins("
+  count = 1
+  [probe.expect]
+  outcome = "fail"
+  anchor  = ["expected `validate_pins(` to appear in production exactly twice"]
+
+[[probe]]
+id    = "P7_coverage_half_unpaired"
+claim = "the one consumer runs the COVERAGE half too -- adjacency is load-bearing"
+  [[probe.mutation]]
+  kind    = "replace"
+  file    = "crates/engine/src/analysis/decision_template.rs"
+  find    = "    predictability_gate(template, &required).is_ok()\n        && validate_pins(schema, template, validated_range, state).is_ok()\n"
+  replace = "    predictability_gate(template, &required).is_ok()\n        // probe pad\n        // probe pad\n        // probe pad\n        && validate_pins(schema, template, validated_range, state).is_ok()\n"
+  [[probe.assert_count]]
+  file  = "crates/engine/src/analysis/decision_template.rs"
+  text  = "// probe pad"
+  count = 3
+  [probe.expect]
+  outcome = "fail"
+  anchor  = ["validating pin VALUES without also running"]
+
+[[probe]]
+id    = "P8_authority_call_site_removed"
+claim = "every declare-time site routes through the shared authority"
+  [[probe.mutation]]
+  kind    = "replace"
+  file    = "crates/engine/src/game/engine.rs"
+  find    = "    crate::analysis::decision_template::declaration_conforms(\n"
+  replace = ""
+  # RAW occurrences: 4 in the pristine file (one is a `///` line, one is cfg(test)-scoped), so 3
+  # after the drop. The census's PRODUCTION count for the same file goes 2 -> 1. Two different
+  # instruments, two different numbers, both stated.
+  [[probe.assert_count]]
+  file  = "crates/engine/src/game/engine.rs"
+  text  = "declaration_conforms("
+  count = 3
+  [probe.expect]
+  outcome = "fail"
+  anchor  = ["expected 1 definition + 3 call sites",
+             "(\"engine/src/game/engine.rs\", 1)"]

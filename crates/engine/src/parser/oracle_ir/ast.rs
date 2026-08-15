@@ -5,12 +5,12 @@ use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, BounceSelection,
     CastingPermission, ChosenCounterCountCondition, ControlWindow, ControllerRef,
-    CopyRetargetPermission, CounterAdjustment, CounterSourceRider, DoorLockOp, Duration, Effect,
-    EffectScope, FaceDownProfile, ForceBlockAttackerRef, LibraryPosition, ManaProduction,
-    ManaSpendRestriction, ManaTargetRole, ModalSelectionConstraint, OutsideGameSourcePool,
-    PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint,
-    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
-    TargetFilter,
+    CopyRetargetPermission, CounterAdjustment, CounterSourceRider, DigRestOrder, DoorLockOp,
+    Duration, Effect, EffectScope, FaceDownProfile, ForceBlockAttackerRef, LibraryPosition,
+    ManaProduction, ManaSpendRestriction, ManaTargetRole, ModalSelectionConstraint,
+    OutsideGameSourcePool, PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit,
+    SearchSelectionConstraint, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
+    SubAbilityLink, TargetFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -386,9 +386,14 @@ pub(crate) enum ContinuationAst {
         chosen_destination: Zone,
         rest_destination: Zone,
     },
-    /// "Put those cards on top ..." after a search/dig/choice producer.
+    /// "Put those cards/the chosen cards on top ..." after a search/dig/choice
+    /// producer.
     /// Count is supplied by the already-selected target set.
     PutChosenCardsAtLibraryPosition { position: LibraryPosition },
+    /// CR 701.23a + CR 608.2c: "exile the rest" after a multi-zone search.
+    /// The searched player's cards in the searched zones, excluding the cards
+    /// selected by the SearchLibrary choice, are moved to exile.
+    ExileSearchRemainder,
     /// CR 702.170c-d: "It/that card/they become plotted" after an exile effect.
     BecomesPlotted,
     /// CR 702.143d: "It/that card/they become foretold" after an exile effect.
@@ -402,6 +407,10 @@ pub(crate) enum ContinuationAst {
     PutRest {
         destination: Zone,
         reorder_all: bool,
+        /// CR 400.5 + CR 608.2c: Only exact "in a random order" text
+        /// randomizes the unchosen library remainder.
+        #[serde(default, skip_serializing_if = "DigRestOrder::is_preserve")]
+        rest_order: DigRestOrder,
     },
     /// CR 701.20e + CR 608.2c: "Put up to N [filter] from among them onto the battlefield/into
     /// your hand" after Dig — patches the Dig's keep_count, filter, destination, and rest_destination.
@@ -420,6 +429,10 @@ pub(crate) enum ContinuationAst {
         /// "put two of them into your hand and the rest on the bottom of your library".
         /// When None, a subsequent PutRest continuation handles rest_destination.
         rest_destination: Option<Zone>,
+        /// CR 400.5 + CR 608.2c: Only exact "in a random order" text sets
+        /// `Random`; every other accepted form preserves existing behavior.
+        #[serde(default)]
+        rest_order: DigRestOrder,
         /// CR 110.2a: Controller override for the kept cards' battlefield entry
         /// ("... onto the battlefield ... under your control"). `None` leaves
         /// them under their owner's control.
@@ -434,6 +447,10 @@ pub(crate) enum ContinuationAst {
         /// from-among put-step.
         #[serde(default)]
         enter_tapped: bool,
+        /// CR 508.4: Kept cards enter attacking when the from-among clause
+        /// says "onto the battlefield ... attacking".
+        #[serde(default)]
+        enters_attacking: bool,
         /// CR 701.20a vs 701.20e: True when the from-among clause's stripped verb
         /// was "reveal" (a public action) rather than "put"/"choose" (a private
         /// look). Promotes the patched Dig to `reveal: true` even when the kept
@@ -661,15 +678,21 @@ pub(crate) enum ImperativeFamilyAst {
         attacker: Option<ForceBlockAttackerRef>,
         duration: Duration,
     },
-    /// CR 508.1d: Attack a required player this turn/combat if able. The
-    /// `required_player` filter selects whom the forced attacker must attack —
-    /// `TargetFilter::Controller` for "attacks you", or
+    /// CR 508.1d + CR 506.3: Attack a required DEFENDER this turn/combat if
+    /// able. The `required_defender` filter selects whom the forced attacker
+    /// must attack — `TargetFilter::Controller` for "attacks you",
     /// `ControllerRef::ChosenPlayer { index }` for "attacks that player" (the
     /// opponent chosen by a preceding "choose an opponent" instruction in the
-    /// same resolution, e.g. Ruhan of the Fomori).
+    /// same resolution, e.g. Ruhan of the Fomori), or `TargetFilter::SelfRef`
+    /// for a permanent defender ("attack ~ if able" — Gideon Jura, whose
+    /// required defender is the planeswalker itself).
     ForceAttack {
-        duration: Duration,
-        required_player: TargetFilter,
+        /// `None` is the WINDOWLESS form ("attack ~ if able" — Gideon Jura),
+        /// whose span is stated by an enclosing clause ("During target
+        /// opponent's next turn, …") and applied by the clause machinery.
+        /// `Some` carries the window the predicate states for itself.
+        duration: Option<Duration>,
+        required_defender: TargetFilter,
     },
     /// CR 701.15a: Goad target creature.
     Goad,
@@ -1503,7 +1526,7 @@ pub(crate) enum PutImperativeAst {
         enters_under: EntersUnderSpec,
         /// CR 603.6d: "enters tapped" — enters the battlefield tapped.
         enter_tapped: bool,
-        /// CR 701.28c: "transformed" — enters with its back face up.
+        /// CR 712.14a: "transformed" — enters with its back face up.
         enter_transformed: bool,
         /// CR 508.4: "tapped and attacking [<player_phrase>]" — the moved
         /// object enters the battlefield as an attacking creature (without
@@ -1798,6 +1821,13 @@ pub(crate) enum ZoneCounterImperativeAst {
         mode: crate::types::ability::CounterTransferMode,
         selection: crate::types::ability::CounterMoveSelection,
         target: TargetFilter,
+    },
+    /// CR 122.1 + CR 603.2c: "put the same number and kind of counters" / "put
+    /// one of each of those kinds of counters" — reproduce the triggering
+    /// event's counters onto `target`. Lowered to `Effect::ReproduceEventCounters`.
+    ReproduceEventCounters {
+        target: TargetFilter,
+        per_kind_count: crate::types::ability::EventCounterReproductionCount,
     },
 }
 

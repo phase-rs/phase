@@ -16,10 +16,15 @@
     "shorten": "Break out",
     "decline": "Decline the shortcut",
     "untilLethal": "Repeat until the game ends.",
-    "fixedCount_one": "Repeat once.",
-    "fixedCount_other": "Repeat {{count}} times.",
+    "fixedCount_one": "Repeat at most once.",
+    "fixedCount_other": "Repeat at most {{count}} times.",
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
     "convokeInfo_other": "Auto-taps up to {{count}} creatures for convoke each iteration.",
+    "countAria": "Number of iterations",
+    "previewTitle_one": "Repeating once produces:",
+    "previewTitle_other": "Repeating {{count}} times produces:",
+    "previewEntry": "{{amount}} {{resource}}",
+    "previewEntryPlayer": "{{amount}} {{resource}} — {{player}}",
     "winKind": {
       "LethalDamage": "This loop deals lethal damage.",
       "PoisonLoss": "This loop gives lethal poison counters.",
@@ -45,6 +50,7 @@
     "expand": "Espandi avanzamento risoluzione"
   },
   "debugCreate": {
+    "copies": "Copie",
     "tokenPower": "Power",
     "tokenToughness": "Toughness",
     "tokenPowerPlaceholder": "Power",
@@ -485,8 +491,10 @@
     "companion": "Compagno",
     "unboundedTooltip": "{{resource}} illimitato (∞)",
     "unboundedScheduledTooltip": "{{resource}} illimitato (∞) — collasso in sospeso; verrà scelta una quantità finita",
+    "unboundedScheduledYouTooltip": "{{resource}} illimitato (∞) — collasso in sospeso; indicherai tu la quantità",
     "unboundedScheduledGlyph": "∞→N",
     "unboundedConditionalTooltip": "{{resource}} illimitato (∞) — collasso in sospeso; questo può restare illimitato",
+    "unboundedConditionalYouTooltip": "{{resource}} illimitato (∞) — collasso in sospeso; questo può restare illimitato e, in caso contrario, indicherai tu la quantità",
     "unboundedMixedTooltip": "{{resource}} illimitato (∞) — parte di questo gruppo ha un collasso in sospeso; parte resta illimitata",
     "unboundedConditionalGlyph": "∞→?",
     "unboundedManaPoolMarker": "Mana illimitato (∞)",
@@ -1806,6 +1814,10 @@
     "title": "Scegli il destinatario del dono",
     "subtitle": "Scegli quale avversario riceve il dono promesso."
   },
+  "entryController": {
+    "title": "Scegli il controllore all'entrata",
+    "subtitle": "Scegli quale avversario controlla questo permanente mentre entra."
+  },
   "optionalCost": {
     "gift": {
       "title": "Promettere un dono?",
@@ -2039,6 +2051,7 @@
     "searchPlaceholder": "Cerca per nome...",
     "noCardsFound": "Nessuna carta trovata",
     "buttonSubtitle": "Seleziona un'opzione",
+    "numberSubtitle": "Inserisci un numero intero maggiore o uguale a {{min}}",
     "filterPlaceholder": "Filtra opzioni...",
     "noOptionsMatch": "Nessuna opzione corrisponde"
   },

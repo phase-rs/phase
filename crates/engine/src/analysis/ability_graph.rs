@@ -893,6 +893,10 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::DoublePT { .. }
         | Effect::DoublePTAll { .. }
         | Effect::MoveCounters { .. }
+        // CR 122.1 + CR 603.2c: the reproduced counter kind is event-derived (not
+        // statically known), so it projects onto no fixed resource axis — like
+        // `MoveCounters`, it is Unmodeled.
+        | Effect::ReproduceEventCounters { .. }
         | Effect::Animate { .. }
         | Effect::ReturnAsAura { .. }
         | Effect::RegisterBending { .. }
@@ -914,6 +918,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
         | Effect::SwapChosenLabels { .. }
+        | Effect::RevealChosenNumbers { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::Suspect { .. }
         | Effect::Unsuspect { .. }
@@ -1012,6 +1017,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::Adapt { .. }
         | Effect::Learn
         | Effect::Forage
+        | Effect::CompletePlayerAction { .. }
         | Effect::Harness
         | Effect::CollectEvidence { .. }
         | Effect::Endure { .. }
@@ -1067,7 +1073,9 @@ fn trigger_axis(trig: &TriggerDefinition) -> Option<AxisKey> {
         // CR 701.26a: "becomes tapped" requires untapped state to consume.
         TriggerMode::Taps | TriggerMode::TapAll => Some(AxisKey::Tap),
         // CR 106.1: mana-added / tap-for-mana triggers consume the mana axis.
-        TriggerMode::TapsForMana | TriggerMode::ManaAdded => Some(AxisKey::Mana),
+        TriggerMode::TapsForMana | TriggerMode::ManaAdded | TriggerMode::ManaAbilityProduced => {
+            Some(AxisKey::Mana)
+        }
         // CR 603.6a / 700.4 / 603.6c: zone-change triggers consume the ETB / dies /
         // LTB event axis, disambiguated by the definition's destination/origin.
         TriggerMode::ChangesZone | TriggerMode::ChangesZoneAll => {
@@ -1181,6 +1189,9 @@ fn trigger_axis(trig: &TriggerDefinition) -> Option<AxisKey> {
         | TriggerMode::RoomEntered
         | TriggerMode::PlanarDice
         | TriggerMode::Planeswalked { .. }
+        // CR 714.2e: a final-chapter meta-trigger consumes another permanent's
+        // chapter-ability lifecycle; no modeled producer axis.
+        | TriggerMode::FinalSagaChapterAbility { .. }
         | TriggerMode::ChaosEnsues
         | TriggerMode::RolledDie
         | TriggerMode::RolledDieOnce

@@ -15,7 +15,7 @@ mod prelude {
     pub(super) use nom::sequence::{preceded, terminated};
     pub(super) use nom::Parser;
 
-    pub(super) use super::super::oracle_cost::parse_oracle_cost;
+    pub(super) use super::super::oracle_cost::{parse_gerund_cost, parse_oracle_cost};
     pub(super) use super::super::oracle_effect::subject::{
         parse_restriction_modes, static_mode_needs_grant_propagation,
     };
@@ -66,8 +66,8 @@ mod prelude {
         CastCostMode, CastExtraCost, CastFreeOrigin, CastFrequency, CastingProhibitionCondition,
         CombatAloneAction, CombatAloneRequirement, CostModifyMode, CostPaymentProhibition,
         CrewAction, CrewContributionKind, ExileCardPool, ExileCastCost, ExileCastTiming,
-        HandSizeModification, ProhibitionScope, StaticMode, SuppressedTriggerEvent, TriggerCause,
-        ZoneChangeQualifier,
+        HandSizeModification, ProhibitionScope, RequiredDefender, StaticMode,
+        SuppressedTriggerEvent, TriggerCause, ZoneChangeQualifier,
     };
     pub(super) use crate::types::zones::Zone;
 }
@@ -155,6 +155,7 @@ pub(crate) use evasion::{
 pub(crate) use grammar::map_keyword;
 pub(crate) use grammar::parse_pt_mod;
 pub(crate) use grammar::promote_nested_ability_quotes;
+pub(crate) use grammar::typed_filter_for_subtype;
 pub(crate) use keyword_grant::{
     classify_quoted_inner, parse_chosen_qualifier_subject, parse_continuous_modifications,
     parse_graveyard_granted_keyword_kind, parse_quoted_ability_modifications, split_keyword_list,

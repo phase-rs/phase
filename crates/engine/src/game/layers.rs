@@ -28,10 +28,10 @@ use crate::game::quantity::{
 use crate::game::speed::{effective_speed, has_max_speed};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, BasicLandType,
-    CastingPermission, ChosenSubtypeKind, CommanderOwnership, ContinuousModification,
-    CopiableValues, Duration, Effect, FilterProp, ManaContribution, ManaProduction, PlayerFilter,
-    PlayerScope, QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter,
-    TriggerGrantProducerKey, TriggerProducerOrigin, TypedFilter,
+    CardTypeSetSource, CastingPermission, ChosenSubtypeKind, CommanderOwnership,
+    ContinuousModification, CopiableValues, Duration, Effect, FilterProp, ManaContribution,
+    ManaProduction, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, StaticCondition,
+    StaticDefinition, TargetFilter, TriggerGrantProducerKey, TriggerProducerOrigin, TypedFilter,
 };
 use crate::types::attribution::EffectRef;
 use crate::types::card_type::{
@@ -660,13 +660,22 @@ pub fn prune_until_next_turn_effects(state: &mut GameState, active_player: Playe
     // turn's own cleanup because that turn's untap step already passed before
     // the effect was created, so this is the controller's *next* turn.
     for e in state.transient_continuous_effects.iter_mut() {
-        if matches!(
-            e.duration,
+        // CR 514.2 + CR 109.4: the player whose next turn ends this effect. The
+        // `Controller` scope reads the effect's own controller ("until the end of
+        // YOUR next turn"); `SpecificPlayer` is the resolution-time snapshot a
+        // resolver installs when the window belongs to someone else — Gideon
+        // Jura's "During target opponent's next turn". Both arm identically once
+        // that player becomes the active player.
+        let armed_for = match e.duration {
             Duration::UntilEndOfNextTurnOf {
-                player: PlayerScope::Controller
-            }
-        ) && e.controller == active_player
-        {
+                player: PlayerScope::Controller,
+            } => Some(e.controller),
+            Duration::UntilEndOfNextTurnOf {
+                player: PlayerScope::SpecificPlayer { id },
+            } => Some(id),
+            _ => None,
+        };
+        if armed_for == Some(active_player) {
             e.duration = Duration::UntilEndOfTurn;
         }
     }
@@ -1097,6 +1106,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::CompletedADungeon
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
+        | StaticCondition::AnyPlayerAttackedYouLastTurn
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::DuringYourTurn
@@ -1254,6 +1264,7 @@ fn static_condition_characteristic_reads_at(
         | StaticCondition::CompletedADungeon
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
+        | StaticCondition::AnyPlayerAttackedYouLastTurn
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::DuringYourTurn
@@ -1378,6 +1389,7 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::CompletedADungeon
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
+        | StaticCondition::AnyPlayerAttackedYouLastTurn
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::DuringYourTurn
@@ -1498,6 +1510,7 @@ fn evaluate_condition_with_context(
                         trigger_source: None,
                         recipient: recipient_id,
                         scoped_player: None,
+                        damage_source: None,
                     },
                 )
             };
@@ -1609,6 +1622,14 @@ fn evaluate_condition_with_context(
         StaticCondition::SpellCastWithVariantThisTurn { variant } => {
             crate::game::restrictions::spell_cast_with_variant_this_turn(state, variant)
         }
+        // CR 508.6 + CR 109.5: True when any other player declared a creature
+        // attacking the controller ("you") during that player's most recent
+        // completed turn. Existential; the defender is the controller, so a player
+        // who attacked someone else — or the controller's own attacks — do not
+        // satisfy it.
+        StaticCondition::AnyPlayerAttackedYouLastTurn => state.players.iter().any(|p| {
+            p.id != controller && state.player_attacked_player_last_turn(p.id, controller)
+        }),
         // CR 105.2 + CR 611.3a: the subject is the recipient (the enchanted
         // creature, "it"), not the Aura source; fall back to the source only when
         // evaluated without a recipient (the source gate defers to per-recipient).
@@ -1672,7 +1693,8 @@ fn evaluate_condition_with_context(
             | crate::types::ability::ObjectScope::OtherRevealedCard
             | crate::types::ability::ObjectScope::OwnedLinkedExileCard
             | crate::types::ability::ObjectScope::Demonstrative
-            | crate::types::ability::ObjectScope::AmassedArmy => false,
+            | crate::types::ability::ObjectScope::AmassedArmy
+            | crate::types::ability::ObjectScope::BatchSource => false,
         },
         // CR 702.171b + CR 110.5d: off-battlefield permanents have no saddled designation.
         StaticCondition::SourceIsSaddled => state.objects.get(&source_id).is_some_and(|obj| {
@@ -2673,15 +2695,56 @@ fn static_condition_reads_zone_membership(condition: &StaticCondition, zone: Zon
 }
 
 /// CR 404: Does a `ZoneRef` denote the game `zone`?
+///
+/// Delegates to [`ZoneRef::zone`](crate::types::ability::ZoneRef::zone) rather
+/// than restating the pairing: the hand-written `matches!` this replaced was a
+/// second copy of the mapping that a new `ZoneRef` variant would have left
+/// silently answering `false` instead of failing to compile.
 fn zone_ref_denotes_zone(zone_ref: &crate::types::ability::ZoneRef, zone: Zone) -> bool {
-    use crate::types::ability::ZoneRef;
-    matches!(
-        (zone_ref, zone),
-        (ZoneRef::Graveyard, Zone::Graveyard)
-            | (ZoneRef::Exile, Zone::Exile)
-            | (ZoneRef::Library, Zone::Library)
-            | (ZoneRef::Hand, Zone::Hand)
-    )
+    zone_ref.zone() == zone
+}
+
+/// CR 613.4a + CR 400.1: Does a [`CardTypeSetSource`] population read `zone`?
+///
+/// Delegates to [`CardTypeSetSource::reads_zone`], which is THE authority for
+/// the population-zone axis and is the same function
+/// `game::quantity::visit_characteristic_source` walks to enumerate members.
+/// This wrapper exists only to keep the local call sites reading like their
+/// `characteristic_source_reads_*` siblings — it must never re-derive the
+/// answer.
+///
+/// It previously did re-derive it, and reported `false` for every `Objects`
+/// population. That is what let a craft characteristic (`And[ExiledBySource,
+/// Owned{You}]`, Sunbird Effigy) be evaluated against exile while no exile
+/// transition ever dirtied it, stranding a stale value in a layer.
+fn characteristic_source_reads_zone(source: &CardTypeSetSource, zone: Zone) -> bool {
+    source.reads_zone(zone)
+}
+
+/// CR 119 + CR 613.4a: Does a [`CardTypeSetSource`] population route a filter
+/// that reads a life total? Mirrors [`characteristic_source_reads_zone`]'s
+/// recursion over the same axis.
+fn characteristic_source_reads_life_total(source: &CardTypeSetSource) -> bool {
+    let mut found = false;
+    let complete =
+        source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
+            if found {
+                return;
+            }
+            found = match leaf {
+                CardTypeSetSource::Objects { filter } => target_filter_reads_life_total(filter),
+                CardTypeSetSource::TurnJournal { filter, .. } => {
+                    filter.as_ref().is_some_and(target_filter_reads_life_total)
+                }
+                CardTypeSetSource::Zone { .. }
+                | CardTypeSetSource::ExiledBySource
+                | CardTypeSetSource::TrackedSet { .. }
+                | CardTypeSetSource::AnyOf { .. } => false,
+            };
+        });
+    // A truncated walk claims the read: one redundant recompute beats a stale
+    // layer surviving a life change.
+    found || !complete
 }
 
 /// CR 404 + CR 611.3a: Does a `QuantityExpr` read the card count / object
@@ -2713,7 +2776,6 @@ fn quantity_expr_reads_zone(expr: &QuantityExpr, zone: Zone) -> bool {
 /// quantity reference that reads a zone must be classified intentionally rather
 /// than silently under-escalating a zone-membership gate.
 fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
-    use crate::types::ability::CardTypeSetSource;
     match qty {
         // Direct graveyard card count (CR 404). `player` scope is irrelevant to
         // the zone identity — any player's graveyard is still the graveyard.
@@ -2738,23 +2800,17 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::ObjectCountDistinct { filter, .. }
         | QuantityRef::ObjectCountBySharedQuality { filter, .. }
         | QuantityRef::Aggregate { filter, .. } => target_filter_reads_zone(filter, zone),
-        // Distinct card types read `zone` only when sourced from that zone's cards
-        // (Tarmogoyf: card types among cards in all graveyards).
-        QuantityRef::DistinctCardTypes { source } => match source {
-            CardTypeSetSource::Zone { zone: zone_ref, .. } => zone_ref_denotes_zone(zone_ref, zone),
-            CardTypeSetSource::ExiledBySource
-            | CardTypeSetSource::Objects { .. }
-            | CardTypeSetSource::TrackedSet { .. } => false,
-        },
-        // CR 613.4a: Distinct subtypes read `zone` when sourced from that zone's
-        // cards (Subgoyf: different subtypes among cards in all graveyards) — layer
-        // 7a CDA P/T must re-derive when that zone changes.
-        QuantityRef::DistinctSubtypes { source, .. } => match source {
-            CardTypeSetSource::Zone { zone: zone_ref, .. } => zone_ref_denotes_zone(zone_ref, zone),
-            CardTypeSetSource::ExiledBySource
-            | CardTypeSetSource::Objects { .. }
-            | CardTypeSetSource::TrackedSet { .. } => false,
-        },
+        // CR 613.4a: A distinct-characteristic count reads `zone` only when its
+        // population is sourced from that zone's cards (Tarmogoyf: card types
+        // among cards in all graveyards; Subgoyf: different subtypes among the
+        // same) — layer 7a CDA P/T must re-derive when that zone changes. All
+        // three characteristics share the population axis, so they share this
+        // classification.
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => {
+            characteristic_source_reads_zone(source, zone)
+        }
         // Everything else reads player-level state, single-object state, battle-
         // field-only population, history records, choices, or tracked sets — none
         // depend on `zone` membership. Enumerated explicitly (no wildcard) so a
@@ -2772,7 +2828,6 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::Devotion { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::PartySize { .. }
-        | QuantityRef::DistinctColorsAmongPermanents { .. }
         | QuantityRef::DistinctCounterKindsAmong { .. }
         | QuantityRef::EnteredThisTurn { .. }
         | QuantityRef::CommanderManaValue { .. }
@@ -2806,6 +2861,7 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
@@ -2818,6 +2874,7 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         // Per-turn bend-type tracking (Avatar Aang) — turn history, not a zone read.
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::ChosenNumber
+        | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::ColorsInCommandersColorIdentity
         | QuantityRef::CommanderCastFromCommandZoneCount
         | QuantityRef::ConvokedCreatureCount
@@ -3000,7 +3057,7 @@ fn quantity_expr_reads_life(expr: &QuantityExpr) -> bool {
 /// and every filter-bearing variant ROUTES its nested payload (universal
 /// routing rule). EXHAUSTIVE and wildcard-free.
 fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
-    use crate::types::ability::{CardTypeSetSource, CastManaSpentMetric};
+    use crate::types::ability::CastManaSpentMetric;
     match qty {
         // CR 119.3 + CR 119.9: the direct-leaf life-family readers — the exact
         // quantities a guarded life-mutation site changes (119.3: gain/loss
@@ -3026,7 +3083,6 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         | QuantityRef::CountersOnObjects { filter, .. }
         | QuantityRef::Aggregate { filter, .. }
         | QuantityRef::ControlledByEachPlayer { filter, .. }
-        | QuantityRef::DistinctColorsAmongPermanents { filter }
         | QuantityRef::DistinctCounterKindsAmong { filter }
         | QuantityRef::EnteredThisTurn { filter }
         | QuantityRef::SacrificedThisTurn { filter, .. }
@@ -3047,6 +3103,7 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         // Optional-`TargetFilter` variants route through the `Option`.
         QuantityRef::ZoneCardCount { filter, .. }
         | QuantityRef::SpellsCastThisTurn { filter, .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
         | QuantityRef::SpellsCastThisGame { filter, .. }
         | QuantityRef::AttackedThisTurn { filter, .. } => {
             filter.as_ref().is_some_and(target_filter_reads_life_total)
@@ -3062,15 +3119,14 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         // reads `life_lost_this_turn` per candidate.
         QuantityRef::PlayerCount { filter } => player_filter_reads_life(filter),
 
-        // Distinct card-type / subtype counts route an `Objects { filter }`
-        // set-source; the other set-sources carry no `TargetFilter`.
+        // Distinct card-type / subtype / colour counts route the filters their
+        // population carries (`Objects { filter }` and the journal's optional
+        // narrowing filter); the fixed-vocabulary set-sources carry none.
         QuantityRef::DistinctCardTypes { source }
-        | QuantityRef::DistinctSubtypes { source, .. } => match source {
-            CardTypeSetSource::Objects { filter } => target_filter_reads_life_total(filter),
-            CardTypeSetSource::Zone { .. }
-            | CardTypeSetSource::ExiledBySource
-            | CardTypeSetSource::TrackedSet { .. } => false,
-        },
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => {
+            characteristic_source_reads_life_total(source)
+        }
 
         // CR 601.2h: `ManaSpentToCast` carries no direct `TargetFilter`, but its
         // `metric` can nest a mana-source filter one level deeper
@@ -3139,6 +3195,7 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
+        | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::SpellsCastLastTurn
@@ -3324,6 +3381,7 @@ fn filter_prop_reads_life(prop: &FilterProp) -> bool {
         | FilterProp::Named { .. }
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource
         | FilterProp::NameMatchesAnyPermanent { .. }
         | FilterProp::IsCommander
         | FilterProp::SharesCreatureTypeWithCommander
@@ -3356,6 +3414,7 @@ fn target_filter_reads_life_total(filter: &TargetFilter) -> bool {
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::SourceController
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::Opponent
         | TargetFilter::SelfRef
@@ -3454,6 +3513,7 @@ fn static_condition_reads_life(condition: &StaticCondition) -> bool {
         | StaticCondition::CompletedADungeon
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
+        | StaticCondition::AnyPlayerAttackedYouLastTurn
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
@@ -6786,8 +6846,8 @@ fn static_mode_needs_source_controller_anchor(mode: &crate::types::statics::Stat
 
 /// CR 508.1d + CR 611.2c: True when a granted static mode belongs to the
 /// directing-source attribution class — modes whose consumers need to name
-/// the object that grafted the requirement (currently `MustAttackPlayer`,
-/// consumed by `combat::must_attack_player_directives_for_creature`). This
+/// the object that grafted the requirement (currently `MustAttackDefender`,
+/// consumed by `combat::must_attack_defender_directives_for_creature`). This
 /// gates the `source_object` stamp so ONLY these modes split into distinct
 /// defs per directing source; every other `AddStaticMode` mode keeps
 /// `source_object == None` and dedups unchanged (crew/keyword/evasion/…
@@ -6796,7 +6856,7 @@ fn static_mode_needs_source_controller_anchor(mode: &crate::types::statics::Stat
 /// match arm when a new consumer needs another mode's directing source.
 fn static_mode_carries_directing_source(mode: &crate::types::statics::StaticMode) -> bool {
     use crate::types::statics::StaticMode;
-    matches!(mode, StaticMode::MustAttackPlayer { .. })
+    matches!(mode, StaticMode::MustAttackDefender { .. })
 }
 
 /// CR 109.5: True when a `TargetFilter` constrains the controller of matched
@@ -8194,7 +8254,7 @@ fn apply_continuous_effect_filtered(
                 // CR 611.2c: stamp the directing object so combat / future
                 // attribution consumers can name the object that grafted this
                 // static (the ForceAttack / Encore / mass-coerce source for a
-                // MustAttackPlayer requirement). Gated on the attribution-class
+                // MustAttackDefender requirement). Gated on the attribution-class
                 // predicate so only those modes split per source; every other
                 // mode stays None and dedups unchanged (see the census in the
                 // plan / the crew-delta scoped-stamp guard test). Mirrors the
@@ -8574,6 +8634,69 @@ pub(crate) fn compute_current_copiable_values(
 
 #[cfg(test)]
 mod tests {
+
+    /// CR 514.2 + CR 109.4: `prune_until_next_turn_effects` arms an
+    /// `UntilEndOfNextTurnOf { SpecificPlayer }` effect on the SNAPSHOTTED
+    /// player's turn — not its controller's.
+    ///
+    /// This drives the arming function directly, which the Gideon integration
+    /// tests do not: they set `active_player` by hand and assert the INSTALLED
+    /// duration, so they would still pass if the prune never recognized the new
+    /// scope and the requirement silently never expired.
+    ///
+    /// The controller (P0) and the snapshotted player (P1) are deliberately
+    /// different — that difference is the whole reason the variant exists, and a
+    /// prune that keyed on `e.controller` would arm on the wrong turn and pass a
+    /// same-player fixture.
+    #[test]
+    fn until_end_of_next_turn_of_specific_player_arms_on_that_players_turn() {
+        fn armed_after_pruning(active: PlayerId) -> Duration {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                P0,
+                "Gideon Jura".to_string(),
+                Zone::Battlefield,
+            );
+            // Controller P0; the window belongs to P1.
+            state.add_transient_continuous_effect(
+                source,
+                P0,
+                Duration::UntilEndOfNextTurnOf {
+                    player: PlayerScope::SpecificPlayer { id: P1 },
+                },
+                TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::SpecificPlayer { id: P1 }),
+                ),
+                vec![ContinuousModification::AddStaticMode {
+                    mode: crate::types::statics::StaticMode::MustAttackDefender {
+                        defender: crate::types::statics::RequiredDefender::Fixed { player: P0 },
+                    },
+                }],
+                None,
+            );
+            prune_until_next_turn_effects(&mut state, active);
+            state.transient_continuous_effects[0].duration.clone()
+        }
+
+        // The CONTROLLER's turn must not arm it — the window is not theirs.
+        assert_eq!(
+            armed_after_pruning(P0),
+            Duration::UntilEndOfNextTurnOf {
+                player: PlayerScope::SpecificPlayer { id: P1 }
+            },
+            "the controller's untap step leaves a SpecificPlayer window un-armed"
+        );
+
+        // The SNAPSHOTTED player's turn arms it, so the existing cleanup-step
+        // prune ends it at that turn's cleanup (CR 514.2).
+        assert_eq!(
+            armed_after_pruning(P1),
+            Duration::UntilEndOfTurn,
+            "the snapshotted player's untap step arms the window"
+        );
+    }
     use super::*;
     use crate::game::elimination::eliminate_player;
     use crate::game::scenario::{GameScenario, P0, P1};

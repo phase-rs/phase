@@ -102,10 +102,7 @@ const GRANTED_BLOODTHIRST_INDEX: usize = usize::MAX - 8;
 /// controller; if an effect asks for a card's controller, use its owner
 /// instead. Command-zone emblems keep their controller under CR 109.4c.
 pub(crate) fn replacement_source_player(obj: &GameObject) -> PlayerId {
-    match obj.zone {
-        Zone::Battlefield | Zone::Stack | Zone::Command => obj.controller,
-        Zone::Library | Zone::Hand | Zone::Graveyard | Zone::Exile => obj.owner,
-    }
+    obj.controller_or_owner()
 }
 
 fn compleated_replacement_id(object_id: ObjectId) -> ReplacementId {
@@ -218,7 +215,7 @@ fn commander_hand_or_library_return_object(
     state
         .liminal_entries
         .get(&object_id)
-        .map(|entry| &entry.object)
+        .map(|entry| entry.object.projected())
         .or_else(|| state.objects.get(&object_id))
 }
 
@@ -858,6 +855,13 @@ pub(crate) fn pending_replacement_option_count(
 /// because step-end mana handlers are not attached to a single object — they
 /// are scanned per-player per-phase-transition.
 pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> WaitingFor {
+    // CR 614.12a: This prompt is raised while applying a replacement, but it
+    // is not an ordering choice. Callers throughout the zone pipeline use this
+    // common helper after `ReplacementResult::NeedsChoice`; preserve the
+    // already-surfaced pre-entry controller prompt instead of overwriting it.
+    if let WaitingFor::EntryControllerChoice { .. } = &state.waiting_for {
+        return state.waiting_for.clone();
+    }
     // CR 616.1 / CR 614: each option carries its source object so the frontend
     // can show which object (or rule-based virtual replacement) creates it,
     // mirroring the `PendingTriggerSummary` payload for CR 603.3b trigger
@@ -1003,10 +1007,16 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
 }
 
 /// CR 614.12a: Park on the replacement choice for `player`, unless a downstream
-/// effect (a Devour as-enters Sacrifice `EffectZoneChoice`) already surfaced its
-/// own interactive prompt — then leave it so the pending choice isn't clobbered.
+/// as-enters effect already surfaced its own interactive prompt. Leave that prompt
+/// in place so the entry choice completes before the surrounding ability resumes.
 pub fn park_waiting_for(state: &mut GameState, player: PlayerId) {
-    if matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }) {
+    if matches!(
+        state.waiting_for,
+        WaitingFor::CopyTargetChoice { .. }
+            | WaitingFor::ReturnAsAuraTarget { .. }
+            | WaitingFor::EntryControllerChoice { .. }
+    ) || super::engine_resolution_choices::handles(&state.waiting_for)
+    {
         return;
     }
     state.waiting_for = replacement_choice_waiting_for(player, state);
@@ -1670,6 +1680,7 @@ fn discard_applier(
             cause: None,
             attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
@@ -5478,6 +5489,7 @@ fn replacement_condition_quantity_ctx(
         trigger_source: None,
         recipient: None,
         scoped_player,
+        damage_source: None,
     }
 }
 
@@ -5538,6 +5550,9 @@ fn replacement_active_player_matches(
         Some(ControllerRef::TriggeringPlayer) => false,
         Some(ControllerRef::EnchantedPlayer) => false,
         Some(ControllerRef::ActivePlayer) => false,
+        // CR 109.4 + CR 611.2: a snapshot id IS resolvable — the active player
+        // satisfies the requirement exactly when they are that player.
+        Some(ControllerRef::SpecificPlayer { id }) => state.active_player == id,
         None => true,
     }
 }
@@ -5676,6 +5691,10 @@ fn evaluate_replacement_condition(
                 // controller-relative role (You/Opponent); `ActivePlayer` is not
                 // one, and the parser does not emit it here. Fail closed.
                 Some(ControllerRef::ActivePlayer) => false,
+                // CR 109.4 + CR 611.2: the turn gate expects a controller-relative
+                // role (You/Opponent); a snapshot id is not one, and the parser
+                // never emits it here. Fail closed (mirrors ActivePlayer).
+                Some(ControllerRef::SpecificPlayer { .. }) => false,
                 None => true,
             };
             if !turn_ok {
@@ -5726,6 +5745,10 @@ fn evaluate_replacement_condition(
                 // controller-relative role (You/Opponent); `ActivePlayer` is not
                 // one, and the parser does not emit it here. Fail closed.
                 Some(ControllerRef::ActivePlayer) => false,
+                // CR 109.4 + CR 611.2: the turn gate expects a controller-relative
+                // role (You/Opponent); a snapshot id is not one, and the parser
+                // never emits it here. Fail closed (mirrors ActivePlayer).
+                Some(ControllerRef::SpecificPlayer { .. }) => false,
                 None => true,
             };
             if !turn_ok {
@@ -5907,6 +5930,7 @@ fn evaluate_replacement_condition(
                 // CR 102.1: no replacement condition scopes its event source to the
                 // active player here. Fail closed (mirrors the siblings above).
                 | ControllerRef::ActivePlayer => false,
+                | ControllerRef::SpecificPlayer { .. } => false,
             }
         }
         ReplacementCondition::EffectCausedDiscard => matches!(
@@ -6131,6 +6155,7 @@ fn apply_state_level_gates(
                 | crate::types::ability::ControllerRef::TriggeringPlayer
                 | crate::types::ability::ControllerRef::EnchantedPlayer
                 | crate::types::ability::ControllerRef::ActivePlayer => false,
+                crate::types::ability::ControllerRef::SpecificPlayer { .. } => false,
             };
             if !matches {
                 return false;
@@ -6249,7 +6274,7 @@ fn object_replacement_candidate_applies(
     let liminal_obj = liminal_entry_ref(event)
         .filter(|entry_ref| *entry_ref == rid.source)
         .and_then(|entry_ref| state.liminal_entries.get(&entry_ref))
-        .map(|entry| &entry.object);
+        .map(|entry| entry.object.projected());
     let Some(obj) = liminal_obj.or_else(|| state.objects.get(&rid.source)) else {
         return false;
     };
@@ -6545,6 +6570,7 @@ fn object_replacement_candidate_applies(
                 // CR 102.1: token-owner scope is not scoped to the active player
                 // here; fail closed (mirrors the siblings above).
                 | crate::types::ability::ControllerRef::ActivePlayer => false,
+                | crate::types::ability::ControllerRef::SpecificPlayer { .. } => false,
             };
             if !matches {
                 return false;
@@ -6792,6 +6818,7 @@ fn legacy_object_replacement_candidates(
             candidates.extend(
                 entry
                     .object
+                    .projected()
                     .replacement_definitions
                     .iter_all()
                     .enumerate()
@@ -6841,6 +6868,7 @@ fn indexed_object_replacement_candidates_from_index(
             candidates.extend(
                 entry
                     .object
+                    .projected()
                     .replacement_definitions
                     .iter_all()
                     .enumerate()
@@ -7707,6 +7735,7 @@ fn extract_etb_counters_from_effect(
                 trigger_source: None,
                 recipient: None,
                 scoped_player: None,
+                damage_source: None,
             };
             let n = match count {
                 QuantityExpr::Fixed { value } => (*value).max(0) as u32,
@@ -7739,6 +7768,7 @@ fn extract_etb_counters_from_effect(
                     trigger_source: None,
                     recipient: None,
                     scoped_player: None,
+                    damage_source: None,
                 };
                 let n =
                     crate::game::quantity::resolve_quantity_with_ctx(state, count, controller, ctx)
@@ -7885,10 +7915,8 @@ fn event_modifiers_for_ability(
 /// `ControllerRef::Opponent` ("enters under the control of an opponent of your
 /// choice") is resolved here rather than via the canonical `controller_ref_player`,
 /// which returns `None` for `Opponent` (ambiguous when more than one opponent
-/// exists). In a two-player game this is the sole opponent — fully correct. In
-/// multiplayer it picks the first opponent in seat order; a full controller choice
-/// is a follow-up. Either way the permanent enters under an opponent's control
-/// rather than its owner's, satisfying CR 110.2a.
+/// exists). The multi-opponent case pauses in `entry_controller_choice`; this
+/// fallback is therefore only the no-choice (zero/one eligible opponent) path.
 fn resolve_self_enters_under_controller(
     state: &GameState,
     object_id: ObjectId,
@@ -7896,9 +7924,11 @@ fn resolve_self_enters_under_controller(
 ) -> Option<PlayerId> {
     let entering_controller = state.objects.get(&object_id)?.controller;
     match cref {
-        ControllerRef::Opponent => crate::game::players::opponents(state, entering_controller)
-            .into_iter()
-            .next(),
+        ControllerRef::Opponent => {
+            crate::game::players::choosable_opponents(state, entering_controller)
+                .into_iter()
+                .next()
+        }
         other => crate::game::filter::controller_ref_player(
             state,
             object_id,
@@ -8134,7 +8164,7 @@ fn apply_single_replacement(
         state
             .liminal_entries
             .get(&rid.source)
-            .map(|entry| &entry.object)
+            .map(|entry| entry.object.projected())
             .or_else(|| state.objects.get(&rid.source))
             .and_then(|obj| obj.replacement_definitions.get(rid.index))
     };
@@ -8362,6 +8392,12 @@ fn apply_single_replacement(
                         | (ProposedEvent::Scry { .. }, Effect::Scry { .. })
                         | (ProposedEvent::Proliferate { .. }, Effect::Proliferate)
                         | (ProposedEvent::LifeGain { .. }, Effect::GainLife { .. })
+                        // CR 614.1a: these specialized appliers already perform
+                        // their exact, unchained execute body inline. Parking it
+                        // would create an un-dispatchable sibling drain for every
+                        // affected event (issue #5676).
+                        | (ProposedEvent::CoinFlip { .. }, Effect::FlipCoins { .. })
+                        | (ProposedEvent::Damage { .. }, Effect::RemoveAllDamage { .. })
                         // CR 614.1a + CR 111.1: Full token substitution
                         // (Divine Visitation) is performed inline by
                         // `create_token_applier`; stashing the same
@@ -8470,6 +8506,15 @@ fn apply_single_replacement(
                 // enters under its owner's control first). Resolve the carried
                 // `ControllerRef` against the entering object's own controller.
                 if let Some(cref) = modifiers.controller_override.as_ref() {
+                    let selected_entry_controller =
+                        new_event.applied_set().iter().find_map(|key| match key {
+                            AppliedReplacementKey::EntryControllerChoice {
+                                source,
+                                index,
+                                controller,
+                            } if *source == rid.source && *index == rid.index => Some(*controller),
+                            _ => None,
+                        });
                     if let ProposedEvent::ZoneChange {
                         object_id,
                         to: Zone::Battlefield,
@@ -8477,7 +8522,9 @@ fn apply_single_replacement(
                         ..
                     } = &mut new_event
                     {
-                        if let Some(pid) =
+                        if let Some(selected_controller) = selected_entry_controller {
+                            *controller_override = Some(selected_controller);
+                        } else if let Some(pid) =
                             resolve_self_enters_under_controller(state, *object_id, cref)
                         {
                             *controller_override = Some(pid);
@@ -9168,7 +9215,7 @@ fn replacement_definition_for_id(
     state
         .liminal_entries
         .get(&rid.source)
-        .map(|entry| &entry.object)
+        .map(|entry| entry.object.projected())
         .or_else(|| state.objects.get(&rid.source))
         .and_then(|obj| obj.replacement_definitions.get(rid.index))
         // CR 121.2: an instruction to draw multiple cards is performed as that many
@@ -9189,6 +9236,69 @@ fn replacement_definition_for_id(
                 def.validate_draw_scope().unwrap_err()
             );
         })
+}
+
+/// CR 614.12a: determine whether a mandatory self-entry controller replacement
+/// needs a pre-entry opponent choice. The candidate set is captured once, before
+/// any physical zone move; the answer is written onto the same `ZoneChange` and
+/// resumed through the ordinary replacement pipeline.
+fn entry_controller_choice(
+    state: &GameState,
+    proposed: &ProposedEvent,
+    rid: ReplacementId,
+) -> Option<(PlayerId, Vec<PlayerId>)> {
+    if proposed.already_applied(&rid) {
+        return None;
+    }
+    let ProposedEvent::ZoneChange {
+        object_id,
+        to: Zone::Battlefield,
+        ..
+    } = proposed
+    else {
+        return None;
+    };
+    let replacement = replacement_definition_for_id(state, rid)?;
+    if replacement_mode_is_optional(&replacement.mode)
+        || !matches!(
+            replacement.enters_under.as_ref(),
+            Some(ControllerRef::Opponent)
+        )
+    {
+        return None;
+    }
+    let chooser = state.objects.get(object_id)?.controller;
+    let candidates = crate::game::players::choosable_opponents(state, chooser);
+    (candidates.len() >= 2).then_some((chooser, candidates))
+}
+
+/// CR 614.12a: park an as-enters controller choice without applying its
+/// replacement yet. Keeping the selected `ReplacementId` and exact proposed
+/// event in the normal pending record means the answer resumes the established
+/// CR 616.1 loop rather than reconstructing a zone move.
+fn park_entry_controller_choice(
+    state: &mut GameState,
+    proposed: ProposedEvent,
+    depth: u16,
+    rid: ReplacementId,
+    player: PlayerId,
+    candidates: Vec<PlayerId>,
+) -> ReplacementResult {
+    state.pending_replacement = Some(PendingReplacement {
+        proposed,
+        sacrifice_provenance: None,
+        candidates: vec![rid],
+        search_found_candidates: Vec::new(),
+        depth,
+        is_optional: false,
+        library_placement: None,
+        excess_recipient: None,
+        lifelink_bonus: 0,
+        may_cost_paid: false,
+        may_cost_remaining: None,
+    });
+    state.waiting_for = WaitingFor::EntryControllerChoice { player, candidates };
+    ReplacementResult::NeedsChoice(player)
 }
 
 fn pipeline_loop(
@@ -9255,6 +9365,18 @@ fn pipeline_loop(
                     may_cost_remaining: None,
                 });
                 return ReplacementResult::NeedsChoice(affected);
+            }
+
+            if let Some((player, entry_candidates)) = entry_controller_choice(state, &proposed, rid)
+            {
+                return park_entry_controller_choice(
+                    state,
+                    proposed,
+                    depth,
+                    rid,
+                    player,
+                    entry_candidates,
+                );
             }
 
             proposed.mark_applied(rid);
@@ -9540,7 +9662,23 @@ fn continue_replacement_impl(
         let reparked_depth = pending.depth;
         let reparked_library_placement = pending.library_placement.clone();
         let reparked_sacrifice_provenance = pending.sacrifice_provenance;
-        let mut proposed = pending.proposed;
+        let mut proposed = pending.proposed.clone();
+        if chosen_index == 0 {
+            if let Some((player, entry_candidates)) = entry_controller_choice(state, &proposed, rid)
+            {
+                // The optional accept decision is already made. Re-park the
+                // same replacement as mandatory so the entry-controller answer
+                // applies it exactly once without re-offering accept/decline.
+                pending.candidates = vec![rid];
+                pending.is_optional = false;
+                state.pending_replacement = Some(pending);
+                state.waiting_for = WaitingFor::EntryControllerChoice {
+                    player,
+                    candidates: entry_candidates,
+                };
+                return ReplacementResult::NeedsChoice(player);
+            }
+        }
         proposed.mark_applied(rid);
         // CR 614.1a: the "first time you would create … each turn" window is
         // per-player; it is consumed by `record_token_created` when the resulting
@@ -9812,7 +9950,17 @@ fn continue_replacement_impl(
         return ReplacementResult::NeedsChoice(affected);
     }
 
-    let mut proposed = pending.proposed;
+    let mut proposed = pending.proposed.clone();
+    if let Some((player, entry_candidates)) = entry_controller_choice(state, &proposed, rid) {
+        pending.candidates = vec![rid];
+        pending.is_optional = false;
+        state.pending_replacement = Some(pending);
+        state.waiting_for = WaitingFor::EntryControllerChoice {
+            player,
+            candidates: entry_candidates,
+        };
+        return ReplacementResult::NeedsChoice(player);
+    }
     proposed.mark_applied(rid);
     // CR 614.1a: per-player "first time each turn" window is consumed by
     // `record_token_created` on the created tokens; no per-source bookkeeping here.
@@ -10570,7 +10718,9 @@ mod tests {
         state.liminal_entries.insert(
             entry_ref,
             LiminalEntry {
-                object: liminal,
+                object: crate::types::game_state::LiminalEntrant::Token(
+                    crate::types::game_state::TokenProjection::materialize(liminal),
+                ),
                 name: "Liminal Copy".to_string(),
                 source_id: ObjectId(999),
                 controller: PlayerId(0),
@@ -11145,6 +11295,7 @@ mod tests {
             cause: None,
             attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
@@ -13364,6 +13515,7 @@ mod tests {
             cause: None,
             attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
@@ -14465,6 +14617,7 @@ mod tests {
             cause: None,
             attach_to: None,
             enter_tapped: EtbTapState::Tapped,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
@@ -17616,6 +17769,7 @@ mod tests {
             cause: None,
             attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
@@ -17662,6 +17816,7 @@ mod tests {
             cause: None,
             attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,

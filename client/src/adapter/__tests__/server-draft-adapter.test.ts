@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { EMPTY_DRAFT_POOL_GROUPS } from "../draft-adapter";
 import { ServerDraftAdapter } from "../server-draft-adapter";
 import { PROTOCOL_VERSION } from "../ws-adapter";
 import type { DraftPlayerView } from "../draft-adapter";
@@ -66,6 +67,8 @@ function createMockDraftView(overrides: Partial<DraftPlayerView> = {}): DraftPla
     pass_direction: "Left",
     current_pack: null,
     pool: [],
+    draft_effects: [],
+    pool_groups: EMPTY_DRAFT_POOL_GROUPS,
     seats: [],
     cards_per_pack: 14,
     pack_count: 3,
@@ -77,6 +80,7 @@ function createMockDraftView(overrides: Partial<DraftPlayerView> = {}): DraftPla
     tournament_format: "Swiss",
     pod_policy: "Competitive",
     pairings: [],
+    match_config: { match_type: "Bo1" },
     ...overrides,
   };
 }

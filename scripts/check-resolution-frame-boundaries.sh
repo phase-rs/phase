@@ -208,7 +208,10 @@ def line_number(source: str, offset: int) -> int:
 
 
 def legacy_allowlist_spans(source: str) -> list[tuple[int, int]]:
-    v1_match = re.search(r"\bLEGACY_RESOLUTION_STATE_WIRE_VERSION\s*=>\s*\{", source)
+    # The version discriminator maps numeric wire versions to the typed decode
+    # mode before the reader match. Anchor the allowlist to that typed v1 arm,
+    # which is the sole branch that consumes legacy resolution fields.
+    v1_match = re.search(r"\bGameStateDecodeMode::ResolutionWireV1\s*=>\s*\{", source)
     if v1_match is None:
         raise ValueError("missing ResolutionStateWire v1 reader arm")
 
@@ -216,7 +219,21 @@ def legacy_allowlist_spans(source: str) -> list[tuple[int, int]]:
     if inventory_match is None:
         raise ValueError("missing legacy resolution key inventory")
 
-    spans = [block_span(source, v1_match), block_span(source, inventory_match)]
+    live_roots_match = re.search(
+        r"\bconst\s+LEGACY_LIVE_ZONE_CHANGED_EVENT_ROOTS\s*:\s*&\[&str\]\s*=\s*&\[",
+        source,
+    )
+    if live_roots_match is None:
+        raise ValueError("missing legacy live ZoneChanged root census")
+    live_roots_end = source.find("];", live_roots_match.end())
+    if live_roots_end == -1:
+        raise ValueError("unterminated legacy live ZoneChanged root census")
+
+    spans = [
+        block_span(source, v1_match),
+        block_span(source, inventory_match),
+        (live_roots_match.start(), live_roots_end + 2),
+    ]
     legacy_struct = re.compile(r"\bstruct\s+Legacy\w+Wire\b[^\{]*\{")
     spans.extend(block_span(source, match) for match in legacy_struct.finditer(source))
     return spans

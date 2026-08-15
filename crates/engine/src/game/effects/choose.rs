@@ -78,6 +78,9 @@ pub fn resolve(
 
     state.waiting_for = WaitingFor::NamedChoice {
         player: ability.controller,
+        // CR 107.1a/b: publish the free-entry contract alongside the choice it
+        // belongs to, so a client never has to re-derive it from `choice_type`.
+        free_entry: choice_type.free_entry(),
         choice_type,
         options,
         source,
@@ -172,6 +175,10 @@ pub(crate) fn resolve_random_in_chain(
     ) {
         ability.update_trigger_source_context_in_resolution_segment(context);
     }
+    // CR 101.4 + CR 608.2d: mirror the interactive answer handler so a
+    // game-selected number is readable per-player too (CR 608.2d override — the
+    // game makes the choice, but it is still THIS player's chosen number).
+    record_player_chosen_number(state, ability.controller, &choice_type, &chosen);
 
     // CR 608.2c + CR 109.4: A `Choose(Player)`/`Choose(Opponent)` answer binds a
     // resolution-scoped chosen player. Append it to the resolving ability's
@@ -251,16 +258,20 @@ pub(crate) fn bind_named_choice(
         .filter(|source| source.is_exact_object_and_resolution())
         .cloned();
     if let Some(pid) = persist_player {
-        // CR 607.2d / CR 607.2m (by analogy): per-player anchor label. The
-        // `Player` axis only ever stores `ChosenAttribute::Label`, so no
-        // multi-keyword split is needed here. Replace-on-rechoose (retain-drop
-        // any existing `Label`, then push) mirrors the object-branch Keyword
-        // replace so "last chose" holds exactly one anchor per player.
+        // CR 607.2d / CR 607.2m (by analogy): per-player anchor. Unlike an
+        // object's `chosen_attributes` (which accumulates a history — The
+        // Toymaker's Trap reads every number it has committed), a PLAYER anchor
+        // answers "what did this player choose", so re-choosing REPLACES the
+        // prior answer of the same kind. Replace-on-rechoose is keyed on the
+        // attribute's own discriminant, which is byte-identical to the previous
+        // `Label`-only retain for the one kind routed here today and keeps any
+        // other kind a different effect recorded on the player untouched.
         if let Some(attr) = ChosenAttribute::from_choice(choice_type.clone(), choice) {
             if let Some(player) = state.players.iter_mut().find(|p| p.id == pid) {
+                let replaced = std::mem::discriminant(&attr);
                 player
                     .chosen_attributes
-                    .retain(|a| !matches!(a, ChosenAttribute::Label(_)));
+                    .retain(|a| std::mem::discriminant(a) != replaced);
                 player.chosen_attributes.push(attr);
             }
             // CR 613.1: per-player labels feed statics/filters — re-run layers.
@@ -335,6 +346,20 @@ pub(crate) fn named_choice_authority(
     persist: bool,
     choice_type: &ChoiceType,
 ) -> (Option<NamedChoiceSource>, Option<PlayerId>) {
+    // CR 607.2d / CR 607.2m (by analogy): a persisting `Labeled` answer chosen
+    // during a per-player iteration is the planar anchor (Two Streams Facility),
+    // recorded on the choosing player instead of the source object.
+    //
+    // NOTE for future axes: `scoped_player` is NOT a reliable "this is a
+    // per-player fan-out" marker — it is also set for a plain triggered ability
+    // resolving for its own controller (measured: The Toymaker's Trap's upkeep
+    // trigger arrives here with `scoped_player == controller == Some(P0)`,
+    // indistinguishable from the first iteration of a real fan-out). Adding a
+    // choice kind to this routing therefore MOVES the answer off the source for
+    // single-chooser cards too, which breaks any object-scoped reader. The
+    // per-player secret number (CR 101.4) is instead recorded ADDITIVELY by
+    // `record_player_chosen_number`, leaving every existing source binding
+    // intact.
     let persist_player = (persist && matches!(choice_type, ChoiceType::Labeled { .. }))
         .then_some(ability.scoped_player)
         .flatten();
@@ -359,6 +384,54 @@ pub(crate) fn named_choice_authority(
         context.map(|context| NamedChoiceSource::from_trigger_source(context, binding)),
         persist_player,
     )
+}
+
+/// CR 101.4 + CR 608.2d: Record the number a PLAYER chose onto that player, as
+/// the per-resolution ledger [`crate::types::ability::QuantityRef::PlayerChosenNumber`]
+/// folds into "the highest / lowest number" (Wheel of Misfortune, Menacing Ogre,
+/// Life at Stake).
+///
+/// ADDITIVE, not a reroute: the source-object binding that `bind_named_choice`
+/// performs is left exactly as it was, so a single-chooser card whose reader is
+/// object-scoped (The Toymaker's Trap's committed number, read through
+/// `QuantityRef::ChosenNumber`) is unaffected. The two axes answer different
+/// questions — "what number is committed on this permanent" versus "what number
+/// did this player choose" — and a card may legitimately want either.
+///
+/// Recording it for EVERY number choice rather than only for a detected
+/// per-player fan-out is deliberate: `ResolvedAbility::scoped_player` is set for
+/// a plain triggered ability resolving for its own controller as well as for a
+/// real fan-out iteration, so there is no reliable runtime marker to gate on.
+/// The write is harmless where nothing reads it — the ledger is cleared at every
+/// top-level resolution entry (`effects::resolve_ability_chain`, depth 0), and
+/// `game::visibility` keeps a player's number private to that player, so an
+/// unread copy can neither leak nor survive into a later resolution.
+///
+/// Replace-on-rechoose: a player holds exactly one chosen number, so a second
+/// choice in the same resolution supersedes the first.
+pub(crate) fn record_player_chosen_number(
+    state: &mut GameState,
+    chooser: PlayerId,
+    choice_type: &ChoiceType,
+    choice: &str,
+) {
+    if !matches!(choice_type, ChoiceType::NumberRange { .. }) {
+        return;
+    }
+    let Ok(value) = choice.parse::<u32>() else {
+        return;
+    };
+    if let Some(player) = state.players.iter_mut().find(|p| p.id == chooser) {
+        player.chosen_attributes.retain(|attribute| {
+            !matches!(
+                attribute,
+                ChosenAttribute::Number(_) | ChosenAttribute::RevealedNumber(_)
+            )
+        });
+        player
+            .chosen_attributes
+            .push(ChosenAttribute::Number(value));
+    }
 }
 
 fn register_exact_named_choice_source(state: &mut GameState, source: Option<&NamedChoiceSource>) {
@@ -570,9 +643,16 @@ fn compute_options(
             max,
             distinctness,
         } => match distinctness {
-            crate::types::ability::NumberDistinctness::Repeatable => {
-                (*min..=*max).map(|n| n.to_string()).collect()
-            }
+            // CR 107.1a/b: an UNBOUNDED range has no list to enumerate. Return
+            // empty and let `options_supplied_by_player` route it to the
+            // free-entry path (the same one `CardName` uses) — the client renders
+            // a numeric input and the answer seam validates it. Materializing a
+            // stand-in ceiling here is exactly the bug that made a legal choice
+            // illegal on Wheel of Misfortune.
+            _ if max.is_none() => Vec::new(),
+            crate::types::ability::NumberDistinctness::Repeatable => (*min..=max.unwrap_or(*min))
+                .map(|n| n.to_string())
+                .collect(),
             // CR 609.3 + "...that hasn't been chosen": each successive COMMIT
             // excludes numbers already committed on this source across prior
             // resolutions. Chosen numbers persist as `ChosenAttribute::Number`
@@ -587,7 +667,7 @@ fn compute_options(
             // offers a separate DistinctFromSourceHistory NumberRange on the same
             // source, scope the read to a per-choice tag.
             crate::types::ability::NumberDistinctness::DistinctFromSourceHistory => {
-                let used: Vec<u8> = state
+                let used: Vec<u32> = state
                     .objects
                     .get(&source_id)
                     .map(|o| {
@@ -600,7 +680,7 @@ fn compute_options(
                             .collect()
                     })
                     .unwrap_or_default();
-                (*min..=*max)
+                (*min..=max.unwrap_or(*min))
                     .filter(|n| !used.contains(n))
                     .map(|n| n.to_string())
                     .collect()
@@ -924,6 +1004,7 @@ mod tests {
 
         match &state.waiting_for {
             WaitingFor::NamedChoice {
+                free_entry: _,
                 player,
                 choice_type,
                 options,
@@ -970,6 +1051,7 @@ mod tests {
 
         match &state.waiting_for {
             WaitingFor::NamedChoice {
+                free_entry: None,
                 choice_type,
                 options,
                 ..
@@ -1084,6 +1166,7 @@ mod tests {
 
         match &state.waiting_for {
             WaitingFor::NamedChoice {
+                free_entry: None,
                 choice_type,
                 options,
                 ..
@@ -1121,7 +1204,7 @@ mod tests {
             Effect::Choose {
                 choice_type: ChoiceType::NumberRange {
                     min: 0,
-                    max: 5,
+                    max: Some(5),
                     distinctness: crate::types::ability::NumberDistinctness::Repeatable,
                 },
                 persist: false,
@@ -1162,7 +1245,7 @@ mod tests {
 
         let distinct = ChoiceType::NumberRange {
             min: 1,
-            max: 5,
+            max: Some(5),
             distinctness: crate::types::ability::NumberDistinctness::DistinctFromSourceHistory,
         };
         assert_eq!(
@@ -1174,7 +1257,7 @@ mod tests {
         // Same history under Repeatable: full range is still offered.
         let repeatable = ChoiceType::NumberRange {
             min: 1,
-            max: 5,
+            max: Some(5),
             distinctness: crate::types::ability::NumberDistinctness::Repeatable,
         };
         assert_eq!(
@@ -1240,6 +1323,7 @@ mod tests {
 
         match &state.waiting_for {
             WaitingFor::NamedChoice {
+                free_entry: _,
                 player,
                 choice_type,
                 options,

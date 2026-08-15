@@ -49,6 +49,13 @@ const TEST_VIEW: BuilderView = {
       is_land: false,
     },
   ],
+  draft_effects: [],
+  pool_groups: {
+    color_groups: [],
+    type_groups: [],
+    cmc_groups: [],
+    color_counts: { white: 0, blue: 1, black: 0, red: 0, green: 0 },
+  },
   seats: [],
   cards_per_pack: 14,
   pack_count: 3,
@@ -60,6 +67,7 @@ const TEST_VIEW: BuilderView = {
   tournament_format: "Swiss",
   pod_policy: "Competitive",
   pairings: [],
+  match_config: { match_type: "Bo1" },
 };
 
 const COPY_VIEW: BuilderView = {

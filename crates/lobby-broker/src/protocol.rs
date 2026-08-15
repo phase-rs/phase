@@ -43,6 +43,31 @@ pub enum ServerErrorCode {
 /// handshake. When making such changes, plan a deprecation window where
 /// both the old and new variants coexist, then bump and remove the old.
 ///
+/// 31 — `WaitingFor::LoopShortcut` publishes the engine-issued `declaration`, and
+///      `InteractionResponseSpec::Shortcut` publishes `preview`, the per-axis
+///      consequence of the offered count. Both are `Option` and neither type sets
+///      `deny_unknown_fields`, so a v30 peer still *parses* the frame — this is a
+///      capability bump like 24, not a parse bump. UNLIKE 24, no pairing is left to
+///      exercise the gap, so this entry names no silent-drop hazard. Full-game floors
+///      are exact-match on both sides (`server_core::MIN_SUPPORTED_PROTOCOL ==
+///      PROTOCOL_VERSION`, and `MIN_SUPPORTED_SERVER_PROTOCOL` in
+///      `client/src/adapter/ws-adapter.ts`), so a v31/v30 full-game pair is refused
+///      at the handshake and never sends an action frame. The one-version window is
+///      this file's `MIN_SUPPORTED_PROTOCOL` below, and it is lobby-only:
+///      `DeclareShortcut` rides `ClientMessage::Action`, which `LobbyClientMessage`
+///      has no variant for at all, and which `reject_if_disabled` in
+///      `crates/phase-server/src/main.rs` answers under `ServerMode::LobbyOnly` with
+///      an explicit rejection rather than a silent drop. The P2P games this broker
+///      matchmakes are gated tighter still, on build-commit equality
+///      (`check_build_commit`), not on a protocol window.
+/// 30 — Serialized player-action completion provenance and modal continuations.
+/// 29 — Added requester-correlated `ResolveAllRejected` response frames.
+/// 28 — Added native `ResolveAll` request/result frames.
+/// 27 — Added `DraftKind::Sealed`, serialized by draft WebSocket messages.
+/// 26 — Added `ServerMessage::ActionNoOp` for accepted transport no-ops.
+/// 25 — `DebugCardEntries` added a serialized, private resolution frame for
+///      multi-card sandbox battlefield entries that pause for replacement or
+///      as-enters choices. Old peers cannot deserialize that `GameState` shape.
 /// 24 — `DerivedViews::unbounded_families` carries the engine-owned per-seat
 ///      family collapse state behind each `∞` badge. The field is
 ///      `#[serde(default)]`, so this is a capability bump rather than a parse
@@ -69,7 +94,7 @@ pub enum ServerErrorCode {
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 24;
+pub const PROTOCOL_VERSION: u32 = 31;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake. Lobby traffic has a one-version rollout window; full game servers
@@ -137,7 +162,7 @@ pub struct DraftLobbyMetadata {
     /// `"custom-cube"`; see [`DraftLobbyMetadata::cube_name`] for the
     /// human-readable cube name.
     pub set_code: String,
-    /// Draft kind label: "Quick", "Premier", or "Traditional".
+    /// Draft kind label: "Quick", "Premier", "Traditional", or "Sealed".
     pub draft_kind: String,
     /// Human-readable cube name when the pod is a cube draft. Absent for
     /// set drafts. Backward-compatible: `#[serde(default)]` accepts
@@ -405,13 +430,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn protocol_version_tracks_priority_passing_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 24);
+    fn protocol_version_tracks_full_game_wire_additions() {
+        assert_eq!(PROTOCOL_VERSION, 31);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
-        // which is what refuses the v23-server/v24-client pairing that would
-        // silently drop every ∞ badge.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 23);
+        // which is what refuses an older full-game peer whose GameState cannot
+        // understand a success acknowledgment the submitting client awaits.
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 30);
     }
 
     #[test]

@@ -9,7 +9,7 @@ import type { AnimationStep } from "../animation/types";
 import { audioManager } from "../audio/AudioManager";
 import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { debugLog } from "./debugLog";
-import { flashInGameRolls } from "./diceContest";
+import { flashCompletedScry, flashInGameRolls } from "./diceContest";
 import i18n from "../i18n";
 import { useAnimationStore } from "../stores/animationStore";
 import { useAppNotificationStore } from "../stores/appToastStore";
@@ -505,6 +505,7 @@ async function processAction(
   // way the turn banner bypasses the animation queue. These events are marked
   // NON_VISUAL so normalizeEvents skips them below.
   flashInGameRolls(events);
+  flashCompletedScry(events);
 
   // 6. Normalize events into animation steps
   const pacingMultipliers = usePreferencesStore.getState().pacingMultipliers;
@@ -836,6 +837,9 @@ async function processRemoteUpdateInner(
     useUiStore.getState().flashTurnBanner(bannerText, turnNumber);
   }
 
+  flashInGameRolls(events);
+  flashCompletedScry(events);
+
   // 3. Normalize events into animation steps
   const pacingMultipliers = usePreferencesStore.getState().pacingMultipliers;
   const steps = normalizeEvents(events, { pacingMultipliers });
@@ -975,11 +979,14 @@ export async function dispatchResolveAll(
     debugLog("dispatchResolveAll: no adapter");
     return;
   }
-  if (!batchAdapter.resolveAll || aiSeats.length === 0) {
-    // No batch drain (multiplayer transports), or no AI deciders for the other
-    // seats (local hotseat — every seat is a human, #4978): those seats are
-    // humans, and CR 117.4 entitles each of them to their own priority window
-    // before anything resolves — the engine must not pass on their behalf.
+  if (
+    !batchAdapter.resolveAll
+    || (aiSeats.length === 0 && batchAdapter.resolveAllUsesServerAi !== true)
+  ) {
+    // No batch drain (transports without the capability), or no AI deciders for
+    // the other seats (local hotseat — every seat is a human, #4978). A native
+    // adapter explicitly vouches that its authenticated server owns AI-seat
+    // selection; all other transports must preserve human priority windows.
     // Arena-style "Resolve All" instead: an engine-side auto-yield for THIS
     // seat only (AutoPassMode::UntilStackEmpty), which auto-passes whenever
     // this player receives priority and clears itself when the stack empties
@@ -1037,9 +1044,8 @@ export async function dispatchResolveAll(
       // One atomic pair per chunk, committed through the single authority. The
       // store's `waitingFor` therefore comes from the snapshot's own state, not
       // from `batchResult.waitingFor` — the pair must stay self-consistent.
-      // Equivalent or fresher: only `WasmAdapter` implements `resolveAll`, and
-      // worker FIFO guarantees this snapshot reflects at least the chunk's end
-      // state.
+      // Equivalent or fresher: worker FIFO or ordered WebSocket state updates
+      // guarantee this snapshot reflects at least the chunk's end state.
       const snapshot = await batchAdapter.getSnapshot();
       useGameStore.getState().commitEngineSnapshot(snapshot);
 
@@ -1073,6 +1079,10 @@ export async function dispatchResolveAll(
     if (gameId && adapter && newState) {
       await saveAuthoritativeGame(gameId, adapter, newState);
     }
+  } catch (err) {
+    if (isStaleAction(err)) return;
+    debugLog(`Resolve All error: ${err instanceof Error ? err.message : String(err)}`);
+    showActionError({ type: "PassPriority" }, err);
   } finally {
     batchResolveInProgress = false;
     setIsResolvingAll(false);

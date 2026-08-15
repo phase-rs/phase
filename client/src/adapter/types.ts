@@ -59,6 +59,11 @@ export type GameFormat =
 
 export type FormatGroup = "Constructed" | "Commander" | "Multiplayer" | "Limited";
 
+export interface RangeOfInfluenceConfig {
+  default_range: number;
+  player_overrides: Record<string, number>;
+}
+
 export interface FormatConfig {
   format: GameFormat;
   starting_life: number;
@@ -68,7 +73,7 @@ export interface FormatConfig {
   singleton: boolean;
   command_zone: boolean;
   commander_damage_threshold: number | null;
-  range_of_influence: number | null;
+  range_of_influence: RangeOfInfluenceConfig | null;
   team_based: boolean;
   /**
    * Engine-derived predicate: true when the format uses a commander card
@@ -326,7 +331,10 @@ export interface MeldSelection {
 // engine surfaces on the declare-attackers/blockers waiting payloads for
 // display-only badges + Confirm gating. `#[serde(tag = "kind")]` in the engine.
 export type CombatRequirement =
-  | { kind: "MustAttack"; players: PlayerId[]; sources?: ObjectId[] }
+  // CR 506.3: `defenders` spans the whole defender category — players,
+  // planeswalkers, and battles — so a planeswalker-directed lure (Gideon Jura's
+  // "+2") surfaces the same way a player-directed one does.
+  | { kind: "MustAttack"; defenders: AttackTarget[]; sources?: ObjectId[] }
   | { kind: "MustBlock"; sources?: ObjectId[]; attackers?: ObjectId[] }
   | { kind: "CantAttack"; sources?: ObjectId[] }
   | { kind: "CantBlock"; sources?: ObjectId[] };
@@ -943,6 +951,14 @@ export type SearchDestinationSplit = {
   primary_enter_tapped: boolean;
   rest_destination: Zone;
 };
+
+// CR 107.1a/b: the engine-published contract for a choice whose answer the
+// player types instead of picking from `options`. Mirrored from Rust
+// `ability::FreeEntry`. `min`/`max` are INCLUSIVE and are the same bounds
+// `ChoiceType::accepts_free_entry_answer` enforces — the client renders and
+// bounds its input from these values and must never restate them, or it becomes
+// a second authority that can reject what the engine accepts.
+export type FreeEntry = { kind: "Number"; min: number; max: number };
 
 // ── Game Object ──────────────────────────────────────────────────────────
 
@@ -1659,6 +1675,7 @@ export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }
   | { type: "MeldPairChoice"; data: { player: PlayerId; choices: MeldSelection[] } }
   | { type: "MeldAttackTargetChoice"; data: { player: PlayerId; context: MeldSelection; valid_targets: AttackTarget[] } }
+  | { type: "EntryAttackTargetChoice"; data: { player: PlayerId; object_id: ObjectId; valid_targets: AttackTarget[] } }
   | { type: "ActivationCostOneOfChoice"; data: { player: PlayerId; costs: SerializedAbilityCost[]; pending_cast: PendingCast } }
   | {
       type: "MulliganDecision";
@@ -1692,6 +1709,7 @@ export type WaitingFor =
   | { type: "DeclareBlockers"; data: { player: PlayerId; valid_blocker_ids: ObjectId[]; valid_block_targets: Record<string, ObjectId[]>; block_requirements?: Record<string, BlockRequirementInfo>; blocker_constraints?: Record<string, CombatRequirement> } }
   | { type: "GameOver"; data: { winner: PlayerId | null } }
   | { type: "ReplacementChoice"; data: { player: PlayerId; candidate_count: number; candidates?: ReplacementCandidateSummary[] } }
+  | { type: "EntryControllerChoice"; data: { player: PlayerId; candidates: PlayerId[] } }
   | { type: "OrderTriggers"; data: { player: PlayerId; triggers: PendingTriggerSummary[] } }
   | { type: "CopyTargetChoice"; data: { player: PlayerId; source_id: ObjectId; valid_targets: ObjectId[]; max_mana_value?: number | null; purpose?: { type: "BecomeCopy" | "PersistChosenAttribute" } } }
   | { type: "ExploreChoice"; data: { player: PlayerId; source_id: ObjectId; choosable: ObjectId[]; remaining: ObjectId[]; pending_effect: unknown } }
@@ -1714,7 +1732,7 @@ export type WaitingFor =
   | { type: "TriggerTargetSelection"; data: { player: PlayerId; trigger_controller?: PlayerId; trigger_event?: GameEvent; trigger_events?: GameEvent[]; target_slots: TargetSelectionSlot[]; mode_labels?: (string | null)[]; target_constraints?: TargetSelectionConstraint[]; selection: TargetSelectionProgress; source_id?: ObjectId; description?: string } }
   | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore; min_main_deck_size: number; max_sideboard_size: number | null } }
   | { type: "BetweenGamesChoosePlayDraw"; data: { player: PlayerId; game_number: number; score: MatchScore } }
-  | { type: "NamedChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; source?: { prompt: { identity: unknown; controller: PlayerId; display_name: string }; binding: "ResolutionContext" | "ExactObjectAndResolution" }; persist_player?: PlayerId } }
+  | { type: "NamedChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; source?: { prompt: { identity: unknown; controller: PlayerId; display_name: string }; binding: "ResolutionContext" | "ExactObjectAndResolution" }; persist_player?: PlayerId; free_entry?: FreeEntry } }
   | { type: "OpponentGuess"; data: { player: PlayerId; options: string[]; choice_type: string | Record<string, unknown>; source: { prompt: { identity: unknown; controller: PlayerId; display_name: string } }; proposition_truth?: boolean } }
   | { type: "SpellbookDraft"; data: { player: PlayerId; source_id: ObjectId; options: string[]; destination: Zone; tapped?: boolean } }
   | { type: "DamageSourceChoice"; data: { player: PlayerId; source_filter: TargetFilter; options: ObjectId[] } }
@@ -2132,6 +2150,7 @@ export type DebugAction =
         attach_to?: AttachTarget;
         run_etb: boolean;
         nonlegendary: boolean;
+        count: number;
       };
     }
   | { type: "RemoveObject"; data: { object_id: ObjectId } }
@@ -2164,11 +2183,12 @@ export type DebugAction =
       data: {
         request: DebugTokenRequest;
         run_etb: boolean;
+        count: number;
       };
     }
   | {
       type: "CreateTokenCopy";
-      data: { source_id: ObjectId; owner: PlayerId; nonlegendary: boolean };
+      data: { source_id: ObjectId; owner: PlayerId; nonlegendary: boolean; count: number };
     };
 
 // CR 117.3d: priority-yield preference types, mirroring the engine's
@@ -2235,6 +2255,7 @@ export type GameAction =
   | { type: "ChooseTarget"; data: { target: TargetRef | null } }
   | { type: "ChoosePair"; data: { partner: ObjectId | null } }
   | { type: "ChooseReplacement"; data: { index: number } }
+  | { type: "ChooseEntryController"; data: { opponent: PlayerId } }
   | { type: "OrderTriggers"; data: { order: number[] } }
   | { type: "CancelCast" }
   | { type: "Equip"; data: { equipment_id: ObjectId; target_id: ObjectId } }
@@ -2417,6 +2438,19 @@ export type PlanarDieFace = "Planeswalk" | "Chaos" | "Blank";
 
 // ── Game Events (discriminated union, tag="type", content="data") ────────
 
+/** Exact serde spellings of the engine's `PlayerActionKind` enum. */
+export type PlayerActionKind =
+  | "AcceptedOptionalEffect"
+  | "SearchedLibrary"
+  | "Scry"
+  | "Surveil"
+  | "CollectEvidence"
+  | "ShuffledLibrary"
+  | "Proliferate"
+  | "Investigate"
+  | "Draw"
+  | "Forage";
+
 export type GameEvent =
   | { type: "GameStarted" }
   | {
@@ -2426,7 +2460,7 @@ export type GameEvent =
   | { type: "TurnStarted"; data: { player_id: PlayerId; turn_number: number } }
   | { type: "PhaseChanged"; data: { phase: Phase } }
   | { type: "PriorityPassed"; data: { player_id: PlayerId } }
-  | { type: "SpellCast"; data: { card_id: CardId; controller: PlayerId; object_id: ObjectId } }
+  | { type: "SpellCast"; data: { card_id: CardId; controller: PlayerId; object_id: ObjectId; cast_mana_value?: number } }
   | { type: "XValueChosen"; data: { player: PlayerId; object_id: ObjectId; value: number } }
   | { type: "AbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId } }
   | { type: "ExhaustAbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId; is_mana_ability: boolean } }
@@ -2442,6 +2476,14 @@ export type GameEvent =
   | { type: "LandPlayed"; data: { object_id: ObjectId; player_id: PlayerId; from_zone: Zone } }
   | { type: "StackPushed"; data: { object_id: ObjectId } }
   | { type: "StackResolved"; data: { object_id: ObjectId } }
+  // CR 714.2: a Saga's chapter ability finished resolving. Bookkeeping the
+  // engine publishes for meta-triggers (Narci, Fable Singer); non-visual, since
+  // the chapter ability's own effects already animate.
+  // `saga` is the engine's TriggerSourceContext for the exact Saga incarnation
+  // (CR 400.7). It is deliberately left unmodelled: this event is non-visual
+  // (see eventNormalizer) and the client never reads the payload, so declaring a
+  // partial shape here would assert a contract nothing checks.
+  | { type: "SagaChapterAbilityResolved"; data: { saga: unknown; controller: PlayerId; chapter: number; final_chapter: number } }
   | { type: "Discarded"; data: { player_id: PlayerId; object_id: ObjectId } }
   | { type: "EnduringStoryGained"; data: { player_id: PlayerId } }
   | { type: "DamageCleared"; data: { object_id: ObjectId } }
@@ -2457,6 +2499,18 @@ export type GameEvent =
   | { type: "PermanentSacrificed"; data: { object_id: ObjectId; player_id: PlayerId } }
   | { type: "ArmyAmassed"; data: { object_id: ObjectId; source_id: ObjectId; controller: PlayerId } }
   | { type: "EffectResolved"; data: { kind: string; source_id: ObjectId } }
+  // CR 701.22a: the engine records only public scry placement counts, never
+  // card identities, so presentation can show the completed outcome safely.
+  | {
+      type: "PlayerPerformedAction";
+      data: {
+        player_id: PlayerId;
+        action: PlayerActionKind;
+        look_count?: number;
+        scry_bottom_count?: number;
+        scry_top_count?: number;
+      };
+    }
   | { type: "AttackersDeclared"; data: { attacker_ids: ObjectId[]; defending_player: PlayerId; attacks?: [ObjectId, AttackTarget][] } }
   | { type: "BlockersDeclared"; data: { assignments: [ObjectId, ObjectId][] } }
   | { type: "BecomesTarget"; data: { target: TargetRef; source_id: ObjectId } }
@@ -2692,7 +2746,23 @@ export type CollapseCertainty = "Committed" | "Conditional";
 export type FamilyCollapseState =
   | { type: "Unscheduled" }
   | { type: "Mixed" }
-  | { type: "Scheduled"; data: CollapseCertainty };
+  | {
+      type: "Scheduled";
+      data: {
+        certainty: CollapseCertainty;
+        /**
+         * The seat the engine will ask to name the collapse count (CR 732.2a's "specified number
+         * of times") — the loop's CONTROLLER. It is emitted because it is NOT recoverable from
+         * `UnboundedFamilyView.player`, which is the ATTRIBUTION seat: for `Life`/`DamageDealt`/
+         * `LibraryDelta`/`Poison` axes that is the VICTIM, who is never asked.
+         *
+         * `undefined` means the family's scheduled axes name TWO OR MORE distinct seats — never
+         * "nobody". One glyph cannot address two players, so the badge falls back to the
+         * seat-neutral voice instead of picking a winner.
+         */
+        prompted?: PlayerId;
+      };
+    };
 
 /**
  * One `∞` badge's engine-owned state, keyed per seat and per display family. Mirrors
@@ -2714,6 +2784,40 @@ export interface UnboundedFamilyView {
   player: PlayerId;
   family: UnboundedFamily;
   state: FamilyCollapseState;
+}
+
+/** Mirrors `engine::game::derived_views::CounterMagnitude`. Absent on the wire ⇒ `"Finite"`. */
+export type CounterMagnitude = "Finite" | "Unbounded";
+
+/**
+ * One renderable counter row on one object. Mirrors
+ * `engine::game::derived_views::CounterRowView`.
+ *
+ * `counter` matches the object's `counters` map key (`CounterType`'s serde spelling — e.g.
+ * `"charge"`, `"P1P1"`). `count` is the object's LIVE count and is engine-supplied because a row
+ * may legitimately have no entry in that map at all: a pair the loop pumps from `0 -> 1` is
+ * registered while the object still carries none, so the count is `0` and there is nothing to join
+ * back to. Re-deriving it here would also be the FE inferring game state. That `count: 0` case is
+ * `"Unbounded"`-only — the finite pass drops zero entries, the unbounded pass does not.
+ */
+export interface CounterRowView {
+  counter: CounterType;
+  count: number;
+  magnitude?: CounterMagnitude;
+}
+
+/**
+ * Every counter row one object renders, PRE-PARTITIONED by the engine. Mirrors
+ * `engine::game::derived_views::ObjectCounterDisplay`.
+ *
+ * CR 306.5c: `loyalty` is the loyalty TOTAL row for an object that has a loyalty characteristic
+ * (loyalty IS its loyalty-counter count); everything else is a `pills` row, including a loyalty
+ * counter on an object with no loyalty. Loyalty ABILITY COST badges are never unbounded (CR 606.4
+ * — a cost is a number of loyalty counters to pay, not a total).
+ */
+export interface ObjectCounterDisplay {
+  pills?: CounterRowView[];
+  loyalty?: CounterRowView;
 }
 
 /** Mirrors `engine::analysis::loop_check::WinKind` (unit variants → bare strings). */
@@ -2838,6 +2942,12 @@ export interface TurnOrderSlotView {
 /** CR 509.1g: engine-authored public `(blocker, attacker)` combat display pair. */
 export type BlockerAssignmentPair = [ObjectId, ObjectId];
 
+/** Debug-only card identity authorized for the viewing player's library browser. */
+export interface DebugLibraryCardView {
+  object_id: ObjectId;
+  name: string;
+}
+
 /**
  * Engine-authored projections computed at each state snapshot. Rides
  * alongside GameState through every adapter path. Frontend components
@@ -2847,6 +2957,12 @@ export type BlockerAssignmentPair = [ObjectId, ObjectId];
  */
 export interface DerivedViews {
   unique_authorized_submitter?: PlayerId;
+  /**
+   * Explicit debug-only identities for the viewing player's library. Normal
+   * library objects remain hidden in `GameState.objects`; only the debug
+   * browser consumes this separately authorized projection.
+   */
+  debug_library_cards?: DebugLibraryCardView[];
   /**
    * Engine-classified live keyword badges for battlefield permanents. The
    * strip renders this map directly rather than deciding which keyword timing
@@ -2954,12 +3070,13 @@ export interface DerivedViews {
    * deviation from it. What matters to the FE is only that the mark is still live there, so `∞` is current engine
    * state, not a stale mark. Render it.
    *
-   * ONE EXCEPTION: "stays populated" is about the ACCEPT, not about the board. A TOKEN-axis row
-   * is still dropped if its entire registered pile leaves the battlefield during that window —
-   * the engine will not render an `∞` beside an already-empty pile. Counter-axis rows are not
-   * dropped that way (the engine has no per-axis backing authority for them yet), so do not
-   * generalize the exception. Either way the accepted collapse itself is never cancelled: the row
-   * may vanish and the boundary still cashes the axis out. Do not infer a cancellation from a
+   * ONE EXCEPTION, ON TWO CONJUNCTS THAT MUST BOTH HOLD: an object-backed row (a TOKEN axis, or a
+   * COUNTER axis with registered targets) is dropped when (1) no accepted collapse names that axis
+   * AND (2) its entire registered board backing has left the battlefield — the engine will not
+   * render an `∞` beside an already-empty pile. Once the table has ACCEPTED, conjunct (1) fails and
+   * the row survives its backing dying, because CR 732.2c takes the shortcut at the last accept and
+   * the growth still lands. Either way the accepted collapse itself is never cancelled: the row may
+   * vanish and the boundary still cashes the axis out. Do not infer a cancellation from a
    * disappearing row — a row's disappearance says nothing about the collapse. What the FE IS told
    * about the collapse arrives on `unbounded_families` below, and only there.
    */
@@ -2980,16 +3097,29 @@ export interface DerivedViews {
    */
   unbounded_pile?: ObjectId[];
   /**
-   * CR 732.2a / CR 701.34a: per-object `∞` counter channel — for each battlefield
-   * object (keyed by ObjectId-as-string), the counter-type keys whose preserved
-   * `Generic` counters an accepted counter-growth loop (proliferate charge, burden)
-   * pumps unboundedly. Each value string matches the object's `counters` map key
-   * (e.g. `"charge"`). The FE renders `∞` (not `×N`) on any counter pill whose type
-   * is in this set, and never re-derives which counters are unbounded. Empty/omitted
-   * when no counter-growth loop is active. Mirrors
-   * `engine::game::derived_views::DerivedViews::unbounded_counters`.
+   * CR 122.1 + CR 732.2a: the COMPLETE per-object counter-display projection, keyed by
+   * ObjectId-as-string — every counter row every display surface renders, for every
+   * object that has one, in ANY zone (a Skullbriar-class permanent keeps its counters in
+   * the graveyard per CR 113.6b; a suspended card carries time counters in exile per
+   * CR 702.62b).
+   *
+   * CONTRACT FOR CONSUMERS: render `pills` in the order given; never sort, never filter,
+   * never read `obj.counters`; `magnitude` absent means `"Finite"`. The engine already
+   * partitioned loyalty (CR 306.5c), deduplicated across seats, and ordered the rows (`∞`
+   * first, then `CounterType` order).
+   *
+   * ZERO COUNTS ARE DROPPED IN THE FINITE PASS ONLY. `counter_display_views`' FINITE pass
+   * admits through `positive_counter_entries` (CR 122.1 — a zero map entry is not a marker),
+   * so no `"Finite"` row ever carries `count: 0`. The UNBOUNDED pass has NO zero filter: it
+   * reads the live count for a REGISTERED pair, so an `"Unbounded"` row legitimately carries
+   * `count: 0` for a pair the loop pumps `0 -> 1`. A consumer that filters on `count > 0`
+   * therefore deletes real `∞` rows — which is why consumers filter nothing.
+   *
+   * An object with no renderable row is absent from this map; the whole field is omitted
+   * when no object has one. Mirrors
+   * `engine::game::derived_views::DerivedViews::counter_display`.
    */
-  unbounded_counters?: Record<string, string[]>;
+  counter_display?: Record<string, ObjectCounterDisplay>;
 }
 
 /** Mirrors `engine::types::game_state::NextSpellModifier` (serde tag="type"). */
@@ -3385,6 +3515,15 @@ export const AdapterErrorCode = {
   /** Engine rejected game init because one or more decks are not bracket 5 at a cEDH table. */
   BRACKET_VIOLATION: "BRACKET_VIOLATION",
   /**
+   * Engine refused game init because another session already owns it. On a
+   * memory-constrained device the P2P host shares the tab's single engine
+   * worker with local play, so the engine refuses in both directions — a
+   * hosted game starting on top of a live local game, and a local game
+   * starting on top of a hosted one. Not recoverable by retry: the user has to
+   * finish or leave the other game first.
+   */
+  ENGINE_OCCUPIED: "ENGINE_OCCUPIED",
+  /**
    * The engine's actor-authorization guards (`check_actor_authorization` /
    * priority checks, CR 117 priority / CR 500 turn structure) rejected the
    * action because the submitting seat is no longer the authorized submitter
@@ -3452,6 +3591,21 @@ export function actionRejectionError(reason: string): AdapterError {
   return isStaleRejectionMessage(reason)
     ? new AdapterError(AdapterErrorCode.STALE_ACTION, reason, false)
     : new AdapterError(AdapterErrorCode.ACTION_REJECTED, reason, true);
+}
+
+/**
+ * Classify a requester-correlated Resolve All rejection.
+ *
+ * A batch request can reach the server after priority has advanced. The server
+ * must reject that request, but this particular response is a stale UI race,
+ * not an actionable error for the requester. Keep the classification scoped to
+ * the Resolve All protocol frame: the same text on an ordinary action
+ * rejection must remain visible.
+ */
+export function resolveAllRejectionError(reason: string): AdapterError {
+  return reason === "Resolve All requires your priority"
+    ? new AdapterError(AdapterErrorCode.STALE_ACTION, reason, false)
+    : actionRejectionError(reason);
 }
 
 /**
@@ -3735,6 +3889,8 @@ export interface EngineAdapter {
     aiSeats: { playerId: number; difficulty: string }[],
     maxResolutions?: number,
   ): Promise<BatchResolveResult>;
+  /** True when Resolve All delegates AI decisions to the authenticated server. */
+  readonly resolveAllUsesServerAi?: true;
   restoreState(state: PersistedGameState): void | Promise<void>;
   /** Trusted local persistence snapshot, when this adapter owns the engine. */
   exportPersistenceState?(): Promise<string>;

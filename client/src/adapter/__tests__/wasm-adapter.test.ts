@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { WasmAdapter } from "../wasm-adapter";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { WasmAdapter, getHostAdapter, getSharedAdapter } from "../wasm-adapter";
 import { EngineWorkerClient } from "../engine-worker-client";
 import type {
   AiActionProposal,
@@ -27,6 +27,7 @@ const mockWorkerClient = {
   initialize: vi.fn().mockResolvedValue(undefined),
   loadCardDb: vi.fn().mockResolvedValue(100),
   loadCardDbFromUrl: vi.fn().mockResolvedValue(100),
+  buildAiCardSubset: vi.fn(),
   evaluateDeckCompatibility: vi
     .fn()
     .mockResolvedValue({ standard: { compatible: true, reasons: [] } }),
@@ -42,6 +43,11 @@ const mockWorkerClient = {
   submitInteraction: vi.fn().mockResolvedValue({ events: [], log_entries: [] } as SubmitResult),
   getAiActionProposal: vi.fn(),
   getAiActionProposalWithDiagnostics: vi.fn(),
+  getAiTacticalActionProposal: vi.fn(),
+  getAiTacticalActionProposalWithDiagnostics: vi.fn(),
+  getAiActionProposalFromScores: vi.fn(),
+  getAiActionProposalFromScoresWithDiagnostics: vi.fn(),
+  getAiScoredCandidates: vi.fn(),
   submitAiActionProposal: vi.fn(),
   getState: vi.fn().mockResolvedValue(buildGameState({
     turn_number: 1,
@@ -51,6 +57,9 @@ const mockWorkerClient = {
   exportState: vi.fn().mockResolvedValue("{}"),
   restoreState: vi.fn().mockResolvedValue(undefined),
   resumeMultiplayerHostState: vi.fn().mockResolvedValue(undefined),
+  setMultiplayerMode: vi.fn().mockResolvedValue(undefined),
+  resetGame: vi.fn().mockResolvedValue(undefined),
+  applySeatMutation: vi.fn().mockResolvedValue({ state: {}, delta: {} }),
   ping: vi.fn().mockResolvedValue("phase-rs engine ready"),
   takeLastPanic: vi.fn().mockResolvedValue(null),
   dispose: vi.fn(),
@@ -65,11 +74,25 @@ vi.mock("../engine-worker-client", () => ({
 describe("WasmAdapter", () => {
   let adapter: WasmAdapter;
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     adapter = new WasmAdapter();
+    mockWorkerClient.getState.mockResolvedValue(buildGameState({
+      turn_number: 1,
+      phase: "Untap",
+    }));
+    mockWorkerClient.buildAiCardSubset.mockResolvedValue(
+      JSON.stringify({ kind: "subset", json: "{}", count: 0 }),
+    );
+    mockWorkerClient.getAiScoredCandidates.mockResolvedValue([]);
     mockWorkerClient.getAiActionProposal.mockResolvedValue(null);
     mockWorkerClient.getAiActionProposalWithDiagnostics.mockResolvedValue(null);
+    mockWorkerClient.getAiTacticalActionProposal.mockResolvedValue(null);
+    mockWorkerClient.getAiTacticalActionProposalWithDiagnostics.mockResolvedValue(null);
     mockWorkerClient.submitAiActionProposal.mockResolvedValue({
       status: "stale",
       reason: "test",
@@ -145,6 +168,108 @@ describe("WasmAdapter", () => {
 
       expect(listener).not.toHaveBeenCalled();
     });
+  });
+
+  it("retires a failed VeryHard pool before the next decision", async () => {
+    const proposal: AiActionProposal = {
+      token: "authoritative-token",
+      semanticOwner: 0,
+      actor: 0,
+      action: { type: "PassPriority" },
+    };
+    mockWorkerClient.getState.mockResolvedValue({ waiting_for: { type: "Priority" } });
+    mockWorkerClient.getAiScoredCandidates.mockRejectedValue(new Error("pool worker crashed"));
+    mockWorkerClient.getAiActionProposal.mockResolvedValue(proposal);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await adapter.initialize();
+      adapter.cardDbLoaded = true;
+
+      await expect(adapter.getAiActionProposal("VeryHard", 0)).resolves.toEqual(proposal);
+      const firstPoolScoreCallCount = mockWorkerClient.getAiScoredCandidates.mock.calls.length;
+      await expect(adapter.getAiActionProposal("VeryHard", 0)).resolves.toEqual(proposal);
+
+      expect(firstPoolScoreCallCount).toBeGreaterThan(0);
+      expect(mockWorkerClient.getAiScoredCandidates).toHaveBeenCalledTimes(firstPoolScoreCallCount);
+      expect(mockWorkerClient.getAiActionProposal).toHaveBeenCalledTimes(2);
+      expect(mockWorkerClient.getAiTacticalActionProposal).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledOnce();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("falls back after a stalled VeryHard pool score", async () => {
+    vi.useFakeTimers();
+    const proposal: AiActionProposal = {
+      token: "authoritative-token",
+      semanticOwner: 0,
+      actor: 0,
+      action: { type: "PassPriority" },
+    };
+    mockWorkerClient.getState.mockResolvedValue({ waiting_for: { type: "Priority" } });
+    mockWorkerClient.getAiScoredCandidates.mockReturnValue(new Promise(() => {}));
+    mockWorkerClient.getAiActionProposal.mockResolvedValue(proposal);
+    mockWorkerClient.getAiTacticalActionProposal.mockResolvedValue(proposal);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await adapter.initialize();
+      adapter.cardDbLoaded = true;
+
+      const decision = adapter.getAiActionProposal("VeryHard", 0);
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      await expect(decision).resolves.toEqual(proposal);
+      const firstPoolScoreCallCount = mockWorkerClient.getAiScoredCandidates.mock.calls.length;
+      await expect(adapter.getAiActionProposal("VeryHard", 0)).resolves.toEqual(proposal);
+
+      expect(mockWorkerClient.exportState).toHaveBeenCalledOnce();
+      expect(firstPoolScoreCallCount).toBeGreaterThan(0);
+      expect(mockWorkerClient.getAiScoredCandidates).toHaveBeenCalledTimes(firstPoolScoreCallCount);
+      expect(mockWorkerClient.getAiTacticalActionProposal).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.getAiActionProposal).toHaveBeenCalledOnce();
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("uses the tactical engine proposal when a diagnostic pool score times out", async () => {
+    vi.useFakeTimers();
+    const proposal: AiActionProposal = {
+      token: "tactical-token",
+      semanticOwner: 0,
+      actor: 0,
+      action: { type: "PassPriority" },
+    };
+    const receipt: AiDecisionDiagnosticReceipt = {
+      semanticOwner: 0,
+      authorizedActor: 0,
+      selectedAction: { type: "PassPriority" },
+      status: "direct",
+      selectionExplanation: "The tactical fallback selected an engine-issued action.",
+      samplingTemperature: null,
+      candidates: [],
+    };
+    mockWorkerClient.getState.mockResolvedValue({ waiting_for: { type: "Priority" } });
+    mockWorkerClient.getAiScoredCandidates.mockReturnValue(new Promise(() => {}));
+    mockWorkerClient.getAiTacticalActionProposalWithDiagnostics.mockResolvedValue({ proposal, receipt });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await adapter.initialize();
+      adapter.cardDbLoaded = true;
+      adapter.setAiDecisionDiagnosticsEnabled(true);
+
+      const decision = adapter.getAiActionProposal("VeryHard", 0);
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      await expect(decision).resolves.toEqual(proposal);
+      expect(mockWorkerClient.getAiTacticalActionProposalWithDiagnostics).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.getAiActionProposalWithDiagnostics).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("implements EngineAdapter interface", () => {
@@ -258,6 +383,21 @@ describe("WasmAdapter", () => {
   });
 
   describe("submitAction", () => {
+    const createCard = (count: number) => ({
+      type: "Debug" as const,
+      data: {
+        type: "CreateCard" as const,
+        data: {
+          card_name: "Lightning Bolt",
+          owner: 0,
+          zone: "Hand" as const,
+          run_etb: false,
+          nonlegendary: false,
+          count,
+        },
+      },
+    });
+
     it("throws AdapterError with NOT_INITIALIZED if not initialized", async () => {
       await expect(
         adapter.submitAction({ type: "PassPriority" }, 0),
@@ -280,6 +420,51 @@ describe("WasmAdapter", () => {
         0,
         { type: "PassPriority" },
       );
+    });
+
+    it("submits a zero-count debug create without loading the card database", async () => {
+      await adapter.initialize();
+
+      await expect(adapter.submitAction(createCard(0), 0)).resolves.toEqual({
+        events: [],
+        log_entries: [],
+      });
+
+      expect(mockWorkerClient.submitAction).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.loadCardDbFromUrl).not.toHaveBeenCalled();
+    });
+
+    it("does not load the card database when Rust rejects debug-create preflight", async () => {
+      mockWorkerClient.submitAction.mockRejectedValueOnce(
+        new Error("Engine error: DebugAction is only allowed in Sandbox mode"),
+      );
+      await adapter.initialize();
+
+      await expect(adapter.submitAction(createCard(1), 0)).rejects.toThrow(
+        "DebugAction is only allowed in Sandbox mode",
+      );
+
+      expect(mockWorkerClient.submitAction).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.loadCardDbFromUrl).not.toHaveBeenCalled();
+    });
+
+    it("loads the card database and retries only after Rust admits a nonzero create", async () => {
+      mockWorkerClient.submitAction
+        .mockRejectedValueOnce(new Error("Engine error: card database not loaded"))
+        .mockResolvedValueOnce({ events: [], log_entries: [] });
+      await adapter.initialize();
+
+      await expect(adapter.submitAction(createCard(1), 0)).resolves.toEqual({
+        events: [],
+        log_entries: [],
+      });
+
+      expect(mockWorkerClient.submitAction).toHaveBeenCalledTimes(2);
+      expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.submitAction.mock.invocationCallOrder[0])
+        .toBeLessThan(mockWorkerClient.loadCardDbFromUrl.mock.invocationCallOrder[0]);
+      expect(mockWorkerClient.loadCardDbFromUrl.mock.invocationCallOrder[0])
+        .toBeLessThan(mockWorkerClient.submitAction.mock.invocationCallOrder[1]);
     });
 
     // Regression: state-loss classification splits on whether the panic
@@ -465,6 +650,23 @@ describe("WasmAdapter", () => {
     });
   });
 
+  describe("applySeatMutation", () => {
+    it("does not load the card database", async () => {
+      await adapter.initialize();
+
+      const mutation = JSON.stringify({ type: "AddAiSeat", difficulty: "Medium" });
+      await adapter.applySeatMutation("{}", mutation);
+
+      expect(mockWorkerClient.applySeatMutation).toHaveBeenCalledWith("{}", mutation);
+      // Seat mutations are a pure reducer over the passed-in seat state plus the
+      // static starter-deck table; the engine re-resolves against CARD_DB at
+      // `initializeGame`. Warming it here would put a second full card database
+      // in memory for every lobby seat change.
+      expect(mockWorkerClient.loadCardDbFromUrl).not.toHaveBeenCalled();
+      expect(adapter.cardDbLoaded).toBe(false);
+    });
+  });
+
   describe("initializeGame", () => {
     it("delegates to worker client with seed", async () => {
       await adapter.initialize();
@@ -489,5 +691,98 @@ describe("WasmAdapter", () => {
       await adapter.initialize();
       expect(adapter.getEngineClient()).toBe(mockWorkerClient);
     });
+  });
+
+});
+
+/**
+ * The device predicate is module-private and reads `navigator` on every call,
+ * so both branches are driven here by redefining the properties it reads (same
+ * technique as `PermanentCard.test.tsx`). Without this, the shared-engine path
+ * would only ever run on the devices we cannot test.
+ */
+describe("getHostAdapter", () => {
+  const realUserAgent = navigator.userAgent;
+
+  function setMemoryConstrained(constrained: boolean): void {
+    Object.defineProperty(navigator, "userAgent", {
+      configurable: true,
+      value: constrained
+        ? "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15"
+        : realUserAgent,
+    });
+    Object.defineProperty(navigator, "maxTouchPoints", { configurable: true, value: 0 });
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    setMemoryConstrained(false);
+    // `dispose()` nulls the singleton, so a leaked shared adapter cannot
+    // cross-talk into the next test.
+    getSharedAdapter().dispose();
+  });
+
+  it("hands the host the tab's shared engine on a memory-constrained device", () => {
+    setMemoryConstrained(true);
+    expect(getHostAdapter()).toBe(getSharedAdapter());
+  });
+
+  it("gives the host its own engine everywhere else", () => {
+    setMemoryConstrained(false);
+    const host = getHostAdapter();
+    expect(host).not.toBe(getSharedAdapter());
+    host.dispose();
+  });
+});
+
+describe("releaseHostSession", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    getSharedAdapter().dispose();
+  });
+
+  it("keeps the shared worker and its card database, clearing only what the host installed", async () => {
+    const shared = getSharedAdapter();
+    await shared.warmCardDatabase();
+    expect(shared.cardDbLoaded).toBe(true);
+
+    await shared.releaseHostSession(true);
+
+    expect(getSharedAdapter()).toBe(shared);
+    expect(shared.cardDbLoaded).toBe(true);
+    expect(mockWorkerClient.dispose).not.toHaveBeenCalled();
+    expect(mockWorkerClient.setMultiplayerMode).toHaveBeenCalledWith(false);
+    expect(mockWorkerClient.resetGame).toHaveBeenCalledOnce();
+    expect(mockWorkerClient.setMultiplayerMode.mock.invocationCallOrder[0])
+      .toBeLessThan(mockWorkerClient.resetGame.mock.invocationCallOrder[0]);
+  });
+
+  it("leaves the shared engine completely untouched when the host never claimed it", async () => {
+    const shared = getSharedAdapter();
+    await shared.initialize();
+
+    await shared.releaseHostSession(false);
+
+    expect(mockWorkerClient.setMultiplayerMode).not.toHaveBeenCalled();
+    expect(mockWorkerClient.resetGame).not.toHaveBeenCalled();
+    expect(mockWorkerClient.dispose).not.toHaveBeenCalled();
+  });
+
+  it("disposes a private host engine outright, as teardown always did", async () => {
+    const host = new WasmAdapter();
+    await host.initialize();
+
+    await host.releaseHostSession(true);
+
+    expect(mockWorkerClient.dispose).toHaveBeenCalledOnce();
+    await expect(host.getState()).rejects.toThrow(AdapterError);
+    // A private release must never post the shared engine's flag clear.
+    expect(mockWorkerClient.setMultiplayerMode).not.toHaveBeenCalled();
   });
 });

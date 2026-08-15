@@ -23,6 +23,46 @@ fn is_pay_any_amount(amount: &QuantityExpr) -> bool {
     )
 }
 
+/// CR 118.1 + CR 119.4b: Resolve the life-payment channel owned by a concrete
+/// `PayCost`. `None` means this cost has no life-payment component; `Some(0)`
+/// is a completed, always-legal zero-life payment and must remain distinct.
+fn paid_life_amount_for_cost(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    cost: &AbilityCost,
+) -> Option<u32> {
+    match cost {
+        AbilityCost::PayLife { amount } => Some(
+            u32::try_from(resolve_quantity_with_targets(state, amount, ability).max(0))
+                .unwrap_or(0),
+        ),
+        AbilityCost::Composite { costs } => {
+            let mut total: Option<u32> = None;
+            for cost in costs {
+                if let Some(amount) = paid_life_amount_for_cost(state, ability, cost) {
+                    total = Some(total.unwrap_or(0).saturating_add(amount));
+                }
+            }
+            total
+        }
+        _ => None,
+    }
+}
+
+/// CR 118.1 + CR 119.4b: Record the resolved life-payment amount before a
+/// cost can pause. The cloned ability is the continuation authority for both
+/// ordinary cost choices and `ManaAbilityResume::EffectPayCost` roots.
+fn prepare_pay_cost_life_amount(
+    state: &GameState,
+    ability: &mut ResolvedAbility,
+    cost: &AbilityCost,
+) {
+    if ability.context.pay_cost_paid_life_amount.is_none() {
+        let paid_life_amount = paid_life_amount_for_cost(state, ability, cost);
+        ability.context.pay_cost_paid_life_amount = paid_life_amount;
+    }
+}
+
 /// CR 118.1: Pay a cost as part of an effect resolution.
 /// CR 117.1: Mana payment uses auto-tap + pool deduction.
 /// CR 119.4: Paying life IS losing life — replacement effects and the
@@ -200,6 +240,7 @@ pub fn resolve(
         // pipeline + lock both apply inside the authority's
         // `pay_life_as_cost`).
         _ => {
+            prepare_pay_cost_life_amount(state, &mut payment_ability, cost);
             resolve_ability_cost_payment(state, &payment_ability, payer, cost, events)?;
         }
     }

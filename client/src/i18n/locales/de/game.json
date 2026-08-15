@@ -16,10 +16,15 @@
     "shorten": "Break out",
     "decline": "Decline the shortcut",
     "untilLethal": "Repeat until the game ends.",
-    "fixedCount_one": "Repeat once.",
-    "fixedCount_other": "Repeat {{count}} times.",
+    "fixedCount_one": "Repeat at most once.",
+    "fixedCount_other": "Repeat at most {{count}} times.",
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
     "convokeInfo_other": "Auto-taps up to {{count}} creatures for convoke each iteration.",
+    "countAria": "Number of iterations",
+    "previewTitle_one": "Repeating once produces:",
+    "previewTitle_other": "Repeating {{count}} times produces:",
+    "previewEntry": "{{amount}} {{resource}}",
+    "previewEntryPlayer": "{{amount}} {{resource}} — {{player}}",
     "winKind": {
       "LethalDamage": "This loop deals lethal damage.",
       "PoisonLoss": "This loop gives lethal poison counters.",
@@ -45,6 +50,7 @@
     "expand": "Auflösungsfortschritt ausklappen"
   },
   "debugCreate": {
+    "copies": "Kopien",
     "tokenPower": "Power",
     "tokenToughness": "Toughness",
     "tokenPowerPlaceholder": "Power",
@@ -485,8 +491,10 @@
     "companion": "Gefährte",
     "unboundedTooltip": "Unbegrenzt: {{resource}} (∞)",
     "unboundedScheduledTooltip": "Unbegrenzt: {{resource}} (∞) — Auflösung steht aus; eine endliche Anzahl wird gewählt",
+    "unboundedScheduledYouTooltip": "Unbegrenzt: {{resource}} (∞) — Auflösung steht aus; du nennst die Anzahl",
     "unboundedScheduledGlyph": "∞→N",
     "unboundedConditionalTooltip": "Unbegrenzt: {{resource}} (∞) — Auflösung steht aus; dies kann unbegrenzt bleiben",
+    "unboundedConditionalYouTooltip": "Unbegrenzt: {{resource}} (∞) — Auflösung steht aus; dies kann unbegrenzt bleiben, und andernfalls nennst du die Anzahl",
     "unboundedMixedTooltip": "Unbegrenzt: {{resource}} (∞) — ein Teil dieser Gruppe hat eine ausstehende Auflösung; ein Teil bleibt unbegrenzt",
     "unboundedConditionalGlyph": "∞→?",
     "unboundedManaPoolMarker": "Unbegrenztes Mana (∞)",
@@ -1806,6 +1814,10 @@
     "title": "Geschenk-Empfänger wählen",
     "subtitle": "Wähle, welcher Gegner das versprochene Geschenk erhält."
   },
+  "entryController": {
+    "title": "Kontrolleur beim Eintreten wählen",
+    "subtitle": "Wähle, welcher Gegner diese bleibende Karte beim Eintreten kontrolliert."
+  },
   "optionalCost": {
     "gift": {
       "title": "Ein Geschenk versprechen?",
@@ -2039,6 +2051,7 @@
     "searchPlaceholder": "Nach Name suchen...",
     "noCardsFound": "Keine Karten gefunden",
     "buttonSubtitle": "Wähle eine Option",
+    "numberSubtitle": "Gib eine ganze Zahl größer oder gleich {{min}} ein",
     "filterPlaceholder": "Optionen filtern...",
     "noOptionsMatch": "Keine Option passt"
   },

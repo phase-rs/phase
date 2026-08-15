@@ -91,6 +91,36 @@ impl DraftSession {
         }
     }
 
+    /// Validate a disk snapshot before it becomes a live server session.
+    fn try_from_persisted(ps: PersistedDraftSession) -> Result<Self, String> {
+        let core = &ps.session;
+        let seat_count = core.seats.len();
+        if ps.draft_code != core.draft_code {
+            return Err("persisted draft code does not match core session".to_string());
+        }
+        if ps.config != core.config {
+            return Err("persisted draft configuration does not match core session".to_string());
+        }
+        if ps.config.pod_size as usize != seat_count
+            || ps.player_tokens.len() != seat_count
+            || ps.display_names.len() != seat_count
+        {
+            return Err("persisted draft seat vectors do not match core seats".to_string());
+        }
+        let mut tokens = std::collections::HashSet::new();
+        if ps
+            .player_tokens
+            .iter()
+            .filter(|token| !token.is_empty())
+            .any(|token| !tokens.insert(token))
+        {
+            return Err("persisted draft player tokens must be unique".to_string());
+        }
+        core.validate_sealed_snapshot()
+            .map_err(|error| format!("invalid persisted sealed snapshot: {error}"))?;
+        Ok(Self::from_persisted(ps))
+    }
+
     /// Inject server-side timer into the filtered view before serializing.
     pub fn view_for_seat(&self, seat: usize) -> DraftPlayerView {
         let mut view = draft_core::view::filter_for_player(&self.session, seat as u8);
@@ -425,6 +455,21 @@ impl DraftSessionManager {
         self.sessions.insert(draft_code, session);
     }
 
+    /// Restore an untrusted persisted snapshot only after its wrapper and core
+    /// session agree. The manager remains unchanged when validation fails.
+    pub fn restore_persisted_session(&mut self, ps: PersistedDraftSession) -> Result<(), String> {
+        let session = DraftSession::try_from_persisted(ps)?;
+        let draft_code = session.draft_code.clone();
+        for token in &session.player_tokens {
+            if !token.is_empty() {
+                self.token_to_draft
+                    .insert(token.clone(), draft_code.clone());
+            }
+        }
+        self.sessions.insert(draft_code, session);
+        Ok(())
+    }
+
     /// Auto-pick a random card for a disconnected seat whose grace period expired.
     ///
     /// Returns `Ok(())` if a pick was made. Only fires during the Drafting phase (D-02).
@@ -563,7 +608,7 @@ impl DraftSessionManager {
                 2,
                 match_config,
                 Some(format_config.clone()),
-            );
+            )?;
             let (token1, _) = game_mgr.join_game_with_name(&game_code, decks[1].clone(), name1)?;
 
             game_mgr
@@ -722,6 +767,15 @@ fn authorize_client_draft_action(seat: usize, action: DraftAction) -> Result<Dra
         } => Ok(DraftAction::Pick {
             seat: seat as u8,
             card_instance_id,
+        }),
+        DraftAction::PickWithDraftEffect {
+            effect_card_instance_id,
+            card_instance_ids,
+            ..
+        } => Ok(DraftAction::PickWithDraftEffect {
+            seat: seat as u8,
+            effect_card_instance_id,
+            card_instance_ids,
         }),
         DraftAction::SubmitDeck { main_deck, .. } => Ok(DraftAction::SubmitDeck {
             seat: seat as u8,
@@ -1190,6 +1244,30 @@ mod tests {
         assert_eq!(mgr2.draft_for_token(&token), Some(code.as_str()));
     }
 
+    #[test]
+    fn restore_persisted_session_rejects_mismatched_wrapper_without_mutation() {
+        let mut mgr = DraftSessionManager::new();
+        let (code, _token, _) = mgr.create_draft(test_config(), "Alice".to_string());
+        let mut persisted = mgr.sessions[&code].to_persisted();
+        persisted.display_names.pop();
+
+        let mut restored = DraftSessionManager::new();
+        assert!(restored.restore_persisted_session(persisted).is_err());
+        assert!(restored.sessions.is_empty());
+    }
+
+    #[test]
+    fn restore_persisted_session_rejects_duplicate_player_tokens() {
+        let mut mgr = DraftSessionManager::new();
+        let (code, token, _) = mgr.create_draft(test_config(), "Alice".to_string());
+        let mut persisted = mgr.sessions[&code].to_persisted();
+        persisted.player_tokens[1] = token;
+
+        let mut restored = DraftSessionManager::new();
+        assert!(restored.restore_persisted_session(persisted).is_err());
+        assert!(restored.sessions.is_empty());
+    }
+
     fn fill_and_start(mgr: &mut DraftSessionManager, code: &str) {
         for i in 1..8 {
             mgr.join_draft(code, format!("Player {i}"), None).unwrap();
@@ -1277,6 +1355,27 @@ mod tests {
             DraftAction::Pick {
                 seat: 2,
                 card_instance_id: "abc".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn authorize_rebinds_draft_effect_pick_seat_to_authenticated_seat() {
+        let action = authorize_client_draft_action(
+            2,
+            DraftAction::PickWithDraftEffect {
+                seat: 0,
+                effect_card_instance_id: "cogwork-1".to_string(),
+                card_instance_ids: vec!["card-1".to_string(), "card-2".to_string()],
+            },
+        )
+        .expect("seat-scoped action is allowed for any seat");
+        assert_eq!(
+            action,
+            DraftAction::PickWithDraftEffect {
+                seat: 2,
+                effect_card_instance_id: "cogwork-1".to_string(),
+                card_instance_ids: vec!["card-1".to_string(), "card-2".to_string()],
             }
         );
     }

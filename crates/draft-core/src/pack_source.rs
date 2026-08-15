@@ -49,6 +49,7 @@ impl PackSource for FixturePackSource {
                 cmc: 0,
                 type_line: String::new(),
                 is_land: false,
+                draft_effect: None,
             })
             .collect();
         DraftPack(cards)

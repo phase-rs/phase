@@ -28,6 +28,10 @@ use crate::types::proposed_event::ProposedEvent;
 #[derive(Clone, Copy)]
 pub(crate) struct DamageContext {
     pub(crate) source_id: ObjectId,
+    /// CR 400.7: The source incarnation observed before the damage event is
+    /// applied. This remains authoritative if the source changes zones while a
+    /// replacement effect pauses the event.
+    pub(crate) source_incarnation: Option<u64>,
     pub(crate) controller: PlayerId,
     pub(crate) source_is_creature: bool,
     pub(crate) has_deathtouch: bool,
@@ -194,6 +198,7 @@ impl DamageContext {
     pub(crate) fn from_source(state: &GameState, source_id: ObjectId) -> Option<Self> {
         state.objects.get(&source_id).map(|obj| Self {
             source_id,
+            source_incarnation: Some(obj.incarnation),
             controller: obj.controller,
             source_is_creature: obj.card_types.core_types.contains(&CoreType::Creature),
             // CR 613.1f + CR 702.2 + CR 702.15 + CR 702.80 + CR 702.90:
@@ -240,6 +245,7 @@ impl DamageContext {
     pub(crate) fn fallback(source_id: ObjectId, controller: PlayerId) -> Self {
         Self {
             source_id,
+            source_incarnation: None,
             controller,
             source_is_creature: false,
             has_deathtouch: false,
@@ -258,6 +264,7 @@ impl From<DamageContextSnapshot> for DamageContext {
     fn from(snapshot: DamageContextSnapshot) -> Self {
         Self {
             source_id: snapshot.source_id,
+            source_incarnation: snapshot.source_incarnation,
             controller: snapshot.controller,
             source_is_creature: snapshot.source_is_creature,
             has_deathtouch: snapshot.has_deathtouch,
@@ -278,6 +285,7 @@ impl From<&DamageContext> for DamageContextSnapshot {
     fn from(ctx: &DamageContext) -> Self {
         Self {
             source_id: ctx.source_id,
+            source_incarnation: ctx.source_incarnation,
             controller: ctx.controller,
             source_is_creature: ctx.source_is_creature,
             has_deathtouch: ctx.has_deathtouch,
@@ -762,12 +770,17 @@ pub(crate) fn apply_damage_after_replacement(
         // source as it was when the damage was dealt — the source may later
         // change type, leave the battlefield (CR 113.7a LKI), or be removed.
         let src = state.objects.get(&ctx.source_id);
+        // CR 400.7: Use the incarnation captured with the damage context, not
+        // a post-application live lookup. The latter can name a later object
+        // after a replacement pause or zone change.
+        let source_incarnation = ctx.source_incarnation;
         let mut record = DamageRecord {
             source_id: ctx.source_id,
             source_controller: ctx.controller,
             target: t.clone(),
             target_controller,
             target_incarnation,
+            source_incarnation,
             // CR 120.4a: the permanent was dealt only the lethal portion; the
             // excess is recorded against the controller by the redirect below.
             amount: primary_amount,
@@ -2473,8 +2486,19 @@ pub fn resolve_each_source_deals_damage(
         }
     };
 
-    // CR 608.2: the amount is uniform across every source — resolve it once.
-    let amt = resolve_quantity_with_targets(state, amount, ability).max(0) as u32;
+    // CR 608.2: the amount is uniform across every source — resolve it once —
+    // UNLESS the amount reads the per-source `BatchSource` scope (CR 120.1:
+    // "deals damage equal to its power" resolves per source object, never
+    // against the ability source).
+    let per_source = crate::game::quantity::quantity_expr_contains_scope(
+        amount,
+        crate::types::ability::ObjectScope::BatchSource,
+    );
+    let amt_uniform = if per_source {
+        0
+    } else {
+        resolve_quantity_with_targets(state, amount, ability).max(0) as u32
+    };
 
     // CR 608.2 + CR 120.1: evaluate the source class against the battlefield at
     // resolution (mirrors `resolve_all`). Each matching object is an independent
@@ -2503,26 +2527,41 @@ pub fn resolve_each_source_deals_damage(
     // recipient so combined lethal/excess is computed once all sources have
     // marked). Each source carries its OWN `DamageContext` (CR 120.1 identity).
     let mut entries: Vec<(ObjectId, DamageContext, TargetRef, u32)> = Vec::new();
-    if amt > 0 {
-        for &source_id in &source_ids {
-            let ctx = DamageContext::from_source(state, source_id)
-                .unwrap_or_else(|| DamageContext::fallback(source_id, ability.controller));
-            match recipient {
-                EachDamageRecipient::Shared(_) => {
-                    for recip in &shared_recipients {
-                        entries.push((source_id, ctx, recip.clone(), amt));
-                    }
+    for &source_id in &source_ids {
+        // CR 120.1 + CR 608.2h: each batch member deals its OWN characteristic;
+        // resolved per source (live object, LKI fallback via the new scope's
+        // resolve arms — the same instant semantics as the one-time uniform
+        // resolution, but read against each batch member). Zero/sourceless
+        // members deal nothing (skip) — entry-set-equivalent to the uniform
+        // path's `if amt > 0` gate.
+        let amt = if per_source {
+            crate::game::quantity::resolve_quantity_with_targets_and_damage_source(
+                state, amount, ability, source_id,
+            )
+            .max(0) as u32
+        } else {
+            amt_uniform
+        };
+        if amt == 0 {
+            continue;
+        }
+        let ctx = DamageContext::from_source(state, source_id)
+            .unwrap_or_else(|| DamageContext::fallback(source_id, ability.controller));
+        match recipient {
+            EachDamageRecipient::Shared(_) => {
+                for recip in &shared_recipients {
+                    entries.push((source_id, ctx, recip.clone(), amt));
                 }
-                // CR 109.4 + CR 120.3a: each source deals to the player that
-                // controls it.
-                EachDamageRecipient::EachController => {
-                    let controller = state
-                        .objects
-                        .get(&source_id)
-                        .map(|obj| obj.controller)
-                        .unwrap_or(ctx.controller);
-                    entries.push((source_id, ctx, TargetRef::Player(controller), amt));
-                }
+            }
+            // CR 109.4 + CR 120.3a: each source deals to the player that
+            // controls it.
+            EachDamageRecipient::EachController => {
+                let controller = state
+                    .objects
+                    .get(&source_id)
+                    .map(|obj| obj.controller)
+                    .unwrap_or(ctx.controller);
+                entries.push((source_id, ctx, TargetRef::Player(controller), amt));
             }
         }
     }
@@ -3074,6 +3113,7 @@ mod tests {
             card_id: CardId(11),
             controller: PlayerId(0),
             object_id: spell,
+            cast_mana_value: None,
         });
 
         // The exile-until hit — Target, mana value 1.
@@ -3228,6 +3268,7 @@ mod tests {
             card_id: CardId(11),
             controller: PlayerId(0),
             object_id: spell,
+            cast_mana_value: None,
         });
 
         // Two exile-until hits — both bound as object targets on the parent, so the
@@ -4036,6 +4077,46 @@ mod tests {
         assert_eq!(
             state.damage_dealt_this_turn[0].target_incarnation,
             Some(state.objects[&target].incarnation)
+        );
+    }
+
+    #[test]
+    fn damage_record_keeps_the_context_source_incarnation() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Target".to_string(),
+            Zone::Battlefield,
+        );
+        let ctx = DamageContext::from_source(&state, source).unwrap();
+        let source_incarnation = ctx.source_incarnation;
+
+        // CR 400.7: a replacement pause can resume after the source has become
+        // a new object. The already-created damage context remains authoritative.
+        state.objects.get_mut(&source).unwrap().incarnation += 1;
+
+        let event = ProposedEvent::Damage {
+            source_id: source,
+            target: TargetRef::Object(target),
+            amount: 1,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        apply_damage_after_replacement(&mut state, &ctx, event, false, &mut events);
+
+        assert_eq!(
+            state.damage_dealt_this_turn[0].source_incarnation, source_incarnation,
+            "damage records must retain the pre-pause source incarnation"
         );
     }
 

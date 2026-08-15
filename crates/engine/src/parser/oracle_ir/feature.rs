@@ -689,7 +689,7 @@ mod tests {
 /// checkout does not have. Point it at one and run it explicitly:
 ///
 /// ```text
-/// ORACLE_POOL_DIR=/path/to/data cargo test -p engine --lib pool_structure_census \
+/// ORACLE_POOL_DIR=/path/to/data cargo test -p phase-engine --lib pool_structure_census \
 ///     -- --ignored --nocapture
 /// ```
 #[cfg(test)]

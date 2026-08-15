@@ -12,6 +12,29 @@ use super::turn_control;
 
 const HIDDEN_CARD_NAME: &str = "Hidden Card";
 
+/// Resolution-only look-result provenance is never part of a viewer snapshot.
+/// The engine retains it for the active loop, while clients need only the
+/// public prompt and the card identities they are otherwise allowed to see.
+fn redact_parent_target_iteration_members(ability: &mut crate::types::ability::ResolvedAbility) {
+    ability.context.parent_target_iteration_members = None;
+    if let Some(sub_ability) = ability.sub_ability.as_mut() {
+        redact_parent_target_iteration_members(sub_ability);
+    }
+    if let Some(else_ability) = ability.else_ability.as_mut() {
+        redact_parent_target_iteration_members(else_ability);
+    }
+}
+
+fn redact_waiting_for_iteration_members(waiting_for: &mut WaitingFor) {
+    match waiting_for {
+        WaitingFor::UnlessPayment { pending_effect, .. }
+        | WaitingFor::UnlessPaymentChooseCost { pending_effect, .. } => {
+            redact_parent_target_iteration_members(pending_effect);
+        }
+        _ => {}
+    }
+}
+
 pub(crate) fn interaction_object_identity_is_visible(state: &GameState, id: ObjectId) -> bool {
     state
         .objects
@@ -74,6 +97,119 @@ pub(crate) fn capture_library_search_card_view(
     }
 }
 
+/// CR 732.2b: the responder's right is to name a place where they will make "a choice that's
+/// different than what's been proposed", so the proposal they see must be the whole proposal or
+/// none of it. A partially-redacted pin set is a LIE about what was proposed — it would show a
+/// shortened sequence the proposer never suggested — so this is ALL-OR-NOTHING: one pin naming an
+/// object this viewer may not see drops the entire pin vector.
+///
+/// THE SINGLE AUTHORITY for that decision. It is keyed on `[PinnedDecision]` rather than on
+/// `DecisionTemplate` because this engine has THREE viewer-visible carriers of that same vector,
+/// and a per-carrier copy of the predicate is exactly what let them drift before:
+///
+/// 1. `WaitingFor::LoopShortcut.declaration.decisions` — the proposer-facing offer.
+/// 2. `WaitingFor::RespondToShortcut.proposal.template.decisions` — the responder-facing copy.
+///    `game::engine::handle_declare_shortcut` moves the identical template verbatim onto
+///    `ShortcutProposal.template` one state transition later, where every responder and spectator
+///    reads it.
+/// 3. `GameState::last_loop_action_sequence[].pins` — the recorded loop period. It is serialized
+///    whenever non-empty (`skip_serializing_if = "Vec::is_empty"`, not `skip`) and has no other
+///    redaction seam. Its three writers (the `game::engine::record_loop_pin` call sites: a
+///    mana-ability tap cost, a mana-color choice, a proliferate target) can only name battlefield
+///    permanents and seats today, so that call redacts nothing on any board the engine currently
+///    mints — it is wired so a fourth writer cannot open the leak silently.
+///
+/// `GameState::decision_templates` is the fourth carrier and deliberately does NOT route here: it
+/// is redacted wholesale by the private-access retain
+/// (`filtered.decision_templates.retain(|t| can_view_private_for_player(t.owner))` — CR 723.4, the
+/// SAME predicate carriers 1 and 2 apply), so a template this viewer may not privately view is
+/// REMOVED entirely and there is nothing left for this predicate to answer about it.
+///
+/// A SEAT needs no redaction, and that is an ENGINE property rather than a CR one — no rule makes
+/// seat identity public. This projection hides card identities and hidden-zone contents; the seat
+/// list itself is never per-viewer filtered (`filtered.players[..]` is redacted in place, never
+/// removed), so a `PlayerId` names something every viewer already has. CR 115.2 is cited for the
+/// narrower thing it actually says: a spell or ability may target a player when it specifies so,
+/// which is what makes a seat a legal pin value at all.
+///
+/// STATED ABOUT THE SEAT RATHER THAN ABOUT ONE SPELLING, because a seat now has two of them:
+/// `TargetPin::Player` (the CR 115.10a CHOICE class) and `AnnouncementSubject::Seat` inside a
+/// `Ranking` (the CR 601.2c TARGET class). Redaction asks "does this name an identity this viewer
+/// may not see", a question the CHOICE/TARGET split does not bear on at all — which is why both
+/// arms below answer `false` for this ONE reason rather than two. It is also why the split cannot
+/// quietly open a leak here: the `AnnouncementSubject` match is wildcard-free, so a future subject
+/// kind that DOES name a hidden identity gets a compile error instead of a `false`.
+///
+/// `target_hidden` is passed in rather than re-derived so that the declaration's object identities
+/// and the offer schema's legal targets are answered by ONE hidden-info authority; two derivations
+/// could disagree about the same object.
+fn pins_name_hidden_source(
+    pins: &[crate::analysis::decision_template::PinnedDecision],
+    target_hidden: &dyn Fn(ObjectId) -> bool,
+) -> bool {
+    use crate::analysis::decision_template::{
+        AnnouncementSubject, DecisionSource, PinnedDecision, Ranking, TargetPin, TargetSchedule,
+    };
+    let source_hidden = |source: &DecisionSource| match source {
+        crate::types::game_state::YieldTarget::ThisObject { source_id, .. } => {
+            target_hidden(*source_id)
+        }
+        // A card identity, not a live object: it names no zone occupant to hide.
+        crate::types::game_state::YieldTarget::AllCopies { .. } => false,
+    };
+    // A `Scheduled` step carries a whole `Ranking`, so the walk descends one level further
+    // than the pin: EVERY subject in every step is inspected, not just the head the current
+    // episode would resolve. The tail is a pre-declaration the responder receives now (it is
+    // part of the proposal they accept or shorten under CR 732.2b), so a hidden identity in
+    // the tail is a leak on exactly the same footing as one in the head.
+    //
+    // Wildcard-free over `AnnouncementSubject`: a future subject kind gets a compile-time
+    // visit here. The `Seat` arm is `false` for the SEAT reason given above — seat identity is
+    // public in this engine — which is stated about the seat rather than about either spelling
+    // precisely so both arms can cite it once.
+    let subject_hidden = |subject: &AnnouncementSubject| match subject {
+        AnnouncementSubject::Object(source) => source_hidden(source),
+        AnnouncementSubject::Seat(_) => false,
+    };
+    let ranking_hidden = |ranking: &Ranking| ranking.iter().any(&subject_hidden);
+    let pin_hidden = |pin: &TargetPin| match pin {
+        TargetPin::ByIdentity(source) => source_hidden(source),
+        TargetPin::Player(_) => false,
+        TargetPin::Scheduled(schedule) => match schedule {
+            TargetSchedule::Constant(ranking) => ranking_hidden(ranking),
+            TargetSchedule::RoundRobin(rankings) => rankings.iter().any(&ranking_hidden),
+            TargetSchedule::Piecewise(steps) => {
+                steps.iter().any(|(_, ranking)| ranking_hidden(ranking))
+            }
+        },
+    };
+    // Wildcard-free over `PinnedDecision`, so a future variant that carries an object
+    // identity gets a compile-time visit here instead of leaking silently.
+    //
+    // `slot` is deliberately not inspected, and the honest reason is PER-CARRIER rather than
+    // global. Carrier 1 co-publishes the identical `DecisionSlot` unredacted as
+    // `schema.points[].slot` (the `LoopShortcut` arm below), so redacting it here would hide
+    // nothing that arm hands over anyway. Carriers 2 and 3 publish NO schema, and for them the
+    // claim is narrower and measured rather than structural: every `DecisionSlot.source` this
+    // engine mints today is either `YieldTarget::AllCopies { card_id }` (a card identity, which
+    // occupies no zone) or a `ThisObject` that `game::engine::object_decision_source` built from
+    // a stack object or a battlefield permanent — never a hand/library occupant. That is a
+    // property of today's PRODUCERS (`build_recast_template` and the `record_loop_pin` call
+    // sites feed carriers 2/3; a proposer-declared template's slots come from the offer schema,
+    // whose sources are stack entries), not of `DecisionSlot` itself, whose constructors accept
+    // any object. A producer that slots a hidden-zone source would leak it through carriers 2/3,
+    // and `source_hidden` above is already the function to call on `slot.source` when one exists.
+    pins.iter().any(|pin| match pin {
+        PinnedDecision::Targets { targets, .. } => targets.iter().any(&pin_hidden),
+        PinnedDecision::Order { source, .. } => source_hidden(source),
+        PinnedDecision::Mode { .. }
+        | PinnedDecision::MayChoice { .. }
+        | PinnedDecision::UnlessBreak { .. }
+        | PinnedDecision::ConvokeTaps { .. }
+        | PinnedDecision::ManaColor { .. } => false,
+    })
+}
+
 /// Returns a filtered copy of the game state for the given viewer.
 /// Hides all opponents' hand contents and all library contents except where the
 /// viewer is explicitly allowed to see them.
@@ -88,10 +224,13 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // viewer projection — including the activating player's projection.
     if let Some(pending) = filtered.pending_cast.as_mut() {
         pending.activation_trigger_collection = None;
+        redact_parent_target_iteration_members(&mut pending.ability);
     }
     if let Some(pending) = filtered.waiting_for.pending_cast_mut() {
         pending.activation_trigger_collection = None;
+        redact_parent_target_iteration_members(&mut pending.ability);
     }
+    redact_waiting_for_iteration_members(&mut filtered.waiting_for);
     // Interaction capability authority is trusted persistence state. Viewer
     // projections expose only the actor-scoped opaque opportunity IDs produced
     // by `game::interaction`, never the session/serial/slot minting ledger.
@@ -117,6 +256,13 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // payloads; the separately projected `WaitingFor` prompt is the complete
     // viewer-facing interaction surface.
     filtered.resolution_stack = Default::default();
+    // ChooseOneOf retains its runtime tail inside the authoritative prompt so
+    // resolution can resume after the branch selection. Like every other
+    // resolved continuation, that carrier can contain private object IDs and
+    // last-known information; clients need only the branch presentation.
+    if let WaitingFor::ChooseOneOfBranch { continuation, .. } = &mut filtered.waiting_for {
+        *continuation = None;
+    }
     // The provenance journal contains exact source identities, restrictions,
     // and cost-recipient relationships. It is server authority and must not
     // expose one player's mana history to another viewer.
@@ -263,6 +409,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         options,
         source,
         persist_player,
+        free_entry,
     } = &state.waiting_for
     {
         let mut source = source.clone();
@@ -275,7 +422,32 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             options: options.clone(),
             source,
             persist_player: *persist_player,
+            // The free-entry contract is what the prompt PUBLISHES; it carries no
+            // hidden information (it is a function of `choice_type`, which is
+            // already public here), so the projection forwards it intact.
+            free_entry: *free_entry,
         };
+    }
+
+    // CR 101.4 + CR 101.4b + CR 608.2d: A number a player chose but has not yet
+    // REVEALED is that player's secret. Wheel of Misfortune, Menacing Ogre and
+    // Life at Stake all say "secretly", and The Toymaker's Trap's committed
+    // number must survive an opponent's guess unseen — CR 101.4b would otherwise
+    // let a later chooser read the earlier answers.
+    //
+    // The redaction keys on the ATTRIBUTE KIND, not on the current `waiting_for`:
+    // `ChosenAttribute::Number` is private, `RevealedNumber` is public, and
+    // `Effect::RevealChosenNumbers` converts one into the other when the card's
+    // reveal instruction resolves (CR 608.2c, in written order). Making privacy a
+    // property of the type means no call path can open a window where a still-
+    // secret value leaks, and no reveal can be forgotten — a value is visible
+    // exactly when the game has published it.
+    for player in filtered.players.iter_mut() {
+        if !can_view_private_for_player(player.id) {
+            player.chosen_attributes.retain(|attribute| {
+                !matches!(attribute, crate::types::ability::ChosenAttribute::Number(_))
+            });
+        }
     }
 
     // CR 608.2d: While an `OpponentGuess` is pending, strip the secret the
@@ -449,16 +621,6 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             HashSet::new()
         };
 
-    // Debug exposure: a viewer with an active debug capability (CR is silent;
-    // this is an out-of-game capability) sees the names of cards in their own
-    // library, so the debug "move card from library to hand" picker can identify
-    // a specific card. This includes native single-user games, whose debug
-    // capability is intentionally independent of the multiplayer sandbox
-    // format flag. Opponents' libraries remain hidden. The FE alphabetizes the
-    // picker within each zone bucket, so name exposure does not leak draw order.
-    // The actual `library` Vec order on the wire is left untouched (preserving
-    // simulate-mode draw semantics) but is never surfaced as draw order.
-    let debug_self_library_visible = state.debug_mode && state.debug_permitted.contains(&viewer);
     // CR 701.20e + CR 400.2: "looking at a card ... is shown only to the
     // specified player." A player with a continuous "you may look at the top
     // card of your library" permission (MayLookAtTopOfLibrary — Vizier of the
@@ -482,7 +644,6 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         .flat_map(|p| p.library.iter().copied())
         .collect();
     for obj_id in all_library_ids {
-        let owner = state.objects.get(&obj_id).map(|o| o.owner);
         let visible = manifest_dread_visible.contains(&obj_id)
             || dig_visible.contains(&obj_id)
             || scry_visible.contains(&obj_id)
@@ -501,8 +662,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             || state.viewer_knows_card_identity(viewer, obj_id)
             // CR 701.20e: own (or controlled-turn) library top under a
             // MayLookAtTopOfLibrary permission — see `look_top_visible` above.
-            || look_top_visible.contains(&obj_id)
-            || (debug_self_library_visible && owner == Some(viewer));
+            || look_top_visible.contains(&obj_id);
         if !visible
             && !effect_zone_hand_cards.contains(&obj_id)
             && !drawn_choice_hand_cards.contains(&obj_id)
@@ -715,6 +875,22 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
+    // A target object is hidden from this viewer iff it sits in a private zone whose
+    // owner the viewer can't privately view AND it isn't otherwise revealed/peeked.
+    // Hoisted above the CR 732.2a/b blocks below because all THREE pin carriers
+    // (`LoopShortcut.declaration`, `RespondToShortcut.proposal.template`,
+    // `last_loop_action_sequence[].pins`) must answer "may this viewer see that object?" the
+    // same way; a per-arm copy is what let the first two drift apart.
+    let target_hidden = |id: ObjectId| -> bool {
+        state.objects.get(&id).is_some_and(|obj| {
+            matches!(obj.zone, Zone::Hand | Zone::Library)
+                && !can_view_private_for_player(obj.owner)
+                && !is_visible_revealed_card(state, viewer, id)
+                && !state.viewer_knows_card_identity(viewer, id)
+                && !private_look_visible.contains(&id)
+        })
+    };
+
     // CR 732.2a: redact hidden-info legal targets in a `LoopShortcut` OFFER for a viewer who is
     // NOT the schema's proposer. The schema is built for the offer's public declaration; this
     // is the SOLE seam that removes a hidden-zone (hand/library) legal target from a viewer who
@@ -727,6 +903,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         predicted_winner,
         ref certificate,
         ref schema,
+        ref declaration,
     } = state.waiting_for
     {
         if !can_view_private_for_player(proposer) {
@@ -734,17 +911,6 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 DecisionPoint, DecisionPointKind, ShortcutDecisionSchema,
             };
             use crate::types::ability::TargetRef;
-            // A target object is hidden from this viewer iff it sits in a private zone whose
-            // owner the viewer can't privately view AND it isn't otherwise revealed/peeked.
-            let target_hidden = |id: ObjectId| -> bool {
-                state.objects.get(&id).is_some_and(|obj| {
-                    matches!(obj.zone, Zone::Hand | Zone::Library)
-                        && !can_view_private_for_player(obj.owner)
-                        && !is_visible_revealed_card(state, viewer, id)
-                        && !state.viewer_knows_card_identity(viewer, id)
-                        && !private_look_visible.contains(&id)
-                })
-            };
             let points: Vec<DecisionPoint> = schema
                 .points
                 .iter()
@@ -808,10 +974,18 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                     _ => None,
                 })
                 .sum();
+            // CR 732.2b, ALL-OR-NOTHING: one pin naming an object this viewer may not see drops
+            // the entire declaration. The predicate itself is `pins_name_hidden_source` (this
+            // file), the single authority shared with the `RespondToShortcut` projection below,
+            // which receives this very template verbatim one state transition later.
+            let declaration = declaration
+                .clone()
+                .filter(|template| !pins_name_hidden_source(&template.decisions, &target_hidden));
             filtered.waiting_for = WaitingFor::LoopShortcut {
                 proposer,
                 predicted_winner,
                 certificate: certificate.clone(),
+                declaration,
                 schema: ShortcutDecisionSchema {
                     iteration_count: schema.iteration_count.clone(),
                     // CR 732.2a: the count bound is derived from PUBLIC board state (life,
@@ -826,6 +1000,37 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
+    // CR 732.2b: the RESPONDER-facing copy of the very declaration redacted above.
+    // `game::engine::handle_declare_shortcut` moves the proposer's template verbatim onto
+    // `ShortcutProposal.template` and installs it here, so without this arm every identity the
+    // `LoopShortcut` block drops is public to every responder and spectator one transition later.
+    // Same authority, same all-or-nothing: the template is dropped whole, never trimmed.
+    //
+    // Guarded on the PROPOSER's private access (`proposal.proposer`), not on the responder
+    // (`player`), because the offer's declaration is the proposer's hidden information and every
+    // seat but theirs — the current responder, the queued ones, and spectators — receives this
+    // same projection.
+    if let WaitingFor::RespondToShortcut { proposal, .. } = &mut filtered.waiting_for {
+        if !can_view_private_for_player(proposal.proposer)
+            && proposal
+                .template
+                .as_ref()
+                .is_some_and(|t| pins_name_hidden_source(&t.decisions, &target_hidden))
+        {
+            proposal.template = None;
+        }
+    }
+
+    // CR 732.2a: the THIRD carrier of the same pin vector — the recorded loop period, which
+    // serializes whenever non-empty and has no other redaction seam. All-or-nothing per recorded
+    // step, for the reason spelled on `pins_name_hidden_source`: a half-shown period states a
+    // sequence that was never played.
+    for step in &mut filtered.last_loop_action_sequence {
+        if pins_name_hidden_source(&step.pins, &target_hidden) {
+            step.pins.clear();
+        }
+    }
+
     if let WaitingFor::DigChoice {
         player,
         library_owner,
@@ -835,8 +1040,10 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         ref selectable_cards,
         kept_destination,
         rest_destination,
+        rest_order,
         source_id,
         enter_tapped,
+        enters_attacking,
     } = state.waiting_for
     {
         if !can_view_private_for_player(player) {
@@ -849,8 +1056,10 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 selectable_cards: selectable_cards.iter().map(|_| ObjectId(0)).collect(),
                 kept_destination,
                 rest_destination,
+                rest_order,
                 source_id,
                 enter_tapped,
+                enters_attacking,
             };
         }
     }
@@ -1412,7 +1621,17 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     filtered
         .may_trigger_auto_choices
         .retain(|record| record.key.player == viewer);
-    filtered.decision_templates.retain(|t| t.owner == viewer);
+    // CR 723.4: "If information about an object in the game would be visible to the player
+    // being controlled, it's visible to both that player and the player controlling them."
+    // The pin vector's other carriers already answer "may this viewer see it" with this same
+    // predicate (the `LoopShortcut` and `RespondToShortcut` blocks above), so carrier 4 uses
+    // it too rather than a strict owner-equality that would deny a controlling player a
+    // template they are entitled to. Absent turn control (and absent a latched
+    // search-decision authority) this is exactly owner-equality — see
+    // `turn_control::authorized_submitter_for_player` for the full arm set.
+    filtered
+        .decision_templates
+        .retain(|t| can_view_private_for_player(t.owner));
     filtered.priority_yields.retain(|y| y.player == viewer);
     filtered
         .lands_tapped_for_mana
@@ -1577,6 +1796,7 @@ pub fn filter_events_for_viewer(
                     card_id: CardId(0),
                     controller: *controller,
                     object_id: *object_id,
+                    cast_mana_value: None,
                 }
             }
             other => other.clone(),
@@ -1798,27 +2018,66 @@ fn is_visible_revealed_card(state: &GameState, viewer: PlayerId, obj_id: ObjectI
         })
 }
 
+/// Removes printed-card identity from a viewer projection while retaining the
+/// public object identity and runtime state needed to render the game.
+fn redact_printed_identity(obj: &mut crate::game::game_object::GameObject) {
+    obj.card_id = CardId(0);
+    obj.base_name = HIDDEN_CARD_NAME.to_string();
+    obj.token_rules_text = None;
+    obj.attraction_lights.clear();
+    obj.token_image_ref = None;
+    obj.source_related_token_ids.clear();
+    obj.spellbook.clear();
+    obj.parse_warnings.clear();
+    obj.back_face = None;
+    obj.specialize_faces = None;
+    obj.cleave_variant = None;
+    obj.modal = None;
+    obj.additional_cost = None;
+    obj.strive_cost = None;
+    obj.casting_restrictions.clear();
+    obj.casting_options.clear();
+    obj.casting_permissions.clear();
+    obj.unimplemented_mechanics.clear();
+
+    obj.base_power = None;
+    obj.base_toughness = None;
+    obj.base_loyalty = None;
+    obj.base_printed_loyalty = None;
+    obj.base_defense = None;
+    obj.base_card_types = Default::default();
+    obj.base_mana_cost = Default::default();
+    obj.base_keywords.clear();
+    Arc::make_mut(&mut obj.base_abilities).clear();
+    Arc::make_mut(&mut obj.base_trigger_definitions).clear();
+    Arc::make_mut(&mut obj.base_replacement_definitions).clear();
+    Arc::make_mut(&mut obj.base_static_definitions).clear();
+    obj.base_color.clear();
+    obj.base_printed_ref = None;
+}
+
 fn hide_card(state: &mut GameState, obj_id: ObjectId) {
     if let Some(obj) = state.objects.get_mut(&obj_id) {
+        // CR 400.2: library and hand are hidden zones — a viewer without
+        // look-permission may not see the card's face or any printed-card
+        // metadata that identifies it.
         obj.face_down = true;
         obj.name = HIDDEN_CARD_NAME.to_string();
+        redact_printed_identity(obj);
         Arc::make_mut(&mut obj.abilities).clear();
         obj.keywords.clear();
-        obj.base_keywords.clear();
         obj.power = None;
         obj.toughness = None;
         obj.loyalty = None;
+        obj.printed_loyalty = None;
+        obj.defense = None;
+        obj.card_types = Default::default();
+        obj.mana_cost = Default::default();
         obj.color.clear();
-        obj.base_color.clear();
         obj.trigger_definitions.clear();
         obj.replacement_definitions.clear();
         obj.static_definitions.clear();
-        obj.casting_permissions.clear();
         obj.printed_ref = None;
-        obj.base_printed_ref = None;
-        obj.back_face = None;
-        obj.token_image_ref = None;
-        obj.source_related_token_ids.clear();
         obj.foretold = false;
     }
 }
@@ -1844,10 +2103,15 @@ fn reveal_face_down_identity_to_controller(obj: &mut crate::game::game_object::G
 
 fn redact_face_down_identity_from_observer(obj: &mut crate::game::game_object::GameObject) {
     obj.name = HIDDEN_CARD_NAME.to_string();
-    obj.base_name = HIDDEN_CARD_NAME.to_string();
+    redact_printed_identity(obj);
     obj.printed_ref = None;
-    obj.base_printed_ref = None;
-    obj.back_face = None;
+    // CR 708.5 + CR 708.2: a face-down permanent has no name and no abilities,
+    // and no player but its controller may look at the card underneath.
+    // `parse_warnings` survives the face-down transformation on the
+    // authoritative object (measured: a manifested card keeps the printed
+    // face's warnings), so it must be redacted here for the same reason
+    // `back_face` is — it is evidence about the hidden printed text.
+    obj.parse_warnings.clear();
 }
 
 /// CR 603.3b + CR 400.2: A pending trigger awaiting its
@@ -1895,8 +2159,8 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::EffectKind;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, BeholdCostAction, CostPaidObjectSnapshot, Effect,
-        ReplacementDefinition, ResolvedAbility, TargetFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, BeholdCostAction, CostPaidObjectSnapshot,
+        Effect, QuantityExpr, ReplacementDefinition, ResolvedAbility, TargetFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CardType, CoreType};
@@ -1916,6 +2180,53 @@ mod tests {
     use crate::types::replacements::ReplacementEvent;
     use crate::types::zones::{ExileCostSourceZone, Zone};
     use rand::RngCore;
+
+    #[test]
+    fn choose_one_prompt_redacts_runtime_continuation_for_every_viewer() {
+        let mut state = GameState::new_two_player(42);
+        let hidden = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Private Card".to_string(),
+            Zone::Hand,
+        );
+        state.waiting_for = WaitingFor::ChooseOneOfBranch {
+            player: PlayerId(0),
+            controller: PlayerId(0),
+            source_id: ObjectId(9),
+            branches: Vec::new(),
+            branch_descriptions: Vec::new(),
+            parent_targets: Vec::new(),
+            context: Default::default(),
+            continuation: Some(Box::new(ResolvedAbility::new(
+                Effect::NoOp,
+                vec![crate::types::ability::TargetRef::Object(hidden)],
+                ObjectId(9),
+                PlayerId(0),
+            ))),
+            replacement_applied: Default::default(),
+            remaining_players: Vec::new(),
+        };
+
+        for viewer in [PlayerId(0), PlayerId(1)] {
+            let filtered = filter_state_for_viewer(&state, viewer);
+            assert!(matches!(
+                filtered.waiting_for,
+                WaitingFor::ChooseOneOfBranch {
+                    continuation: None,
+                    ..
+                }
+            ));
+        }
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ChooseOneOfBranch {
+                continuation: Some(_),
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn priority_passing_preferences_are_visible_only_to_their_owner() {
@@ -1998,6 +2309,40 @@ mod tests {
         })
     }
 
+    #[test]
+    fn unless_payment_projection_redacts_private_iteration_members() {
+        let mut state = GameState::new_two_player(42);
+        let mut pending = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "private loop probe".to_string(),
+                description: None,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        pending.context.parent_target_iteration_members = Some(vec![ObjectId(1), ObjectId(2)]);
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(0),
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
+            pending_effect: Box::new(pending),
+            trigger_event: None,
+            effect_description: None,
+            remaining: Vec::new(),
+        };
+
+        let filtered = filter_state_for_viewer(&state, PlayerId(1));
+        let WaitingFor::UnlessPayment { pending_effect, .. } = filtered.waiting_for else {
+            panic!("the viewer projection must retain the payment prompt");
+        };
+        assert_eq!(
+            pending_effect.context.parent_target_iteration_members, None,
+            "a viewer snapshot must not expose the private look-result object ids"
+        );
+    }
+
     fn dummy_pending_mana_ability(
         player: PlayerId,
         source_id: ObjectId,
@@ -2040,6 +2385,7 @@ mod tests {
             options: vec!["Anchor".to_string()],
         };
         state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(0),
             choice_type: choice_type.clone(),
             options: vec!["Anchor".to_string()],
@@ -2052,6 +2398,7 @@ mod tests {
         assert!(matches!(
             source_less_view.waiting_for,
             WaitingFor::NamedChoice {
+                free_entry: _,
                 player: PlayerId(0),
                 ref choice_type,
                 ref options,
@@ -2079,6 +2426,7 @@ mod tests {
         );
         let expected_prompt = source.prompt.clone();
         state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(0),
             choice_type,
             options: vec!["Anchor".to_string()],
@@ -2090,6 +2438,7 @@ mod tests {
         assert!(source_bound_view.resolution_stack.is_empty());
         match source_bound_view.waiting_for {
             WaitingFor::NamedChoice {
+                free_entry: None,
                 source: Some(source),
                 persist_player,
                 ..
@@ -2154,12 +2503,16 @@ mod tests {
         state.liminal_entries.insert(
             entry_ref,
             crate::types::game_state::LiminalEntry {
-                object: crate::game::game_object::GameObject::new(
-                    entry_ref,
-                    CardId(99),
-                    PlayerId(0),
-                    "Liminal Token".to_string(),
-                    Zone::Battlefield,
+                object: crate::types::game_state::LiminalEntrant::Token(
+                    crate::types::game_state::TokenProjection::materialize(
+                        crate::game::game_object::GameObject::new(
+                            entry_ref,
+                            CardId(99),
+                            PlayerId(0),
+                            "Liminal Token".to_string(),
+                            Zone::Battlefield,
+                        ),
+                    ),
                 ),
                 name: "Liminal Token".to_string(),
                 source_id: ObjectId(1),
@@ -2503,16 +2856,19 @@ mod tests {
                 card_id: CardId(701),
                 controller: PlayerId(1),
                 object_id: face_down_spell,
+                cast_mana_value: Some(4),
             },
             GameEvent::SpellCast {
                 card_id: CardId(702),
                 controller: PlayerId(0),
                 object_id: own_spell,
+                cast_mana_value: Some(4),
             },
             GameEvent::SpellCast {
                 card_id: CardId(703),
                 controller: PlayerId(1),
                 object_id: opponent_face_up_spell,
+                cast_mana_value: Some(4),
             },
         ];
 
@@ -2524,18 +2880,23 @@ mod tests {
                     card_id: CardId(0),
                     controller: PlayerId(1),
                     object_id,
+                    cast_mana_value: None,
                 },
                 GameEvent::SpellCast {
                     card_id: CardId(702),
                     controller: PlayerId(0),
-                    ..
+                    object_id: own_object_id,
+                    cast_mana_value: Some(4),
                 },
                 GameEvent::SpellCast {
                     card_id: CardId(703),
                     controller: PlayerId(1),
                     object_id: face_up_object_id,
+                    cast_mana_value: Some(4),
                 },
-            ] if *object_id == face_down_spell && *face_up_object_id == opponent_face_up_spell
+            ] if *object_id == face_down_spell
+                && *own_object_id == own_spell
+                && *face_up_object_id == opponent_face_up_spell
         ));
 
         let spectator = filter_events_for_viewer(&events, &state, PlayerId(u8::MAX));
@@ -2646,7 +3007,13 @@ mod tests {
     }
 
     /// CR 603.3b: saved trigger-ordering templates are per-player private preference
-    /// state — a viewer sees only their own, never an opponent's saved orderings.
+    /// state — a viewer sees only the ones they may privately view.
+    ///
+    /// The REASON is CR 723.4 private access, not opponent-ness: a player controlling another
+    /// player is normally an opponent and DOES see the controlled seat's templates (row R1-j
+    /// asserts that direction). This board has no turn control and no latched search-decision
+    /// authority, so `can_view_private_for_player` is exactly owner-equality here, which is
+    /// why this row is unmodified by the unification.
     #[test]
     fn filters_other_players_decision_templates() {
         use crate::analysis::decision_template::{
@@ -2682,6 +3049,97 @@ mod tests {
         // view (len 2) or an inverted retain drops P0's own (len 0) — both fail here.
         assert_eq!(filtered.decision_templates.len(), 1);
         assert_eq!(filtered.decision_templates[0].owner, PlayerId(0));
+    }
+
+    /// **Row R1-j — carrier 4 answers "may this viewer see it" with the SAME predicate as
+    /// carriers 1 and 2.** CR 723.4: "If information about an object in the game would be
+    /// visible to the player being controlled, it's visible to both that player and the
+    /// player controlling them." A controlling player is normally an opponent, so strict
+    /// owner-equality denied them a template they are entitled to — while the
+    /// `LoopShortcut` / `RespondToShortcut` carriers directly above already used
+    /// `can_view_private_for_player`. One question, one predicate.
+    ///
+    /// # Non-vacuity / discrimination
+    ///
+    /// BOTH directions ride ONE instrument on ONE board: turn control in effect ⇒ RETAINED;
+    /// the identical board with the control record removed ⇒ DROPPED. Without the second
+    /// half the change would read as "everyone now sees everything". The shipped row
+    /// `filters_other_players_decision_templates` above is the third guard: a plain
+    /// non-owner with no control still loses the template, and that row is unmodified.
+    ///
+    /// REVERT-PROBE: restore `retain(|t| t.owner == viewer)` ⇒ the controller loses the
+    /// controlled seat's template ⇒ the RETAINED assertion FAILS, while the DROPPED
+    /// assertion and the shipped row stay green.
+    #[test]
+    fn r1j_a_controlling_player_sees_the_controlled_seats_decision_template() {
+        use crate::analysis::decision_template::{
+            DecisionGroupKey, DecisionKind, DecisionTemplate, PinnedDecision, ReplayMode,
+        };
+        use crate::types::game_state::YieldTarget;
+
+        let controller = PlayerId(0);
+        let controlled = PlayerId(1);
+        let src = YieldTarget::AllCopies {
+            card_id: CardId(100),
+            trigger_description: None,
+        };
+        let template = DecisionTemplate {
+            owner: controlled,
+            decisions: vec![PinnedDecision::Order {
+                source: src.clone(),
+                pos: 0,
+            }],
+            replay: ReplayMode::Static,
+            key: DecisionGroupKey::from_sources(&[src], DecisionKind::TriggerOrdering),
+        };
+
+        let mut state = GameState::new_two_player(42);
+        state.set_trigger_order_template(template);
+        assert_eq!(
+            state.decision_templates.len(),
+            1,
+            "reach-guard: the unprojected state really carries the template"
+        );
+
+        // ── DROPPED: no turn control, viewer != owner (the pre-unification behaviour, which
+        //    the unification preserves) ──
+        assert!(
+            filter_state_for_viewer(&state, controller)
+                .decision_templates
+                .is_empty(),
+            "with no control in effect a non-owner still loses it — the predicate did not \
+             become a pass-through"
+        );
+
+        // ── RETAINED: the SAME board with `controller` taking `controlled`'s turn. The
+        //    control is scoped to the ACTIVE player's decisions — see
+        //    `turn_control::effective_authority_for_player`, which is the authority the
+        //    reach-guard below reads rather than restating. ──
+        let mut controlled_state = state.clone();
+        controlled_state.active_player = controlled;
+        controlled_state.turn_decision_controller = Some(controller);
+        assert_eq!(
+            turn_control::authorized_submitter_for_player(&controlled_state, controlled),
+            controller,
+            "reach-guard: the control record really is in effect, so the retain below is \
+             keyed to CR 723.4 and not to the fixture"
+        );
+        let projected = filter_state_for_viewer(&controlled_state, controller);
+        assert_eq!(
+            projected.decision_templates.len(),
+            1,
+            "CR 723.4: the controlling player sees the controlled seat's template"
+        );
+        assert_eq!(projected.decision_templates[0].owner, controlled);
+
+        // And the controlled player still sees their own — the widening is additive.
+        assert_eq!(
+            filter_state_for_viewer(&controlled_state, controlled)
+                .decision_templates
+                .len(),
+            1,
+            "the owner never lost their own copy"
+        );
     }
 
     /// CR 117.3d: priority yields are private preference state — a viewer sees
@@ -2761,6 +3219,200 @@ mod tests {
 
         assert_eq!(hidden.name, "Hidden Card");
         assert!(hidden.back_face.is_none());
+    }
+
+    /// CR 400.2: a non-owner's hidden-zone projection must not carry printed
+    /// identity through baseline characteristics or card metadata. The owner
+    /// arm proves each sentinel is present before the observer projection.
+    #[test]
+    fn hidden_hand_card_redacts_printed_identity_metadata_from_opponent() {
+        let mut state = GameState::new_two_player(42);
+        let card_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Secret Printed Card".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&card_id).unwrap();
+            let card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Secret Type".to_string()],
+            };
+            obj.base_name = "Secret Base Name".to_string();
+            obj.token_rules_text = Some("Secret token rules".to_string());
+            obj.spellbook = vec!["Secret Spellbook Card".to_string()];
+            obj.unimplemented_mechanics = vec!["Secret mechanic".to_string()];
+            obj.power = Some(7);
+            obj.toughness = Some(9);
+            obj.base_power = Some(7);
+            obj.base_toughness = Some(9);
+            obj.card_types = card_types.clone();
+            obj.base_card_types = card_types;
+            obj.mana_cost = ManaCost::generic(7);
+            obj.base_mana_cost = ManaCost::generic(7);
+        }
+
+        let owner_view = filter_state_for_viewer(&state, PlayerId(1));
+        let owned = owner_view.objects.get(&card_id).unwrap();
+        assert_eq!(owned.base_name, "Secret Base Name");
+        assert_eq!(owned.spellbook, vec!["Secret Spellbook Card".to_string()]);
+        assert_eq!(
+            owned.token_rules_text.as_deref(),
+            Some("Secret token rules")
+        );
+        assert_eq!(
+            owned.unimplemented_mechanics,
+            vec!["Secret mechanic".to_string()]
+        );
+        assert_eq!(owned.base_power, Some(7));
+        assert_eq!(owned.base_toughness, Some(9));
+        assert_ne!(owned.base_card_types, CardType::default());
+        assert_eq!(owned.base_mana_cost, ManaCost::generic(7));
+
+        let opponent_view = filter_state_for_viewer(&state, PlayerId(0));
+        let hidden = opponent_view.objects.get(&card_id).unwrap();
+        assert_eq!(hidden.name, HIDDEN_CARD_NAME);
+        assert_eq!(hidden.card_id, CardId(0));
+        assert_eq!(hidden.base_name, HIDDEN_CARD_NAME);
+        assert!(hidden.token_rules_text.is_none());
+        assert!(hidden.spellbook.is_empty());
+        assert!(hidden.unimplemented_mechanics.is_empty());
+        assert_eq!(hidden.power, None);
+        assert_eq!(hidden.toughness, None);
+        assert_eq!(hidden.base_power, None);
+        assert_eq!(hidden.base_toughness, None);
+        assert_eq!(hidden.card_types, CardType::default());
+        assert_eq!(hidden.base_card_types, CardType::default());
+        assert_eq!(hidden.mana_cost, ManaCost::default());
+        assert_eq!(hidden.base_mana_cost, ManaCost::default());
+
+        let serialized = serde_json::to_string(hidden).unwrap();
+        for secret in [
+            "Secret Printed Card",
+            "Secret Base Name",
+            "Secret token rules",
+            "Secret Spellbook Card",
+            "Secret mechanic",
+            "Secret Type",
+        ] {
+            assert!(
+                !serialized.contains(secret),
+                "hidden card's serialized payload must not reveal {secret:?}"
+            );
+        }
+    }
+
+    /// CR 400.2: a hand is a hidden zone. `parse_warnings` is derived from the
+    /// hidden face's printed text — an `IgnoredRemainder`/`SwallowedClause`
+    /// payload quotes that text verbatim, and `skip_serializing_if` makes the
+    /// field's mere presence a fingerprint (891 of 35,657 faces carry one).
+    /// Matched pair: the owner keeps the diagnostic, the opponent gets nothing.
+    /// The owner arm is the reach-guard — without it an empty-opponent
+    /// assertion would pass even if the field were never populated.
+    #[test]
+    fn hidden_hand_card_redacts_parse_warnings_from_opponent() {
+        let mut state = GameState::new_two_player(42);
+        let card_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Warned Card".to_string(),
+            Zone::Hand,
+        );
+        state.objects.get_mut(&card_id).unwrap().parse_warnings = vec![
+            crate::parser::oracle_ir::diagnostic::OracleDiagnostic::IgnoredRemainder {
+                text: "and each opponent loses 2 life".to_string(),
+                parser: "effect_chain".to_string(),
+                line_index: 0,
+            },
+        ];
+
+        let owner_view = filter_state_for_viewer(&state, PlayerId(1));
+        let owned = owner_view.objects.get(&card_id).unwrap();
+        assert_eq!(owned.name, "Warned Card");
+        assert_eq!(
+            owned.parse_warnings.len(),
+            1,
+            "reach guard: the owner must still see the diagnostic, otherwise \
+             the opponent assertion below is vacuous"
+        );
+
+        let opponent_view = filter_state_for_viewer(&state, PlayerId(0));
+        let hidden = opponent_view.objects.get(&card_id).unwrap();
+        assert_eq!(hidden.name, "Hidden Card");
+        assert!(
+            hidden.parse_warnings.is_empty(),
+            "opponent must not receive parse diagnostics for a hidden-zone card"
+        );
+        // The wire payload is the actual leak vector: assert on the serialized
+        // bytes, not just the in-memory field.
+        assert!(
+            !serde_json::to_string(hidden)
+                .unwrap()
+                .contains("each opponent loses 2 life"),
+            "hidden card's serialized payload must not quote its printed text"
+        );
+    }
+
+    /// CR 708.5 + CR 708.2: a face-down permanent has no name and no abilities,
+    /// and only its controller may look at the card underneath. `manifest` does
+    /// not reset `parse_warnings`, so the printed face's diagnostics survive on
+    /// the authoritative object and must be redacted for every other viewer —
+    /// the same reason `back_face` is redacted on this path.
+    #[test]
+    fn face_down_permanent_redacts_parse_warnings_from_observer() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let controller = PlayerId(0);
+        let secret = create_object(
+            &mut state,
+            CardId(7),
+            controller,
+            "Secret Manifest".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&secret).unwrap();
+            obj.card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec![],
+            };
+            obj.parse_warnings = vec![
+                crate::parser::oracle_ir::diagnostic::OracleDiagnostic::IgnoredRemainder {
+                    text: "and each opponent loses 2 life".to_string(),
+                    parser: "effect_chain".to_string(),
+                    line_index: 0,
+                },
+            ];
+        }
+
+        let mut events = Vec::new();
+        manifest(&mut state, controller, &mut events).unwrap();
+        // Reach guard: the field genuinely survives the face-down transform, so
+        // the observer assertion below is not vacuous.
+        assert_eq!(
+            state.objects[&secret].parse_warnings.len(),
+            1,
+            "manifest must leave the printed face's diagnostics on the object"
+        );
+
+        let controller_view = filter_state_for_viewer(&state, controller);
+        assert_eq!(
+            controller_view.objects[&secret].parse_warnings.len(),
+            1,
+            "the controller may look at their own face-down permanent"
+        );
+
+        let observer_view = filter_state_for_viewer(&state, PlayerId(1));
+        let observed = observer_view.objects.get(&secret).unwrap();
+        assert_eq!(observed.name, "Hidden Card");
+        assert!(
+            observed.parse_warnings.is_empty(),
+            "observer must not receive parse diagnostics for a face-down permanent"
+        );
     }
 
     #[test]
@@ -3094,10 +3746,10 @@ mod tests {
         );
     }
 
-    /// Debug capability exposure lets a viewer identify cards in their own
-    /// library for debug actions, without exposing an opponent's library.
+    /// Debug permission does not alter normal hidden-zone visibility. The
+    /// explicit debug browser receives its separately authorized projection.
     #[test]
-    fn debug_permitted_sees_own_library_but_not_opponent_library() {
+    fn debug_permission_keeps_all_unrevealed_library_cards_hidden() {
         let mut state = GameState::new(FormatConfig::standard(), 2, 42);
         state.debug_mode = true;
         state.debug_permitted.insert(PlayerId(0));
@@ -3120,8 +3772,8 @@ mod tests {
         let filtered = filter_state_for_viewer(&state, PlayerId(0));
         assert_eq!(
             filtered.objects.get(&own).map(|obj| obj.name.as_str()),
-            Some("My Library Card"),
-            "viewer must see their own library names with debug capability"
+            Some("Hidden Card"),
+            "debug permission must not make normal library objects visible"
         );
         assert_eq!(
             filtered.objects.get(&opp).map(|obj| obj.name.as_str()),
@@ -5197,6 +5849,120 @@ mod tests {
         ));
     }
 
+    /// CR 101.4b + CR 608.2d: a number a player chose is that player's secret.
+    /// The per-player ledger behind `QuantityRef::PlayerChosenNumber` (Wheel of
+    /// Misfortune's "each player secretly chooses a number 0 or greater") is
+    /// redacted from every other viewer — and, because it is an engine ledger
+    /// rather than a rendered fact, it stays redacted regardless of what the game
+    /// is currently waiting on. A window-scoped rule would leak the moment the
+    /// prompt closed but the secret was still live (The Toymaker's Trap's
+    /// committed number, guessed at during an `OpponentGuess`).
+    ///
+    /// Fail-on-revert: without the redaction the second chooser's client shows
+    /// the first chooser's number and the "secret" is free information.
+    #[test]
+    fn player_chosen_number_is_private_to_that_player() {
+        use crate::types::ability::{ChoiceType, ChosenAttribute, NumberDistinctness};
+        let mut state = GameState::new_two_player(42);
+        // P0 has already answered; P1 is the pending chooser.
+        state.players[0].chosen_attributes = vec![ChosenAttribute::Number(4)];
+        state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
+            player: PlayerId(1),
+            choice_type: ChoiceType::NumberRange {
+                min: 0,
+                max: Some(20),
+                distinctness: NumberDistinctness::Repeatable,
+            },
+            options: (0..=20u8).map(|n| n.to_string()).collect(),
+            source: None,
+            persist_player: None,
+        };
+
+        let chooser_view = filter_state_for_viewer(&state, PlayerId(1));
+        assert!(
+            chooser_view.players[0].chosen_attributes.is_empty(),
+            "the pending chooser must not see the number already chosen by P0"
+        );
+        let owner_view = filter_state_for_viewer(&state, PlayerId(0));
+        assert!(
+            owner_view.players[0]
+                .chosen_attributes
+                .contains(&ChosenAttribute::Number(4)),
+            "a player always sees their own chosen number"
+        );
+
+        // Still redacted once the prompt window has closed — the secret can
+        // outlive the prompt (a pending guess against it, CR 608.2d).
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        assert!(
+            filter_state_for_viewer(&state, PlayerId(1)).players[0]
+                .chosen_attributes
+                .is_empty(),
+            "privacy is a property of the attribute kind, not of the current prompt"
+        );
+
+        // CR 101.4 + CR 608.2c: the OTHER side of the contract. Once the card's
+        // reveal instruction publishes the number (`Number` → `RevealedNumber`,
+        // performed by `Effect::RevealChosenNumbers`), every viewer sees it —
+        // otherwise the engine would keep information secret after the
+        // instruction that makes it public.
+        state.players[0].reveal_chosen_number();
+        assert!(
+            filter_state_for_viewer(&state, PlayerId(1)).players[0]
+                .chosen_attributes
+                .contains(&ChosenAttribute::RevealedNumber(4)),
+            "a revealed number must be visible to every player"
+        );
+        assert!(
+            filter_state_for_viewer(&state, PlayerId(0)).players[0]
+                .chosen_attributes
+                .contains(&ChosenAttribute::RevealedNumber(4)),
+            "revealing must not hide the number from its own chooser"
+        );
+    }
+
+    /// CR 101.4: `reveal_chosen_number` is the single typed transition — it
+    /// preserves the VALUE (every rules read must agree across the reveal),
+    /// is idempotent, and is a no-op for a player who chose nothing (CR 609.3),
+    /// which is what lets a card name every player when only some chose.
+    #[test]
+    fn revealing_a_chosen_number_preserves_value_and_tolerates_non_choosers() {
+        use crate::types::ability::ChosenAttribute;
+        let mut state = GameState::new_two_player(42);
+        state.players[0].chosen_attributes = vec![ChosenAttribute::Number(7)];
+
+        assert_eq!(state.players[0].reveal_chosen_number(), Some(7));
+        assert_eq!(
+            state.players[0].chosen_number(),
+            Some(7),
+            "the value a rules read sees is unchanged by the reveal"
+        );
+        assert_eq!(
+            state.players[0].reveal_chosen_number(),
+            Some(7),
+            "revealing an already-revealed number is idempotent"
+        );
+        assert_eq!(
+            state.players[0]
+                .chosen_attributes
+                .iter()
+                .filter(|a| matches!(
+                    a,
+                    ChosenAttribute::Number(_) | ChosenAttribute::RevealedNumber(_)
+                ))
+                .count(),
+            1,
+            "a player holds exactly one chosen number, in exactly one state"
+        );
+
+        // A player who chose nothing reveals nothing, and gains no attribute.
+        assert_eq!(state.players[1].reveal_chosen_number(), None);
+        assert!(state.players[1].chosen_attributes.is_empty());
+    }
+
     /// CR 608.2d: For a `GuessSubject::CommittedChoice` (The Toymaker's Trap),
     /// only the MOST-RECENTLY committed number is hidden from the guesser — it is
     /// the secret of the pending guess. Numbers chosen on earlier upkeeps were
@@ -5227,7 +5993,7 @@ mod tests {
             options: (1..=5).map(|n| n.to_string()).collect(),
             choice_type: ChoiceType::NumberRange {
                 min: 1,
-                max: 5,
+                max: Some(5),
                 distinctness: NumberDistinctness::DistinctFromSourceHistory,
             },
             source: crate::types::game_state::OpponentGuessSource {
@@ -5486,5 +6252,405 @@ mod tests {
         let back = snapshot.back_face.expect("stored back face is captured");
         assert_eq!(back.name, "Back Face");
         assert_eq!(back.printed_ref, Some(back_ref));
+    }
+
+    // ── item-4 C2b row D5-h — the offer's own `declaration` never crosses the viewer boundary
+    //    carrying an object identity the viewer may not see ──
+
+    const D5H_PROPOSER: PlayerId = PlayerId(0);
+    const D5H_VIEWER: PlayerId = PlayerId(1);
+
+    /// One `LoopShortcut` offer whose declaration carries whatever `decisions` builds from the
+    /// HIDDEN card's id and the fixture's slot. The card sits in the PROPOSER's hand, so the
+    /// non-proposer viewer cannot privately view its owner and `target_hidden` answers `true`
+    /// for it.
+    ///
+    /// EVERY arm of D5-h and D5-h/2 mints through here, so the fixture spells the
+    /// `WaitingFor::LoopShortcut` anchor exactly once (this is a counted site in
+    /// `tests/integration/loop_shortcut_offer_writer_census.rs`, which pins the per-file
+    /// multiset — a second literal in this file would fail that row).
+    fn d5h_offer_decisions(
+        decisions: impl FnOnce(
+            ObjectId,
+            &crate::analysis::decision_template::DecisionSlot,
+        ) -> Vec<crate::analysis::decision_template::PinnedDecision>,
+    ) -> GameState {
+        use crate::analysis::decision_template::{
+            DecisionGroupKey, DecisionKind, DecisionPoint, DecisionPointKind, DecisionSlot,
+            DecisionTemplate, IterationCount, ReplayMode, ShortcutDecisionSchema,
+        };
+        let mut state = GameState::new_two_player(42);
+        let hidden = create_object(
+            &mut state,
+            CardId(4242),
+            D5H_PROPOSER,
+            "Secret Card".to_string(),
+            Zone::Hand,
+        );
+        let slot = DecisionSlot::target(crate::types::game_state::YieldTarget::ThisObject {
+            source_id: ObjectId(777),
+            incarnation: Some(1),
+            trigger_description: None,
+        });
+        state.waiting_for = WaitingFor::LoopShortcut {
+            proposer: D5H_PROPOSER,
+            predicted_winner: None,
+            certificate: crate::analysis::loop_check::LoopCertificate {
+                unbounded: vec![],
+                win_kind: crate::analysis::loop_check::WinKind::LethalDamage,
+                mandatory: false,
+                residual_board_delta: crate::analysis::resource::BoardDelta::default(),
+                per_cycle: None,
+            },
+            schema: ShortcutDecisionSchema {
+                iteration_count: IterationCount::Fixed(3),
+                max_iterations: 3,
+                points: vec![DecisionPoint {
+                    slot: slot.clone(),
+                    kind: DecisionPointKind::Targets {
+                        legal_targets: vec![crate::types::ability::TargetRef::Player(D5H_VIEWER)],
+                        min_targets: 1,
+                        max_targets: 1,
+                        ordered: false,
+                    },
+                }],
+                convoke_tappable_count: 0,
+            },
+            declaration: Some(DecisionTemplate {
+                owner: D5H_PROPOSER,
+                decisions: decisions(hidden, &slot),
+                replay: ReplayMode::Scheduled {
+                    count: IterationCount::Fixed(3),
+                },
+                key: DecisionGroupKey::from_sources(&[slot.source], DecisionKind::LoopChoice),
+            }),
+        };
+        state
+    }
+
+    /// The ONE-pin shorthand D5-h uses: a single `PinnedDecision::Targets` carrying `pins`.
+    fn d5h_offer(
+        pins: impl FnOnce(ObjectId) -> Vec<crate::analysis::decision_template::TargetPin>,
+    ) -> GameState {
+        use crate::analysis::decision_template::PinnedDecision;
+        d5h_offer_decisions(|hidden, slot| {
+            vec![PinnedDecision::Targets {
+                slot: slot.clone(),
+                targets: pins(hidden),
+            }]
+        })
+    }
+
+    /// The declaration AS PROJECTED for `viewer`. Both arms of D5-h read through here, so the
+    /// read also spells the census anchor exactly once.
+    fn d5h_projected_declaration(
+        state: &GameState,
+        viewer: PlayerId,
+    ) -> Option<crate::analysis::decision_template::DecisionTemplate> {
+        match filter_state_for_viewer(state, viewer).waiting_for {
+            WaitingFor::LoopShortcut { declaration, .. } => declaration,
+            other => panic!("the fixture parks on the CR 732.2a offer, got {other:?}"),
+        }
+    }
+
+    /// **Row D5-h — a `ByIdentity` pin naming a hidden object drops the WHOLE declaration for a
+    /// non-proposer viewer.**
+    ///
+    /// CR 732.2b gives each other player the right to "shorten [the proposal] by naming a place
+    /// where they will make a game choice that's different than what's been proposed" — so what
+    /// they receive must be the whole proposal or none of it. A partially-redacted pin set would
+    /// show a sequence the proposer never suggested, which is why this is ALL-OR-NOTHING rather
+    /// than a per-pin filter. A `TargetPin::Player` travels unredacted because seat identity is
+    /// public IN THIS ENGINE — no CR rule states that, and the redaction comment says so; CR
+    /// 115.2 only establishes that a seat can be a targeted (hence pinnable) value.
+    ///
+    /// # This path is UNREACHABLE through today's publisher, and the row says so
+    ///
+    /// `record_trigger_target_answer` mints `ByIdentity` only for `TargetRef::Object`, and the
+    /// bounded publisher's own conjuncts (`TargetAnnouncement::Chosen`, and player-valued legal
+    /// sets on every tracked board — measured `any ByIdentity pin? false` on all five drives)
+    /// keep object pins out of a published slot today. The row exists so a publisher relaxation
+    /// cannot silently open the leak; it is not evidence that the leak is live.
+    ///
+    /// # Non-vacuity
+    ///
+    /// The all-`Player` arm is the paired positive from the SAME fixture one pin apart: a
+    /// redactor that dropped EVERY declaration would satisfy the hidden arm and fail this one.
+    /// The proposer's own projection is asserted too, so "drop it for everybody" fails twice.
+    ///
+    /// REVERT-PROBE: make the redaction's `TargetPin::ByIdentity(_)` arm answer `false` (pass
+    /// through unfiltered) ⇒ the hidden arm's `is_none()` flips while both positives stay green.
+    ///
+    /// *What wrong implementation would still pass this row?* One that redacts the declaration
+    /// but leaks the same identity through `schema.points` — that surface has its own row,
+    /// `loop_shortcut_schema_redacts_hidden_targets_for_non_controller`.
+    #[test]
+    fn d5h_a_hidden_object_pin_drops_the_whole_declaration_for_a_non_proposer() {
+        use crate::analysis::decision_template::TargetPin;
+
+        // ── the hidden arm ──
+        let hidden_state = d5h_offer(|hidden| {
+            vec![
+                TargetPin::ByIdentity(crate::types::game_state::YieldTarget::ThisObject {
+                    source_id: hidden,
+                    incarnation: Some(1),
+                    trigger_description: None,
+                }),
+                TargetPin::Player(D5H_VIEWER),
+            ]
+        });
+        // Reach-guards: the UNPROJECTED offer really carries a declaration (else `is_none()`
+        // below would be satisfied by a fixture that never had one), and the viewer really is a
+        // non-proposer (else the redaction block never runs at all).
+        assert!(
+            d5h_projected_declaration(&hidden_state, D5H_PROPOSER).is_some(),
+            "reach-guard + positive: the PROPOSER's own projection keeps the declaration, so the \
+             drop below is keyed to the viewer boundary rather than to the fixture"
+        );
+        assert_ne!(D5H_VIEWER, D5H_PROPOSER);
+        assert!(
+            d5h_projected_declaration(&hidden_state, D5H_VIEWER).is_none(),
+            "CR 732.2b: one pin naming an object this viewer may not see drops the ENTIRE \
+             declaration — a partial pin set would state a proposal that was never made"
+        );
+
+        // ── the paired positive: every pin is a seat, which carries no hidden identity ──
+        let public_state = d5h_offer(|_hidden| vec![TargetPin::Player(D5H_VIEWER)]);
+        assert_eq!(
+            d5h_projected_declaration(&public_state, D5H_VIEWER),
+            d5h_projected_declaration(&public_state, D5H_PROPOSER),
+            "an all-seat declaration is public and reaches the opponent UNCHANGED — without this \
+             arm a redactor that dropped everything would pass the hidden arm above"
+        );
+        assert!(
+            d5h_projected_declaration(&public_state, D5H_VIEWER).is_some(),
+            "and it is genuinely present, not two matching `None`s"
+        );
+    }
+
+    /// **Row D5-h/2 — the ACROSS-PIN axis: a declaration whose FIRST pin is public and whose
+    /// SECOND names a hidden object still drops WHOLE.**
+    ///
+    /// D5-h above and both integration rows build a ONE-element `decisions` vector, and on a
+    /// one-element vector `pins.iter().any(..)` and `pins.iter().all(..)` are the same function —
+    /// so the PIN-LEVEL quantifier of `pins_name_hidden_source` was discriminated by no row in the
+    /// tree (measured: flipping the OUTER `any` to `all` left lib and integration fully green).
+    /// CR 732.2b is all-or-nothing across the WHOLE pin set, not within one pin: a declaration
+    /// that survives because only *some* of its pins name hidden objects states a proposal that
+    /// was never made.
+    ///
+    /// # The multi-pin shape is the ORDINARY production shape, not an exotic one
+    ///
+    /// `game::engine::record_loop_pin` appends up to three pins onto ONE `LoopActionContext.pins`
+    /// in temporal order — a mana-ability tap-cost `Targets` pin (`index: 0`), a `ManaColor` pin
+    /// (`index: 1`), then a proliferate `Targets` pin — and `game::engine::build_recast_template`
+    /// clones that very vector (`decisions = ctx.pins.clone()`) into the offer's declaration
+    /// before pushing a `ConvokeTaps` pin. A public pin sitting ahead of a hidden one is therefore
+    /// exactly what those producers mint; this row builds `[ManaColor, Targets{hidden}]`, i.e.
+    /// pins 2 and 3 of that production sequence.
+    ///
+    /// # Non-vacuity / discrimination
+    ///
+    /// The PUBLIC pin is FIRST, so an implementation that stops at the first pin — `all(..)`, or a
+    /// `decisions.first()` peek — keeps the declaration and fails the negative below. Paired
+    /// positives: the proposer's own projection keeps it, and an all-public TWO-pin declaration
+    /// reaches the non-proposer unchanged, so a redactor that dropped every multi-pin declaration
+    /// fails here. The pin count and the first pin's variant are asserted on the projected
+    /// proposer copy, so a fixture that silently built one pin (or a hidden first pin) cannot
+    /// satisfy the negative for the wrong reason.
+    ///
+    /// REVERT-PROBE (measured both directions, `item4-run/t-r0-fold/REPORT.md`): outer
+    /// `pins.iter().any` -> `.all` in `pins_name_hidden_source` ⇒ this row FAILS while every other
+    /// row in `game::visibility::tests` stays green; restored ⇒ it passes.
+    #[test]
+    fn d5h2_a_public_pin_ahead_of_a_hidden_one_still_drops_the_whole_declaration() {
+        use crate::analysis::decision_template::{PinnedDecision, TargetPin};
+        use crate::types::mana::ManaColor;
+
+        // ── the hostile arm: pin 1 carries no identity, pin 2 names the hidden hand card ──
+        let hidden_state = d5h_offer_decisions(|hidden, slot| {
+            vec![
+                PinnedDecision::ManaColor {
+                    slot: slot.clone(),
+                    color: ManaColor::Blue,
+                },
+                PinnedDecision::Targets {
+                    slot: slot.clone(),
+                    targets: vec![TargetPin::ByIdentity(
+                        crate::types::game_state::YieldTarget::ThisObject {
+                            source_id: hidden,
+                            incarnation: Some(1),
+                            trigger_description: None,
+                        },
+                    )],
+                },
+            ]
+        });
+        let proposer_copy = d5h_projected_declaration(&hidden_state, D5H_PROPOSER)
+            .expect("reach-guard + positive: the PROPOSER's own projection keeps the declaration");
+        assert_eq!(
+            proposer_copy.decisions.len(),
+            2,
+            "reach-guard: the fixture really carries TWO pins — `any` and `all` are the same \
+             function on a one-pin vector, which is why this row exists"
+        );
+        assert!(
+            matches!(proposer_copy.decisions[0], PinnedDecision::ManaColor { .. }),
+            "reach-guard: the FIRST pin carries no hidden identity, so a check that stops at \
+             `decisions[0]` must look further to answer correctly"
+        );
+        assert!(
+            d5h_projected_declaration(&hidden_state, D5H_VIEWER).is_none(),
+            "CR 732.2b: ONE pin naming an object this viewer may not see drops the ENTIRE \
+             declaration, however many public pins precede it"
+        );
+
+        // ── the paired positive: the SAME two-pin shape with no hidden identity travels whole ──
+        let public_state = d5h_offer_decisions(|_hidden, slot| {
+            vec![
+                PinnedDecision::ManaColor {
+                    slot: slot.clone(),
+                    color: ManaColor::Blue,
+                },
+                PinnedDecision::Targets {
+                    slot: slot.clone(),
+                    targets: vec![TargetPin::Player(D5H_VIEWER)],
+                },
+            ]
+        });
+        assert_eq!(
+            d5h_projected_declaration(&public_state, D5H_VIEWER),
+            d5h_projected_declaration(&public_state, D5H_PROPOSER),
+            "a two-pin declaration with no hidden identity reaches the opponent UNCHANGED — \
+             without this arm a redactor that dropped every multi-pin declaration would pass the \
+             negative above"
+        );
+        assert!(
+            d5h_projected_declaration(&public_state, D5H_VIEWER).is_some(),
+            "and it is genuinely present, not two matching `None`s"
+        );
+    }
+
+    /// **Row R1-k — the WITHIN-RANKING axis: a public subject ahead of a hidden one inside
+    /// ONE `Scheduled` pin still drops the WHOLE declaration.**
+    ///
+    /// This is `d5h2`'s shape one level further down. `d5h2` is a public *pin* ahead of a
+    /// hidden one; this is a public *subject* ahead of a hidden one inside a single pin —
+    /// which the `Ranking` parameterization newly makes possible. The redaction walk must
+    /// descend into every subject of every step, not stop at the head the current episode
+    /// would resolve: the tail is a pre-declaration the responder receives NOW, as part of
+    /// the proposal CR 732.2b lets them accept or shorten, so a hidden identity there leaks
+    /// on exactly the same footing as one in the head.
+    ///
+    /// # Coverage this row creates rather than repeats
+    ///
+    /// `TargetPin::Scheduled` has exactly ONE occurrence in this file — the production arm
+    /// inside `pins_name_hidden_source` — and zero in its tests, so before this row NOTHING
+    /// in the tree failed for either mutation below.
+    ///
+    /// # Non-vacuity / discrimination
+    ///
+    /// The PUBLIC subject is FIRST, so a walk that reads only `head()` keeps the declaration
+    /// and fails the negative. Paired positives: the proposer's own projection keeps it in
+    /// the hidden arm, and an ALL-PUBLIC two-subject ranking on the same board reaches the
+    /// non-proposer unchanged — so a redactor that dropped every ranked declaration fails
+    /// here. The head's publicness is asserted structurally on the proposer's copy, so a
+    /// fixture that silently built a hidden head cannot satisfy the negative for the wrong
+    /// reason.
+    ///
+    /// REVERT-PROBES: (a) walk only `ranking.head()` instead of `iter()` ⇒ the hidden TAIL is
+    /// never seen ⇒ the declaration survives for the non-proposer ⇒ FAILS; (b) write
+    /// `AnnouncementSubject::Object(_) => false` (mirroring the `Seat => false` line directly
+    /// above it) ⇒ FAILS. Both leave every other row in this module green.
+    ///
+    /// This row mints through `d5h_offer_decisions` and reads through
+    /// `d5h_projected_declaration`, so it adds NO new `WaitingFor::LoopShortcut {` literal —
+    /// `tests/integration/loop_shortcut_offer_writer_census.rs` pins this file's production
+    /// multiset at 2 and would red on a third.
+    #[test]
+    fn r1k_a_public_subject_ahead_of_a_hidden_one_in_a_ranking_still_drops_the_declaration() {
+        use crate::analysis::decision_template::{
+            AnnouncementSubject, PinnedDecision, Ranking, TargetPin, TargetSchedule,
+        };
+        use crate::types::game_state::YieldTarget;
+
+        // A card identity occupies no zone, so `source_hidden` answers `false` for it by an
+        // explicit production arm — a head that is public BY RULE, not by absence.
+        let public_subject = AnnouncementSubject::Object(YieldTarget::AllCopies {
+            card_id: CardId(4242),
+            trigger_description: None,
+        });
+        let ranked_pin =
+            |ranking: Ranking, slot: &crate::analysis::decision_template::DecisionSlot| {
+                vec![PinnedDecision::Targets {
+                    slot: slot.clone(),
+                    targets: vec![TargetPin::Scheduled(TargetSchedule::Constant(ranking))],
+                }]
+            };
+
+        // ── the hostile arm: subject 1 is public, subject 2 names the hidden hand card ──
+        let hidden_state = d5h_offer_decisions(|hidden, slot| {
+            let ranking = Ranking::new(vec![
+                public_subject.clone(),
+                AnnouncementSubject::Object(YieldTarget::ThisObject {
+                    source_id: hidden,
+                    incarnation: Some(1),
+                    trigger_description: None,
+                }),
+            ])
+            .expect("two distinct subjects");
+            ranked_pin(ranking, slot)
+        });
+        let proposer_copy = d5h_projected_declaration(&hidden_state, D5H_PROPOSER)
+            .expect("reach-guard + positive: the PROPOSER's own projection keeps the declaration");
+        match &proposer_copy.decisions[0] {
+            PinnedDecision::Targets { targets, .. } => {
+                match &targets[0] {
+                    TargetPin::Scheduled(TargetSchedule::Constant(ranking)) => {
+                        assert_eq!(
+                            ranking.iter().count(),
+                            2,
+                            "reach-guard: the ranking really carries TWO subjects — on a \
+                             one-subject ranking `head()` and `iter()` are the same function, \
+                             which is why this row exists"
+                        );
+                        assert_eq!(
+                            ranking.head(),
+                            &public_subject,
+                            "reach-guard: the HEAD carries no hidden identity, so a walk that \
+                             stops at the head must look further to answer correctly"
+                        );
+                    }
+                    other => panic!("the fixture pins a Constant ranking, got {other:?}"),
+                };
+            }
+            other => panic!("the fixture pins one Targets decision, got {other:?}"),
+        }
+        assert!(
+            d5h_projected_declaration(&hidden_state, D5H_VIEWER).is_none(),
+            "CR 732.2b: ONE subject naming an object this viewer may not see drops the ENTIRE \
+             declaration, however many public subjects precede it in the ranking"
+        );
+
+        // ── the paired positive: the SAME two-subject shape with no hidden identity ──
+        let public_state = d5h_offer_decisions(|_hidden, slot| {
+            let ranking = Ranking::new(vec![
+                public_subject.clone(),
+                AnnouncementSubject::Seat(D5H_VIEWER),
+            ])
+            .expect("two distinct subjects");
+            ranked_pin(ranking, slot)
+        });
+        assert_eq!(
+            d5h_projected_declaration(&public_state, D5H_VIEWER),
+            d5h_projected_declaration(&public_state, D5H_PROPOSER),
+            "a two-subject ranking with no hidden identity reaches the opponent UNCHANGED — \
+             without this arm a redactor that dropped every ranked declaration would pass the \
+             negative above"
+        );
+        assert!(
+            d5h_projected_declaration(&public_state, D5H_VIEWER).is_some(),
+            "and it is genuinely present, not two matching `None`s"
+        );
     }
 }

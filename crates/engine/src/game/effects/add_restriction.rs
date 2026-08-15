@@ -161,6 +161,19 @@ fn fill_runtime_fields(
                         *affected_players = RestrictionPlayerScope::SpecificPlayer(controller);
                     }
                 }
+                // CR 109.5 + CR 611.2a: `SourceController` (the "you" in "you
+                // can't cast additional spells this turn" — Conduit of Worlds)
+                // comes from the resolution of an ACTIVATED ability, so "you" is
+                // the player who activated it (CR 109.5), fixed at resolution. The
+                // resulting rules-modifying continuous effect lasts until end of
+                // turn (CR 611.2a), a source-independent turn-based duration: it
+                // must keep affecting the original activator even if the source
+                // later changes controller or leaves play. Lower to
+                // `SpecificPlayer` now to lock that player, exactly like the other
+                // affected-player scopes above.
+                RestrictionPlayerScope::SourceController => {
+                    *affected_players = RestrictionPlayerScope::SpecificPlayer(original_controller);
+                }
                 RestrictionPlayerScope::AllPlayers
                 | RestrictionPlayerScope::SpecificPlayer(_)
                 | RestrictionPlayerScope::OpponentsOfSourceController => {}
@@ -197,6 +210,13 @@ fn fill_runtime_fields(
             // controller's. The affected-player resolution above already lowered a
             // `TargetedPlayer`/`ParentTargetedPlayer` scope to `SpecificPlayer(p)`,
             // so read that resolved player here (Willie Lumpkin).
+            // CR 109.5: this block only anchors "during their next turn"-style
+            // expiries on the RESTRICTED player. `SourceController` is lowered to
+            // `SpecificPlayer(original_controller)` by the affected-player
+            // resolution above (Conduit of Worlds' "you"), so it is read here via
+            // the `SpecificPlayer` arm — a future `SourceController` restriction
+            // carrying a next-turn duration correctly anchors on the activator
+            // with no special-casing.
             let restricted_player = match affected_players {
                 RestrictionPlayerScope::SpecificPlayer(p) => Some(*p),
                 _ => None,

@@ -6,11 +6,9 @@
 //!    you may begin the game with Gemstone Caverns on the battlefield with a
 //!    luck counter on it. If you do, exile a card from your hand."
 //!
-//! Bug: the `BeginGame` ability was hardcoded to a bare `Effect::ChangeZone`,
-//! dropping both "with a luck counter on it" (CR 122.1) and the entire
-//! "If you do, exile a card from your hand" sentence (CR 701.13a). The fix
-//! parses the line into a `ChangeZone` with `enter_with_counters` populated and
-//! an `IfYouDo`-gated `sub_ability` for the exile.
+//! The exported card data must retain the full `BeginGame` ability: Gemstone
+//! Caverns enters with its luck counter, then its `IfYouDo` rider exiles a card
+//! from its controller's hand.
 //!
 //! These tests drive the real begin-game / mulligan flow through `apply`:
 //!   - accept the opt-in: Gemstone Caverns enters with a luck counter and an
@@ -23,26 +21,35 @@
 
 use engine::database::card_db::CardDatabase;
 use engine::game::deck_loading::create_object_from_card_face;
+use engine::game::mana_abilities::is_mana_ability;
+use engine::game::scenario::{GameScenario, P0};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::{apply, start_game_with_starting_player};
-use engine::parser::parse_oracle_text;
 use engine::types::ability::AbilityKind;
 use engine::types::actions::{GameAction, MulliganChoice};
 use engine::types::counter::CounterType;
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::game_state::{
+    GameState, ManaChoice, ManaChoiceContext, ManaChoicePrompt, WaitingFor,
+};
+use engine::types::mana::ManaType;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
+use std::collections::HashSet;
 
 use crate::support::shared_card_db as load_db;
-
-const GEMSTONE_CAVERNS_ORACLE: &str = "If this card is in your opening hand and you're not the starting player, you may begin the game with Gemstone Caverns on the battlefield with a luck counter on it. If you do, exile a card from your hand.";
+use crate::support::shared_card_export_json as load_export;
 
 /// Build a 2-player game where the non-starting player (P1) has a 7-card
 /// library consisting of Gemstone Caverns plus six basic lands. After the
 /// opening-hand draw the entire library becomes P1's opening hand regardless of
 /// shuffle order, so Gemstone Caverns is guaranteed to be in the opening hand.
 ///
-/// Returns the state with the game started and the mulligan flow active.
-fn setup_game_with_gemstone_owner(db: &CardDatabase, gemstone_owner: PlayerId) -> GameState {
+/// Returns the state with the game started, the mulligan flow active, and the
+/// Gemstone mana ability's exported definition index.
+fn setup_game_with_gemstone_owner(
+    db: &CardDatabase,
+    gemstone_owner: PlayerId,
+) -> (GameState, usize) {
     let mut state = GameState::new_two_player(42);
 
     let gemstone = db
@@ -51,31 +58,20 @@ fn setup_game_with_gemstone_owner(db: &CardDatabase, gemstone_owner: PlayerId) -
     let forest = db
         .get_face_by_name("Forest")
         .expect("Forest must be in the card database");
+    let gemstone_mana_ability_index = gemstone
+        .abilities
+        .iter()
+        .position(|ability| ability.kind == AbilityKind::Activated && is_mana_ability(ability))
+        .expect("exported Gemstone Caverns must include an activated mana ability");
 
     for player in [PlayerId(0), PlayerId(1)] {
         if player == gemstone_owner {
             let gemstone_id = create_object_from_card_face(&mut state, gemstone, player);
-            let parsed = parse_oracle_text(
-                GEMSTONE_CAVERNS_ORACLE,
-                "Gemstone Caverns",
-                &[],
-                &["Land".to_string()],
-                &[],
+            assert_eq!(
+                state.objects[&gemstone_id].abilities[gemstone_mana_ability_index],
+                gemstone.abilities[gemstone_mana_ability_index],
+                "the runtime Gemstone Caverns object must retain its exported mana ability"
             );
-            let begin_game = parsed
-                .abilities
-                .into_iter()
-                .find(|ability| ability.kind == AbilityKind::BeginGame)
-                .expect("current parser output must include Gemstone Caverns begin-game ability");
-            let abilities = std::sync::Arc::make_mut(
-                &mut state
-                    .objects
-                    .get_mut(&gemstone_id)
-                    .expect("Gemstone Caverns object exists")
-                    .abilities,
-            );
-            abilities.retain(|ability| ability.kind != AbilityKind::BeginGame);
-            abilities.push(begin_game);
             for _ in 0..6 {
                 create_object_from_card_face(&mut state, forest, player);
             }
@@ -90,10 +86,10 @@ fn setup_game_with_gemstone_owner(db: &CardDatabase, gemstone_owner: PlayerId) -
     // flavor condition.
     let result = start_game_with_starting_player(&mut state, PlayerId(0));
     state.waiting_for = result.waiting_for;
-    state
+    (state, gemstone_mana_ability_index)
 }
 
-fn setup_game(db: &CardDatabase) -> GameState {
+fn setup_game(db: &CardDatabase) -> (GameState, usize) {
     setup_game_with_gemstone_owner(db, PlayerId(1))
 }
 
@@ -135,19 +131,162 @@ fn gemstone_in_player_hand(
         .expect("Gemstone Caverns must be in the player's opening hand")
 }
 
+/// The integration fixture is intentionally small and can lag the production
+/// export. Pin the serialized contract in the full export, where a dropped
+/// condition or a widened counter scope would otherwise be invisible.
+#[test]
+fn gemstone_caverns_full_export_retains_luck_counter_mana_contract() {
+    let Some(export) = load_export() else {
+        return;
+    };
+    let card = export
+        .get("gemstone caverns")
+        .expect("Gemstone Caverns must be in the full card-data export");
+    let abilities = card
+        .get("abilities")
+        .and_then(|value| value.as_array())
+        .expect("Gemstone Caverns abilities must be an array");
+
+    assert_eq!(
+        abilities.len(),
+        2,
+        "the full export must retain exactly Gemstone Caverns' BeginGame and mana abilities"
+    );
+    assert_eq!(
+        abilities[0].get("kind").and_then(|value| value.as_str()),
+        Some("BeginGame"),
+        "the first exported ability must remain the opening-hand ability"
+    );
+
+    let mana = &abilities[1];
+    assert_eq!(
+        mana.get("kind").and_then(|value| value.as_str()),
+        Some("Activated"),
+        "the second exported ability must remain Gemstone Caverns' activated mana ability"
+    );
+    assert_eq!(
+        mana.get("effect")
+            .and_then(|effect| effect.get("type"))
+            .and_then(|value| value.as_str()),
+        Some("Mana"),
+        "the base branch must produce mana"
+    );
+    assert_eq!(
+        mana.get("effect")
+            .and_then(|effect| effect.get("produced"))
+            .and_then(|produced| produced.get("type"))
+            .and_then(|value| value.as_str()),
+        Some("Colorless"),
+        "the base branch must produce colorless mana"
+    );
+
+    let conditional = mana
+        .get("sub_ability")
+        .expect("the exported mana ability must retain its conditional replacement branch");
+    assert_eq!(
+        conditional
+            .get("effect")
+            .and_then(|effect| effect.get("type"))
+            .and_then(|value| value.as_str()),
+        Some("Mana"),
+        "the luck-counter replacement branch must also produce mana"
+    );
+    let quantity = conditional
+        .get("condition")
+        .and_then(|condition| condition.get("inner"))
+        .and_then(|inner| inner.get("lhs"))
+        .and_then(|lhs| lhs.get("qty"))
+        .expect("the replacement branch must compare counters on Gemstone Caverns");
+    assert_eq!(
+        conditional
+            .get("condition")
+            .and_then(|condition| condition.get("type"))
+            .and_then(|value| value.as_str()),
+        Some("ConditionInstead"),
+        "the luck-counter branch must replace, rather than supplement, colorless mana"
+    );
+    assert_eq!(
+        quantity.get("type").and_then(|value| value.as_str()),
+        Some("CountersOn"),
+        "the replacement condition must inspect a counter quantity"
+    );
+    assert_eq!(
+        quantity
+            .get("scope")
+            .and_then(|scope| scope.get("type"))
+            .and_then(|value| value.as_str()),
+        Some("Source"),
+        "the counter condition must inspect Gemstone Caverns itself"
+    );
+    assert_eq!(
+        quantity
+            .get("counter_type")
+            .and_then(|value| value.as_str()),
+        Some("luck"),
+        "the counter condition must inspect Generic(luck), not every counter"
+    );
+    let condition = conditional
+        .get("condition")
+        .and_then(|condition| condition.get("inner"))
+        .expect("the replacement condition must have an inner quantity comparison");
+    assert_eq!(
+        condition.get("comparator").and_then(|value| value.as_str()),
+        Some("GE"),
+        "the luck-counter replacement must require at least one counter"
+    );
+    assert_eq!(
+        condition
+            .get("rhs")
+            .and_then(|rhs| rhs.get("type"))
+            .and_then(|value| value.as_str()),
+        Some("Fixed")
+    );
+    assert_eq!(
+        condition
+            .get("rhs")
+            .and_then(|rhs| rhs.get("value"))
+            .and_then(|value| value.as_i64()),
+        Some(1),
+        "the luck-counter replacement threshold must be one"
+    );
+    let produced = conditional
+        .get("effect")
+        .and_then(|effect| effect.get("produced"))
+        .expect("the replacement branch must define produced mana");
+    assert_eq!(
+        produced.get("type").and_then(|value| value.as_str()),
+        Some("AnyOneColor")
+    );
+    assert_eq!(
+        produced
+            .get("color_options")
+            .and_then(|value| value.as_array())
+            .expect("the replacement branch must offer colors")
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["White", "Blue", "Black", "Red", "Green"]
+            .into_iter()
+            .collect(),
+        "the replacement must offer all five colors"
+    );
+}
+
 #[test]
 fn gemstone_caverns_accept_enters_with_luck_counter_and_prompts_exile() {
     let Some(db) = load_db() else {
         return;
     };
-    let mut state = setup_game(db);
+    let (mut state, gemstone_mana_ability_index) = setup_game(db);
     keep_both_hands(&mut state);
 
     let gemstone_id = gemstone_in_hand(&state);
-    // Cards in hand that are NOT Gemstone Caverns — the exile sub-ability draws
-    // from these. Gemstone Caverns itself leaves the hand when it enters the
-    // battlefield, so it must be excluded from the exile-pool baseline.
-    let non_gemstone_in_hand = state.players[1].hand.len() - 1;
+    let expected_exile_candidates = state.players[1]
+        .hand
+        .iter()
+        .copied()
+        .filter(|id| *id != gemstone_id)
+        .collect::<Vec<_>>();
 
     // The begin-game opt-in for Gemstone Caverns must be surfaced to P1.
     let WaitingFor::OptionalEffectChoice { player, .. } = &state.waiting_for else {
@@ -184,22 +323,211 @@ fn gemstone_caverns_accept_enters_with_luck_counter_and_prompts_exile() {
         state.objects[&gemstone_id].counters,
     );
 
-    // CR 701.13a: the `IfYouDo`-gated sub-ability must surface an exile prompt
-    // — the player has not yet chosen which card to exile, so the game is NOT
-    // at Priority and no card has left the exile pool yet.
-    assert!(
-        !matches!(state.waiting_for, WaitingFor::Priority { .. }),
-        "after accepting, an exile-a-card prompt must be surfaced, not Priority: {:?}",
-        state.waiting_for,
-    );
-    let non_gemstone_now = state.players[1]
-        .hand
-        .iter()
-        .filter(|id| state.objects[id].name != "Gemstone Caverns")
-        .count();
+    let WaitingFor::EffectZoneChoice {
+        player,
+        cards,
+        count,
+        zone,
+        destination,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!(
+            "accepting must surface a hand-to-exile EffectZoneChoice, got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(*player, PlayerId(1), "P1 must choose the exiled card");
+    assert_eq!(*count, 1, "exactly one card must be exiled");
+    assert_eq!(*zone, Zone::Hand, "the choice must come from P1's hand");
     assert_eq!(
-        non_gemstone_now, non_gemstone_in_hand,
-        "the exile choice is still pending — no card may leave hand until it resolves",
+        *destination,
+        Some(Zone::Exile),
+        "the selected card must be exiled"
+    );
+    assert_eq!(
+        cards.iter().copied().collect::<HashSet<_>>(),
+        expected_exile_candidates
+            .into_iter()
+            .collect::<HashSet<_>>(),
+        "only P1's non-Gemstone opening-hand cards are legal exile candidates"
+    );
+    assert!(
+        cards.iter().all(|id| state.players[1].hand.contains(id)),
+        "every exile candidate must still be in P1's hand; candidates={cards:?}"
+    );
+    assert!(
+        cards.iter().all(|id| !state.players[0].hand.contains(id)),
+        "P0's cards must never be exile candidates; candidates={cards:?}"
+    );
+
+    let exiled_card = cards[0];
+    let result = apply(
+        &mut state,
+        PlayerId(1),
+        GameAction::SelectCards {
+            cards: vec![exiled_card],
+        },
+    )
+    .expect("selecting a legal P1 hand card to exile must succeed");
+    state.waiting_for = result.waiting_for;
+
+    assert_eq!(
+        state.objects[&exiled_card].zone,
+        Zone::Exile,
+        "the selected card must leave P1's hand for exile"
+    );
+    assert!(
+        !state.players[1].hand.contains(&exiled_card),
+        "the selected card must no longer be in P1's hand"
+    );
+    assert_eq!(
+        state.objects[&gemstone_id].zone,
+        Zone::Battlefield,
+        "Gemstone Caverns remains on the battlefield after the exile rider"
+    );
+    assert_eq!(
+        state.objects[&gemstone_id].counters.get(&luck).copied(),
+        Some(1),
+        "Gemstone Caverns retains its luck counter after the exile rider"
+    );
+    assert!(
+        matches!(&state.waiting_for, WaitingFor::Priority { player } if *player == PlayerId(1)),
+        "begin-game resolution must drain to P1 priority, got {:?}",
+        state.waiting_for
+    );
+
+    let runtime_mana_ability = &state.objects[&gemstone_id].abilities[gemstone_mana_ability_index];
+    assert_eq!(runtime_mana_ability.kind, AbilityKind::Activated);
+    assert!(
+        is_mana_ability(runtime_mana_ability),
+        "the exported Gemstone mana ability must be present on its runtime object"
+    );
+    let result = apply(
+        &mut state,
+        PlayerId(1),
+        GameAction::ActivateAbility {
+            source_id: gemstone_id,
+            ability_index: gemstone_mana_ability_index,
+        },
+    )
+    .expect("P1 must be able to activate Gemstone Caverns' exported mana ability");
+    state.waiting_for = result.waiting_for;
+
+    let WaitingFor::ChooseManaColor {
+        player,
+        choice: ManaChoicePrompt::SingleColor { options },
+        context: ManaChoiceContext::ManaAbility(pending),
+    } = &state.waiting_for
+    else {
+        panic!(
+            "Gemstone Caverns must surface its mana-color choice, got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(*player, PlayerId(1), "P1 chooses the mana color");
+    assert_eq!(pending.player, PlayerId(1));
+    assert_eq!(pending.source_id, gemstone_id);
+    assert_eq!(pending.ability_index, Some(gemstone_mana_ability_index));
+    assert_eq!(
+        options,
+        &vec![
+            ManaType::White,
+            ManaType::Blue,
+            ManaType::Black,
+            ManaType::Red,
+            ManaType::Green,
+        ],
+        "a luck counter lets Gemstone Caverns produce one mana of any color"
+    );
+
+    let result = apply(
+        &mut state,
+        PlayerId(1),
+        GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Blue),
+            count: 1,
+        },
+    )
+    .expect("P1 must be able to choose blue mana");
+    state.waiting_for = result.waiting_for;
+
+    let mana_pool = &state.players[1].mana_pool;
+    assert_eq!(mana_pool.count_color(ManaType::Blue), 1);
+    assert_eq!(mana_pool.count_color(ManaType::Colorless), 0);
+    assert_eq!(mana_pool.total(), 1);
+    assert!(state.objects[&gemstone_id].tapped);
+}
+
+#[test]
+fn gemstone_caverns_without_luck_makes_colorless_despite_controller_luck_elsewhere() {
+    let Some(db) = load_db() else {
+        return;
+    };
+
+    let luck = CounterType::Generic("luck".to_string());
+    let mut scenario = GameScenario::new();
+    let gemstone = scenario.add_real_card(P0, "Gemstone Caverns", Zone::Battlefield, db);
+    let other_permanent = scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
+    scenario.with_counter(other_permanent, luck.clone(), 1);
+    let mut runner = scenario.build();
+
+    // Production path: objects are rehydrated from card-data after deck loading.
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    let mana_ability_index = runner.state().objects[&gemstone]
+        .abilities
+        .iter()
+        .position(|ability| ability.kind == AbilityKind::Activated && is_mana_ability(ability))
+        .expect("exported Gemstone Caverns must include an activated mana ability");
+    assert!(
+        !runner.state().objects[&gemstone]
+            .counters
+            .contains_key(&luck),
+        "Gemstone Caverns must begin this scenario without a luck counter"
+    );
+    assert_eq!(
+        runner.state().objects[&other_permanent]
+            .counters
+            .get(&luck)
+            .copied(),
+        Some(1),
+        "the same controller's other permanent supplies the scope-regression witness"
+    );
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: gemstone,
+            ability_index: mana_ability_index,
+        })
+        .expect("the public activation action must activate Gemstone Caverns");
+
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseManaColor { .. }
+        ),
+        "without a luck counter on Gemstone Caverns, its mana ability must not prompt for color"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "the colorless mana ability must resolve immediately, got {:?}",
+        runner.state().waiting_for
+    );
+    let mana_pool = &runner.state().players[P0.0 as usize].mana_pool;
+    assert_eq!(
+        mana_pool.count_color(ManaType::Colorless),
+        1,
+        "without its own luck counter, Gemstone Caverns must add exactly {{C}}"
+    );
+    assert_eq!(
+        mana_pool.total(),
+        1,
+        "the activation must add exactly one mana"
+    );
+    assert!(
+        runner.state().objects[&gemstone].tapped,
+        "the public activation must pay Gemstone Caverns' tap cost"
     );
 }
 
@@ -208,7 +536,7 @@ fn gemstone_caverns_decline_surfaces_no_exile_prompt() {
     let Some(db) = load_db() else {
         return;
     };
-    let mut state = setup_game(db);
+    let (mut state, _) = setup_game(db);
     keep_both_hands(&mut state);
 
     let gemstone_id = gemstone_in_hand(&state);
@@ -257,7 +585,7 @@ fn gemstone_caverns_starting_player_gets_no_begin_game_prompt() {
     let Some(db) = load_db() else {
         return;
     };
-    let mut state = setup_game_with_gemstone_owner(db, PlayerId(0));
+    let (mut state, _) = setup_game_with_gemstone_owner(db, PlayerId(0));
     keep_both_hands(&mut state);
 
     let gemstone_id = gemstone_in_player_hand(&state, PlayerId(0));

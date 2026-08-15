@@ -41,6 +41,7 @@ fn specialize_back(name: &str, color: ManaColor, shard: ManaCostShard) -> BackFa
         casting_restrictions: vec![],
         casting_options: vec![],
         layout_kind: None,
+        parse_warnings: vec![],
     }
 }
 

@@ -24,6 +24,7 @@ const mockHostAdapter = {
   initialize: vi.fn(async () => {}),
   startDraft: vi.fn(async () => {}),
   submitPick: vi.fn(async () => mockView("Drafting")),
+  submitPickWithDraftEffect: vi.fn(async () => mockView("Drafting")),
   submitDeck: vi.fn(async () => mockView("Deckbuilding")),
   getHostView: vi.fn(async () => mockView("Lobby")),
   kickPlayer: vi.fn(),
@@ -47,6 +48,7 @@ const mockGuestAdapter = {
   }),
   initialize: vi.fn(async () => {}),
   submitPick: vi.fn(async () => {}),
+  submitPickWithDraftEffect: vi.fn(async () => {}),
   submitDeck: vi.fn(async () => {}),
   submitAuthorized: vi.fn(),
   acknowledgeAuthorized: vi.fn(),
@@ -80,6 +82,13 @@ function mockView(status: string): DraftPlayerView {
     pass_direction: "Left",
     current_pack: null,
     pool: [],
+    draft_effects: [],
+    pool_groups: {
+      color_groups: [],
+      type_groups: [],
+      cmc_groups: [],
+      color_counts: { white: 0, blue: 0, black: 0, red: 0, green: 0 },
+    },
     seats: [],
     cards_per_pack: 14,
     pack_count: 3,
@@ -91,6 +100,7 @@ function mockView(status: string): DraftPlayerView {
     tournament_format: "Swiss",
     pod_policy: "Competitive",
     pairings: [],
+    match_config: { match_type: "Bo1" },
   };
 }
 
@@ -418,6 +428,27 @@ describe("multiplayerDraftStore", () => {
   });
 
   describe("shared actions", () => {
+    it("submits a draft-effect pick through the host adapter", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+
+      await useMultiplayerDraftStore.getState().submitPickWithDraftEffect(
+        "cogwork-1",
+        ["card-1", "card-2"],
+      );
+
+      expect(mockHostAdapter.submitPickWithDraftEffect).toHaveBeenCalledWith(
+        "cogwork-1",
+        ["card-1", "card-2"],
+      );
+    });
+
     it("selectCard and confirmPick work together", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
         poolInput: { type: "Set", data: { set_pool_json: "{}" } },

@@ -50,7 +50,7 @@ use crate::types::game_state::{
     CostResume, GameState, ManaAbilityResume, PayCostKind, PendingCostMoveCompletion,
     PendingCostMoveResume, WaitingFor,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
@@ -651,14 +651,25 @@ pub(crate) fn pay_ability_cost_for_resolution(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<PaymentOutcome, EngineError> {
-    pay_ability_cost_for_resolution_with_cost_move_root(
+    let outcome = pay_ability_cost_for_resolution_with_cost_move_root(
         state,
         payer,
         cost,
         ability,
         ResolutionCostMoveRoot::EffectPayCost,
         events,
-    )
+    )?;
+    // CR 118.1 + CR 119.4b: `effects::pay` records a concrete life component
+    // on its continuation-owned ability before this authority can pause. Stamp
+    // it only after the entire cost finishes, including a mana-root resume.
+    // `None` is deliberately distinct from `Some(0)`: mana-only costs retain
+    // their preceding amount, while a completed zero-life cost reports zero.
+    if outcome == PaymentOutcome::Paid {
+        if let Some(amount) = ability.context.pay_cost_paid_life_amount {
+            state.last_effect_amount = Some(amount as i32);
+        }
+    }
+    Ok(outcome)
 }
 
 /// Pays a replacement's MayCost. Its dedicated root owns the outer
@@ -1308,8 +1319,9 @@ fn pay_ability_cost_inner(
         // Waterbend cost was already paid via ManaPayment before reaching pay_ability_cost.
         AbilityCost::Waterbend { .. } => {}
         // CR 118.3: An effect performed as a cost. Resolve the effect on the
-        // source before the ability's own effect fires. Currently handles
-        // PutCounter on self (Devoted Druid, Chainbreaker, etc.).
+        // source before the ability's own effect fires. The shared support
+        // predicate admits only deterministic source-counter and fixed-mana
+        // forms, so this never opens a player-choice prompt mid-payment.
         AbilityCost::EffectCost { effect } => {
             use crate::types::ability::Effect;
             match effect.as_ref() {
@@ -1319,6 +1331,28 @@ fn pay_ability_cost_inner(
                     target: TargetFilter::SelfRef,
                 } => {
                     let count = resolve_cost_quantity(state, count, player, source_id, scope);
+                    // CR 118.3: A prevented counter placement pays none of this
+                    // cost. The shared add primitive reports both a delivered
+                    // and prevented event as complete because effect resolution
+                    // needs that distinction only for continuation; payment must
+                    // reject the prevented case before executing it.
+                    let prevented = state.objects.get(&source_id).is_some_and(|object| {
+                        matches!(
+                            super::effects::counters::preview_counter_addition(
+                                state,
+                                player,
+                                ObjectIncarnationRef::from_object(object),
+                                counter_type.clone(),
+                                count.unsigned_abs(),
+                            ),
+                            Some(super::effects::counters::CounterAdditionPreview::Prevented)
+                        )
+                    });
+                    if prevented {
+                        return Ok(payment_failed(
+                            "Counter-placement cost prevented by a replacement effect",
+                        ));
+                    }
                     if !super::effects::counters::add_counter_with_replacement(
                         state,
                         player,
@@ -1330,6 +1364,42 @@ fn pay_ability_cost_inner(
                         return Ok(PaymentOutcome::Paused {
                             remaining_cost: None,
                         });
+                    }
+                }
+                // CR 106.3 + CR 106.4: A Braid of Fire-style cost performs
+                // fixed mana production directly into the payer's pool. This
+                // uses the ordinary replacement-aware mana primitive but does
+                // not resolve a separate ability or change priority mid-cost.
+                Effect::Mana {
+                    produced:
+                        produced @ crate::types::ability::ManaProduction::Fixed { colors, .. },
+                    restrictions,
+                    grants,
+                    expiry,
+                    target: None,
+                } => {
+                    let restrictions = super::effects::mana::resolve_restrictions(
+                        restrictions,
+                        state,
+                        source_id,
+                    );
+                    let source_could_produce_two_or_more_colors =
+                        super::mana_sources::mana_production_could_produce_two_or_more_colors(
+                            state, player, source_id, produced,
+                        );
+                    for color in colors {
+                        super::mana_payment::produce_mana_with_attributes_from_source_quality(
+                            state,
+                            source_id,
+                            super::mana_sources::mana_color_to_type(color),
+                            player,
+                            false,
+                            source_could_produce_two_or_more_colors,
+                            &restrictions,
+                            grants,
+                            *expiry,
+                            events,
+                        );
                     }
                 }
                 _ => {
@@ -1795,7 +1865,7 @@ pub(crate) fn can_pay(
 /// cost as `Paid` (`Waterbend`, `ExileMaterials`, non-self `Sacrifice`, targeted
 /// `RemoveCounter`) or perform an effect that was never meant to fire at
 /// resolution (singleton `Tap`, self-ref `Sacrifice`/`Exile`, `Loyalty`,
-/// `RemoveCounter { target: None }`, `Exert`, `Unattach`, `EffectCost`,
+/// `RemoveCounter { target: None }`, `Exert`, `Unattach`, arbitrary `EffectCost`,
 /// source-card `Discard`). Both outcomes violate CR 118.3 / CR 601.2h, so the
 /// guard refuses them with `Failed`.
 pub(crate) fn supported_at_resolution(cost: &AbilityCost) -> bool {
@@ -1824,6 +1894,9 @@ pub(crate) fn supported_at_resolution(cost: &AbilityCost) -> bool {
         // "exile two creature cards from graveyards"). The interactive choice is
         // surfaced via WaitingFor::PayCost before this resume runs.
         AbilityCost::Exile { filter, .. } if !matches!(filter, Some(TargetFilter::SelfRef)) => true,
+        // CR 118.3: The shared effect-cost predicate admits only deterministic
+        // payment effects that the authority resolves directly.
+        AbilityCost::EffectCost { .. } if cost.supports_effect_cost_payment() => true,
         AbilityCost::Discard { .. }
         | AbilityCost::Tap
         | AbilityCost::Untap
@@ -1986,6 +2059,10 @@ fn can_pay_resolution(
         // limit on giving yourself more counters (poison's ten-or-more loss
         // condition is a separate SBA, not a payment-time affordability gate).
         AbilityCost::GetPlayerCounters { .. } => true,
+        // CR 118.3: Every deterministic effect-cost payment admitted by the
+        // shared support predicate is offerable; its resolver handles any
+        // replacement effects while paying it.
+        AbilityCost::EffectCost { .. } if cost.supports_effect_cost_payment() => true,
         // Variants below have no resolution-time payment arm
         // (`supported_at_resolution` is the shared membership authority).
         // Refusing here is the conservative affordability answer (treat as

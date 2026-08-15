@@ -339,6 +339,16 @@ fn event_to_damage_filters(
         },
         // Combat-only / noncombat-only restrictors set `combat_scope` per
         // CR 614.1a.
+        //
+        // CR 510.1a: The unqualified "combat damage would be dealt" event names
+        // neither a source nor a recipient, so both filter slots stay `None`
+        // and only the combat scope narrows the replacement. Mirrors the same
+        // variant's handling in `damage_event_to_prevent_params`.
+        E::CombatDamageWouldBeDealt => DamageEventFilters {
+            source_filter: None,
+            target_filter: None,
+            combat_scope: Some(CombatDamageScope::CombatOnly),
+        },
         E::CombatDamageWouldBeDealtByACreatureToRecipient(_perm, recipient) => DamageEventFilters {
             source_filter: None,
             target_filter: recipient_to_damage_target_filter(recipient),
@@ -1885,10 +1895,10 @@ fn build_replacement_exec(
         // values are out of range or inverted (defensive — the engine
         // would generate a degenerate option list).
         A::ChooseANumberBetween(min, max) => {
-            let (Ok(min_u8), Ok(max_u8)) = (u8::try_from(*min), u8::try_from(*max)) else {
+            let (Ok(min_u8), Ok(max_u8)) = (u32::try_from(*min), u32::try_from(*max)) else {
                 return Err(ConversionGap::EnginePrerequisiteMissing {
                     engine_type: "ChoiceType::NumberRange",
-                    needed_variant: format!("number-range bounds out of u8 ({min}, {max})"),
+                    needed_variant: format!("number-range bounds out of u32 ({min}, {max})"),
                 });
             };
             if min_u8 > max_u8 {
@@ -1900,7 +1910,9 @@ fn build_replacement_exec(
             Effect::Choose {
                 choice_type: ChoiceType::NumberRange {
                     min: min_u8,
-                    max: max_u8,
+                    // CR 107.1a: "between X and Y" states an upper bound, so this
+                    // converts to the BOUNDED form.
+                    max: Some(max_u8),
                     distinctness: engine::types::ability::NumberDistinctness::Repeatable,
                 },
                 persist: true,
@@ -3287,8 +3299,8 @@ fn expiration_tag(e: &Expiration) -> String {
 #[cfg(test)]
 mod tests {
     use engine::types::ability::{
-        AbilityCost, ContinuousModification, DamageModification, Duration, Effect, QuantityExpr,
-        ReplacementMode, TargetFilter,
+        AbilityCost, CombatDamageScope, ContinuousModification, DamageModification, Duration,
+        Effect, QuantityExpr, ReplacementMode, TargetFilter,
     };
     use engine::types::card_type::{CoreType, Supertype};
     use engine::types::keywords::Keyword;
@@ -3316,6 +3328,30 @@ mod tests {
             ],
         )
         .expect("fixed damage replacement actions should convert");
+
+        assert_eq!(defs.len(), 3);
+
+        // CR 510.1a: the unqualified event names neither a damage source nor a
+        // recipient, so both filter slots must stay unset and the combat scope
+        // is the ONLY narrowing the event contributes. Asserted on every
+        // definition the action list produced, since they all share one event.
+        // Without this, a wrong scope or an over-narrow filter would still
+        // leave the `damage_modification` assertions below green.
+        for (idx, def) in defs.iter().enumerate() {
+            assert_eq!(
+                def.damage_source_filter, None,
+                "defs[{idx}]: unqualified combat event must not narrow the damage source"
+            );
+            assert_eq!(
+                def.damage_target_filter, None,
+                "defs[{idx}]: unqualified combat event must not narrow the damage target"
+            );
+            assert_eq!(
+                def.combat_scope,
+                Some(CombatDamageScope::CombatOnly),
+                "defs[{idx}]: combat-damage event must restrict the replacement to combat damage"
+            );
+        }
 
         assert!(matches!(
             defs[0].damage_modification.as_ref(),

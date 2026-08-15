@@ -1,0 +1,27 @@
+import type { DraftPoolGroupKind } from "../../adapter/draft-adapter";
+
+/** Translation keys for the engine-defined limited-pool group categories. */
+export const POOL_GROUP_LABEL_KEYS: Record<DraftPoolGroupKind, string> = {
+  white: "pool.groups.white",
+  blue: "pool.groups.blue",
+  black: "pool.groups.black",
+  red: "pool.groups.red",
+  green: "pool.groups.green",
+  multicolor: "pool.groups.multicolor",
+  colorless: "pool.groups.colorless",
+  creature: "pool.groups.creature",
+  instant: "pool.groups.instant",
+  sorcery: "pool.groups.sorcery",
+  enchantment: "pool.groups.enchantment",
+  artifact: "pool.groups.artifact",
+  planeswalker: "pool.groups.planeswalker",
+  land: "pool.groups.land",
+  other: "pool.groups.other",
+  mana_value0: "pool.groups.manaValue0",
+  mana_value1: "pool.groups.manaValue1",
+  mana_value2: "pool.groups.manaValue2",
+  mana_value3: "pool.groups.manaValue3",
+  mana_value4: "pool.groups.manaValue4",
+  mana_value5: "pool.groups.manaValue5",
+  mana_value6_plus: "pool.groups.manaValue6Plus",
+};

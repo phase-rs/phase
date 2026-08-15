@@ -22,6 +22,7 @@ import { AdapterError, AdapterErrorCode, isStaleRejectionMessage, isStateLostMes
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import { isBracketEstimate } from "../types/bracketEstimate";
 import { EngineWorkerClient } from "./engine-worker-client";
+import { classifyInitFailure } from "./init-envelope";
 import { AiWorkerPool } from "./ai-worker-pool";
 import type { AiCardDataMode, AiPoolCardDbPlan } from "./card-db-subset";
 import {
@@ -35,6 +36,26 @@ function isMemoryConstrainedDevice(): boolean {
   const isIOS = /iP(hone|od|ad)/.test(navigator.userAgent)
     || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
   return isIOS || (/Android/.test(navigator.userAgent) && /Mobile/.test(navigator.userAgent));
+}
+
+// Parallel scoring is optional. Bound its queued restore-and-score work so a
+// stalled score worker cannot make a healthy local game appear hung.
+const AI_POOL_SCORE_TIMEOUT_MS = 5_000;
+const DEBUG_CREATE_CARD_DB_MISSING = "Engine error: card database not loaded";
+
+function isDebugCreateCard(action: GameAction): boolean {
+  return action.type === "Debug" && action.data.type === "CreateCard";
+}
+
+function isDebugCreateCardDbMissing(error: unknown): boolean {
+  return error instanceof Error && error.message === DEBUG_CREATE_CARD_DB_MISSING;
+}
+
+class AiPoolScoreTimeoutError extends Error {
+  constructor() {
+    super(`AI worker pool timed out after ${AI_POOL_SCORE_TIMEOUT_MS}ms`);
+    this.name = "AiPoolScoreTimeoutError";
+  }
 }
 
 /**
@@ -113,6 +134,18 @@ let sharedAdapter: WasmAdapter | null = null;
 export function getSharedAdapter(): WasmAdapter {
   if (!sharedAdapter) sharedAdapter = new WasmAdapter();
   return sharedAdapter;
+}
+
+/**
+ * Engine for a P2P host session. Memory-constrained devices reuse the shared
+ * worker (one WASM module + one card DB for the whole tab) and pay for it in
+ * serialized engine calls; everywhere else the host keeps a private worker so
+ * its authoritative game state can never interleave with local play. Mirrors
+ * the AI-pool trade at `ensureAiPool`, which likewise returns null on these
+ * devices rather than spending a second resident allocation.
+ */
+export function getHostAdapter(): WasmAdapter {
+  return isMemoryConstrainedDevice() ? getSharedAdapter() : new WasmAdapter();
 }
 
 /**
@@ -293,11 +326,18 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
 
   async submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult> {
     this.assertInitialized();
-    if (action.type === "Debug" && action.data.type === "CreateCard") {
-      await this.ensureCardDb();
-    }
     try {
-      const result = this.engine ? await this.engine.submitAction(actor, action) : await this.fallback!.submitAction(action, actor);
+      const submit = () => this.engine
+        ? this.engine.submitAction(actor, action)
+        : this.fallback!.submitAction(action, actor);
+      let result: SubmitResult;
+      try {
+        result = await submit();
+      } catch (error) {
+        if (!isDebugCreateCard(action) || !isDebugCreateCardDbMissing(error)) throw error;
+        await this.ensureCardDb();
+        result = await submit();
+      }
       this.invalidateAiDecisionDiagnostics();
       return result;
     } catch (err) {
@@ -432,29 +472,32 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
           try {
             const state = await this.engine!.getState();
             if (state.waiting_for.type === "Priority") {
-              const pool = await this.ensureAiPool();
-              if (pool) {
-                const scores = await pool.getAiScoredCandidates(
-                  await this.engine!.exportState(),
+              const scores = await this.getAiPoolScores(this.engine, difficulty, playerId);
+              if (scores?.length) {
+                const captured = await this.engine!.getAiActionProposalFromScoresWithDiagnostics(
+                  JSON.stringify(scores),
                   difficulty,
                   playerId,
+                  Date.now(),
                 );
-                if (scores?.length) {
-                  const captured = await this.engine!.getAiActionProposalFromScoresWithDiagnostics(
-                    JSON.stringify(scores),
-                    difficulty,
-                    playerId,
-                    Date.now(),
-                  );
-                  if (captured) {
-                    this.retainAiDecisionDiagnostic(captureEpoch, captured.proposal, captured.receipt);
-                    return captured.proposal;
-                  }
+                if (captured) {
+                  this.retainAiDecisionDiagnostic(captureEpoch, captured.proposal, captured.receipt);
+                  return captured.proposal;
                 }
               }
             }
           } catch (error) {
             if (error instanceof Error && isStateLostMessage(error.message)) throw error;
+            if (error instanceof AiPoolScoreTimeoutError) {
+              const captured = await this.engine!.getAiTacticalActionProposalWithDiagnostics(
+                difficulty,
+                playerId,
+              );
+              if (captured) {
+                this.retainAiDecisionDiagnostic(captureEpoch, captured.proposal, captured.receipt);
+                return captured.proposal;
+              }
+            }
             console.warn("AI worker pool failed; using authoritative single worker", error);
           }
         }
@@ -470,26 +513,23 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
           // worker rebinds every score against a newly-issued contract below.
           const state = await this.engine.getState();
           if (state.waiting_for.type === "Priority") {
-            const pool = await this.ensureAiPool();
-            if (pool) {
-              const scores = await pool.getAiScoredCandidates(
-                await this.engine.exportState(),
+            const scores = await this.getAiPoolScores(this.engine, difficulty, playerId);
+            if (scores?.length) {
+              const proposal = await this.engine.getAiActionProposalFromScores(
+                JSON.stringify(scores),
                 difficulty,
                 playerId,
+                Date.now(),
               );
-              if (scores?.length) {
-                const proposal = await this.engine.getAiActionProposalFromScores(
-                  JSON.stringify(scores),
-                  difficulty,
-                  playerId,
-                  Date.now(),
-                );
-                if (proposal) return proposal;
-              }
+              if (proposal) return proposal;
             }
           }
         } catch (error) {
           if (error instanceof Error && isStateLostMessage(error.message)) throw error;
+          if (error instanceof AiPoolScoreTimeoutError) {
+            const proposal = await this.engine.getAiTacticalActionProposal(difficulty, playerId);
+            if (proposal) return proposal;
+          }
           console.warn("AI worker pool failed; using authoritative single worker", error);
         }
       }
@@ -530,6 +570,45 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     };
     void pending.then(clear, clear);
     return pending;
+  }
+
+  /** Discard an optional scorer without affecting the authoritative worker. */
+  private disableAiPool(generation: number): void {
+    if (generation !== this.aiPoolGeneration) return;
+    this.aiPoolGeneration += 1;
+    this.aiPoolPromise = null;
+    this.aiPool?.dispose();
+    this.aiPool = null;
+    this.aiPoolFailed = true;
+  }
+
+  private async getAiPoolScores(
+    engine: EngineWorkerClient,
+    difficulty: string,
+    playerId: number,
+  ): Promise<[GameAction, number][] | null> {
+    const pool = await this.ensureAiPool();
+    if (!pool) return null;
+    const generation = this.aiPoolGeneration;
+    const stateJson = await engine.exportState();
+    if (generation !== this.aiPoolGeneration) return null;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+    try {
+      return await Promise.race([
+        pool.getAiScoredCandidates(stateJson, difficulty, playerId),
+        new Promise<never>((_, reject) => {
+          timeoutId = setTimeout(() => {
+            reject(new AiPoolScoreTimeoutError());
+          }, AI_POOL_SCORE_TIMEOUT_MS);
+        }),
+      ]);
+    } catch (error) {
+      this.disableAiPool(generation);
+      throw error;
+    } finally {
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
+    }
   }
 
   private async reloadAiPoolGameDb(
@@ -652,10 +731,16 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
   }
 
   /**
-   * Toggle the engine's multiplayer enforcement flag. When enabled, the
-   * Rust side refuses `restore_game_state` with a descriptive error —
-   * defense against any caller trying to rewind a multiplayer game.
-   * Called by multiplayer adapters (P2P host/guest) after WASM init.
+   * Set the engine's multiplayer enforcement flag. While it is set, the Rust
+   * side refuses `restore_game_state` (undo) and refuses a local
+   * `initializeGame` — defense against any caller rewriting a multiplayer
+   * game.
+   *
+   * Nothing in the client turns it *on*: the engine claims it itself, in the
+   * same call that installs the host's game
+   * (`initializeMultiplayerHostGame`, `resumeMultiplayerHostState`). This
+   * method exists for the release side — `releaseHostSession` clears the flag
+   * when a host session ends.
    */
   async setMultiplayerMode(enabled: boolean): Promise<void> {
     this.assertInitialized();
@@ -669,7 +754,15 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
 
   async applySeatMutation(stateJson: string, mutationJson: string): Promise<unknown> {
     this.assertInitialized();
-    await this.ensureCardDb();
+    // No `ensureCardDb()` here: `apply_seat_mutation` never reads CARD_DB. Its
+    // `WasmDeckResolver` resolves only against the static `STARTER_DECKS` table
+    // (crates/engine/src/starter_decks.rs) and otherwise clones the passed-in
+    // name list, staying at the name-only layer — `initialize_game` re-resolves
+    // against CARD_DB when the game actually starts. (The Rust doc comment on
+    // `apply_seat_mutation` claiming it uses "the TLS card database" is stale;
+    // read the resolver, not the doc comment.) Warming a ~100 MB DB for every
+    // lobby seat change is pure cost, and on a host lobby it is a second
+    // resident copy alongside the shared worker's.
     if (this.engine) {
       const result = await this.engine.applySeatMutation(stateJson, mutationJson);
       this.invalidateAiDecisionDiagnostics();
@@ -783,6 +876,36 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     return this.fallback!.getCardRulings(cardName);
   }
 
+  /**
+   * End a multiplayer host session's hold on this adapter — the single
+   * authority for undoing a host session.
+   *
+   * A private host adapter is disposed outright (today's behaviour). The
+   * shared adapter keeps its worker — the card database and TurboFan-compiled
+   * code stay resident for the rest of the tab — and instead clears the
+   * multiplayer flag plus any game state the host installed. Branching on
+   * identity (`sharedAdapter === this`) rather than a stored mode flag mirrors
+   * `dispose()` below.
+   *
+   * `claimed` answers "did this host ever install engine state?", which only
+   * the caller knows. An unclaimed host must leave the shared engine
+   * completely untouched: a live local game may be running on it.
+   */
+  async releaseHostSession(claimed: boolean): Promise<void> {
+    if (sharedAdapter !== this) {
+      this.dispose();
+      return;
+    }
+    if (!claimed) return;
+    // No await between the two posts. `EngineWorkerClient.request` posts
+    // inside a synchronously-executed promise executor, and neither method
+    // awaits before reaching it, so the worker sees them back to back — an
+    // `initializeGame` from a later mount cannot land in between.
+    const flagCleared = this.setMultiplayerMode(false);
+    const stateCleared = this.resetGameState();
+    await Promise.all([flagCleared, stateCleared]);
+  }
+
   dispose(): void {
     this.setAiDecisionDiagnosticsEnabled(false);
     this.aiDecisionDiagnosticListeners.clear();
@@ -849,6 +972,50 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     return result;
   }
 
+  /**
+   * Start a P2P host's game. The engine refuses if it already holds a game and
+   * claims the multiplayer flag in the same call that installs the state, so a
+   * host sharing this worker with local play can neither destroy nor be
+   * destroyed by the other session. Rejects with
+   * `AdapterErrorCode.ENGINE_OCCUPIED` when the engine is occupied; nothing in
+   * the engine changed on that path, so callers have nothing to compensate.
+   */
+  async initializeMultiplayerHostGame(
+    deckData?: unknown,
+    formatConfig?: FormatConfig,
+    playerCount?: number,
+    matchConfig?: MatchConfig,
+    firstPlayer?: number,
+  ): Promise<SubmitResult> {
+    this.assertInitialized();
+    if (deckData) {
+      await this.ensureCardDb();
+    }
+    const seed = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
+    if (this.engine) {
+      const result = await this.engine.initializeMultiplayerHostGame(
+        deckData ?? null,
+        seed,
+        formatConfig ?? null,
+        matchConfig ?? null,
+        playerCount,
+        firstPlayer,
+      );
+      this.invalidateAiDecisionDiagnostics();
+      return result;
+    }
+    const result = await this.fallback!.initializeMultiplayerHostGame(
+      deckData ?? null,
+      seed,
+      formatConfig ?? null,
+      matchConfig ?? null,
+      playerCount,
+      firstPlayer,
+    );
+    this.invalidateAiDecisionDiagnostics();
+    return result;
+  }
+
   /** Expose the worker client for AI pool state export (Phase 4). */
   getEngineClient(): EngineWorkerClient | null {
     return this.engine;
@@ -900,11 +1067,43 @@ interface MainThreadFallback {
     playerCount?: number,
     firstPlayer?: number,
   ): Promise<SubmitResult>;
+  initializeMultiplayerHostGame(
+    deckData: unknown | null,
+    seed: number,
+    formatConfig: FormatConfig | null,
+    matchConfig: MatchConfig | null,
+    playerCount?: number,
+    firstPlayer?: number,
+  ): Promise<SubmitResult>;
   estimateBracketForDeck(deck: BracketDeckRequest): Promise<BracketEstimate | null>;
   evaluateDeckCompatibility(request: unknown): Promise<unknown>;
   getCardFaceData(cardName: string): Promise<unknown>;
   getCardParseDetails(cardName: string): Promise<unknown>;
   getCardRulings(cardName: string): Promise<unknown>;
+}
+
+/**
+ * Raise an initialize-envelope failure as the typed error the worker path
+ * raises for the same envelope (see `EngineWorkerClient`'s error handling).
+ * Both fallback initialize methods go through here — the fallback is a real
+ * supported path (worker creation failed), so a refusal must not surface as
+ * "Deck validation failed: …" on it either.
+ */
+function throwInitFailure(result: unknown): void {
+  const failure = classifyInitFailure(result);
+  if (!failure) return;
+  switch (failure.kind) {
+    case "bracketViolation":
+      throw new AdapterError(
+        AdapterErrorCode.BRACKET_VIOLATION,
+        failure.reasons.join("; ") || "cEDH bracket violation",
+        false,
+      );
+    case "engineOccupied":
+      throw new AdapterError(AdapterErrorCode.ENGINE_OCCUPIED, failure.message, false);
+    case "deckValidation":
+      throw new Error(failure.message);
+  }
 }
 
 async function createMainThreadFallback(): Promise<MainThreadFallback> {
@@ -1054,19 +1253,28 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
           playerCount ?? undefined,
           firstPlayer ?? undefined,
         );
-        if (r && typeof r === "object" && "error" in r && r.error) {
-          const envelope = r as { reasons?: string[]; cedh_bracket_violation?: boolean };
-          const reasons = envelope.reasons ?? [];
-          const message = `Deck validation failed: ${reasons.join("; ")}`;
-          if (envelope.cedh_bracket_violation) {
-            throw new AdapterError(
-              AdapterErrorCode.BRACKET_VIOLATION,
-              envelope.reasons?.join("; ") ?? "cEDH bracket violation",
-              false,
-            );
-          }
-          throw new Error(message);
-        }
+        throwInitFailure(r);
+        return { events: r.events ?? [], log_entries: r.log_entries ?? [] };
+      }),
+
+    initializeMultiplayerHostGame: (
+      deckData: unknown | null,
+      seed: number,
+      formatConfig: FormatConfig | null,
+      matchConfig: MatchConfig | null,
+      playerCount?: number,
+      firstPlayer?: number,
+    ) =>
+      enqueue(() => {
+        const r = wasm.initialize_multiplayer_host_game(
+          deckData,
+          seed,
+          formatConfig,
+          matchConfig,
+          playerCount ?? undefined,
+          firstPlayer ?? undefined,
+        );
+        throwInitFailure(r);
         return { events: r.events ?? [], log_entries: r.log_entries ?? [] };
       }),
 

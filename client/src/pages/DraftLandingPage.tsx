@@ -93,7 +93,7 @@ export function DraftLandingPage() {
 
             {/* Same bento action tiles as the home dashboard — one accent tone
                 per mode — so the draft landing shares the home card grammar. */}
-            <div className="grid grid-cols-1 gap-4 min-[640px]:grid-cols-3">
+            <div className="grid grid-cols-1 gap-4 min-[640px]:grid-cols-2">
               <MenuActionTile
                 tone="arcane"
                 motif="pack"
@@ -102,6 +102,15 @@ export function DraftLandingPage() {
                 enterLabel={tMenu("home.dashboard.enter")}
                 renderIcon={(cls) => <BotIcon className={cls} />}
                 onClick={() => navigate("/draft/quick")}
+              />
+              <MenuActionTile
+                tone="ember"
+                motif="pack"
+                title={t("landing.sealed.title")}
+                description={t("landing.sealed.description")}
+                enterLabel={tMenu("home.dashboard.enter")}
+                renderIcon={(cls) => <PackIcon className={cls} />}
+                onClick={() => navigate("/draft/quick?mode=sealed")}
               />
               <MenuActionTile
                 tone="ember"
@@ -213,6 +222,7 @@ function ActiveDraftCard({ meta }: { meta: ActiveQuickDraftMeta }) {
   function getPhaseLabel(): string {
     switch (meta.phase) {
       case "drafting": return t("quickPhase.drafting");
+      case "opening": return t("quickPhase.opening");
       case "deckbuilding": return t("quickPhase.deckbuilding");
       case "playing": {
         const w = meta.runWins ?? 0;
@@ -225,6 +235,7 @@ function ActiveDraftCard({ meta }: { meta: ActiveQuickDraftMeta }) {
       case "complete":
         return t("quickPhase.runComplete", { wins: meta.runWins ?? 0, losses: meta.runLosses ?? 0 });
     }
+    return t("quickPhase.drafting");
   }
 
   function handleClick() {
@@ -304,6 +315,14 @@ function CubeIcon({ className = "h-6 w-6" }: { className?: string }) {
   return (
     <svg aria-hidden="true" viewBox="0 0 24 24" className={`${className} fill-current`}>
       <path d="M12 2.4 3.5 6.8v10.4L12 21.6l8.5-4.4V6.8L12 2.4Zm0 2.25 5.55 2.88L12 10.4 6.45 7.53 12 4.65Zm-6.5 4.5 5.5 2.85v6.8l-5.5-2.85v-6.8Zm7.5 9.65V12l5.5-2.85v6.8L13 18.8Z" />
+    </svg>
+  );
+}
+
+function PackIcon({ className = "h-6 w-6" }: { className?: string }) {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" className={`${className} fill-current`}>
+      <path d="M5.25 2.5h13.5l1.75 19H3.5l1.75-19ZM7.1 4.5 5.72 19.5h12.56L16.9 4.5H7.1Zm4.9 2.25 2.75 3.75L12 14.25 9.25 10.5 12 6.75Z" />
     </svg>
   );
 }

@@ -1191,6 +1191,7 @@ mod tests {
         );
 
         state.waiting_for = WaitingFor::NamedChoice {
+            free_entry: None,
             player: PlayerId(1),
             choice_type: ChoiceType::CardName,
             options: Vec::new(),
@@ -1317,6 +1318,7 @@ mod tests {
                     card_id: CardId(100),
                     controller: PlayerId(0),
                     object_id: cast_obj,
+                    cast_mana_value: None,
                 }],
                 log_entries: Vec::new(),
             },

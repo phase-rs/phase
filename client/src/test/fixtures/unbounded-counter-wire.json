@@ -1,15 +1,24 @@
 {
-  "unbounded_counters": {
-    "405": [
-      "charge"
-    ]
+  "counter_display": {
+    "405": {
+      "pills": [
+        {
+          "count": 4,
+          "counter": "charge",
+          "magnitude": "Unbounded"
+        }
+      ]
+    }
   },
   "unbounded_families": [
     {
       "family": "counters",
       "player": 0,
       "state": {
-        "data": "Committed",
+        "data": {
+          "certainty": "Committed",
+          "prompted": 0
+        },
         "type": "Scheduled"
       }
     }

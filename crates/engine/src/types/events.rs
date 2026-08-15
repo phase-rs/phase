@@ -10,7 +10,7 @@ use super::ability::{
 };
 use super::card::PrintedCardRef;
 use super::card_type::{CardType, CoreType, Supertype};
-use super::game_state::ZoneChangeRecord;
+use super::game_state::{TriggerSourceContext, ZoneChangeRecord};
 use super::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
 use super::keywords::Keyword;
 use super::mana::ManaCost;
@@ -85,6 +85,23 @@ pub enum ManaTapState {
     FromTapTriggersResolved,
 }
 
+/// CR 605.4a: Records whether the triggered mana abilities coupled to one
+/// aggregate mana-ability production event have already resolved inline.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ManaAbilityTriggerState {
+    /// Coupled triggered mana abilities have not yet resolved.
+    #[default]
+    Pending,
+    /// Coupled triggered mana abilities resolved inline during a payment.
+    InlineResolved,
+}
+
+impl ManaAbilityTriggerState {
+    pub fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending)
+    }
+}
+
 /// CR 602.2 + CR 606.2: Discriminates how an activated ability was activated so
 /// that "Whenever you activate a loyalty ability" triggers (CR 606.2) can be told
 /// apart from ordinary activated abilities (CR 602.2) while both share the single
@@ -145,6 +162,19 @@ pub enum PlayerActionKind {
     Proliferate,
     /// CR 701.16a: A player investigated (created a Clue token).
     Investigate,
+    /// CR 701.61a: A player foraged by exiling three cards from their graveyard
+    /// or sacrificing a Food.
+    Forage,
+    /// A player completed a draw instruction that delivered at least
+    /// one card. Emitted once per settled draw INSTRUCTION (at draw-sequence
+    /// completion), not once per card — so a multi-card draw records a single
+    /// event. Recorded so "for each opponent who drew a card this way" (Cut a
+    /// Deal) resolves via `PlayerFilter::PerformedActionThisWay` — a count over
+    /// players, not objects — and so `PlayerActionsThisTurn { Draw }` would count
+    /// draw events rather than cards. `player_actions_this_way` (a set) counts the
+    /// drawing player once; a draw that delivered no card (empty library, or every
+    /// unit replaced away) emits nothing because that player did not draw.
+    Draw,
 }
 
 /// CR 701.30d: Result of a clash — whether the controller won, lost, or tied.
@@ -473,6 +503,7 @@ impl EventObjectSnapshot {
             // semantics for a nonsensical player-Connives subject rather than inventing one.
             TargetFilter::Player
             | TargetFilter::Controller
+            | TargetFilter::SourceController
             | TargetFilter::Opponent
             | TargetFilter::Owner
             | TargetFilter::AllPlayers
@@ -691,6 +722,9 @@ impl EventObjectSnapshot {
             | FilterProp::ManaSymbolCount { .. }
             | FilterProp::Foretold
             | FilterProp::HasAdventure
+            // CR 607.2a: This compares against an object linked in the live
+            // exile-link side table, which event snapshots deliberately omit.
+            | FilterProp::SameNameAsExiledBySource
             | FilterProp::AttachedToSource
             | FilterProp::AttachedToRecipient
             | FilterProp::Unpaired
@@ -740,6 +774,11 @@ pub enum GameEvent {
         card_id: CardId,
         controller: PlayerId,
         object_id: ObjectId, // CR 601.2a: The spell object on the stack
+        /// CR 202.3e + CR 601.2i: Mana value while this cast was on the stack,
+        /// including the announced value of X. Optional for legacy and
+        /// synthetic events that do not carry cast-time characteristics.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cast_mana_value: Option<u32>,
     },
     /// CR 702.140c + CR 730.2: A mutating creature spell merged with a target
     /// creature, forming a mutated permanent. Emitted by
@@ -857,6 +896,16 @@ pub enum GameEvent {
         /// guard and the inline resolver's Pass-2 flip key off this.
         #[serde(default, skip_serializing_if = "ManaTapState::is_not_from_tap")]
         tap_state: ManaTapState,
+    },
+    /// CR 605.1b: An activated mana ability resolved and produced mana. Unlike
+    /// `ManaAdded`, this is one aggregate event per ability resolution; unlike
+    /// `TappedForMana`, it also covers mana abilities without a tap cost.
+    ManaAbilityProduced {
+        player_id: PlayerId,
+        source_id: ObjectId,
+        produced: Vec<ManaType>,
+        #[serde(default, skip_serializing_if = "ManaAbilityTriggerState::is_pending")]
+        trigger_state: ManaAbilityTriggerState,
     },
     /// CR 500.5 + CR 703.4q: A single mana unit was emptied from a player's
     /// pool during the step-end empty event after the CR 616.1 replacement
@@ -1037,6 +1086,53 @@ pub enum GameEvent {
         object_id: ObjectId,
         counter_type: CounterType,
         count: u32,
+        // CR 122.1 + CR 603.2c: the player who put the counters, so "whenever
+        // you/an opponent put one or more counters" triggers can gate on the
+        // actor. Defaults to `PlayerId(0)` on pre-field serialized fixtures.
+        #[serde(default)]
+        actor: PlayerId,
+    },
+    /// CR 714.2 + CR 608.2p: A Saga's chapter ability finished resolving.
+    ///
+    /// CR 608.2p is the rule this event exists to serve: once every resolution
+    /// step is completed, abilities that trigger on that ability resolving
+    /// trigger. Nothing else on the bus reports that moment for a chapter
+    /// ability.
+    ///
+    /// A chapter ability is not a distinct AST concept — CR 714.2b defines a
+    /// chapter symbol as a lore-counter threshold trigger on the Saga itself.
+    /// This event is the resolution half of that ability's lifecycle, which
+    /// nothing else on the bus reports: `StackResolved` is emitted for fizzles
+    /// and failed intervening-ifs too, and carries the stack entry id rather
+    /// than the Saga.
+    ///
+    /// `chapter` and `final_chapter` are captured BEFORE the chapter ability
+    /// executes, because a chapter ability may remove its own Saga from the
+    /// battlefield as its effect (Fable of the Mirror-Breaker III), and CR 714.4
+    /// sacrifices it as soon as the ability leaves the stack — after which
+    /// neither number could be re-derived.
+    SagaChapterAbilityResolved {
+        /// CR 400.7 + CR 113.7a: The exact Saga incarnation whose chapter ability
+        /// resolved, with the characteristics it had when the ability triggered.
+        ///
+        /// The trigger's own source context, not a raw `ObjectId`, for the same
+        /// reason `ConniveSubject` carries a snapshot: a chapter ability already
+        /// on the stack still resolves after its Saga leaves and re-enters, and
+        /// the re-entered permanent can occupy the same storage id. A bare id
+        /// would let an observer's "that Saga" bind to the NEW incarnation and
+        /// read its mana value (CR 202.3); suppressing the event instead would
+        /// lose an occurrence that genuinely resolved. Carrying the context does
+        /// neither — `identity.reference` pins the incarnation and `lki` answers
+        /// every characteristic an observer can ask about.
+        saga: Box<TriggerSourceContext>,
+        /// CR 109.5: controller of the resolved chapter ability.
+        controller: PlayerId,
+        /// CR 714.2b: the chapter number (lore threshold) that resolved.
+        chapter: u32,
+        /// CR 714.2d: the greatest chapter number among this Saga's chapter
+        /// abilities. Per CR 714.2e, `chapter == final_chapter` is exactly what
+        /// makes this the Saga's *final* chapter ability.
+        final_chapter: u32,
     },
     /// Digital-only Alchemy (no CR entry): a card's intensity increased by
     /// `amount`. Emitted per affected card so consumers (triggers that watch for
@@ -1160,6 +1256,7 @@ pub enum GameEvent {
     BecomesTarget {
         target: TargetRef,
         source_id: ObjectId,
+        source_controller: PlayerId,
     },
     /// CR 702.122e: A Vehicle's crew ability resolved.
     /// Carries creature list for trigger conditions that reference "creatures that crewed it".
@@ -1228,6 +1325,20 @@ pub enum GameEvent {
         card_ids: Vec<ObjectId>,
         card_names: Vec<String>,
     },
+    /// CR 101.4 + CR 608.2c: Secretly-chosen numbers were published by a reveal
+    /// instruction ("then all players reveal those numbers simultaneously" —
+    /// Wheel of Misfortune). One event carries every number published by the
+    /// single instruction, because the card reveals them SIMULTANEOUSLY; a
+    /// per-player event would imply an ordering the rules do not have.
+    ///
+    /// Distinct from `CardsRevealed`, which is CR 701.20 (showing a card). This
+    /// is the game log's and the frontend's view of the secret→public
+    /// transition that `game::visibility` enforces on
+    /// `ChosenAttribute::RevealedNumber`.
+    ChosenNumbersRevealed {
+        /// Each revealing player and the number they had chosen, in APNAP order.
+        numbers: Vec<(PlayerId, u32)>,
+    },
     CombatDamageDealtToPlayer {
         player_id: PlayerId,
         /// CR 120.1 + CR 510.2: Per-source combat damage amounts for this
@@ -1284,6 +1395,12 @@ pub enum GameEvent {
         /// completed nonzero scry that left every looked-at card on top.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scry_bottom_count: Option<u32>,
+        /// CR 701.22a: Number of cards the player kept on top during a
+        /// completed scry. This is presentation data paired with the bottom
+        /// count; it lets observers display the public outcome without
+        /// reconstructing it from hidden-zone data.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scry_top_count: Option<u32>,
     },
     /// Engine-authored diagnostic for top-card predicate
     /// guesses. This is intentionally a log/debug event rather than rules input:

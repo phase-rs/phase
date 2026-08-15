@@ -55,6 +55,7 @@ fn room_back_face() -> BackFaceData {
         casting_restrictions: Vec::new(),
         casting_options: Vec::new(),
         layout_kind: Some(LayoutKind::Split),
+        parse_warnings: vec![],
     }
 }
 

@@ -194,7 +194,9 @@ export function groupAttackers(
   // `∞` like the battlefield (mirrors buildPlayerBattlefieldView in gameStateView.ts).
   const unboundedPileIds = new Set(state.derived?.unbounded_pile ?? []);
 
-  return groupByName(objects, ringBearerIds, unboundedPileIds)
+  // CR 122.1: the engine's counter-display projection is part of the group IDENTITY, so attacker
+  // stacks split exactly where the battlefield does (mirrors buildPlayerBattlefieldView).
+  return groupByName(objects, ringBearerIds, unboundedPileIds, state.derived?.counter_display)
     .flatMap((group) =>
       subdivideByTargets(
         [...group.ids],

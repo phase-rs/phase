@@ -22,10 +22,15 @@
     "shorten": "Break out",
     "decline": "Decline the shortcut",
     "untilLethal": "Repeat until the game ends.",
-    "fixedCount_one": "Repeat once.",
-    "fixedCount_other": "Repeat {{count}} times.",
+    "fixedCount_one": "Repeat at most once.",
+    "fixedCount_other": "Repeat at most {{count}} times.",
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
     "convokeInfo_other": "Auto-taps up to {{count}} creatures for convoke each iteration.",
+    "countAria": "Number of iterations",
+    "previewTitle_one": "Repeating once produces:",
+    "previewTitle_other": "Repeating {{count}} times produces:",
+    "previewEntry": "{{amount}} {{resource}}",
+    "previewEntryPlayer": "{{amount}} {{resource}} — {{player}}",
     "winKind": {
       "LethalDamage": "This loop deals lethal damage.",
       "PoisonLoss": "This loop gives lethal poison counters.",
@@ -51,6 +56,7 @@
     "expand": "Expand resolving progress"
   },
   "debugCreate": {
+    "copies": "Copies",
     "tokenPower": "Power",
     "tokenToughness": "Toughness",
     "tokenPowerPlaceholder": "Power",
@@ -524,8 +530,10 @@
     "companion": "Companion",
     "unboundedTooltip": "Unbounded {{resource}} (∞)",
     "unboundedScheduledTooltip": "Unbounded {{resource}} (∞) — collapse pending; a finite amount will be chosen",
+    "unboundedScheduledYouTooltip": "Unbounded {{resource}} (∞) — collapse pending; you'll name the count",
     "unboundedScheduledGlyph": "∞→N",
     "unboundedConditionalTooltip": "Unbounded {{resource}} (∞) — collapse pending; this may stay unbounded",
+    "unboundedConditionalYouTooltip": "Unbounded {{resource}} (∞) — collapse pending; this may stay unbounded, and you'll name the count if it doesn't",
     "unboundedMixedTooltip": "Unbounded {{resource}} (∞) — part of this group has a pending collapse; part remains unbounded",
     "unboundedConditionalGlyph": "∞→?",
     "unboundedManaPoolMarker": "Unbounded mana (∞)",
@@ -1850,6 +1858,10 @@
     "title": "Choose Gift Recipient",
     "subtitle": "Choose which opponent receives the promised gift."
   },
+  "entryController": {
+    "title": "Choose Entry Controller",
+    "subtitle": "Choose which opponent controls this permanent as it enters."
+  },
   "optionalCost": {
     "gift": {
       "title": "Promise a gift?",
@@ -2083,6 +2095,7 @@
     "searchPlaceholder": "Search by name...",
     "noCardsFound": "No cards found",
     "buttonSubtitle": "Select one option",
+    "numberSubtitle": "Enter a whole number {{min}} or greater",
     "filterPlaceholder": "Filter options...",
     "noOptionsMatch": "No options match"
   },

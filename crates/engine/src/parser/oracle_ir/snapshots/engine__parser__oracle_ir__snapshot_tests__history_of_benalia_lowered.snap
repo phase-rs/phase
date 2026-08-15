@@ -71,6 +71,7 @@ expression: "&lowered"
         "counter_type": "lore",
         "threshold": 1
       },
+      "saga_chapter": 1,
       "batched": false
     },
     {
@@ -139,6 +140,7 @@ expression: "&lowered"
         "counter_type": "lore",
         "threshold": 2
       },
+      "saga_chapter": 2,
       "batched": false
     },
     {
@@ -197,6 +199,7 @@ expression: "&lowered"
         "counter_type": "lore",
         "threshold": 3
       },
+      "saga_chapter": 3,
       "batched": false
     }
   ],

@@ -10,8 +10,8 @@ use std::collections::BTreeSet;
 
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ChoiceType,
-    ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition, DigSource,
-    Duration, Effect, EffectScope, FilterProp, LibraryPosition, ManaProduction,
+    ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition, DigRestOrder,
+    DigSource, Duration, Effect, EffectScope, FilterProp, LibraryPosition, ManaProduction,
     ManaSpendRestriction, ModalSelectionConstraint, MultiTargetSpec, PileSource, PlayerFilter,
     PlayerScope, PtValue, QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality,
     StaticDefinition, TapStateChange, TargetFilter, TriggerDefinition, TypedFilter, VoterScope,
@@ -245,11 +245,20 @@ impl VariableBindings {
     /// typed constraint from the outer `Actions::Targeted` wrapper. This
     /// preserves the typed target slot so the engine can prompt for targets
     /// at cast/activation time (CR 601.2c).
+    ///
+    /// Selection continuations (`is_selection_continuation`) are skipped: their
+    /// `TargetFilter::Any` is bound by the preceding effect's choice, not a
+    /// target slot the outer wrapper may constrain.
     fn rewrite_target_filters(&self, effects: &mut [Effect]) {
         let Some(typed) = &self.target_filter else {
             return;
         };
-        for effect in effects.iter_mut() {
+        for idx in 0..effects.len() {
+            let (preceding, from_here) = effects.split_at_mut(idx);
+            let effect = &mut from_here[0];
+            if is_selection_continuation(preceding.last(), effect) {
+                continue;
+            }
             rewrite_any_target_filter_in_effect(effect, typed);
         }
     }
@@ -3230,8 +3239,10 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
+            rest_order: DigRestOrder::Preserve,
             reveal: false,
             enter_tapped: false,
+            enters_attacking: false,
             source: DigSource::Library,
         },
 
@@ -4420,10 +4431,10 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         // are out of range or inverted (defensive — the engine would generate
         // a degenerate option list).
         Action::ChooseANumberBetween(min, max) => {
-            let (Ok(min_u8), Ok(max_u8)) = (u8::try_from(*min), u8::try_from(*max)) else {
+            let (Ok(min_u8), Ok(max_u8)) = (u32::try_from(*min), u32::try_from(*max)) else {
                 return Err(ConversionGap::EnginePrerequisiteMissing {
                     engine_type: "ChoiceType::NumberRange",
-                    needed_variant: format!("number-range bounds out of u8 ({min}, {max})"),
+                    needed_variant: format!("number-range bounds out of u32 ({min}, {max})"),
                 });
             };
             if min_u8 > max_u8 {
@@ -4435,7 +4446,10 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             Effect::Choose {
                 choice_type: ChoiceType::NumberRange {
                     min: min_u8,
-                    max: max_u8,
+                    // CR 107.1a: "between X and Y" states an upper bound, so this
+                    // converts to the BOUNDED form. The unbounded engine shape is
+                    // reserved for text that states no maximum.
+                    max: Some(max_u8),
                     distinctness: engine::types::ability::NumberDistinctness::Repeatable,
                 },
                 persist: true,
@@ -4893,8 +4907,10 @@ fn convert_look_at_top(
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
+            rest_order: DigRestOrder::Preserve,
             reveal: false,
             enter_tapped: false,
+            enters_attacking: false,
             source: DigSource::Library,
         }),
 
@@ -4913,8 +4929,17 @@ fn convert_look_at_top(
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: Some(Zone::Library),
+                rest_order: if matches!(
+                    dispositions.last(),
+                    Some(L::PutTheRemainingCardsOnTheBottomOfLibraryInARandomOrder)
+                ) {
+                    DigRestOrder::Random
+                } else {
+                    DigRestOrder::Preserve
+                },
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -4932,8 +4957,10 @@ fn convert_look_at_top(
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_order: DigRestOrder::Preserve,
                 reveal: false,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -4954,8 +4981,17 @@ fn convert_look_at_top(
                 up_to: true,
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: Some(Zone::Library),
+                rest_order: if matches!(
+                    dispositions.last(),
+                    Some(L::PutTheRemainingCardsOnTheBottomOfLibraryInARandomOrder)
+                ) {
+                    DigRestOrder::Random
+                } else {
+                    DigRestOrder::Preserve
+                },
                 reveal: true,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -4972,8 +5008,10 @@ fn convert_look_at_top(
                 up_to: true,
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: Some(Zone::Graveyard),
+                rest_order: DigRestOrder::Preserve,
                 reveal: true,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -5033,8 +5071,10 @@ fn convert_reveal_top_dig(
                 up_to: true,
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: None,
+                rest_order: DigRestOrder::Preserve,
                 reveal: true,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -5048,8 +5088,10 @@ fn convert_reveal_top_dig(
                 up_to: false,
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: None,
+                rest_order: DigRestOrder::Preserve,
                 reveal: true,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -5063,8 +5105,10 @@ fn convert_reveal_top_dig(
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_order: DigRestOrder::Preserve,
                 reveal: true,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -5079,8 +5123,17 @@ fn convert_reveal_top_dig(
                 up_to: true,
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: Some(Zone::Library),
+                rest_order: if matches!(
+                    dispositions.last(),
+                    Some(RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsOnTheBottomOfLibraryInARandomOrder)
+                ) {
+                    DigRestOrder::Random
+                } else {
+                    DigRestOrder::Preserve
+                },
                 reveal: true,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -5095,8 +5148,17 @@ fn convert_reveal_top_dig(
                 up_to: false,
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: Some(Zone::Library),
+                rest_order: if matches!(
+                    dispositions.last(),
+                    Some(RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsOnTheBottomOfLibraryInARandomOrder)
+                ) {
+                    DigRestOrder::Random
+                } else {
+                    DigRestOrder::Preserve
+                },
                 reveal: true,
                 enter_tapped: false,
+                enters_attacking: false,
                 source: DigSource::Library,
             })
         }
@@ -5644,19 +5706,34 @@ fn apply_player_target_chain(
 ) -> ConvResult<Vec<Effect>> {
     let mut out = Vec::with_capacity(effects.len());
     for effect in effects {
-        let hand_selection_continuation = matches!(out.last(), Some(Effect::RevealHand { .. }))
-            && is_selected_hand_exile_continuation(&effect);
-        let library_selection_continuation =
-            matches!(out.last(), Some(Effect::SearchLibrary { .. }))
-                && is_search_library_change_zone_continuation(&effect);
-
-        if hand_selection_continuation || library_selection_continuation {
+        if is_selection_continuation(out.last(), &effect) {
             out.push(effect);
         } else {
             out.push(apply_player_target(effect, target_filter.clone())?);
         }
     }
     Ok(out)
+}
+
+/// CR 115.1 + CR 601.2c: Does `effect` consume a selection already bound by the
+/// immediately preceding effect — the card found by `Effect::SearchLibrary`, the
+/// card chosen by `Effect::RevealHand` — rather than declare a target slot of
+/// its own?
+///
+/// Such an effect's `TargetFilter::Any` is structural: the engine resolves it
+/// from the continuation the previous effect installed, so no player or typed
+/// constraint from an enclosing wrapper may overwrite it. Both rebinding passes
+/// (`apply_player_target_chain` for the `SearchPlayersLibrary` player axis and
+/// `VariableBindings::rewrite_target_filters` for the outer `Actions::Targeted`
+/// typed axis) route through this single predicate — an outer wrapper that
+/// clobbered the slot would retarget the move at an arbitrary permanent the
+/// bound player controls instead of the card the search selected.
+fn is_selection_continuation(preceding: Option<&Effect>, effect: &Effect) -> bool {
+    match preceding {
+        Some(Effect::RevealHand { .. }) => is_selected_hand_exile_continuation(effect),
+        Some(Effect::SearchLibrary { .. }) => is_search_library_change_zone_continuation(effect),
+        _ => false,
+    }
 }
 
 fn is_selected_hand_exile_continuation(effect: &Effect) -> bool {

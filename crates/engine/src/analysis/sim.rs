@@ -313,6 +313,7 @@ mod tests {
                 card_id: CardId(5),
                 controller: PlayerId(0),
                 object_id: ObjectId(22),
+                cast_mana_value: None,
             },
             GameEvent::PhaseChanged {
                 phase: Phase::BeginCombat,
@@ -339,6 +340,7 @@ mod tests {
                 action: PlayerActionKind::Proliferate,
                 look_count: None,
                 scry_bottom_count: None,
+                scry_top_count: None,
             },
         ];
 
@@ -410,6 +412,7 @@ mod tests {
                 action: PlayerActionKind::Scry,
                 look_count: None,
                 scry_bottom_count: None,
+                scry_top_count: None,
             }],
         );
         assert!(acc.generic_triggers.is_empty());
