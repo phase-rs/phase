@@ -41667,6 +41667,78 @@ fn multi_zone_player_exile_matcher_recognizes_zone_union() {
     );
 }
 
+/// CR 701.23a + CR 608.2c: Doomsday searches the controller's library and
+/// graveyard, exiles the searched-zone complement of the selected cards, then
+/// leaves the selected cards in the library for the explicit ordering step.
+#[test]
+fn doomsday_search_exiles_rest_and_orders_chosen_cards() {
+    let def = parse_effect_chain(
+        "Search your library and graveyard for five cards and exile the rest. Put the chosen cards on top of your library in any order. You lose half your life, rounded up.",
+        AbilityKind::Spell,
+    );
+
+    let Effect::SearchLibrary {
+        count,
+        source_zones,
+        target_player,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!("expected SearchLibrary root, got {:?}", def.effect);
+    };
+    assert_eq!(*count, QuantityExpr::Fixed { value: 5 });
+    assert_eq!(source_zones, &vec![Zone::Graveyard, Zone::Library]);
+    assert_eq!(*target_player, None);
+
+    let exile = def
+        .sub_ability
+        .as_deref()
+        .expect("expected an exile-rest continuation");
+    let Effect::ChangeZoneAll {
+        target,
+        destination,
+        ..
+    } = exile.effect.as_ref()
+    else {
+        panic!(
+            "expected ChangeZoneAll exile-rest step, got {:?}",
+            exile.effect
+        );
+    };
+    assert_eq!(*destination, Zone::Exile);
+    assert_eq!(
+        *target,
+        TargetFilter::Typed(
+            TypedFilter::default()
+                .controller(ControllerRef::You)
+                .properties(vec![
+                    FilterProp::InAnyZone {
+                        zones: vec![Zone::Graveyard, Zone::Library],
+                    },
+                    FilterProp::Not {
+                        prop: Box::new(FilterProp::InTrackedSet {
+                            id: TrackedSetId(0),
+                        }),
+                    },
+                ]),
+        )
+    );
+
+    let put = exile
+        .sub_ability
+        .as_deref()
+        .expect("expected chosen-card ordering continuation");
+    assert!(matches!(
+        put.effect.as_ref(),
+        Effect::PutAtLibraryPosition {
+            target: TargetFilter::Any,
+            count: QuantityExpr::Fixed { value: 0 },
+            position: LibraryPosition::Top,
+        }
+    ));
+    assert!(!ability_chain_has_unimplemented(&def));
+}
+
 /// CR 701.12a: Tree of Perdition / Tree of Redemption / Evra — "exchange
 /// <player>'s life total with ~'s power/toughness" parses to
 /// `ExchangeLifeWithStat` with the right player filter and stat, not the

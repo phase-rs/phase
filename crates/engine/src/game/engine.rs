@@ -18565,9 +18565,31 @@ mod stage2_injector_tests {
                 // NOTE on the prose above from main: that entry's "total still 37,
                 // partition still 5/7/25" describes an older census. The asserts in this
                 // file read 38 and 5/8/25, and both fired GREEN on the merged tree.
-                "game/effects/mod.rs:6767".to_string(),
-                "game/effects/mod.rs:6844".to_string(),
-                "game/effects/mod.rs:10082".to_string(),
+                //
+                // FIFTH MERGE (this branch × `origin/main` @ `0f37d27b`, Doomsday).
+                // Main's own entry for this round, preserved: "#7403/#7389 move main's
+                // three production pins to `:6738/:6815/:10053`; the Doomsday tracked-set
+                // publication adds seven lines above each. Re-measured in this merged
+                // tree: `:6745/:6822/:10060`. The three sites remain the existing
+                // producers." That is main's coordinate, correct for main.
+                //
+                // Neither side taken, again. Main carried `:6745/:6822/:10060` and this
+                // branch carried `:6767/:6844/:10082`; the merged file measures
+                // `:6774/:6851/:10089`.
+                //
+                // Predicted with the CUMULATIVE offset, which is the lesson the previous
+                // entry records: main's `:6745` plus this branch's `+29` net insertion
+                // into effects/mod.rs gives `6745+29`/`6822+29`/`10060+29` =
+                // `:6774`/`:6851`/`:10089`, equal to the measurement. Main's `+7`
+                // (Doomsday) and this branch's `+29` compose additively, which is the
+                // set-preservation evidence: a merge that gained or lost a producer would
+                // break the additivity rather than merely shift a pin.
+                //
+                // Identity re-established: `9869a19f…`, `2bc316e3…`, `8df98486…` at the
+                // new coordinates. The other two entries did not move.
+                "game/effects/mod.rs:6774".to_string(),
+                "game/effects/mod.rs:6851".to_string(),
+                "game/effects/mod.rs:10089".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.

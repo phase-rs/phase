@@ -5196,7 +5196,14 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
         }
     }
     if let Effect::ChangeZoneAll { target, .. } = effect {
-        if filter_references_tracked_set(target) {
+        // CR 608.2c: a mass zone move can consume the selected set through a
+        // typed property as well as a bare `TrackedSet` leg. In particular,
+        // "exile the rest" uses `Not(InTrackedSet)` inside its typed filter;
+        // the search choice must publish its chosen set before this effect
+        // resolves or that complement would include the chosen cards too.
+        if filter_references_tracked_set(target)
+            || filter_properties_reference_tracked_membership(target)
+        {
             return true;
         }
     }

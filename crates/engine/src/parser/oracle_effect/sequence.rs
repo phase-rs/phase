@@ -280,7 +280,10 @@ fn parse_put_chosen_cards_at_library_position(lower: &str) -> Option<LibraryPosi
     value(
         LibraryPosition::Top,
         all_consuming((
-            tag::<_, _, OracleError<'_>>("put those cards on top"),
+            alt((
+                tag::<_, _, OracleError<'_>>("put those cards on top"),
+                tag("put the chosen cards on top"),
+            )),
             opt(alt((
                 tag(" of your library"),
                 tag(" of their owner's library"),
@@ -844,7 +847,7 @@ fn parse_put_one_dig_card_on_top(lower: &str) -> Option<DigRestOrder> {
     Some(order.unwrap_or(DigRestOrder::Preserve))
 }
 
-fn parse_exile_rest_after_dig(lower: &str) -> bool {
+fn parse_exile_rest_clause(lower: &str) -> bool {
     (
         tag::<_, _, OracleError<'_>>("exile the rest"),
         opt(tag(".")),
@@ -4764,6 +4767,63 @@ pub(super) fn apply_clause_continuation(
             );
             append_definition_to_sub_chain(previous, put_def);
         }
+        ContinuationAst::ExileSearchRemainder => {
+            let Some(previous) = defs.last_mut() else {
+                return;
+            };
+            // Recognition only constructs this continuation after
+            // `SearchLibrary { target_player: None, source_zones.len() >= 2 }`.
+            // Keep that invariant loud here: this continuation is absorbed, so
+            // silently returning would otherwise discard "exile the rest"
+            // without emitting the required zone move.
+            let Effect::SearchLibrary {
+                source_zones,
+                target_player: None,
+                ..
+            } = &*previous.effect
+            else {
+                unreachable!(
+                    "ExileSearchRemainder must immediately follow a self multi-zone SearchLibrary"
+                );
+            };
+            // CR 701.23a + CR 400.3: the preceding search selected from each
+            // listed zone, so `origin: None` lets this mass move scan both the
+            // library and graveyard constrained by `InAnyZone` below.
+            // CR 608.2c: the selected cards are the search's tracked result;
+            // exclude that set so only the unchosen remainder is exiled.
+            let target = TargetFilter::Typed(
+                TypedFilter::default()
+                    .controller(ControllerRef::You)
+                    .properties(vec![
+                        FilterProp::InAnyZone {
+                            zones: source_zones.clone(),
+                        },
+                        FilterProp::Not {
+                            prop: Box::new(FilterProp::InTrackedSet {
+                                id: crate::types::identifiers::TrackedSetId(0),
+                            }),
+                        },
+                    ]),
+            );
+            append_definition_to_sub_chain(
+                previous,
+                AbilityDefinition::new(
+                    kind,
+                    Effect::ChangeZoneAll {
+                        origin: None,
+                        destination: Zone::Exile,
+                        target,
+                        enters_under: None,
+                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                        enters_attacking: false,
+                        enter_with_counters: vec![],
+                        face_down_profile: None,
+                        library_position: None,
+                        random_order: false,
+                    },
+                ),
+            );
+        }
         ContinuationAst::BecomesPlotted => {
             let Some(previous) = defs.last_mut() else {
                 return;
@@ -5317,6 +5377,10 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::PutChoiceRemainderOnBottom => true,
         ContinuationAst::ChoicePartitionDestinations { .. } => true,
         ContinuationAst::PutChosenCardsAtLibraryPosition { .. } => true,
+        // Recognition is gated on a self multi-zone SearchLibrary, and lowering
+        // appends its `ChangeZoneAll` child. It is therefore safe to absorb the
+        // clause rather than emit an `Unimplemented` sibling.
+        ContinuationAst::ExileSearchRemainder => true,
         ContinuationAst::BecomesPlotted => true,
         ContinuationAst::BecomesForetold => true,
         ContinuationAst::EntersTappedAttacking { .. } => true,
@@ -5389,6 +5453,7 @@ pub(super) fn parse_intrinsic_continuation_ast(
                     || nom_primitives::scan_contains(&full_lower, "put the card on top")
                     || nom_primitives::scan_contains(&full_lower, "put them on top")
                     || nom_primitives::scan_contains(&full_lower, "put those cards on top")
+                    || nom_primitives::scan_contains(&full_lower, "put the chosen cards on top")
                     || (nom_primitives::scan_contains(&full_lower, "put that card")
                         && nom_primitives::scan_contains(&full_lower, "from the top"));
             if has_positional_put {
@@ -6927,6 +6992,13 @@ pub(super) fn parse_followup_continuation_ast(
                 rest_order: DigRestOrder::Preserve,
             })
         }
+        Effect::SearchLibrary {
+            source_zones,
+            target_player: None,
+            ..
+        } if source_zones.len() >= 2 && parse_exile_rest_clause(&lower) => {
+            Some(ContinuationAst::ExileSearchRemainder)
+        }
         Effect::SearchLibrary { .. } | Effect::Shuffle { .. } | Effect::Dig { .. }
             if parse_put_chosen_cards_at_library_position(&lower).is_some() =>
         {
@@ -6947,7 +7019,7 @@ pub(super) fn parse_followup_continuation_ast(
         }
         // "Exile the rest" after Dig — sets rest_destination on the preceding
         // looked-at pile while preserving any prior kept-card destination.
-        Effect::Dig { .. } if parse_exile_rest_after_dig(&lower) => {
+        Effect::Dig { .. } if parse_exile_rest_clause(&lower) => {
             Some(ContinuationAst::PutRest {
                 destination: Zone::Exile,
                 reorder_all: false,
@@ -8298,7 +8370,7 @@ pub(super) fn try_parse_scoped_does_the_same(text: &str) -> Option<PlayerFilter>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::QuantityExpr;
+    use crate::types::ability::{QuantityExpr, SearchSelectionConstraint};
 
     #[test]
     fn face_down_pile_is_dig_lookback_transparent() {
@@ -11836,6 +11908,71 @@ mod tests {
             Some(ContinuationAst::PutChosenCardsAtLibraryPosition {
                 position: LibraryPosition::Top,
             })
+        );
+    }
+
+    #[test]
+    fn put_the_chosen_cards_on_top_parses_as_library_position_continuation() {
+        let search = Effect::SearchLibrary {
+            filter: TargetFilter::Any,
+            count: QuantityExpr::Fixed { value: 5 },
+            reveal: false,
+            target_player: None,
+            selection_constraint: SearchSelectionConstraint::None,
+            split: None,
+            source_zones: vec![Zone::Graveyard, Zone::Library],
+        };
+        let result = parse_followup_continuation_ast(
+            "Put the chosen cards on top of your library in any order.",
+            &search,
+            &mut ParseContext::default(),
+        );
+        assert_eq!(
+            result,
+            Some(ContinuationAst::PutChosenCardsAtLibraryPosition {
+                position: LibraryPosition::Top,
+            })
+        );
+    }
+
+    #[test]
+    fn exile_the_rest_after_multi_zone_search_excludes_selected_set() {
+        let search = Effect::SearchLibrary {
+            filter: TargetFilter::Any,
+            count: QuantityExpr::Fixed { value: 5 },
+            reveal: false,
+            target_player: None,
+            selection_constraint: SearchSelectionConstraint::None,
+            split: None,
+            source_zones: vec![Zone::Graveyard, Zone::Library],
+        };
+        let result = parse_followup_continuation_ast(
+            "Exile the rest.",
+            &search,
+            &mut ParseContext::default(),
+        );
+        assert_eq!(result, Some(ContinuationAst::ExileSearchRemainder));
+    }
+
+    #[test]
+    fn exile_the_rest_after_single_zone_search_is_not_recognized() {
+        let search = Effect::SearchLibrary {
+            filter: TargetFilter::Any,
+            count: QuantityExpr::Fixed { value: 5 },
+            reveal: false,
+            target_player: None,
+            selection_constraint: SearchSelectionConstraint::None,
+            split: None,
+            source_zones: vec![Zone::Library],
+        };
+        assert_eq!(
+            parse_followup_continuation_ast(
+                "Exile the rest.",
+                &search,
+                &mut ParseContext::default(),
+            ),
+            None,
+            "a single-zone search must not exile its library remainder"
         );
     }
 
