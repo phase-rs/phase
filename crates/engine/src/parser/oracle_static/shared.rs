@@ -2006,13 +2006,12 @@ fn parse_subject_cant_attack_you_or_block_static(
         .affected(affected.clone())
         .attack_defended(defended)
         .description(text.to_string());
-    let block = StaticDefinition::new(StaticMode::BlockRestriction {
-        filter: TargetFilter::Not {
-            filter: Box::new(block_filter),
-        },
-    })
-    .affected(affected)
-    .description(text.to_string());
+    let block = lower_rule_static(
+        RuleStaticPredicate::CantBlock,
+        Some(block_filter),
+        affected,
+        text,
+    );
     Some(vec![attack, block])
 }
 

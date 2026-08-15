@@ -2405,31 +2405,35 @@ pub(crate) fn parse_subject_combat_rule_static(text: &str) -> Option<StaticDefin
     // side, consumed here so the object composes with this function's shared
     // subject scoping and trailing-condition handling below rather than needing
     // a parallel arm that would reach neither.
-    let (rest, block_object) = match predicate {
+    let (rest, block_object, object_is_source) = match predicate {
         RuleStaticPredicate::CantBlock => match opt(preceded(
             tag::<_, _, OracleError<'_>>(" "),
-            super::shared::parse_block_object_filter,
+            alt((
+                nom_target::parse_self_reference,
+                super::shared::parse_block_object_filter,
+            )),
         ))
         .parse(rest)
         {
-            Ok((after, Some(object))) if !matches!(object, TargetFilter::SelfRef) => {
-                (after, Some(object))
-            }
-            // A self-referential object ("… can't block it" / "… this
-            // creature") is the attacker-side dual: there the tight `affected`
-            // set is the SOURCE, not the subject, so it keeps its
-            // `CantBeBlockedBy` lowering in the source-anchored dispatch arms.
-            // Leaving `rest` unconsumed makes this parser decline, so dispatch
-            // falls through to them.
-            _ => (rest, None),
+            // CR 201.5: `it`, `this creature`, `this permanent`, and `~` name
+            // the static's source. The restriction is therefore attacker-side:
+            // the source can't be blocked by the parsed subject filter.
+            Ok((after, Some(TargetFilter::SelfRef))) => (after, None, true),
+            Ok((after, Some(object))) => (after, Some(object), false),
+            _ => (rest, None, false),
         },
-        _ => (rest, None),
+        _ => (rest, None, false),
     };
     let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
     let subject = text[..subject_lower.len()].trim();
     let affected = parse_rule_static_subject_filter(subject)?;
-    let mut def =
-        lower_rule_static(predicate, block_object, affected, text).attack_defended(defended);
+    let mut def = if object_is_source {
+        StaticDefinition::new(StaticMode::CantBeBlockedBy { filter: affected })
+            .affected(TargetFilter::SelfRef)
+            .description(text.to_string())
+    } else {
+        lower_rule_static(predicate, block_object, affected, text).attack_defended(defended)
+    };
     let trailing = rest.trim();
     if trailing.is_empty() {
         return Some(def);

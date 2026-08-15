@@ -13857,6 +13857,52 @@ mod tests {
         );
     }
 
+    /// CR 201.5 + CR 509.1b: source-pronoun block objects are attacker-side
+    /// evasion restrictions. This drives the parser-produced static through the
+    /// production pair and declaration validators: a Coward cannot block the
+    /// source, but can still block another attacker and a non-Coward can block
+    /// the source. Reverting the self-object route instead produces the inverse
+    /// `CantBlock { affected: SelfRef }`, flipping all three boundaries.
+    #[test]
+    fn source_pronoun_cant_block_restriction_scopes_combat_pair() {
+        let mut state = setup();
+        let source = create_creature(&mut state, PlayerId(0), "Source", 2, 2);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(
+                crate::parser::oracle_static::parse_static_line("Cowards can't block it.")
+                    .expect("source-pronoun restriction must parse"),
+            );
+        let other_attacker = create_creature(&mut state, PlayerId(0), "Other", 2, 2);
+
+        let coward = create_creature(&mut state, PlayerId(1), "Coward", 2, 2);
+        state
+            .objects
+            .get_mut(&coward)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Coward".into());
+        let wall = create_creature(&mut state, PlayerId(1), "Wall", 0, 4);
+
+        assert!(
+            !can_block_pair(&state, coward, source),
+            "a Coward cannot block the source named by 'it'"
+        );
+        assert!(validate_blockers(&state, &[(coward, source)]).is_err());
+        assert!(
+            can_block_pair(&state, coward, other_attacker),
+            "the Coward may still block another attacker"
+        );
+        assert!(
+            can_block_pair(&state, wall, source),
+            "a non-Coward may still block the source"
+        );
+    }
+
     /// The precomputed `can_block_pair_with_precomputed` path must agree with the
     /// `can_block_pair` wrapper for a blocker-side BlockRestriction (flying-only):
     /// reject a ground attacker, accept a flyer. Reverted-fix discrimination: if

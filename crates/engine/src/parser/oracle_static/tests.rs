@@ -33068,19 +33068,33 @@ fn shapes_without_an_object_keep_their_existing_lowering() {
     );
 }
 
-/// Guard: when the OBJECT is the source ("can't block this creature"), the
-/// tight `affected` set is the source, so the source-anchored arms keep
-/// lowering it to the attacker-side dual `CantBeBlockedBy`. The production
-/// declines a self-referential object for exactly that reason.
+/// CR 201.5 + CR 509.1b: when the OBJECT is the source, the subject is the
+/// blocker filter and the static must lower to the attacker-side
+/// `CantBeBlockedBy` dual on the source. This reaches the shared self-reference
+/// grammar for every source spelling rather than relying on the old
+/// power-comparison-only recovery arm.
 #[test]
-fn source_object_still_lowers_to_cant_be_blocked_by() {
+fn source_object_self_references_lower_to_cant_be_blocked_by() {
     use crate::types::statics::StaticMode;
 
-    let def = parse_static_line("Creatures with power 2 or less can't block this creature.")
-        .expect("Kraken-shaped clause");
-    assert!(
-        matches!(def.mode, StaticMode::CantBeBlockedBy { .. }),
-        "a source object must stay attacker-side, got: {:?}",
-        def.mode
-    );
+    for object in ["it", "this creature", "this permanent", "~"] {
+        let line = format!("Cowards can't block {object}.");
+        let def = parse_static_line(&line).unwrap_or_else(|| panic!("{line} should parse"));
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::SelfRef),
+            "{line}: the source must be the affected attacker"
+        );
+        let StaticMode::CantBeBlockedBy { filter } = &def.mode else {
+            panic!(
+                "{line}: source object must lower attacker-side, got {:?}",
+                def.mode
+            );
+        };
+        assert_eq!(
+            typed_subtypes(filter),
+            vec!["Coward".to_string()],
+            "{line}: the subject must remain the prohibited blocker filter"
+        );
+    }
 }
