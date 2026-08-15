@@ -2392,12 +2392,11 @@ pub fn matches_target_filter_in_owner_zone(
 /// itself; this predicate is that enumeration and nothing more.
 ///
 /// Why ownership is the correct scope for a `ControllerRef::You` filter there:
-/// CR 110.1 + CR 110.2 — a permanent is a card or token ON THE BATTLEFIELD, and
-/// every permanent has a controller — so a card sitting in a hand, library, or
-/// graveyard is not a permanent and has NO controller at all. CR 109.5 then routes
-/// the possessive: "you"/"your" refer to the object's controller "or its owner (if
-/// it has no controller)". So "your graveyard" is an ownership claim as a matter of
-/// rule, even though the parser represents the player scope as `ControllerRef::You`.
+/// CR 108.4 + CR 108.4a — a card has a controller only when it represents a
+/// permanent or spell; if it has no controller, use its owner instead. A card in a
+/// hand, library, or graveyard is neither, so CR 109.5 routes "you"/"your" to its
+/// owner. Thus "your graveyard" is an ownership claim even though the parser
+/// represents its player scope as `ControllerRef::You`.
 ///
 /// EXILE IS DELIBERATELY EXCLUDED, and CR 400.3 excludes it too — the rule names
 /// library, graveyard, and hand, not exile. The engine matches exiled objects
@@ -2414,7 +2413,7 @@ pub fn is_owner_scoped_zone(zone: Zone) -> bool {
     matches!(zone, Zone::Hand | Zone::Library | Zone::Graveyard)
 }
 
-/// CR 400.3 + CR 109.5 + CR 110.1: match `object_id` against `filter` using the
+/// CR 400.3 + CR 109.5 + CR 108.4a: match `object_id` against `filter` using the
 /// ownership semantics of the zone it is being enumerated from.
 ///
 /// The single entry point for "evaluate this filter against an object in zone Z".

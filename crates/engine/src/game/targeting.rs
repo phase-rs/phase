@@ -2037,14 +2037,14 @@ fn stack_entry_controller_matches(
 /// Enumerate legal targets among `object_ids`, all of which are being read out of
 /// `zone`.
 ///
-/// CR 109.5 + CR 110.1 + CR 110.2 + CR 400.3: `zone` is not bookkeeping — it selects
+/// CR 109.5 + CR 108.4 + CR 108.4a + CR 400.3: `zone` is not bookkeeping — it selects
 /// the ownership semantics the filter is evaluated under, via
 /// `filter::matches_target_filter_for_zone`. A player-scoped query on a hand,
 /// library, or graveyard ("target creature card from YOUR graveyard") is an
-/// ownership claim as a matter of rule: a permanent is a card on the BATTLEFIELD
-/// (CR 110.1) and only permanents have controllers (CR 110.2), so a card in one of
-/// those zones has no controller, and CR 109.5 resolves "your" to its owner in
-/// exactly that case. CR 400.3 fixes which zones those are.
+/// ownership claim as a matter of rule: a card has a controller only when it
+/// represents a permanent or spell, and CR 108.4a uses the owner when it has none.
+/// Cards in those zones are neither, so CR 109.5 resolves "your" to the owner.
+/// CR 400.3 fixes which zones those are.
 ///
 /// Matching them against `obj.controller` excluded a card from its OWN owner's
 /// query whenever a control-change effect left a stale controller behind — the
