@@ -34,9 +34,16 @@
 //!   4. the "you may" window is declined or unanswered     (CR 608.2d)
 //!
 //! Paths 1-3 emit no prompt at all, matching the report's most diagnostic
-//! detail (no "you may" prompt was shown). All four are indistinguishable from
-//! one another, and from a successful move, in the event stream — which is why
-//! the reporting game could not be diagnosed after the fact.
+//! detail (no "you may" prompt was shown).
+//!
+//! A successful move IS distinguishable in the event stream: it commits through
+//! `apply_counter_move_commit` (game/effects/counters.rs), which emits
+//! `GameEvent::CounterRemoved` then `GameEvent::CounterAdded`. Every one of the
+//! four no-op paths returns before those. What the event stream does NOT
+//! distinguish is WHICH of the four fired — all four emit only
+//! `EffectResolved`, and three of them present no prompt, so they are
+//! indistinguishable from one another at the table. That is why the reporting
+//! game could not be diagnosed after the fact.
 //!
 //! CR references (verified against docs/MagicCompRules.txt):
 //!   - CR 122.5: If an effect says to move a counter, it's removed from the
@@ -56,6 +63,7 @@ use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::ManaCost;
 
 const OZOLITH_ORACLE: &str = "Whenever a creature you control leaves the battlefield, if it had counters on it, put those counters on The Ozolith.\nAt the beginning of combat on your turn, if The Ozolith has counters on it, you may move all counters from The Ozolith onto target creature.";
 
@@ -63,6 +71,13 @@ const OZOLITH_ORACLE: &str = "Whenever a creature you control leaves the battlef
 /// intervening-if, so the trigger still resolves when the source holds nothing.
 /// Used to pin the counterfactual the negative tests depend on.
 const NO_GATE_ORACLE: &str = "At the beginning of combat on your turn, you may move all counters from Counter Shuttle onto target creature.";
+
+/// Removal used to take a creature off the battlefield through the production
+/// pipeline. Casting this and letting it resolve drives the departure through
+/// `ProposedEvent::ZoneChange` and the state-based-action pass, so replacement
+/// effects apply and the engine itself queues any leaves-the-battlefield
+/// trigger — none of which a direct `zones::move_to_zone` write would exercise.
+const DESTROY_ORACLE: &str = "Destroy target creature.";
 
 /// Count counters of a given type on an object.
 fn counters(runner: &super::rules::GameRunner, id: ObjectId, ct: &CounterType) -> u32 {
@@ -234,13 +249,24 @@ fn issue_7386_ozolith_moves_counters_it_collected_from_a_dead_creature() {
         .with_plus_counters(12)
         .id();
 
+    let removal = scenario
+        .add_spell_to_hand_from_oracle(P0, "Bearer Removal", true, DESTROY_ORACLE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+
     let mut runner = scenario.build();
 
-    // The bearer dies: the leaves-the-battlefield trigger collects its counters
-    // (the #2358 path, covered in ozolith_leaves_battlefield_counters.rs).
-    let mut events = Vec::new();
-    engine::game::zones::move_to_zone(runner.state_mut(), dying, Zone::Graveyard, &mut events);
-    engine::game::triggers::process_triggers(runner.state_mut(), &events);
+    // The bearer dies through the real cast → destroy → state-based-action →
+    // zone-change path, so replacements apply and the ENGINE queues The
+    // Ozolith's leaves-the-battlefield trigger rather than the test hand-feeding
+    // it (the #2358 path, covered in ozolith_leaves_battlefield_counters.rs).
+    runner.cast(removal).target_object(dying).resolve();
+
+    assert_eq!(
+        runner.state().objects[&dying].zone,
+        Zone::Graveyard,
+        "precondition: the removal spell actually destroyed the bearer"
+    );
     runner.advance_until_stack_empty();
 
     assert_eq!(
@@ -361,6 +387,11 @@ fn issue_7386_illegal_target_at_resolution_leaves_counters_untouched() {
         .with_plus_counters(12)
         .id();
 
+    let removal = scenario
+        .add_spell_to_hand_from_oracle(P0, "Responsive Removal", true, DESTROY_ORACLE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+
     let mut runner = scenario.build();
     runner.advance_to_phase(Phase::BeginCombat);
 
@@ -378,9 +409,13 @@ fn issue_7386_illegal_target_at_resolution_leaves_counters_untouched() {
         "reach-guard: the begin-combat trigger is on the stack awaiting resolution"
     );
 
-    let mut events = Vec::new();
-    engine::game::zones::move_to_zone(runner.state_mut(), receiver, Zone::Graveyard, &mut events);
-    engine::game::triggers::process_triggers(runner.state_mut(), &events);
+    // Kill the bound target IN RESPONSE, exactly as a real game would: an
+    // instant cast while the trigger sits on the stack. `commit()` + a single
+    // `resolve_top()` resolves only the removal — `SpellCast::resolve()` would
+    // drain the whole stack, resolving the very trigger under test and taking
+    // the prompt discriminator with it.
+    runner.cast(removal).target_object(receiver).commit();
+    runner.resolve_top();
 
     assert_eq!(
         runner.state().objects.get(&receiver).unwrap().zone,
@@ -390,9 +425,10 @@ fn issue_7386_illegal_target_at_resolution_leaves_counters_untouched() {
     assert_eq!(
         runner.state().stack.len(),
         1,
-        "control: an OPPONENT's creature leaving pushes no second trigger — the \
-         'creature you control' collection ability did not fire, which is what \
-         keeps an 11-counter end state reachable"
+        "control: the removal has left the stack and only the begin-combat \
+         trigger remains — an OPPONENT's creature leaving pushed no second \
+         trigger, so the 'creature you control' collection ability did not \
+         fire, which is what keeps an 11-counter end state reachable"
     );
 
     let prompts = drive_trigger(&mut runner, receiver, true);
