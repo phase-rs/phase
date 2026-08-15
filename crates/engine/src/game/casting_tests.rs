@@ -38117,8 +38117,10 @@ mod alt_cost_reduction_509 {
                 alternative_additional_cost_description,
                 ..
             } => assert_eq!(
-                alternative_additional_cost_description.as_deref(),
-                Some("an artifact")
+                alternative_additional_cost_description,
+                Some(crate::types::game_state::AlternativeAdditionalCostDescription::EmergeSacrifice {
+                    quality: crate::types::game_state::EmergeSacrificeQuality::Artifact,
+                })
             ),
             other => panic!("expected Crabomination AlternativeCastChoice(Emerge), got {other:?}"),
         }

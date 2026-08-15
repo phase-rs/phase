@@ -2,6 +2,8 @@ import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 
 import type {
+  AlternativeAdditionalCostDescription,
+  EmergeSacrificeQuality,
   GameAction,
   ManaCost,
   SerializedAbilityCost,
@@ -35,7 +37,7 @@ interface KeywordCopy {
 function keywordCopy(
   keyword: Keyword,
   cardName: string,
-  alternativeAdditionalCostDescription: string | null,
+  alternativeAdditionalCostDescription: AlternativeAdditionalCostDescription | null,
   t: TFunction<"game">,
 ): KeywordCopy {
   switch (keyword) {
@@ -66,7 +68,9 @@ function keywordCopy(
         showOracleText: true,
         subtitle: t("alternativeCost.emergeSubtitle", {
           name: cardName,
-          sacrifice: alternativeAdditionalCostDescription ?? t("alternativeCost.emergeFallbackSacrifice"),
+          sacrifice: alternativeAdditionalCostDescription
+            ? describeAdditionalCostDescription(alternativeAdditionalCostDescription, t)
+            : t("alternativeCost.emergeFallbackSacrifice"),
         }),
       };
     // CR 702.109a: Dash — like Warp, the rider (haste + end-step return to hand)
@@ -197,6 +201,48 @@ function keywordCopy(
   return assertNever(keyword);
 }
 
+function describeEmergeSacrificeQuality(
+  quality: EmergeSacrificeQuality,
+  t: TFunction<"game">,
+): string {
+  switch (quality.type) {
+    case "Artifact":
+      return t("alternativeCost.emergeSacrificeQuality.artifact");
+    case "Battle":
+      return t("alternativeCost.emergeSacrificeQuality.battle");
+    case "Card":
+      return t("alternativeCost.emergeSacrificeQuality.card");
+    case "Creature":
+      return t("alternativeCost.emergeSacrificeQuality.creature");
+    case "Enchantment":
+      return t("alternativeCost.emergeSacrificeQuality.enchantment");
+    case "Instant":
+      return t("alternativeCost.emergeSacrificeQuality.instant");
+    case "Kindred":
+      return t("alternativeCost.emergeSacrificeQuality.kindred");
+    case "Land":
+      return t("alternativeCost.emergeSacrificeQuality.land");
+    case "Permanent":
+      return t("alternativeCost.emergeSacrificeQuality.permanent");
+    case "Planeswalker":
+      return t("alternativeCost.emergeSacrificeQuality.planeswalker");
+    case "Sorcery":
+      return t("alternativeCost.emergeSacrificeQuality.sorcery");
+    case "Subtype":
+      return t("alternativeCost.emergeSacrificeQuality.subtype", { subtype: quality.data });
+  }
+}
+
+function describeAdditionalCostDescription(
+  description: AlternativeAdditionalCostDescription,
+  t: TFunction<"game">,
+): string {
+  switch (description.type) {
+    case "EmergeSacrifice":
+      return describeEmergeSacrificeQuality(description.quality, t);
+  }
+}
+
 /**
  * CR 702.74a + CR 601.2h: Compact display copy for the non-mana portion of
  * an alternative cost (e.g., Solitude's Evoke "Exile a white card from your
@@ -267,7 +313,7 @@ function AlternativeCostContent({
   normalCost: ManaCost;
   alternativeCost: ManaCost | null;
   alternativeAdditionalCost: SerializedAbilityCost | null;
-  alternativeAdditionalCostDescription: string | null;
+  alternativeAdditionalCostDescription: AlternativeAdditionalCostDescription | null;
   dispatch: (action: GameAction) => Promise<unknown>;
 }) {
   const { t } = useTranslation("game");
@@ -322,7 +368,9 @@ function AlternativeCostContent({
           )}
           {alternativeAdditionalCost && (
             <span className="ml-2 text-xs text-slate-300">
-              {alternativeAdditionalCostDescription ?? describeAdditionalCost(alternativeAdditionalCost, t)}
+              {alternativeAdditionalCostDescription
+                ? describeAdditionalCostDescription(alternativeAdditionalCostDescription, t)
+                : describeAdditionalCost(alternativeAdditionalCost, t)}
             </span>
           )}
           {copy.altSuffix && (

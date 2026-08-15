@@ -7598,6 +7598,30 @@ pub struct PileResult {
 ///
 /// Adding a new alternative-cost keyword (e.g., Madness CR 702.35a, Spectacle
 /// CR 702.137a) is a compile error at every dispatch site until handled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum AlternativeAdditionalCostDescription {
+    /// CR 702.119b: The quality named by Emerge from [quality].
+    EmergeSacrifice { quality: EmergeSacrificeQuality },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum EmergeSacrificeQuality {
+    Artifact,
+    Battle,
+    Card,
+    Creature,
+    Enchantment,
+    Instant,
+    Kindred,
+    Land,
+    Permanent,
+    Planeswalker,
+    Sorcery,
+    Subtype(String),
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
 #[serde(tag = "type")]
 pub enum AlternativeCastKeyword {
@@ -7606,8 +7630,9 @@ pub enum AlternativeCastKeyword {
     /// CR 702.74a: ETB + sacrifice trigger fires when the resolving permanent
     /// was cast for its evoke cost (CR 702.74b).
     Evoke,
-    /// CR 702.119a-c: Emerge alternative cost requires sacrificing a creature
-    /// while casting and reduces the emerge cost by that creature's mana value.
+    /// CR 702.119a-c: Emerge alternative cost requires sacrificing the specified
+    /// permanent quality while casting and reduces the emerge cost by that
+    /// permanent's mana value.
     Emerge,
     /// CR 702.109a: Cast for the dash cost — the resolving permanent gains haste
     /// and is returned to its owner's hand at the next end step.
@@ -11470,14 +11495,15 @@ pub enum WaitingFor {
         /// the alternative cost (e.g., `AbilityCost::Exile { count, zone,
         /// filter }` for the MH2 Evoke Incarnations). `None` when the
         /// alternative cost is pure mana (Warp, Lorwyn Evoke, Overload,
-        /// Bestow, mana-only Flashback). Engine owns the derived display
-        /// string; the frontend renders the engine-provided description.
+        /// Bestow, mana-only Flashback). The engine owns the typed display
+        /// payload; the frontend localizes and renders the descriptor.
         #[serde(default)]
         alternative_additional_cost: Option<AbilityCost>,
-        /// Engine-authored display text for an alternative cost's non-mana
-        /// component when its typed details affect player-facing wording.
+        /// Engine-authored typed display descriptor for an alternative cost's
+        /// non-mana component when its semantic details affect player-facing
+        /// wording. The frontend localizes this descriptor.
         #[serde(default)]
-        alternative_additional_cost_description: Option<String>,
+        alternative_additional_cost_description: Option<AlternativeAdditionalCostDescription>,
     },
     /// CR 702.140c + CR 730.2a: As a mutating creature spell resolves with a
     /// legal target, the spell's controller chooses whether the spell is put on

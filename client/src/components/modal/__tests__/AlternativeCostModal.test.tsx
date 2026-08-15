@@ -1,11 +1,13 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
+  AlternativeAdditionalCostDescription,
   GameObject,
   ManaCost,
   WaitingFor,
 } from "../../../adapter/types.ts";
+import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { buildGameObjectWithCoreTypes, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
 import { buildGameState } from "../../../test/factories/gameStateFactory.ts";
@@ -36,7 +38,7 @@ type AltKeyword = Extract<
 
 function setSpectacleChoice(
   keyword: AltKeyword,
-  alternativeAdditionalCostDescription: string | null = null,
+  alternativeAdditionalCostDescription: AlternativeAdditionalCostDescription | null = null,
 ) {
   const waitingFor: WaitingFor = {
     type: "AlternativeCastChoice",
@@ -72,10 +74,12 @@ describe("AlternativeCostModal", () => {
   beforeEach(() => {
     dispatchMock.mockReset();
     dispatchMock.mockResolvedValue(undefined);
+    usePreferencesStore.setState({ language: "en" });
   });
 
   afterEach(() => {
     cleanup();
+    usePreferencesStore.setState({ language: "en" });
   });
 
   // Regression for issue #2939: the engine emits `keyword.type === "Spectacle"`
@@ -127,9 +131,25 @@ describe("AlternativeCostModal", () => {
   );
 
   it("renders Emerge's engine-provided sacrifice description", () => {
-    setSpectacleChoice("Emerge", "an artifact");
+    setSpectacleChoice("Emerge", {
+      type: "EmergeSacrifice",
+      quality: { type: "Artifact" },
+    });
     render(<AlternativeCostModal />);
 
     expect(screen.getByText(/sacrificing an artifact/i)).toBeInTheDocument();
+  });
+
+  it("localizes Emerge's typed sacrifice quality", async () => {
+    usePreferencesStore.setState({ language: "es" });
+    setSpectacleChoice("Emerge", {
+      type: "EmergeSacrifice",
+      quality: { type: "Artifact" },
+    });
+    render(<AlternativeCostModal />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/sacrificando un artefacto/i)).toBeInTheDocument();
+    });
   });
 });

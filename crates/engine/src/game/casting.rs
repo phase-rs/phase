@@ -13,8 +13,9 @@ use crate::types::actions::{AlternativeCastDecision, GameAction};
 use crate::types::card::LayoutKind;
 use crate::types::events::{ActivatedAbilityKind, GameEvent};
 use crate::types::game_state::{
-    ActivationResidual, ActivationTargetSelection, CastOfferKind, CastPaymentMode,
-    CastingPermissionIndex, CastingVariant, CastingVariantChoiceOption, ConvokeMode, CostResume,
+    ActivationResidual, ActivationTargetSelection, AlternativeAdditionalCostDescription,
+    CastOfferKind, CastPaymentMode, CastingPermissionIndex, CastingVariant,
+    CastingVariantChoiceOption, ConvokeMode, CostResume, DistributionUnit, EmergeSacrificeQuality,
     GameState, ManaAbilityCostParent, ManaAbilityResume, ManaChoice, ManaChoiceContext,
     ManaChoicePrompt, NextSpellModifier, PayCostKind, PendingCast, PendingCostMoveResume,
     SneakPlacement, SpellCostSource, StackEntry, StackEntryKind, TargetEffectDetail,
@@ -2547,26 +2548,28 @@ pub(crate) fn effective_spell_keywords(
     effective_spell_keywords_for(state, caster, object_id, false)
 }
 
-/// CR 702.119a-b: The active Emerge keyword supplies the permanent quality for
-/// its required sacrifice cost.
-fn effective_emerge_sacrifice_filter(
+/// CR 702.119a-b: The active Emerge keyword supplies both the mana cost and
+/// permanent quality for its required sacrifice cost.
+fn effective_emerge_cost(
     state: &GameState,
     caster: PlayerId,
     object_id: ObjectId,
-) -> Option<TargetFilter> {
+) -> Option<crate::types::keywords::EmergeCost> {
     effective_spell_keywords(state, caster, object_id)
         .into_iter()
         .find_map(|keyword| match keyword {
-            Keyword::Emerge(cost) => Some(cost.sacrifice_filter),
+            Keyword::Emerge(cost) => Some(cost),
             _ => None,
         })
 }
 
-/// CR 702.119a-b: Emerge's sacrifice quality is part of the alternative cost,
-/// so the engine supplies a display-ready phrase rather than requiring a client
-/// to interpret its `TargetFilter`. Complex filters use the localized generic
+/// CR 702.119b: Emerge's sacrifice quality is part of the alternative cost, so
+/// the engine supplies a typed descriptor rather than requiring a client to
+/// interpret its `TargetFilter`. Complex filters use the localized generic
 /// fallback rather than a lossy partial description.
-fn emerge_sacrifice_description(sacrifice_filter: &TargetFilter) -> Option<String> {
+fn emerge_sacrifice_description(
+    sacrifice_filter: &TargetFilter,
+) -> Option<AlternativeAdditionalCostDescription> {
     let TargetFilter::Typed(filter) = sacrifice_filter else {
         return None;
     };
@@ -2576,25 +2579,60 @@ fn emerge_sacrifice_description(sacrifice_filter: &TargetFilter) -> Option<Strin
     {
         return None;
     }
-    let subject = match filter.get_primary_type()? {
-        TypeFilter::Artifact => "artifact",
-        TypeFilter::Battle => "battle",
-        TypeFilter::Card => "card",
-        TypeFilter::Creature => "creature",
-        TypeFilter::Enchantment => "enchantment",
-        TypeFilter::Instant => "instant",
-        TypeFilter::Kindred => "kindred",
-        TypeFilter::Land => "land",
-        TypeFilter::Permanent => "permanent",
-        TypeFilter::Planeswalker => "planeswalker",
-        TypeFilter::Sorcery => "sorcery",
-        TypeFilter::Subtype(subtype) => subtype,
-        TypeFilter::Any | TypeFilter::AnyOf(_) | TypeFilter::Non(_) => "permanent",
+    let quality = match filter.type_filters.first()? {
+        TypeFilter::Artifact => EmergeSacrificeQuality::Artifact,
+        TypeFilter::Battle => EmergeSacrificeQuality::Battle,
+        TypeFilter::Card => EmergeSacrificeQuality::Card,
+        TypeFilter::Creature => EmergeSacrificeQuality::Creature,
+        TypeFilter::Enchantment => EmergeSacrificeQuality::Enchantment,
+        TypeFilter::Instant => EmergeSacrificeQuality::Instant,
+        TypeFilter::Kindred => EmergeSacrificeQuality::Kindred,
+        TypeFilter::Land => EmergeSacrificeQuality::Land,
+        TypeFilter::Permanent => EmergeSacrificeQuality::Permanent,
+        TypeFilter::Planeswalker => EmergeSacrificeQuality::Planeswalker,
+        TypeFilter::Sorcery => EmergeSacrificeQuality::Sorcery,
+        TypeFilter::Subtype(subtype) => EmergeSacrificeQuality::Subtype(subtype.clone()),
+        TypeFilter::Any | TypeFilter::AnyOf(_) | TypeFilter::Non(_) => return None,
     };
-    let article = matches!(subject.chars().next(), Some('a' | 'e' | 'i' | 'o' | 'u'))
-        .then_some("an")
-        .unwrap_or("a");
-    Some(format!("{article} {subject}"))
+    Some(AlternativeAdditionalCostDescription::EmergeSacrifice { quality })
+}
+
+/// CR 702.119c + CR 601.2b/h: Declare Emerge's required sacrifice before
+/// targets and mana payment, using the same effective keyword snapshot as the
+/// alternative-cost offer and mana-cost substitution paths.
+fn begin_emerge_cost_before_targets(
+    state: &mut GameState,
+    player: PlayerId,
+    prepared: &PreparedSpellCast,
+    resolved: ResolvedAbility,
+    distribute: Option<DistributionUnit>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let sacrifice_filter = effective_emerge_cost(state, player, prepared.object_id)
+        .ok_or_else(|| {
+            EngineError::ActionNotAllowed(
+                "Emerge casting variant requires an effective Emerge keyword".to_string(),
+            )
+        })?
+        .sacrifice_filter;
+    casting_costs::begin_required_cost_before_targets(
+        state,
+        player,
+        prepared.object_id,
+        prepared.card_id,
+        resolved,
+        prepared.mana_cost.clone(),
+        Some(prepared.base_mana_cost.clone()),
+        casting_costs::emerge_sacrifice_cost(sacrifice_filter),
+        SpellCostSource::Emerge,
+        prepared.casting_variant,
+        prepared.casting_permission_index,
+        prepared.cast_timing_permission,
+        distribute,
+        prepared.origin_zone,
+        prepared.payment_mode,
+        events,
+    )
 }
 
 /// Fuse-aware sibling of [`effective_spell_keywords`]. `fused` projects a
@@ -6592,16 +6630,10 @@ fn prepare_spell_cast_with_variant_override_inner(
     // (CR 702.119c, CR 601.2h).
     // CR 702.102b: GUARDED — arm requires `casting_variant == Emerge`; Fuse never
     // equals it, so this read is unreachable for a fused split cast.
-    let emerge_cost = if casting_variant == CastingVariant::Emerge {
-        effective_spell_keywords(state, player, object_id)
-            .iter()
-            .find_map(|k| match k {
-                crate::types::keywords::Keyword::Emerge(cost) => Some(cost.mana_cost.clone()),
-                _ => None,
-            })
-    } else {
-        None
-    };
+    let emerge_cost = (casting_variant == CastingVariant::Emerge)
+        .then(|| effective_emerge_cost(state, player, object_id))
+        .flatten()
+        .map(|cost| cost.mana_cost);
     // CR 702.103a + CR 118.9: When the caller explicitly opted into Bestow (via
     // `variant_override = Some(CastingVariant::Bestow)`), substitute the bestow
     // mana sub-cost taken from the object's `Keyword::Bestow(cost)` payload.
@@ -11607,13 +11639,7 @@ pub fn handle_cast_spell_with_payment_mode(
     // permanent's mana value is subtracted.
     if let Some(obj) = state.objects.get(&object_id) {
         if obj.zone == Zone::Hand {
-            if let Some(emerge_cost) = effective_spell_keywords(state, player, object_id)
-                .into_iter()
-                .find_map(|k| match k {
-                    crate::types::keywords::Keyword::Emerge(cost) => Some(cost),
-                    _ => None,
-                })
-            {
+            if let Some(emerge_cost) = effective_emerge_cost(state, player, object_id) {
                 let (normal_cost, normal_affordable) =
                     normal_cast_choice_cost_and_affordability(state, player, object_id, obj);
                 let emerge_cost_eff = apply_cost_modifiers_to_base(
@@ -12927,27 +12953,15 @@ fn continue_with_prepared(
     // then sacrificing it as that cost is paid. Route this before any target
     // selection so the required sacrifice is declared on the CR 601.2b axis.
     if prepared.casting_variant == CastingVariant::Emerge {
-        let sacrifice_filter = effective_emerge_sacrifice_filter(state, player, prepared.object_id)
-            .expect("Emerge casting variant requires an effective Emerge keyword");
-        return casting_costs::begin_required_cost_before_targets(
+        return begin_emerge_cost_before_targets(
             state,
             player,
-            prepared.object_id,
-            prepared.card_id,
+            &prepared,
             resolved,
-            prepared.mana_cost,
-            Some(prepared.base_mana_cost.clone()),
-            casting_costs::emerge_sacrifice_cost(sacrifice_filter),
-            SpellCostSource::Emerge,
-            prepared.casting_variant,
-            prepared.casting_permission_index,
-            prepared.cast_timing_permission,
             prepared
                 .ability_def
                 .as_ref()
                 .and_then(|a| a.distribute.clone()),
-            prepared.origin_zone,
-            prepared.payment_mode,
             events,
         );
     }
@@ -13439,24 +13453,12 @@ fn continue_with_no_ability(
         player,
     );
     if prepared.casting_variant == CastingVariant::Emerge {
-        let sacrifice_filter = effective_emerge_sacrifice_filter(state, player, prepared.object_id)
-            .expect("Emerge casting variant requires an effective Emerge keyword");
-        return casting_costs::begin_required_cost_before_targets(
+        return begin_emerge_cost_before_targets(
             state,
             player,
-            prepared.object_id,
-            prepared.card_id,
+            &prepared,
             placeholder,
-            prepared.mana_cost,
-            Some(prepared.base_mana_cost.clone()),
-            casting_costs::emerge_sacrifice_cost(sacrifice_filter),
-            SpellCostSource::Emerge,
-            prepared.casting_variant,
-            prepared.casting_permission_index,
-            prepared.cast_timing_permission,
             None,
-            prepared.origin_zone,
-            prepared.payment_mode,
             events,
         );
     }
@@ -14328,14 +14330,14 @@ fn can_cast_prepared_now_with_probe(
     if prepared.casting_variant == CastingVariant::Emerge {
         return (prepared.modal.is_some()
             || spell_has_legal_targets_with_probe(state, obj.id, player, probe))
-            && effective_emerge_sacrifice_filter(state, player, prepared.object_id).is_some_and(
-                |sacrifice_filter| {
+            && effective_emerge_cost(state, player, prepared.object_id).is_some_and(
+                |emerge_cost| {
                     casting_costs::can_pay_emerge_cost(
                         state,
                         player,
                         prepared.object_id,
                         &prepared.mana_cost,
-                        &sacrifice_filter,
+                        &emerge_cost.sacrifice_filter,
                     )
                 },
             );
