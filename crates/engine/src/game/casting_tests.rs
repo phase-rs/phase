@@ -38024,6 +38024,106 @@ mod alt_cost_reduction_509 {
         );
     }
 
+    const CRABOMINATION_ORACLE: &str = "Emerge from artifact {5}{B}{B} (You may cast this spell by sacrificing an artifact and paying the emerge cost reduced by that artifact's mana value.)\nWhen this creature enters, target opponent exiles the top card of their library, a card at random from their graveyard, and a card at random from their hand. You may cast a spell from among cards exiled this way without paying its mana cost.";
+
+    /// CR 702.119b-c: Crabomination's real Oracle text must carry its artifact
+    /// quality through parsing and into the cast-cost selection pipeline.
+    #[test]
+    fn crabomination_real_oracle_casts_by_sacrificing_only_an_artifact() {
+        use crate::game::scenario::{GameScenario, P0};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let crabomination = scenario
+            .add_creature_to_hand_from_oracle(P0, "Crabomination", 5, 5, CRABOMINATION_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+                generic: 4,
+            })
+            .id();
+        let artifact = scenario
+            .add_creature(P0, "Artifact Tribute", 1, 1)
+            .as_artifact()
+            .with_mana_cost(ManaCost::generic(5))
+            .id();
+        let creature = scenario
+            .add_creature(P0, "Creature Tribute", 1, 1)
+            .with_mana_cost(ManaCost::generic(1))
+            .id();
+
+        let mut runner = scenario.build();
+        add_mana(runner.state_mut(), P0, ManaType::Black, 2);
+        let card_id = runner.state().objects[&crabomination].card_id;
+        let mut events = Vec::new();
+        let waiting_for =
+            handle_cast_spell(runner.state_mut(), P0, crabomination, card_id, &mut events)
+                .expect("Crabomination must enter its Emerge sacrifice payment");
+
+        match &waiting_for {
+            WaitingFor::PayCost {
+                kind: PayCostKind::Sacrifice,
+                choices,
+                ..
+            } => {
+                assert!(choices.contains(&artifact));
+                assert!(!choices.contains(&creature));
+            }
+            other => panic!("expected Crabomination Emerge PayCost(Sacrifice), got {other:?}"),
+        }
+
+        runner.state_mut().waiting_for = waiting_for;
+        apply_as_current(
+            runner.state_mut(),
+            GameAction::SelectCards {
+                cards: vec![artifact],
+            },
+        )
+        .expect("the artifact sacrifice must complete Crabomination's Emerge cast");
+
+        assert_eq!(runner.state().objects[&artifact].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&crabomination].zone, Zone::Stack);
+        assert_eq!(runner.state().players[P0.0 as usize].mana_pool.total(), 0);
+    }
+
+    #[test]
+    fn crabomination_real_oracle_prompt_describes_artifact_sacrifice() {
+        use crate::game::scenario::{GameScenario, P0};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let crabomination = scenario
+            .add_creature_to_hand_from_oracle(P0, "Crabomination", 5, 5, CRABOMINATION_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+                generic: 4,
+            })
+            .id();
+        scenario
+            .add_creature(P0, "Artifact Tribute", 1, 1)
+            .as_artifact()
+            .with_mana_cost(ManaCost::generic(5));
+
+        let mut runner = scenario.build();
+        add_mana(runner.state_mut(), P0, ManaType::Black, 6);
+        let card_id = runner.state().objects[&crabomination].card_id;
+        let mut events = Vec::new();
+        let waiting_for =
+            handle_cast_spell(runner.state_mut(), P0, crabomination, card_id, &mut events)
+                .expect("Crabomination must offer its normal and Emerge casts");
+
+        match waiting_for {
+            WaitingFor::AlternativeCastChoice {
+                keyword: crate::types::game_state::AlternativeCastKeyword::Emerge,
+                alternative_additional_cost_description,
+                ..
+            } => assert_eq!(
+                alternative_additional_cost_description.as_deref(),
+                Some("an artifact")
+            ),
+            other => panic!("expected Crabomination AlternativeCastChoice(Emerge), got {other:?}"),
+        }
+    }
+
     #[test]
     fn emerge_mana_value_reduction_preserves_colored_pips() {
         let mut state = setup_game_at_main_phase();
@@ -42792,6 +42892,7 @@ fn bestow_cost_choice_legal_actions_includes_both_paths() {
             generic: 3,
         }),
         alternative_additional_cost: None,
+        alternative_additional_cost_description: None,
         payment_mode: CastPaymentMode::Auto,
     };
     let cands = candidate_actions_broad(&state);

@@ -11474,6 +11474,10 @@ pub enum WaitingFor {
         /// string; the frontend renders the engine-provided description.
         #[serde(default)]
         alternative_additional_cost: Option<AbilityCost>,
+        /// Engine-authored display text for an alternative cost's non-mana
+        /// component when its typed details affect player-facing wording.
+        #[serde(default)]
+        alternative_additional_cost_description: Option<String>,
     },
     /// CR 702.140c + CR 730.2a: As a mutating creature spell resolves with a
     /// legal target, the spell's controller chooses whether the spell is put on

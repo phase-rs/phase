@@ -2403,6 +2403,7 @@ impl FromStr for Keyword {
                 "madness" => return Ok(Keyword::Madness(parse_keyword_mana_cost(p))),
                 "miracle" => return Ok(Keyword::Miracle(parse_keyword_mana_cost(p))),
                 "dash" => return Ok(Keyword::Dash(parse_keyword_mana_cost(p))),
+                // CR 702.119a: Bare Emerge defaults to sacrificing a creature.
                 "emerge" => {
                     return Ok(Keyword::Emerge(EmergeCost::creature(
                         parse_keyword_mana_cost(p),
@@ -3267,6 +3268,8 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Madness" => Ok(Keyword::Madness(mana(data)?)),
         "Miracle" => Ok(Keyword::Miracle(mana(data)?)),
         "Dash" => Ok(Keyword::Dash(mana(data)?)),
+        // CR 702.119a: Historic bare Emerge payloads use only the mana cost,
+        // which implies the ordinary creature sacrifice filter.
         "Emerge" => match serde_json::from_value::<EmergeCost>(data.clone()) {
             Ok(cost) => Ok(Keyword::Emerge(cost)),
             Err(_) => Ok(Keyword::Emerge(EmergeCost::creature(mana(data)?))),
@@ -4775,6 +4778,29 @@ mod tests {
                     generic: 0,
                 },
             }
+        );
+
+        let legacy_emerge: Keyword =
+            serde_json::from_str(r#"{"Emerge":{"type":"Cost","shards":["Blue"],"generic":3}}"#)
+                .expect("legacy Emerge mana payload deserializes");
+        assert_eq!(
+            legacy_emerge,
+            Keyword::Emerge(EmergeCost::creature(ManaCost::Cost {
+                shards: vec![crate::types::mana::ManaCostShard::Blue],
+                generic: 3,
+            }))
+        );
+
+        let legacy_quality_emerge: Keyword = serde_json::from_str(
+            r#"{"EmergeFromQuality":{"mana_cost":{"type":"Cost","shards":[],"generic":5},"sacrifice_filter":{"type":"Typed","type_filters":["Artifact"],"controller":null,"properties":[]}}}"#,
+        )
+        .expect("legacy EmergeFromQuality payload deserializes");
+        assert_eq!(
+            legacy_quality_emerge,
+            Keyword::Emerge(EmergeCost::from_quality(
+                ManaCost::generic(5),
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+            ))
         );
     }
 

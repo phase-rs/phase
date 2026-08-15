@@ -34,7 +34,10 @@ type AltKeyword = Extract<
   { type: "AlternativeCastChoice" }
 >["data"]["keyword"]["type"];
 
-function setSpectacleChoice(keyword: AltKeyword) {
+function setSpectacleChoice(
+  keyword: AltKeyword,
+  alternativeAdditionalCostDescription: string | null = null,
+) {
   const waitingFor: WaitingFor = {
     type: "AlternativeCastChoice",
     data: {
@@ -45,6 +48,7 @@ function setSpectacleChoice(keyword: AltKeyword) {
       normal_cost: { type: "Cost", shards: ["Red"], generic: 3 },
       alternative_cost: RED_COST,
       alternative_additional_cost: null,
+      alternative_additional_cost_description: alternativeAdditionalCostDescription,
     },
   };
 
@@ -121,4 +125,11 @@ describe("AlternativeCostModal", () => {
       ).toBeInTheDocument();
     },
   );
+
+  it("renders Emerge's engine-provided sacrifice description", () => {
+    setSpectacleChoice("Emerge", "an artifact");
+    render(<AlternativeCostModal />);
+
+    expect(screen.getByText(/sacrificing an artifact/i)).toBeInTheDocument();
+  });
 });

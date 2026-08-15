@@ -7,7 +7,7 @@ use crate::types::ability::{
     ModalSelectionCondition, ObjectScope, PlayerFilter, PlayerScope, ProhibitedActivity,
     QuantityExpr, QuantityRef, ResolvedAbility, RestrictionExpiry, RestrictionPlayerScope,
     StaticCondition, StaticDefinition, SubAbilityLink, TapCreaturesRequirement, TargetFilter,
-    TargetRef,
+    TargetRef, TypeFilter,
 };
 use crate::types::actions::{AlternativeCastDecision, GameAction};
 use crate::types::card::LayoutKind;
@@ -2560,6 +2560,41 @@ fn effective_emerge_sacrifice_filter(
             Keyword::Emerge(cost) => Some(cost.sacrifice_filter),
             _ => None,
         })
+}
+
+/// CR 702.119a-b: Emerge's sacrifice quality is part of the alternative cost,
+/// so the engine supplies a display-ready phrase rather than requiring a client
+/// to interpret its `TargetFilter`. Complex filters use the localized generic
+/// fallback rather than a lossy partial description.
+fn emerge_sacrifice_description(sacrifice_filter: &TargetFilter) -> Option<String> {
+    let TargetFilter::Typed(filter) = sacrifice_filter else {
+        return None;
+    };
+    if filter.type_filters.len() != 1
+        || filter.controller.is_some()
+        || !filter.properties.is_empty()
+    {
+        return None;
+    }
+    let subject = match filter.get_primary_type()? {
+        TypeFilter::Artifact => "artifact",
+        TypeFilter::Battle => "battle",
+        TypeFilter::Card => "card",
+        TypeFilter::Creature => "creature",
+        TypeFilter::Enchantment => "enchantment",
+        TypeFilter::Instant => "instant",
+        TypeFilter::Kindred => "kindred",
+        TypeFilter::Land => "land",
+        TypeFilter::Permanent => "permanent",
+        TypeFilter::Planeswalker => "planeswalker",
+        TypeFilter::Sorcery => "sorcery",
+        TypeFilter::Subtype(subtype) => subtype,
+        TypeFilter::Any | TypeFilter::AnyOf(_) | TypeFilter::Non(_) => "permanent",
+    };
+    let article = matches!(subject.chars().next(), Some('a' | 'e' | 'i' | 'o' | 'u'))
+        .then_some("an")
+        .unwrap_or("a");
+    Some(format!("{article} {subject}"))
 }
 
 /// Fuse-aware sibling of [`effective_spell_keywords`]. `fused` projects a
@@ -11494,6 +11529,7 @@ pub fn handle_cast_spell_with_payment_mode(
                         normal_cost,
                         alternative_cost: Some(warp_cost_eff),
                         alternative_additional_cost: None,
+                        alternative_additional_cost_description: None,
                     });
                 }
                 // If only normal is affordable, skip warp — prepare_spell_cast will
@@ -11549,6 +11585,7 @@ pub fn handle_cast_spell_with_payment_mode(
                 normal_cost: offer.normal_cost,
                 alternative_cost: offer.alternative_cost,
                 alternative_additional_cost: offer.alternative_additional_cost,
+                alternative_additional_cost_description: None,
             });
         }
         if !eligibility.normal_affordable && eligibility.evoke_affordable {
@@ -11603,8 +11640,11 @@ pub fn handle_cast_spell_with_payment_mode(
                         normal_cost,
                         alternative_cost: Some(emerge_cost_eff),
                         alternative_additional_cost: Some(casting_costs::emerge_sacrifice_cost(
-                            emerge_cost.sacrifice_filter,
+                            emerge_cost.sacrifice_filter.clone(),
                         )),
+                        alternative_additional_cost_description: emerge_sacrifice_description(
+                            &emerge_cost.sacrifice_filter,
+                        ),
                     });
                 }
                 if !normal_affordable && emerge_affordable {
@@ -11656,6 +11696,7 @@ pub fn handle_cast_spell_with_payment_mode(
                         normal_cost,
                         alternative_cost: Some(dash_eff),
                         alternative_additional_cost: None,
+                        alternative_additional_cost_description: None,
                     });
                 }
                 if !normal_affordable && dash_affordable {
@@ -11711,6 +11752,7 @@ pub fn handle_cast_spell_with_payment_mode(
                         normal_cost,
                         alternative_cost: Some(blitz_eff),
                         alternative_additional_cost: None,
+                        alternative_additional_cost_description: None,
                     });
                 }
                 if !normal_affordable && blitz_affordable {
@@ -11762,6 +11804,7 @@ pub fn handle_cast_spell_with_payment_mode(
                         normal_cost,
                         alternative_cost: Some(spectacle_eff),
                         alternative_additional_cost: None,
+                        alternative_additional_cost_description: None,
                     });
                 }
                 if !normal_affordable && spectacle_affordable {
@@ -11819,6 +11862,7 @@ pub fn handle_cast_spell_with_payment_mode(
                         normal_cost,
                         alternative_cost: Some(prowl_eff),
                         alternative_additional_cost: None,
+                        alternative_additional_cost_description: None,
                     });
                 }
                 if !normal_affordable && prowl_affordable {
@@ -11868,6 +11912,7 @@ pub fn handle_cast_spell_with_payment_mode(
                         normal_cost,
                         alternative_cost: Some(overload_cost_eff),
                         alternative_additional_cost: None,
+                        alternative_additional_cost_description: None,
                     });
                 }
                 if !normal_affordable && overload_affordable {
@@ -11925,6 +11970,7 @@ pub fn handle_cast_spell_with_payment_mode(
                         normal_cost,
                         alternative_cost: Some(mtmte_cost_eff),
                         alternative_additional_cost: None,
+                        alternative_additional_cost_description: None,
                     });
                 }
                 if !normal_affordable && mtmte_affordable {
@@ -11978,6 +12024,7 @@ pub fn handle_cast_spell_with_payment_mode(
                         normal_cost,
                         alternative_cost: Some(cleave_cost_eff),
                         alternative_additional_cost: None,
+                        alternative_additional_cost_description: None,
                     });
                 }
                 if !normal_affordable && cleave_affordable {
@@ -12080,6 +12127,7 @@ pub fn handle_cast_spell_with_payment_mode(
                         normal_cost,
                         alternative_cost: bestow_mana_eff,
                         alternative_additional_cost: bestow_non_mana_part,
+                        alternative_additional_cost_description: None,
                     });
                 }
                 if has_legal_creature_target && bestow_affordable {
@@ -12163,6 +12211,7 @@ pub fn handle_cast_spell_with_payment_mode(
                         normal_cost,
                         alternative_cost: Some(mutate_cost_eff),
                         alternative_additional_cost: None,
+                        alternative_additional_cost_description: None,
                     });
                 }
                 if has_legal_mutate_target && !normal_affordable && mutate_affordable {
@@ -12230,6 +12279,7 @@ pub fn handle_cast_spell_with_payment_mode(
                         normal_cost,
                         alternative_cost: Some(awaken_cost_eff),
                         alternative_additional_cost: None,
+                        alternative_additional_cost_description: None,
                     });
                 }
                 if has_legal_land && !normal_affordable && awaken_affordable {
@@ -12277,6 +12327,7 @@ pub fn handle_cast_spell_with_payment_mode(
                         normal_cost,
                         alternative_cost: Some(impending_cost_eff),
                         alternative_additional_cost: None,
+                        alternative_additional_cost_description: None,
                     });
                 }
                 if !normal_affordable && impending_affordable {
@@ -12324,6 +12375,7 @@ pub fn handle_cast_spell_with_payment_mode(
                         normal_cost,
                         alternative_cost: Some(prototype_cost_eff),
                         alternative_additional_cost: None,
+                        alternative_additional_cost_description: None,
                     });
                 }
                 if !normal_affordable && prototype_affordable {
@@ -12381,6 +12433,7 @@ pub fn handle_cast_spell_with_payment_mode(
                         normal_cost,
                         alternative_cost: Some(face_down_cost),
                         alternative_additional_cost: None,
+                        alternative_additional_cost_description: None,
                     });
                 }
                 // Only the face-down {3} is affordable — proceed face down.

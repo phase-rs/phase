@@ -35,6 +35,7 @@ interface KeywordCopy {
 function keywordCopy(
   keyword: Keyword,
   cardName: string,
+  alternativeAdditionalCostDescription: string | null,
   t: TFunction<"game">,
 ): KeywordCopy {
   switch (keyword) {
@@ -55,15 +56,18 @@ function keywordCopy(
         showOracleText: true,
         subtitle: t("alternativeCost.evokeSubtitle", { name: cardName }),
       };
-    // CR 702.119a-c: Emerge — sacrifice a creature while casting; the emerge
-    // cost is reduced by that creature's mana value (handled engine-side).
+    // CR 702.119a-b: Emerge's required sacrifice quality is supplied by the
+    // engine; the modal must not infer it from the typed cost filter.
     case "Emerge":
       return {
         eyebrow: t("alternativeCost.emergeEyebrow"),
         normalLabel: t("alternativeCost.emergeNormalLabel"),
         altLabel: t("alternativeCost.emergeAltLabel"),
         showOracleText: true,
-        subtitle: t("alternativeCost.emergeSubtitle", { name: cardName }),
+        subtitle: t("alternativeCost.emergeSubtitle", {
+          name: cardName,
+          sacrifice: alternativeAdditionalCostDescription ?? t("alternativeCost.emergeFallbackSacrifice"),
+        }),
       };
     // CR 702.109a: Dash — like Warp, the rider (haste + end-step return to hand)
     // lives on the keyword itself and doesn't change the spell's printed text.
@@ -243,6 +247,7 @@ export function AlternativeCostModal() {
       normalCost={data.normal_cost}
       alternativeCost={data.alternative_cost}
       alternativeAdditionalCost={data.alternative_additional_cost}
+      alternativeAdditionalCostDescription={data.alternative_additional_cost_description}
       dispatch={dispatch}
     />
   );
@@ -254,6 +259,7 @@ function AlternativeCostContent({
   normalCost,
   alternativeCost,
   alternativeAdditionalCost,
+  alternativeAdditionalCostDescription,
   dispatch,
 }: {
   objectId: number;
@@ -261,6 +267,7 @@ function AlternativeCostContent({
   normalCost: ManaCost;
   alternativeCost: ManaCost | null;
   alternativeAdditionalCost: SerializedAbilityCost | null;
+  alternativeAdditionalCostDescription: string | null;
   dispatch: (action: GameAction) => Promise<unknown>;
 }) {
   const { t } = useTranslation("game");
@@ -269,7 +276,7 @@ function AlternativeCostContent({
   if (!obj) return null;
 
   const cardName = obj.name;
-  const copy = keywordCopy(keyword, cardName, t);
+  const copy = keywordCopy(keyword, cardName, alternativeAdditionalCostDescription, t);
 
   return (
     <DialogShell
@@ -315,7 +322,7 @@ function AlternativeCostContent({
           )}
           {alternativeAdditionalCost && (
             <span className="ml-2 text-xs text-slate-300">
-              {describeAdditionalCost(alternativeAdditionalCost, t)}
+              {alternativeAdditionalCostDescription ?? describeAdditionalCost(alternativeAdditionalCost, t)}
             </span>
           )}
           {copy.altSuffix && (
