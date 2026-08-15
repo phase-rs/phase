@@ -199,9 +199,11 @@ fn first_family_counts_its_own_cast_on_an_empty_board() {
     outcome.assert_life_delta(P0, 2);
 }
 
-/// CR 109.4: "spells **you've** cast" is the controller's journal
-/// (`CountScope::Controller`). An opponent's cast of a brand-new colour must not
-/// move X.
+/// CR 109.5: "spells **you've** cast" is the controller's journal
+/// (`CountScope::Controller`) — "you"/"your" on an object refers to that
+/// object's controller. An opponent's cast of a brand-new colour must not move
+/// X. (NOT CR 109.4, which says only stack/battlefield objects HAVE a
+/// controller; that rule does not define the possessive.)
 #[test]
 fn first_family_ignores_an_opponents_cast() {
     let mut scenario = GameScenario::new();

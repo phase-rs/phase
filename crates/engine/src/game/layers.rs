@@ -2695,35 +2695,30 @@ fn static_condition_reads_zone_membership(condition: &StaticCondition, zone: Zon
 }
 
 /// CR 404: Does a `ZoneRef` denote the game `zone`?
+///
+/// Delegates to [`ZoneRef::zone`](crate::types::ability::ZoneRef::zone) rather
+/// than restating the pairing: the hand-written `matches!` this replaced was a
+/// second copy of the mapping that a new `ZoneRef` variant would have left
+/// silently answering `false` instead of failing to compile.
 fn zone_ref_denotes_zone(zone_ref: &crate::types::ability::ZoneRef, zone: Zone) -> bool {
-    use crate::types::ability::ZoneRef;
-    matches!(
-        (zone_ref, zone),
-        (ZoneRef::Graveyard, Zone::Graveyard)
-            | (ZoneRef::Exile, Zone::Exile)
-            | (ZoneRef::Library, Zone::Library)
-            | (ZoneRef::Hand, Zone::Hand)
-    )
+    zone_ref.zone() == zone
 }
 
 /// CR 613.4a + CR 400.1: Does a [`CardTypeSetSource`] population read `zone`?
 ///
-/// Only the explicit `Zone` source names one. `Objects` keeps the pre-existing
-/// classification (its `InZone` prop is not consulted here, matching the
-/// behavior every characteristic head had before they shared this axis), the
-/// journal is player state rather than a zone (CR 601.2a), and `AnyOf` reads a
-/// zone iff any member does.
+/// Delegates to [`CardTypeSetSource::reads_zone`], which is THE authority for
+/// the population-zone axis and is the same function
+/// `game::quantity::visit_characteristic_source` walks to enumerate members.
+/// This wrapper exists only to keep the local call sites reading like their
+/// `characteristic_source_reads_*` siblings — it must never re-derive the
+/// answer.
+///
+/// It previously did re-derive it, and reported `false` for every `Objects`
+/// population. That is what let a craft characteristic (`And[ExiledBySource,
+/// Owned{You}]`, Sunbird Effigy) be evaluated against exile while no exile
+/// transition ever dirtied it, stranding a stale value in a layer.
 fn characteristic_source_reads_zone(source: &CardTypeSetSource, zone: Zone) -> bool {
-    match source {
-        CardTypeSetSource::Zone { zone: zone_ref, .. } => zone_ref_denotes_zone(zone_ref, zone),
-        CardTypeSetSource::AnyOf { sources } => sources
-            .iter()
-            .any(|member| characteristic_source_reads_zone(member, zone)),
-        CardTypeSetSource::ExiledBySource
-        | CardTypeSetSource::Objects { .. }
-        | CardTypeSetSource::TrackedSet { .. }
-        | CardTypeSetSource::TurnJournal { .. } => false,
-    }
+    source.reads_zone(zone)
 }
 
 /// CR 119 + CR 613.4a: Does a [`CardTypeSetSource`] population route a filter

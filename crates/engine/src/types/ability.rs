@@ -1846,6 +1846,24 @@ pub enum ZoneRef {
     Hand,
 }
 
+impl ZoneRef {
+    /// CR 400.1: The game zone this reference denotes.
+    ///
+    /// The single authority for the `ZoneRef` → [`Zone`](crate::types::zones::Zone)
+    /// mapping. Exhaustive by construction: a new `ZoneRef` variant fails to
+    /// compile here rather than silently reading as "some other zone" at a call
+    /// site that pattern-matched only the four it knew about.
+    pub fn zone(&self) -> crate::types::zones::Zone {
+        use crate::types::zones::Zone;
+        match self {
+            ZoneRef::Graveyard => Zone::Graveyard,
+            ZoneRef::Exile => Zone::Exile,
+            ZoneRef::Library => Zone::Library,
+            ZoneRef::Hand => Zone::Hand,
+        }
+    }
+}
+
 /// CR 701.10d-f: What aspect to double (counters, life total, or mana pool).
 /// Used by `Effect::Double` per locked decision D-05.
 /// DoublePT/DoublePTAll handle CR 701.10a-c (power/toughness) separately.
@@ -6071,6 +6089,76 @@ impl CardTypeSetSource {
             1 => sources.pop(),
             _ => Some(CardTypeSetSource::AnyOf { sources }),
         }
+    }
+
+    /// CR 400.1 + CR 613.4a: Every zone this population reads.
+    ///
+    /// THE single authority for the population-zone axis. Both consumers ask
+    /// this and nothing else:
+    ///
+    /// * **Evaluation** — `game::quantity::visit_characteristic_source` walks
+    ///   exactly these zones to enumerate members.
+    /// * **Dependency tracking** — [`reads_zone`](Self::reads_zone), which
+    ///   `game::layers::characteristic_source_reads_zone` delegates to, dirties
+    ///   a dependent characteristic when an object crosses one of them.
+    ///
+    /// They MUST agree. When they did not, a layer or CDA could retain a stale
+    /// distinct-characteristic value across a zone transition: the evaluator
+    /// scanned exile for a craft population (`And[ExiledBySource, …]`, Sunbird
+    /// Effigy) while the classifier reported that same population as reading no
+    /// zone at all, so nothing ever re-evaluated it. Splitting the two answers
+    /// across two functions is what made that divergence possible; one function
+    /// with two callers is what prevents it.
+    ///
+    /// EMPTY means "no zone is explicitly named", which each consumer resolves
+    /// per [`TargetFilter::population_zones`]: the walk substitutes the
+    /// battlefield default (CR 110.1), the dependency check does not. Two
+    /// populations are empty as a POSITIVE claim rather than a fallback, and for
+    /// them the walk substitutes nothing because it never scans a zone at all:
+    ///
+    /// * `TurnJournal` — characteristics come from the snapshot taken when the
+    ///   action was journaled, because a resolved spell is no longer an object
+    ///   (CR 400.7). Nothing re-reads a zone, so no transition can stale it.
+    /// * `TrackedSet` — membership is by object id and is fixed when the set is
+    ///   published (CR 608.2c); a member moving zones changes neither the set
+    ///   nor the card types its members have (CR 205.2a).
+    pub fn population_zones(&self) -> Vec<crate::types::zones::Zone> {
+        let mut out = Vec::new();
+        self.collect_population_zones(&mut out);
+        out
+    }
+
+    fn collect_population_zones(&self, out: &mut Vec<crate::types::zones::Zone>) {
+        fn push(out: &mut Vec<crate::types::zones::Zone>, zone: crate::types::zones::Zone) {
+            if !out.contains(&zone) {
+                out.push(zone);
+            }
+        }
+        match self {
+            CardTypeSetSource::Zone { zone, .. } => push(out, zone.zone()),
+            // CR 607.2a + CR 406.6: a linked-exile pool lives in exile.
+            CardTypeSetSource::ExiledBySource => push(out, crate::types::zones::Zone::Exile),
+            CardTypeSetSource::Objects { filter } => {
+                for zone in filter.population_zones() {
+                    push(out, zone);
+                }
+            }
+            // Not zone reads — see the doc comment on `population_zones`.
+            CardTypeSetSource::TrackedSet { .. } | CardTypeSetSource::TurnJournal { .. } => {}
+            CardTypeSetSource::AnyOf { sources } => {
+                for member in sources {
+                    member.collect_population_zones(out);
+                }
+            }
+        }
+    }
+
+    /// CR 613.4a: Does this population read `zone`?
+    ///
+    /// The dependency-tracking half of [`population_zones`](Self::population_zones),
+    /// kept as one call so a caller cannot accidentally ask a narrower question.
+    pub fn reads_zone(&self, zone: crate::types::zones::Zone) -> bool {
+        self.population_zones().contains(&zone)
     }
 }
 
@@ -15714,6 +15802,43 @@ impl TargetFilter {
             }
             _ => {}
         }
+    }
+
+    /// CR 400.1: Every zone this filter EXPLICITLY constrains its population to.
+    ///
+    /// The union of both zone readers, and never narrower than either. They
+    /// disagree on `StackSpell` / `StackAbility`: [`extract_in_zone`](Self::extract_in_zone)
+    /// reports `Stack`, while `collect_zones` has no arm for them and reports
+    /// nothing. A population walk that switched from the former to the latter
+    /// would stop scanning the stack, so the single-zone answer is unioned in
+    /// rather than assumed redundant. Deliberately fixed HERE rather than by
+    /// adding the arm to `collect_zones`: that function has ~15 callers asking
+    /// the narrower "what is written here" question, and widening it under them
+    /// is a change none of them requested.
+    ///
+    /// EMPTY IS MEANINGFUL, and is why no battlefield default is applied here.
+    /// A filter with no written zone constraint denotes permanents (CR 110.1),
+    /// but the two consumers of this list need opposite things from that fact:
+    ///
+    /// * a population WALK must scan the battlefield, so it substitutes the
+    ///   default itself (`game::quantity::visit_characteristic_source`);
+    /// * a zone-transition DEPENDENCY must not claim to read the battlefield,
+    ///   because battlefield moves are already escalated unconditionally by
+    ///   `mark_layers_full` — reporting it here would add a redundant full
+    ///   recompute to every battlefield move, and would break this function's
+    ///   agreement with its `target_filter_reads_zone` siblings, none of which
+    ///   report a defaulted zone.
+    ///
+    /// Order is deterministic (`extract_zones` order, then the single-zone
+    /// answer) so a walk's yield order does not depend on traversal incidentals.
+    pub fn population_zones(&self) -> Vec<crate::types::zones::Zone> {
+        let mut zones = self.extract_zones();
+        if let Some(single) = self.extract_in_zone() {
+            if !zones.contains(&single) {
+                zones.push(single);
+            }
+        }
+        zones
     }
 }
 
@@ -26381,6 +26506,168 @@ mod tests {
             )
             .is_ok(),
             "a two-member union must still load"
+        );
+    }
+
+    /// CR 400.1: the population-zone authority reports EVERY zone a population
+    /// reads, per variant. The craft row is the one that was silently wrong:
+    /// evaluation scanned exile for `And[ExiledBySource, Owned{You}]` while the
+    /// dependency classifier reported that population as reading no zone, so no
+    /// exile transition ever dirtied a characteristic derived from it.
+    #[test]
+    fn population_zones_reports_every_zone_each_population_reads() {
+        // Craft linked-exile (Sunbird Effigy), in both the shapes that reach it:
+        // the dedicated variant and the filter the craft parser actually builds.
+        assert_eq!(
+            CardTypeSetSource::ExiledBySource.population_zones(),
+            vec![Zone::Exile]
+        );
+        let craft = CardTypeSetSource::Objects {
+            filter: TargetFilter::And {
+                filters: vec![
+                    TargetFilter::ExiledBySource,
+                    TargetFilter::Typed(TypedFilter::default().properties(vec![
+                        FilterProp::Owned {
+                            controller: ControllerRef::You,
+                        },
+                    ])),
+                ],
+            },
+        };
+        assert_eq!(craft.population_zones(), vec![Zone::Exile]);
+        assert!(craft.reads_zone(Zone::Exile), "the craft regression");
+        assert!(!craft.reads_zone(Zone::Graveyard));
+
+        // An explicit single-zone constraint, and the ZoneRef mapping.
+        for (zone_ref, zone) in [
+            (ZoneRef::Graveyard, Zone::Graveyard),
+            (ZoneRef::Exile, Zone::Exile),
+            (ZoneRef::Library, Zone::Library),
+            (ZoneRef::Hand, Zone::Hand),
+        ] {
+            let source = CardTypeSetSource::Zone {
+                zone: zone_ref,
+                scope: CountScope::Controller,
+            };
+            assert_eq!(source.population_zones(), vec![zone]);
+            assert!(source.reads_zone(zone));
+            assert!(!source.reads_zone(Zone::Stack));
+        }
+
+        // A snapshot population is NOT a zone read (CR 400.7 / CR 608.2c), and
+        // that is asserted rather than left implicit.
+        for snapshot in [
+            CardTypeSetSource::TrackedSet { caused_by: None },
+            CardTypeSetSource::TurnJournal {
+                journal: TurnJournalKind::SpellsCast,
+                scope: CountScope::Controller,
+                filter: None,
+            },
+        ] {
+            assert!(snapshot.population_zones().is_empty());
+            for zone in [Zone::Battlefield, Zone::Exile, Zone::Graveyard] {
+                assert!(!snapshot.reads_zone(zone));
+            }
+        }
+    }
+
+    /// CR 400.1: a multi-zone `InAnyZone` population enumerates EVERY zone.
+    /// `extract_in_zone` collapses it to one, which is what made the evaluator
+    /// undercount every zone after the first.
+    #[test]
+    fn population_zones_preserves_multi_zone_unions_that_extract_in_zone_collapses() {
+        let multi =
+            TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::InAnyZone {
+                    zones: vec![Zone::Graveyard, Zone::Hand, Zone::Library],
+                }]),
+            );
+        // The collapse this replaces: one zone out of three.
+        assert_eq!(multi.extract_in_zone(), None);
+        let source = CardTypeSetSource::Objects {
+            filter: multi.clone(),
+        };
+        assert_eq!(
+            source.population_zones(),
+            vec![Zone::Graveyard, Zone::Hand, Zone::Library]
+        );
+        for zone in [Zone::Graveyard, Zone::Hand, Zone::Library] {
+            assert!(source.reads_zone(zone), "{zone:?} is in the union");
+        }
+        for zone in [Zone::Battlefield, Zone::Exile, Zone::Stack] {
+            assert!(!source.reads_zone(zone), "{zone:?} is not in the union");
+        }
+    }
+
+    /// The population-zone list must never be NARROWER than `extract_in_zone`.
+    /// `collect_zones` has no `StackSpell` arm, so a walk that read only
+    /// `extract_zones` would stop scanning the stack — the union is what keeps
+    /// Secret Arcade's "permanent spells you control" shape reachable.
+    #[test]
+    fn population_zones_is_never_narrower_than_either_zone_reader() {
+        for filter in [
+            TargetFilter::StackSpell,
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::StackSpell,
+                    TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+                ],
+            },
+        ] {
+            assert!(
+                filter.extract_zones().is_empty(),
+                "precondition: collect_zones has no stack arm"
+            );
+            assert_eq!(filter.extract_in_zone(), Some(Zone::Stack));
+            assert_eq!(filter.population_zones(), vec![Zone::Stack]);
+        }
+    }
+
+    /// CR 110.1 + CR 611.3a: an unconstrained filter denotes permanents, but the
+    /// battlefield default is deliberately NOT reported here. Battlefield moves
+    /// are escalated unconditionally by `mark_layers_full`, so claiming the read
+    /// would add a redundant full recompute to every one of them; the population
+    /// WALK substitutes the default itself. This asymmetry is the whole reason
+    /// `population_zones` returns an empty vec instead of `[Battlefield]`.
+    #[test]
+    fn population_zones_leaves_the_battlefield_default_to_the_walk() {
+        let source = CardTypeSetSource::Objects {
+            filter: TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+        };
+        assert!(source.population_zones().is_empty());
+        assert!(!source.reads_zone(Zone::Battlefield));
+    }
+
+    /// CR 109.2: a union reads the union of its members' zones, deduplicated —
+    /// First Family's shape, plus a nested union to pin the recursion.
+    #[test]
+    fn population_zones_unions_member_zones_without_duplicates() {
+        let graveyard = CardTypeSetSource::Zone {
+            zone: ZoneRef::Graveyard,
+            scope: CountScope::Controller,
+        };
+        let union = CardTypeSetSource::any_of(vec![
+            graveyard.clone(),
+            CardTypeSetSource::ExiledBySource,
+            // Same zone twice — the dedup is what makes this a set union.
+            graveyard.clone(),
+            CardTypeSetSource::any_of(vec![
+                CardTypeSetSource::Zone {
+                    zone: ZoneRef::Hand,
+                    scope: CountScope::Controller,
+                },
+                CardTypeSetSource::TurnJournal {
+                    journal: TurnJournalKind::SpellsCast,
+                    scope: CountScope::Controller,
+                    filter: None,
+                },
+            ])
+            .expect("two-member union"),
+        ])
+        .expect("multi-member union");
+        assert_eq!(
+            union.population_zones(),
+            vec![Zone::Graveyard, Zone::Exile, Zone::Hand]
         );
     }
 

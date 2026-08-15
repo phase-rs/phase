@@ -239,16 +239,34 @@ fn visit_characteristic_source<'s>(
                 }
             }
         }
+        // CR 400.1: EVERY zone the filter names, not just the first. The zone
+        // list comes from `CardTypeSetSource::population_zones` — the same
+        // authority `game::layers::characteristic_source_reads_zone` asks — so
+        // the set this walk enumerates and the set a zone transition dirties
+        // cannot drift apart.
+        //
+        // The previous `extract_in_zone().unwrap_or(Battlefield)` collapsed a
+        // multi-zone `FilterProp::InAnyZone` population to whichever zone the
+        // filter tree happened to yield first, silently undercounting every
+        // other zone in the union.
+        //
+        // CR 110.1: an empty list means the filter writes no zone constraint, so
+        // it denotes permanents. The default is substituted HERE and not inside
+        // `population_zones` — see that function on why the dependency half must
+        // not claim a defaulted battlefield read.
         CardTypeSetSource::Objects { filter } => {
-            let zone = filter
-                .extract_in_zone()
-                .unwrap_or(crate::types::zones::Zone::Battlefield);
-            for obj_id in crate::game::targeting::zone_object_ids(state, zone) {
-                if !matches_target_filter(state, obj_id, filter, filter_ctx) {
-                    continue;
-                }
-                if let Some(obj) = state.objects.get(&obj_id) {
-                    visit(CharacteristicView::Object(obj));
+            let mut zones = source.population_zones();
+            if zones.is_empty() {
+                zones.push(crate::types::zones::Zone::Battlefield);
+            }
+            for zone in zones {
+                for obj_id in crate::game::targeting::zone_object_ids(state, zone) {
+                    if !matches_target_filter(state, obj_id, filter, filter_ctx) {
+                        continue;
+                    }
+                    if let Some(obj) = state.objects.get(&obj_id) {
+                        visit(CharacteristicView::Object(obj));
+                    }
                 }
             }
         }

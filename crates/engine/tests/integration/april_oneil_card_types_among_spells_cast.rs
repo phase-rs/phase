@@ -80,16 +80,25 @@ fn april_oneil_binds_card_types_over_the_cast_journal() {
     );
 }
 
-/// RUNTIME half. Cast THREE spells spanning TWO card types this turn, then
-/// resolve the same `DistinctCardTypes { TurnJournal }` quantity through the
-/// production resolver against the real journal the casts wrote.
+/// RUNTIME half, driven through the REAL end-step trigger.
 ///
-/// The 3-casts / 2-types split is the discriminator: the pre-fix
-/// `SpellsCastThisTurn` reading returns 3.
+/// Cast THREE spells spanning TWO card types, then advance to the end step and
+/// let April O'Neil's own triggered ability resolve. The 3-casts / 2-types split
+/// is the discriminator: the pre-fix `SpellsCastThisTurn` reading draws 3.
+///
+/// The direct `resolve_quantity` probe is kept as a second, sharper assertion —
+/// it pins the quantity in isolation — but it is NOT the primary check. On its
+/// own it proves only that the resolver can count a hand-built AST; the drawn-card
+/// assertion is what proves the parsed trigger actually reaches that resolver
+/// with the source bound, so a break anywhere in trigger wiring is caught here
+/// rather than passing green against a quantity nothing dispatches.
 #[test]
 fn april_oneil_counts_card_types_not_spells() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    // Deeper than the trigger can draw, so a miscount reads as a wrong DRAW
+    // COUNT rather than as an empty library.
+    scenario.with_library_top(P0, &["Draw A", "Draw B", "Draw C", "Draw D"]);
 
     let april = scenario
         .add_creature_from_oracle(P0, "April O'Neil, Hacktivist", 2, 2, APRIL_ONEIL)
@@ -142,6 +151,34 @@ fn april_oneil_counts_card_types_not_spells() {
         2,
         "three spells spanning two card types must count 2 (CR 205.2a), not 3"
     );
+
+    // THE PRIMARY ASSERTION: April O'Neil's own trigger, through the production
+    // pipeline. CR 513.1 — "at the beginning of your end step" triggers when the
+    // end step begins; the trigger goes on the stack and resolves from there.
+    let hand_before = runner.state().players[P0.0 as usize].hand.len();
+    // CR 508.1: April O'Neil is a 2/2 and could attack, so the declare-attackers
+    // turn-based action surfaces a prompt `advance_to_phase` cannot auto-pass —
+    // it would stop in combat and leave the end step unreached. Cross it
+    // explicitly rather than letting the phase helper stall.
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[])
+        .expect("declare no attackers to cross combat");
+    runner.advance_to_end_step();
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().phase,
+        Phase::End,
+        "reach guard: the scenario must actually reach the end step, or the \
+         draw assertion below passes vacuously by never triggering"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize].hand.len() - hand_before,
+        2,
+        "April O'Neil must draw one card per CARD TYPE among the three spells \
+         cast this turn — 2 (instant, sorcery), not 3 (the spell count)"
+    );
 }
 
 /// Sibling: the journal's optional narrowing filter (Hurkyl's "noncreature
@@ -157,8 +194,14 @@ fn a_filtered_cast_journal_narrows_the_type_tally() {
         .add_spell_to_hand_from_oracle(P0, "Instant A", true, INSTANT_FILLER)
         .with_mana_cost(mono(ManaCostShard::Blue))
         .id();
+    // The EXCLUDED member for the filtered arm below — a second card type in the
+    // journal that a narrowing filter must reject.
+    let sorcery = scenario
+        .add_spell_to_hand_from_oracle(P0, "Sorcery A", false, SORCERY_FILLER)
+        .with_mana_cost(mono(ManaCostShard::Red))
+        .id();
 
-    scenario.with_mana_pool(P0, pool(&[(ManaType::Blue, 1)]));
+    scenario.with_mana_pool(P0, pool(&[(ManaType::Blue, 1), (ManaType::Red, 1)]));
     let mut runner = scenario.build();
 
     let unfiltered = |scope| QuantityExpr::Ref {
@@ -167,6 +210,20 @@ fn a_filtered_cast_journal_narrows_the_type_tally() {
                 journal: TurnJournalKind::SpellsCast,
                 scope,
                 filter: None,
+            },
+        },
+    };
+    // CR 601.2a: the journal's optional narrowing filter, matched against each
+    // record's cast-time snapshot (a resolved spell is no longer an object,
+    // CR 400.7).
+    let narrowed_to = |type_filter| QuantityExpr::Ref {
+        qty: QuantityRef::DistinctCardTypes {
+            source: CardTypeSetSource::TurnJournal {
+                journal: TurnJournalKind::SpellsCast,
+                scope: engine::types::ability::CountScope::Controller,
+                filter: Some(engine::types::ability::TargetFilter::Typed(
+                    engine::types::ability::TypedFilter::new(type_filter),
+                )),
             },
         },
     };
@@ -196,8 +253,10 @@ fn a_filtered_cast_journal_narrows_the_type_tally() {
         "one instant cast → one card type"
     );
 
-    // CR 109.4: the same journal read at `Opponents` scope sees the OTHER
-    // player's journal, which is empty.
+    // CR 109.5: "you"/"your" on an object refers to that object's controller,
+    // so the same journal read at `Opponents` scope sees the OTHER player's
+    // journal, which is empty. (NOT CR 109.4, which says only stack/battlefield
+    // objects HAVE a controller; that rule does not define the possessive.)
     assert_eq!(
         engine::game::quantity::resolve_quantity(
             runner.state(),
@@ -208,4 +267,36 @@ fn a_filtered_cast_journal_narrows_the_type_tally() {
         0,
         "the opponents' journal is empty, so the scope axis is live"
     );
+
+    // FILTERED ARM — what this test is named for. Put a SECOND card type in the
+    // journal, then narrow to each one in turn. Without the second cast the
+    // filter would be indistinguishable from `None`, which is why the exclusion
+    // half is asserted alongside the inclusion half.
+    runner.cast(sorcery).target_player(P0).resolve();
+    assert_eq!(
+        engine::game::quantity::resolve_quantity(
+            runner.state(),
+            &unfiltered(engine::types::ability::CountScope::Controller),
+            P0,
+            source,
+        ),
+        2,
+        "reach guard: both casts are journaled, so the filter below has \
+         something to exclude"
+    );
+    for (type_filter, label) in [
+        (engine::types::ability::TypeFilter::Instant, "instant"),
+        (engine::types::ability::TypeFilter::Sorcery, "sorcery"),
+    ] {
+        assert_eq!(
+            engine::game::quantity::resolve_quantity(
+                runner.state(),
+                &narrowed_to(type_filter),
+                P0,
+                source,
+            ),
+            1,
+            "narrowing to {label} must admit exactly that one record, not both"
+        );
+    }
 }
