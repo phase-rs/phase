@@ -18587,6 +18587,19 @@ mod stage2_injector_tests {
                 //
                 // Identity re-established: `9869a19f…`, `2bc316e3…`, `8df98486…` at the
                 // new coordinates. The other two entries did not move.
+                //
+                // CONVERGENT RE-MEASUREMENT, and the strongest evidence in this log. The
+                // maintainer merged the same upstream commit into this branch
+                // independently and in parallel, and recorded it thus: "#7404's Doomsday
+                // tracked-set publication and this branch's characteristic-source work
+                // both shift the producer coordinates. Re-measured in this merged tree:
+                // `:6774/:6851/:10089`. The three sites remain the existing producers."
+                //
+                // Two independent measurements of the same merged tree, agreeing to the
+                // line on all three coordinates. That is what a coordinate this log can
+                // trust looks like — and it is why the two prose entries are BOTH kept
+                // rather than one overwriting the other: they are separate witnesses, not
+                // duplicates.
                 "game/effects/mod.rs:6774".to_string(),
                 "game/effects/mod.rs:6851".to_string(),
                 "game/effects/mod.rs:10089".to_string(),

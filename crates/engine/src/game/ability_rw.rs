@@ -3756,7 +3756,7 @@ fn characteristic_source_read_bounded(source: &CardTypeSetSource) -> RwProfile {
     if complete {
         profile
     } else {
-        reads_zone_membership()
+        RwProfile::conservative()
     }
 }
 
@@ -6961,6 +6961,38 @@ mod tests {
                 "every characteristic head must declare the population's own read: {qty:?}"
             );
         }
+    }
+
+    /// CR 603.3b: a union walk that exceeds its safety budget cannot retain a
+    /// partial read profile. In particular, a deeply nested cast journal has no
+    /// zone read to fall back to: treating it as one would omit `JournalCast`.
+    #[test]
+    fn truncated_characteristic_source_walk_is_conservative_for_cast_journals() {
+        use crate::types::ability::{CardTypeSetSource, TurnJournalKind};
+
+        let journal = CardTypeSetSource::TurnJournal {
+            journal: TurnJournalKind::SpellsCast,
+            scope: CountScope::Controller,
+            filter: None,
+        };
+        let mut source = journal.clone();
+        for _ in 0..crate::types::ability::UNION_DEPTH_BUDGET {
+            source = CardTypeSetSource::any_of(vec![journal.clone(), source])
+                .expect("two sources form a union");
+        }
+
+        let profile = characteristic_source_read_bounded(&source);
+        assert_eq!(profile, RwProfile::conservative());
+        assert_ne!(
+            profile,
+            reads_zone_membership(),
+            "a truncated cast-journal union must not be misclassified as a zone read"
+        );
+        assert_ne!(
+            profile,
+            characteristic_source_read(&journal),
+            "a partial JournalCast fold is false precision, not a safe fallback"
+        );
     }
 
     /// Matrix rows 15b + 17 — zero delta for the D5 frozen-event-tag visitor,
