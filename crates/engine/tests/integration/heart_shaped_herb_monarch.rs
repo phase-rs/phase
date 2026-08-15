@@ -8,12 +8,19 @@
 //!   do, return that card to the battlefield under its owner's control with
 //!   three +1/+1 counters on it and you become the monarch.
 //!
-//! Before the `"you become "` bare-and splitter arm (parser/oracle_effect/
-//! sequence.rs), the final conjunct was dropped SILENTLY: the return-destination
-//! counter-suffix truncation in `strip_return_destination_ext_with_remainder`
-//! (lower.rs) cut the remainder at the counter clause's START offset, discarding
-//! the tail. The card reported as fully supported with zero coverage gaps while
-//! never granting the monarch.
+//! The conjunct was dropped SILENTLY — the card reported as fully supported
+//! with zero coverage gaps while never granting the monarch — because BOTH
+//! seams it had to cross were broken:
+//!   1. `strip_return_destination_ext_with_remainder` (lower.rs) truncated its
+//!      remainder at the counter clause's START offset, discarding everything
+//!      printed after it. It now CONSUMES the counter clause as a leading entry
+//!      rider, so the remainder stays a true suffix.
+//!   2. The chunk-level bare-and splitter `starts_bare_and_clause_lower`
+//!      (sequence.rs) had no `"you become "` arm, so even an intact tail was
+//!      not peeled into its own clause.
+//!
+//! Either fix alone leaves the card silent; the tests below pin the runtime
+//! behavior that requires both.
 //!
 //! Every test here drives the real `apply()` pipeline (GameScenario +
 //! GameRunner::activate + CR 602 announce/pay/resolve) and asserts measured

@@ -13106,12 +13106,13 @@ fn monarch_chain_has_unimplemented(def: &AbilityDefinition) -> bool {
 }
 
 /// CR 725.1 + CR 608.2c: Heart-Shaped Herb's activated ability ends with
-/// "… with three +1/+1 counters on it and you become the monarch". Before the
-/// `"you become "` bare-and splitter arm, the trailing conjunct was dropped
-/// SILENTLY — the return-destination counter-suffix truncation in
-/// `strip_return_destination_ext_with_remainder` (lower.rs) cut the remainder
-/// at the counter clause's start offset, so the card reported as fully
-/// supported with zero gaps while discarding a printed instruction.
+/// "… with three +1/+1 counters on it and you become the monarch". The trailing
+/// conjunct was dropped SILENTLY — the card reported as fully supported with
+/// zero gaps while discarding a printed instruction — because both seams it
+/// crosses were broken: `strip_return_destination_ext_with_remainder` (lower.rs)
+/// truncated its remainder at the counter clause's start offset, and the
+/// chunk-level bare-and splitter had no `"you become "` arm to peel the tail
+/// into its own clause even once it survived.
 ///
 /// The monarch grant must land NESTED under the `EffectOutcome`-gated
 /// `ChangeZone`, not as a sibling of the `Sacrifice`: CR 608.2c means

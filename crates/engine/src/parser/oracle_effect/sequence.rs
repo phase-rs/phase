@@ -2775,11 +2775,14 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         // Exactly two lines in the whole corpus contain " and you become " —
         // both were broken, in different ways:
         //   Heart-Shaped Herb: "…with three +1/+1 counters on it AND YOU BECOME
-        //     THE MONARCH" — dropped SILENTLY (reported supported, zero gaps),
-        //     because the return-destination counter-suffix truncation in
-        //     `strip_return_destination_ext_with_remainder` (lower.rs) cuts the
-        //     remainder at the counter clause's START offset, discarding the
-        //     tail before any guard could see it.
+        //     THE MONARCH" — dropped SILENTLY (reported supported, zero gaps).
+        //     It failed at TWO seams: the return-destination counter suffix in
+        //     `strip_return_destination_ext_with_remainder` (lower.rs) used to
+        //     truncate its remainder at the counter clause's START offset,
+        //     discarding the tail before any guard could see it (that seam now
+        //     CONSUMES the clause as a leading entry rider, so the tail
+        //     survives), and this splitter had no arm to peel the tail into its
+        //     own chunk once it did.
         //   Fall from Favor: "tap enchanted creature AND YOU BECOME THE
         //     MONARCH" — isolated by `try_split_targeted_compound` (mod.rs) but
         //     dispatched through `parse_imperative_effect`, which never tries
