@@ -71,7 +71,7 @@ fn resolve_fight_for_the_throne(stage_commander: impl FnOnce(&mut GameScenario))
     let theirs = scenario.add_creature(P1, "Doomed Squire", 1, 1).id();
 
     // The commander is ALWAYS a distinct object from both fighters. The gate is
-    // evaluated live as the delayed ability resolves (CR 608.2c), so a commander
+    // evaluated live as the delayed ability resolves (CR 603.4 + CR 608.2a), so a commander
     // that were itself a fight participant could change zones mid-resolution and
     // make the expected value depend on the fight outcome rather than on the gate.
     stage_commander(&mut scenario);
@@ -126,7 +126,7 @@ fn own_commander_on_battlefield_grants_the_monarch() {
     );
 }
 
-/// NEGATIVE + reach-guard — CR 603.4 + CR 608.2c: with no commander anywhere,
+/// NEGATIVE + reach-guard — CR 603.4 + CR 608.2a: with no commander anywhere,
 /// the intervening-`if` fails as the delayed ability resolves and nobody becomes
 /// the monarch.
 ///
@@ -145,7 +145,7 @@ fn no_commander_means_no_monarch() {
     );
     assert_eq!(
         result.monarch, None,
-        "CR 608.2c: the intervening-if \"if you control your commander\" fails, so \
+        "CR 603.4 + CR 608.2a: the intervening-if \"if you control your commander\" fails, so \
          the delayed BecomeMonarch must do nothing. Some(P0) here is the shipped \
          misparse — a dropped gate granting the monarch unconditionally"
     );
