@@ -59,23 +59,6 @@ pub fn resolve(
         && ability.targets.is_empty()
         && ability.parent_target_missing_reason == Some(ParentTargetMissingReason::Dig);
 
-    // CR 400.7 + CR 113.7a: An activated ability's SelfRef must not follow a
-    // later object that reuses the source ID. Triggered abilities retain the
-    // trigger-aware SelfRef exceptions for their own departure successors.
-    let stale_self_ref = if ability.trigger_source.is_some() {
-        !ability.self_ref_is_current(state)
-    } else {
-        !ability.source_is_current(state)
-    };
-    if matches!(target_filter, TargetFilter::SelfRef) && stale_self_ref {
-        events.push(GameEvent::EffectResolved {
-            kind: EffectKind::PutAtLibraryPosition,
-            source_id: ability.source_id,
-            subject: None,
-        });
-        return Ok(());
-    }
-
     // CR 608.2c + 603.10a: Delegate to the unified 3-tier dispatch
     // (`resolved_targets`). `SelfRef` always resolves to the source object;
     // `None` / `ParentTarget` fall back to the source only when
@@ -86,6 +69,33 @@ pub fn resolve(
     } else {
         crate::game::targeting::resolved_targets(ability, &target_filter, state)
     };
+
+    // CR 400.7 + CR 113.7a: A source-resolving empty SelfRef/ParentTarget must
+    // not follow a later object that reuses the source ID. This stays after
+    // `resolved_targets`: an empty ParentTarget can instead resolve a real
+    // event-context referent, which must not be mistaken for the source
+    // fallback. Triggered abilities retain the trigger-aware immediate-
+    // departure successor exceptions through `self_ref_is_current`.
+    let source_is_current = if ability.trigger_source.is_some() {
+        ability.self_ref_is_current(state)
+    } else {
+        ability.source_is_current(state)
+    };
+    if ability.targets.is_empty()
+        && matches!(
+            target_filter,
+            TargetFilter::SelfRef | TargetFilter::ParentTarget
+        )
+        && effective_targets == [crate::types::ability::TargetRef::Object(ability.source_id)]
+        && !source_is_current
+    {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::PutAtLibraryPosition,
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
     // CR 608.2c: `effect_object_targets` forwards `ability.targets` verbatim
     // for non-slot filters. A dig hand-keep binds `ParentTarget` on the exile
     // tail but must not pre-fill a `TrackedSet` bottom pick with the kept card.
@@ -881,6 +891,74 @@ mod tests {
             "Avenging Angel should be on top of its owner's library"
         );
         assert!(!state.players[0].graveyard.contains(&angel_id));
+    }
+
+    /// CR 400.7: An LTB `ParentTarget` fallback names the object that died,
+    /// not a later object with the same storage ID. Drive the trigger through
+    /// the real zone-change, trigger, stack, and resolver pipeline, then move
+    /// the card back before the trigger resolves to prove the new object stays
+    /// on the battlefield.
+    #[test]
+    fn test_put_on_top_ltb_reentry_does_not_follow_new_object() {
+        use crate::game::stack::resolve_top;
+        use crate::game::triggers::process_triggers;
+        use crate::types::ability::{AbilityDefinition, AbilityKind, TriggerDefinition};
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+        let angel_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Avenging Angel".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+        trigger.origin = Some(Zone::Battlefield);
+        trigger.destination = Some(Zone::Graveyard);
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+        trigger.trigger_zones = vec![Zone::Graveyard];
+        trigger.execute = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::ParentTarget,
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
+            },
+        )));
+        state
+            .objects
+            .get_mut(&angel_id)
+            .unwrap()
+            .trigger_definitions
+            .push(trigger);
+
+        let mut death_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, angel_id, Zone::Graveyard, &mut death_events);
+        let died_incarnation = state.objects[&angel_id].incarnation;
+        process_triggers(&mut state, &death_events);
+        assert_eq!(state.stack.len(), 1, "LTB trigger did not reach the stack");
+
+        let mut reentry_events = Vec::new();
+        crate::game::zones::move_to_zone(
+            &mut state,
+            angel_id,
+            Zone::Battlefield,
+            &mut reentry_events,
+        );
+        assert_ne!(
+            state.objects[&angel_id].incarnation, died_incarnation,
+            "re-entering must create a new object incarnation"
+        );
+
+        let mut resolve_events = Vec::new();
+        resolve_top(&mut state, &mut resolve_events);
+        assert_eq!(state.objects[&angel_id].zone, Zone::Battlefield);
+        assert!(
+            !state.players[0].library.contains(&angel_id),
+            "the stale LTB trigger must not put the new object on top of the library"
+        );
     }
 
     #[test]

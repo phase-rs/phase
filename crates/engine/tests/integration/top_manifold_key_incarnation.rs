@@ -2,7 +2,7 @@
 //! activated abilities that remain on the stack across a zone change.
 
 use engine::game::scenario::{GameScenario, P0};
-use engine::types::ability::TargetRef;
+use engine::types::ability::{Effect, ResolvedAbility, TargetFilter, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -11,6 +11,35 @@ use engine::types::zones::Zone;
 
 #[test]
 fn top_ability_does_not_follow_new_object_after_key_untaps_it() {
+    fn contains_self_ref_library_placement(ability: &ResolvedAbility) -> bool {
+        matches!(
+            ability.effect.as_ref(),
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ) || ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(contains_self_ref_library_placement)
+            || ability
+                .else_ability
+                .as_deref()
+                .is_some_and(contains_self_ref_library_placement)
+    }
+
+    fn contains_unimplemented(ability: &ResolvedAbility) -> bool {
+        matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })
+            || ability
+                .sub_ability
+                .as_deref()
+                .is_some_and(contains_unimplemented)
+            || ability
+                .else_ability
+                .as_deref()
+                .is_some_and(contains_unimplemented)
+    }
+
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_library_top(
@@ -141,6 +170,17 @@ fn top_ability_does_not_follow_new_object_after_key_untaps_it() {
             .and_then(|ability| ability.source_incarnation),
         Some(first_incarnation),
         "the older Top ability must retain its original source incarnation"
+    );
+    let older_ability = runner.state().stack[0]
+        .ability()
+        .expect("the older Top activation must carry its resolved ability");
+    assert!(
+        contains_self_ref_library_placement(older_ability),
+        "the older Top activation must retain its parsed SelfRef library placement"
+    );
+    assert!(
+        !contains_unimplemented(older_ability),
+        "the older Top activation must not reach the stale-source guard through an unimplemented parse"
     );
     // CR 400.7 + CR 113.7a: The older ability draws Top as a new object. Its
     // stale SelfRef placement is a legal no-op, so the stack still settles.
