@@ -9004,7 +9004,7 @@ pub(super) fn parse_exile_ast(
     // carry a "with N counters" FILTER — that reading only applies to
     // descriptive targets like "exile each creature with a +1/+1 counter on
     // it"), recover the enter-with-counters suffix from the full clause. The
-    // `rem` is already empty in this case, so `counters_offset` stays `None`.
+    // `rem` is already empty in this case, so `counters_span` stays `None`.
     if enter_with_counters.is_empty()
         && matches!(
             parsed_target,

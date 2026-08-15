@@ -10861,9 +10861,14 @@ pub(crate) fn parse_with_counters_suffix_spanned(
 ///   * "…return that card to the battlefield under its owner's control with a
 ///     vigilance counter and a lifelink counter on it" (Gilraen, Dúnedain
 ///     Protector)
-///   * "this creature enters with two +1/+1 counters and a lifelink counter on
-///     it" (Dust Animus), "…with two +1/+1 counters and a trample counter on it
-///     and with haste" (Voidpouncer)
+///
+/// Those two are the cards this combinator actually reaches, confirmed against
+/// the CI parse diff. The self-referential "…enters with two +1/+1 counters and
+/// a lifelink counter on it" shape (Dust Animus, Voidpouncer) prints the SAME
+/// conjoined grammar but is parsed at a different seam that calls
+/// `parse_counter_suffix_body_combinator` directly rather than through this
+/// list, so it still lifts only the first conjunct. Routing that seam through
+/// here is the follow-up; do not assume this function already covers it.
 ///
 /// `separated_list1` is the right combinator rather than a hand-rolled loop
 /// because nom backtracks the separator when the following element fails, which
