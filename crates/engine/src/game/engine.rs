@@ -18562,12 +18562,13 @@ mod stage2_injector_tests {
                 // own coordinate for that producer (this branch's engine.rs edits are all
                 // in the census array far below it).
                 //
-                // NOTE on the prose above from main: that entry's "total still 37,
-                // partition still 5/7/25" describes an older census. The asserts in this
-                // file read 38 and 5/8/25, and both fired GREEN on the merged tree.
-                "game/effects/mod.rs:6767".to_string(),
-                "game/effects/mod.rs:6844".to_string(),
-                "game/effects/mod.rs:10082".to_string(),
+                // Current-main port: #7404's Doomsday tracked-set publication and this
+                // branch's characteristic-source work both shift the producer coordinates.
+                // Re-measured in this merged tree: `:6774/:6851/:10089`.
+                // The three sites remain the existing `OptionalEffectChoice` producers.
+                "game/effects/mod.rs:6774".to_string(),
+                "game/effects/mod.rs:6851".to_string(),
+                "game/effects/mod.rs:10089".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.

@@ -965,6 +965,21 @@ fn finalize_standard_search_selection(
             .exiled_from_hand_this_resolution
             .saturating_add(hand_exiles);
     }
+    // CR 608.2c + CR 701.23a: A search choice produces the selected set for
+    // any continuation that consumes "the chosen cards" or excludes them from
+    // a searched-zone remainder. Publish it before the continuation resolves
+    // so a typed `Not(InTrackedSet)` excludes every selected card.
+    let continuation_consumes_tracked_set = state
+        .active_ability_continuation()
+        .or_else(|| {
+            state
+                .outer_ability_continuation_of_active_post_replacement_draw()
+                .map(|continuation| &continuation.pending)
+        })
+        .is_some_and(|continuation| effects::chain_references_tracked_set(&continuation.chain));
+    if continuation_consumes_tracked_set {
+        effects::publish_fresh_tracked_set(state, chosen.to_vec());
+    }
     let mut has_delivery = false;
     if state.active_ability_continuation().is_some() {
         let mut frame = state
