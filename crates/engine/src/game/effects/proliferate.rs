@@ -268,9 +268,10 @@ pub fn resolve(
     Ok(())
 }
 
-/// CR 701.34a (operation) + CR 122.1: Resolve `Effect::ProliferateTarget` — the
-/// forced single-target form ("for each kind of counter on target permanent or
-/// player, give that permanent or player another counter of that kind").
+/// CR 608.2c + CR 122.1: Resolve `Effect::ProliferateTarget` as its direct
+/// counter instruction ("for each kind of counter on target permanent or player,
+/// give that permanent or player another counter of that kind"). This is not the
+/// CR 701.34a proliferate keyword action.
 ///
 /// Unlike `resolve` (the chooser-driven `Proliferate`), the target is already
 /// fixed in `ability.targets`, so there is no `ProliferateChoice` prompt: it
