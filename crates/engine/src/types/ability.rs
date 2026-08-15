@@ -15720,6 +15720,33 @@ impl TargetFilter {
         }
     }
 
+    /// CR 603.7c + CR 400.7: Returns true when this filter names ONE object that
+    /// is already BOUND — a specific permanent or an anaphor to one — rather than
+    /// a CLASS of objects re-matched against the live board on every check.
+    ///
+    /// Used where "how many times can an event matching this filter occur?" is
+    /// the question, e.g. CR 603.7b's one-shot delayed triggers: a bound object
+    /// dies, leaves, or enters exactly once per incarnation (a returning object
+    /// is a NEW object, CR 400.7 / CR 603.7c), whereas a class filter ("a
+    /// creature") can match an unbounded number of later occurrences.
+    ///
+    /// Deliberately NARROWER than the parser's `is_single_object_ref`: that
+    /// helper also admits `TriggeringSource`, which is re-resolved from whichever
+    /// event is being examined and is therefore NOT bound in advance, and it has
+    /// no reason to admit `SpecificObject` / `ParentTargetSlot`. `TrackedSet`
+    /// and `LastCreated` are excluded for the same reason as a class filter —
+    /// they can name several objects, so several occurrences.
+    pub fn names_bound_single_object(&self) -> bool {
+        matches!(
+            self,
+            TargetFilter::SelfRef
+                | TargetFilter::SpecificObject { .. }
+                | TargetFilter::AttachedTo
+                | TargetFilter::ParentTarget
+                | TargetFilter::ParentTargetSlot { .. }
+        )
+    }
+
     /// CR 115.1: Returns true for filters that are NOT player-chosen targets —
     /// context references (triggering event participants per CR 603.7c),
     /// parent target anaphora, and self-references resolve automatically
@@ -20808,6 +20835,34 @@ pub enum AbilityCondition {
     HasCityBlessing,
     /// CR 702.195b: True when the ability controller has the enduring story designation.
     HasEnduringStory,
+    /// CR 903.3d + CR 608.2a: Resolution-time commander-control gate — "if you
+    /// control your commander" / "if you control a commander". CR 903.3d is the
+    /// authorizing rule: "If an effect refers to controlling a commander, it
+    /// refers to a permanent on the battlefield that is a commander."
+    /// CR 608.2a is the resolution-time half: an intervening-`if` condition is
+    /// re-checked as the ability resolves and the ability does nothing if it is
+    /// then false.
+    ///
+    /// The effect-resolution mirror of `StaticCondition::ControlsCommander`
+    /// (layers), `TriggerCondition::ControlsCommander` (intervening-if on a
+    /// printed trigger) and `ParsedCondition::ControlsCommander`
+    /// (activation/casting restrictions), carrying the same `ownership` axis.
+    ///
+    /// CR 903.3 + CR 109.5: `Own` ("your commander") requires the evaluating
+    /// player to both OWN and control it — CR 903.3 makes the designation an
+    /// attribute of the *card*, so a stolen commander remains its owner's, not
+    /// yours. `Any` ("a commander") is controller-only, any owner.
+    ///
+    /// CR 109.5: "you" is the resolving ability's controller; for a delayed
+    /// triggered ability that is the player who controlled the creating spell as
+    /// it resolved (CR 603.7d), which `Effect::CreateDelayedTrigger` already
+    /// stamps onto the delayed `ResolvedAbility`.
+    ///
+    /// Evaluated live at resolution against the single `game::commander`
+    /// authority — the same helpers the three sibling mirrors use — so the four
+    /// readings of one printed clause cannot drift, and the CR 702.26b
+    /// phased-out exclusion applies uniformly.
+    ControlsCommander { ownership: CommanderOwnership },
     /// CR 701.9a + CR 608.2c: True when the card discarded by the directly
     /// preceding discard instruction matches `filter`. The resolver reads the
     /// discard operation's captured hand-time result, never current-zone state
@@ -21104,6 +21159,14 @@ impl AbilityCondition {
             | AbilityCondition::IsInitiative
             | AbilityCondition::HasCityBlessing
             | AbilityCondition::HasEnduringStory
+            // CR 903.3d: a commander-control gate is a plain game-state predicate
+            // about the resolving ability's controller. It says nothing about
+            // whether an antecedent optional effect was performed, so a token
+            // minted under this gate is unconditionally live and the referent
+            // re-link must NOT fold the gate away as a reflexive "if you do".
+            // Same classification, for the same reason, as `IsMonarch` and
+            // `CompletedDungeon` below.
+            | AbilityCondition::ControlsCommander { .. }
             | AbilityCondition::DiscardedCardMatchesFilter { .. }
             | AbilityCondition::IsRingBearer
             | AbilityCondition::HasObjectTarget

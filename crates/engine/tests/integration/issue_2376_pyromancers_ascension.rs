@@ -113,6 +113,7 @@ fn spell_cast_event(spell_id: ObjectId) -> GameEvent {
         card_id: CardId(spell_id.0),
         controller: P0,
         object_id: spell_id,
+        cast_mana_value: None,
     }
 }
 

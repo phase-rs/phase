@@ -5328,6 +5328,20 @@ impl PendingEffectResolved {
             player_action: Some(PendingPlayerAction { player_id, action }),
         }
     }
+
+    /// Whether this completion has no work left to perform.
+    ///
+    /// A post-action that pauses hands back whatever of its completion has not
+    /// run yet. When that residue is empty there is nothing to re-park, and
+    /// parking it anyway would install a frame that only exists to do nothing.
+    pub fn is_noop(&self) -> bool {
+        self.post_actions.is_empty()
+            && matches!(
+                self.resolution_event,
+                PendingEffectResolutionEvent::Suppress
+            )
+            && self.player_action.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -5528,6 +5542,48 @@ pub enum PendingCounterPostAction {
     },
     MarkRenowned {
         object_id: ObjectId,
+    },
+    /// CR 701.34a + CR 614.1a: The proliferate action whose counter placement
+    /// paused on a replacement choice has finished; continue with the actions
+    /// the originating effect still owes.
+    ///
+    /// The `Proliferate` direct-choice frame is deliberately NOT resident while
+    /// this is parked. Its handler takes the frame before applying counters, so
+    /// a counter-addition pause can never strand it on the stack (issue #7384);
+    /// continuing pushes a fresh frame only if another target choice is needed.
+    ///
+    /// CR 608.2c ordering: this is installed at index 0 of the completion's
+    /// `post_actions`, so anything a replacement's execute ability later appends
+    /// through `append_pending_counter_post_actions` runs AFTER the next
+    /// proliferate action. That is correct for the appenders that exist — they
+    /// are entry/delivery tails of the counter placement that already finished,
+    /// and CR 701.34a makes each proliferate action a separate event — but a
+    /// future appender that belongs to the SAME counter-placement event would
+    /// need to be ordered ahead of this instead.
+    ///
+    /// `add-engine-variant` gate, recorded because the verdict is binding:
+    /// * Stage 1 DOES_NOT_EXIST — no post-action resumes a pausable proliferate,
+    ///   and the declared alternative (`replace_active_proliferate_frame`) is
+    ///   structurally unusable here, as its own doc note records.
+    /// * Stage 2 EXTEND_OK — the `Continue*` members share a name root but carry
+    ///   structurally disjoint payloads for distinct suspended operations, with
+    ///   no `(op, scope, target)` axis to parameterize over. This enum is a
+    ///   tagged union of suspended-work families — the `ResolutionFrame` shape —
+    ///   not a parameterization gap.
+    /// * Stage 3 WITHIN_SECTION — the payload lies wholly inside CR 701.34, and
+    ///   this is a resumption layer, not a leaf-reference layer.
+    ///
+    /// Serialized surface: this enum reaches persisted state through
+    /// `PendingEffectResolved::post_actions`, carried on the
+    /// `RESOLUTION_STATE_WIRE_VERSION` = 2 frame wire. A new externally-tagged
+    /// variant is backward compatible — no save written before it can contain
+    /// one, so existing saves still decode — but NOT forward compatible: a build
+    /// predating this variant cannot decode a save taken mid-paused-proliferate.
+    /// That is the same one-way contract `MarkMonstrous`, `MarkRenowned` and
+    /// `EmitCommittedCopyTokenEntry` shipped under, so the wire version is
+    /// deliberately not bumped.
+    ContinueProliferateActions {
+        pending: PendingProliferateActions,
     },
 }
 
@@ -18444,6 +18500,27 @@ impl GameState {
         self.resolution_stack.push_counter_additions(pending);
     }
 
+    /// Insert a CounterAdditions queue immediately below the active child.
+    ///
+    /// A paused post-action may have installed a direct-choice owner (a fresh
+    /// `ProliferateChoice`, say). That owner must remain the stack top until
+    /// its action handler consumes it — `ResolutionStack::validate` rejects a
+    /// direct-choice owner buried below another frame — so a completion that
+    /// outlives the pause becomes the owner's PARENT instead of being pushed
+    /// on top of it.
+    pub fn insert_counter_additions_parent_of_active(
+        &mut self,
+        pending: PendingCounterAdditionQueue,
+    ) -> Result<(), ResolutionStackError> {
+        self.resolve_and_apply_frame_transition(ResolvedFrameTransition::InsertParentOfActive {
+            frame: super::resolution::ResolutionFrame::CounterAdditions(pending),
+        })
+        .map(|_| ())
+        .map_err(|error| match error {
+            ResolvedFrameTransitionReplayInvariantError::Stack(error) => error,
+        })
+    }
+
     /// Re-park the active CounterAdditions queue after it advances or pauses
     /// again.
     pub fn replace_active_counter_additions(
@@ -18871,8 +18948,15 @@ impl GameState {
         self.resolution_stack.push_proliferate(pending);
     }
 
-    /// Re-parks the active proliferate owner after a replacement-produced
-    /// subsequent target choice.
+    /// Re-parks the active proliferate owner in place.
+    ///
+    /// NOTE: this is deliberately NOT the path for surviving a counter-addition
+    /// replacement choice. A proliferate that pauses that way has a
+    /// `CounterAdditions` frame at the stack top, so re-parking the proliferate
+    /// owner beneath it would bury a direct-choice owner — which
+    /// `ResolutionStack::validate` rejects. That case rides
+    /// `PendingCounterPostAction::ContinueProliferateActions` on the
+    /// counter-additions completion instead (issue #7384).
     pub fn replace_active_proliferate_frame(
         &mut self,
         pending: PendingProliferateActions,

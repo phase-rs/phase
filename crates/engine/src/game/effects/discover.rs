@@ -263,6 +263,7 @@ mod tests {
             card_id: CardId(4),
             controller: PlayerId(0),
             object_id: triggering_spell,
+            cast_mana_value: None,
         });
 
         let ability = ResolvedAbility::new(

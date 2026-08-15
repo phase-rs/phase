@@ -6216,6 +6216,42 @@ where
     }
 }
 
+/// CR 601.2i + CR 202.3e: a `SpellCast` event's cast-time record preserves the
+/// announced X value after the spell leaves the stack, where the live object's
+/// mana value correctly treats X as zero.
+fn spell_cast_mana_value_for_event(state: &GameState, event: &GameEvent) -> Option<i32> {
+    let GameEvent::SpellCast {
+        cast_mana_value,
+        controller,
+        object_id,
+        ..
+    } = event
+    else {
+        return None;
+    };
+
+    // CR 603.2 + CR 603.3 + CR 608.2k: the event-bound value is the authority
+    // for the exact cast that caused this trigger. It remains distinct when the
+    // same object id is cast again before an earlier trigger resolves.
+    if let Some(value) = cast_mana_value {
+        return Some(u32_to_i32_saturating(*value));
+    }
+
+    // CR 400.7: retain compatibility with legacy/synthetic events that lack the
+    // snapshot, but never guess between multiple same-id casts.
+    let mut matching_records = state
+        .spells_cast_this_turn_by_player
+        .get(controller)
+        .into_iter()
+        .flat_map(|records| records.iter())
+        .filter(|record| record.spell_object_id == Some(*object_id));
+    let record = matching_records.next()?;
+    matching_records
+        .next()
+        .is_none()
+        .then(|| u32_to_i32_saturating(record.mana_value))
+}
+
 /// CR 202.3: Resolve an object's mana value through the same ObjectScope axis
 /// used for power/toughness. Source scope falls back to LKI for objects that
 /// moved during resolution; target scope reads the selected object target.
@@ -6388,10 +6424,17 @@ fn resolve_object_mana_value(
         // instruction-order (608.2c) first, vs. cost referent (608.2k) first.
         // `Demonstrative` ("that spell's mana value", Mana Drain) shares this
         // resolution — same earlier-instruction referent named by a noun phrase.
-        // CR 202.3e: include cost_x_paid for on-stack event sources.
+        // CR 202.3e: include cost_x_paid for on-stack event sources. For a
+        // SpellCast event, prefer the CR 601.2i cast-time record so this value
+        // remains correct after the spell leaves the stack.
         ObjectScope::Anaphoric | ObjectScope::Demonstrative => ability
             .and_then(|a| a.effect_context_object.as_ref())
             .map(|s| u32_to_i32_saturating(s.lki.mana_value))
+            .or_else(|| {
+                current_or_detection_trigger_event(state)
+                    .as_ref()
+                    .and_then(|event| spell_cast_mana_value_for_event(state, event))
+            })
             .or_else(|| {
                 object_id_for_scope(state, ObjectScope::EventSource, ctx, targets).and_then(|id| {
                     state
@@ -14062,6 +14105,7 @@ mod tests {
             card_id: CardId(11),
             controller: PlayerId(0),
             object_id: triggering_spell,
+            cast_mana_value: None,
         });
 
         let expr = QuantityExpr::Ref {
@@ -14450,6 +14494,82 @@ mod tests {
             resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)),
             2,
             "second Approach cast must satisfy `another spell named ~ this game` (count >= 2)"
+        );
+    }
+
+    /// CR 603.2 + CR 603.3 + CR 608.2k + CR 202.3e: an event-bound cast-time mana value must win over
+    /// later same-id history records, while a legacy event with no bound value
+    /// must not guess between ambiguous records.
+    #[test]
+    fn event_bound_spell_mana_value_survives_same_id_recast() {
+        let spell_id = ObjectId(77);
+        let mut state = GameState::new_two_player(42);
+        state.spells_cast_this_turn_by_player.insert(
+            PlayerId(0),
+            crate::im::Vector::from(vec![
+                SpellCastRecord {
+                    mana_value: 6,
+                    spell_object_id: Some(spell_id),
+                    ..SpellCastRecord::default()
+                },
+                SpellCastRecord {
+                    mana_value: 4,
+                    spell_object_id: Some(spell_id),
+                    ..SpellCastRecord::default()
+                },
+            ]),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Demonstrative,
+            },
+        };
+
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            card_id: CardId(77),
+            controller: PlayerId(0),
+            object_id: spell_id,
+            cast_mana_value: Some(6),
+        });
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &expr, &ability),
+            6,
+            "the earlier trigger must use its event-bound cast value, not the later X"
+        );
+
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            card_id: CardId(77),
+            controller: PlayerId(0),
+            object_id: spell_id,
+            cast_mana_value: None,
+        });
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &expr, &ability),
+            0,
+            "an ambiguous legacy event must fail closed rather than guess a history record"
+        );
+
+        state.spells_cast_this_turn_by_player.insert(
+            PlayerId(0),
+            crate::im::Vector::from(vec![SpellCastRecord {
+                mana_value: 5,
+                spell_object_id: Some(spell_id),
+                ..SpellCastRecord::default()
+            }]),
+        );
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &expr, &ability),
+            5,
+            "an unambiguous legacy event should retain its history fallback"
         );
     }
 
@@ -14986,6 +15106,7 @@ mod tests {
             card_id: CardId(2),
             controller: PlayerId(0),
             object_id: target,
+            cast_mana_value: None,
         });
         let event_source_expr = QuantityExpr::Ref {
             qty: QuantityRef::ObjectColorCount {
@@ -16236,9 +16357,9 @@ mod tests {
     }
 
     /// CR 608.2c vs CR 608.2k — divergent priority pin: when both slots are
-    /// populated, `Anaphoric` reads `effect_context_object` (608.2c) while
-    /// `CostPaidObject` reads `cost_paid_object` (608.2k). This is the test
-    /// that locks the two arms' priority split.
+    /// populated, `Anaphoric` and `Demonstrative` read `effect_context_object`
+    /// (608.2c) while `CostPaidObject` reads `cost_paid_object` (608.2k). This
+    /// is the test that locks the two arms' priority split.
     #[test]
     fn resolve_object_mana_value_anaphoric_vs_cost_paid_divergent_priority() {
         use crate::types::ability::{CostPaidObjectSnapshot, ResolvedAbility};
@@ -16286,6 +16407,11 @@ mod tests {
                 scope: ObjectScope::Anaphoric,
             },
         };
+        let demonstrative = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Demonstrative,
+            },
+        };
         let cost_paid = QuantityExpr::Ref {
             qty: QuantityRef::ObjectManaValue {
                 scope: ObjectScope::CostPaidObject,
@@ -16295,6 +16421,11 @@ mod tests {
             resolve_quantity_with_targets(&state, &anaphoric, &ability),
             7,
             "Anaphoric must read effect_context_object (CR 608.2c slot 1)"
+        );
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &demonstrative, &ability),
+            7,
+            "Demonstrative must read effect_context_object (CR 608.2c slot 1)"
         );
         assert_eq!(
             resolve_quantity_with_targets(&state, &cost_paid, &ability),

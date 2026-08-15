@@ -3097,6 +3097,7 @@ mod tests {
             card_id,
             controller: PlayerId(0),
             object_id: spell,
+            cast_mana_value: None,
         });
 
         // Demonstrative "that spell" ref with NO parent target -> event-context path.

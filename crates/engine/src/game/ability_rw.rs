@@ -1914,6 +1914,14 @@ fn legacy_ability_condition(x: &AbilityCondition) -> bool {
         | AbilityCondition::ControllerControlledMatchingAsCast { .. }
         | AbilityCondition::SourceLacksKeyword { .. }
         | AbilityCondition::WasStartingPlayer { .. }
+        // CR 903.3d: `false` here is about the D5 LEGACY-BATCH-PROMPT axis only —
+        // "does this leaf carry one of the 12 retained event-context refs" — not
+        // about reads. It carries none, exactly like the board-reading
+        // `ControllerControlsMatching` above and the `TriggerCondition` /
+        // `StaticCondition` mirrors below. The commander gate's actual read
+        // (a live battlefield census, CR 903.3d) is classified in
+        // `rw_ability_condition` via `commander_control_read`.
+        | AbilityCondition::ControlsCommander { .. }
         | AbilityCondition::AdditionalCostPaidInstead
         | AbilityCondition::AlternativeManaCostPaid
         | AbilityCondition::EffectOutcome { .. }
@@ -3623,6 +3631,46 @@ fn board_membership_read(filter: &TargetFilter) -> RwProfile {
     // attachment / chosen referent is member-distinct ⇒ refuses batch-T1.
     p.reads_member_bound |= member_bound_target_filter(filter);
     p
+}
+
+/// CR 903.3d + CR 603.3b: the single read profile for a commander-control gate,
+/// shared by ALL THREE condition-vocabulary mirrors (`AbilityCondition`,
+/// `TriggerCondition`, `StaticCondition`).
+///
+/// CR 903.3d: "If an effect refers to controlling a commander, it refers to a
+/// permanent on the battlefield that is a commander." That is a LIVE BOARD
+/// CENSUS, not a static card attribute: `game::commander::controls_own_commander`
+/// / `controls_any_commander` scan `state.battlefield` for
+/// `is_commander && controller == you [&& owner == you] && is_phased_in`. Only
+/// the `is_commander` and `owner` conjuncts are frozen card attributes (CR 903.3);
+/// battlefield MEMBERSHIP, the CONTROLLER field and CR 702.26b phased-in status
+/// are all sibling-mutable, and `StateKind::SetMembership` is exactly "which
+/// objects are where / whose" plus the kind a `PhaseOut` write records.
+///
+/// So this must NOT be `RwProfile::empty()`: a sibling copy whose effect moves a
+/// commander onto or off the battlefield, steals it, or phases it out FEEDS this
+/// gate's truth, and `group_is_order_independent` would otherwise auto-order the
+/// pair against a gate that write flips (CR 603.3b). Modeled exactly like the
+/// direct analogue `AbilityCondition::ControllerControlsMatching` —
+/// `board_membership_read` over the population CR 903.3d names, expressed in the
+/// engine's own filter vocabulary so the census/zone/controller spans are derived
+/// by the one authority rather than hand-assembled.
+///
+/// `ControllerRef::You` for both ownership arms: CR 109.5 "you" is the evaluating
+/// player, and `Own` merely adds the frozen owner conjunct on top of the same
+/// controller-keyed census (a strictly narrower population, so the `You` span
+/// stays sound).
+fn commander_control_read() -> RwProfile {
+    board_membership_read(&TargetFilter::Typed(
+        TypedFilter::permanent()
+            .controller(ControllerRef::You)
+            .properties(vec![
+                FilterProp::IsCommander,
+                FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                },
+            ]),
+    ))
 }
 
 /// §L2 (CR 400.7 + CR 400.1): a zone-change per-turn journal read, keyed to its
@@ -6285,6 +6333,15 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
             }
             p
         }
+        // CR 903.3d: a LIVE battlefield census — see `commander_control_read`.
+        // The three condition-vocabulary mirrors of this ONE printed clause share
+        // that helper, so none of them can drift from the others.
+        // M3 binding mandate: `commander_control_read()` is a PRECISE profile, not
+        // `RwProfile::conservative()`, so this arm binds every payload field.
+        // `ownership` is deliberately not read: CR 903.3d makes both arms the same
+        // live battlefield census, and the Own/Any distinction narrows WHICH
+        // commanders qualify, not which state the read touches.
+        AbilityCondition::ControlsCommander { ownership: _ } => commander_control_read(),
         AbilityCondition::AdditionalCostPaidInstead
         | AbilityCondition::AlternativeManaCostPaid
         | AbilityCondition::EffectOutcome { .. }
@@ -6425,10 +6482,14 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
         | TriggerCondition::TributeNotPaid
         | TriggerCondition::CastDuringPhase { .. }
         | TriggerCondition::CastTimingPermission { .. }
-        | TriggerCondition::ControlsCommander { .. }
         | TriggerCondition::ChosenLabelIs { .. }
         | TriggerCondition::ExceptFirstDrawInDrawStep
         | TriggerCondition::PlacedByAbilitySource => RwProfile::empty(),
+        // CR 903.3d: a LIVE battlefield census — see `commander_control_read`.
+        // Shared with the `AbilityCondition` / `StaticCondition` mirrors of the
+        // same printed clause.
+        // M3 binding mandate: precise RHS, so bind every payload field.
+        TriggerCondition::ControlsCommander { ownership: _ } => commander_control_read(),
     }
 }
 
@@ -6525,12 +6586,16 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
-        | StaticCondition::ControlsCommander { .. }
         | StaticCondition::SourceControllerEquals { .. }
         | StaticCondition::EnchantedIsFaceDown
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::None => RwProfile::empty(),
+        // CR 903.3d: a LIVE battlefield census — see `commander_control_read`.
+        // Shared with the `AbilityCondition` / `TriggerCondition` mirrors of the
+        // same printed clause.
+        // M3 binding mandate: precise RHS, so bind every payload field.
+        StaticCondition::ControlsCommander { ownership: _ } => commander_control_read(),
     }
 }
 

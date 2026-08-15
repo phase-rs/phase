@@ -1210,6 +1210,57 @@ impl<'a> CardBuilder<'a> {
 
     // --- Special modifiers ---
 
+    /// CR 903.3: Mark this object as its owner's commander IN PLACE, without
+    /// moving it to the command zone (unlike `GameScenario::with_commander`,
+    /// which forces `Zone::Command`).
+    ///
+    /// CR 903.3d resolves "controlling a commander" against a permanent ON THE
+    /// BATTLEFIELD, so every "you control your/a commander" gate — Lieutenant
+    /// statics, Lieutenant triggers, activation restrictions, and
+    /// resolution-time gates alike — needs a battlefield commander to be
+    /// reachable at all. This is that building block.
+    pub fn commander(&mut self) -> &mut Self {
+        self.obj().is_commander = true;
+        self
+    }
+
+    /// CR 613.1b (Layer 2: control-changing effects) + CR 109.5: put this object
+    /// under `player`'s control while leaving `owner` unchanged — the
+    /// owner/controller divergence a stolen permanent has.
+    ///
+    /// This is the only way to exercise the two conjuncts of
+    /// `game::commander::controls_own_commander` (owner, then controller)
+    /// independently, which CR 903.3 makes observable: the commander designation
+    /// is an attribute of the card, so a stolen commander is still its owner's.
+    ///
+    /// Sets BOTH fields on purpose: Layer 2 recomputes `obj.controller` from
+    /// `base_controller.unwrap_or(owner)` on every `evaluate_layers` pass, so
+    /// setting `controller` alone is silently reverted by the first layer pass a
+    /// cast pipeline runs. `controller` is set too so the state is coherent
+    /// before any layer pass.
+    ///
+    /// Battlefield-only: `state.battlefield` is a flat list with no per-player
+    /// split, so no zone-list bookkeeping is needed. Do NOT use this for
+    /// hand/library/graveyard objects, whose zone lists are keyed by owner —
+    /// the `debug_assert_eq!` below ENFORCES that precondition rather than
+    /// merely documenting it, so a misapplied call fails loudly at the fixture
+    /// that wrote it instead of desynchronizing an owner-keyed zone list and
+    /// surfacing somewhere unrelated.
+    pub fn controlled_by(&mut self, player: PlayerId) -> &mut Self {
+        let obj = self.obj();
+        debug_assert_eq!(
+            obj.zone,
+            Zone::Battlefield,
+            "CardBuilder::controlled_by is battlefield-only: object {:?} is in {:?}, whose \
+             zone list is keyed by OWNER, so diverging the controller would corrupt the fixture",
+            obj.id,
+            obj.zone,
+        );
+        obj.base_controller = Some(player);
+        obj.controller = player;
+        self
+    }
+
     /// Mark this creature as having summoning sickness (entered this turn).
     pub fn with_summoning_sickness(&mut self) -> &mut Self {
         let turn = self.state.turn_number;
@@ -2365,6 +2416,11 @@ impl<'a> SpellCast<'a> {
         // distinct targets while a single declaration remains reusable across
         // independent modal slots.
         let mut remaining_objects: Vec<ObjectId> = target_objects;
+        // CR 603.3d: triggered-ability targets are chosen after the trigger is
+        // put on the stack, independently of the spell's own target slots.
+        // Keep a separate object-intent pool so the same declared object can
+        // satisfy a trigger target and a later resolution target.
+        let mut remaining_trigger_objects = remaining_objects.clone();
         let declared_players: Vec<PlayerId> = target_players;
         let mut remaining_multi_target_players = declared_players.clone();
         let mut remaining_cost_objects: Vec<ObjectId> = cost_objects;
@@ -2609,6 +2665,29 @@ impl<'a> SpellCast<'a> {
                         &mut events,
                     )?;
                 }
+                // CR 603.3d: triggered abilities choose targets after they are
+                // put on the stack. Their object intents are independent of
+                // the spell's target slots, while player intents remain
+                // reusable across both prompts.
+                WaitingFor::TriggerTargetSelection {
+                    target_slots,
+                    selection,
+                    ..
+                } => {
+                    let slot = &target_slots[selection.current_slot];
+                    let choice = pick_slot_target(
+                        slot,
+                        &mut remaining_trigger_objects,
+                        None,
+                        &declared_players,
+                        selection.current_slot,
+                    );
+                    act_collect(
+                        runner,
+                        GameAction::ChooseTarget { target: choice },
+                        &mut events,
+                    )?;
+                }
                 // CR 601.2a: spell is on the stack — capture the hand baseline.
                 WaitingFor::Priority { .. } => {
                     hand_at_commit = Some(
@@ -2697,6 +2776,22 @@ impl<'a> CastCommit<'a> {
     /// Read the current pre-resolution state.
     pub fn state(&self) -> &GameState {
         &self.runner.state
+    }
+
+    /// Submit an action while this cast remains committed on the stack.
+    ///
+    /// This keeps response tests on the same `apply()` pipeline as the live
+    /// game, while preserving the committed cast's hand and target baselines.
+    pub fn act(&mut self, action: GameAction) -> Result<ActionResult, EngineError> {
+        self.runner.act(action)
+    }
+
+    /// Start another fluent cast while this committed spell waits on the stack.
+    ///
+    /// Used by response tests to cast a counterspell or other instant before
+    /// resolving the committed spell and its triggers.
+    pub fn cast(&mut self, spell: ObjectId) -> SpellCast<'_> {
+        self.runner.cast(spell)
     }
 
     /// Mutate the board WHILE the committed spell is still on the stack.
