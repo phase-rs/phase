@@ -18,9 +18,9 @@ use crate::parser::oracle_util::SELF_REF_TYPE_PHRASES;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, AggregateFunction, AttackScope, AttackSubject, CardTypeSetSource, ChoiceType,
-    CoinFlipResult, Comparator, ContinuousModification, ControllerRef, CountScope,
-    CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration,
-    EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
+    CoinFlipResult, CommanderOwnership, Comparator, ContinuousModification, ControllerRef,
+    CountScope, CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode,
+    Duration, EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
     ForEachCategoryAction, GameRestriction, LibraryPosition, ManaProduction, ObjectProperty,
     ObjectScope, PerpetualModification, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
     QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
@@ -3958,6 +3958,23 @@ fn fmt_comparator(c: &Comparator) -> &'static str {
     }
 }
 
+/// CR 903.3 vs CR 903.3d: the single label authority for a commander-control
+/// gate, shared by ALL FOUR condition-vocabulary formatters
+/// (`AbilityCondition`, `TriggerCondition`, `StaticCondition`, and any future
+/// mirror).
+///
+/// The two arms are DIFFERENT predicates — CR 903.3 + CR 109.5 "your commander"
+/// is owned AND controlled, CR 903.3d "a commander" is controlled by any owner —
+/// so they must never share a label. Collapsing them prints a strictly weaker
+/// predicate than the card, and the parse-details / Alt-hover overlay is what
+/// bug triage reads. Centralized here so one mirror cannot drift from another.
+fn fmt_commander_ownership(ownership: &CommanderOwnership) -> &'static str {
+    match ownership {
+        CommanderOwnership::Own => "you control your commander",
+        CommanderOwnership::Any => "you control a commander",
+    }
+}
+
 /// Format an `AbilityCondition` as a human-readable string for the parse-details overlay.
 fn fmt_ability_condition(cond: &AbilityCondition) -> String {
     match cond {
@@ -4022,6 +4039,9 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         ),
         AbilityCondition::HasMaxSpeed => "has max speed".into(),
         AbilityCondition::IsMonarch => "is monarch".into(),
+        AbilityCondition::ControlsCommander { ownership } => {
+            fmt_commander_ownership(ownership).into()
+        }
         AbilityCondition::CompletedDungeon { specific } => match specific {
             None => "you've completed a dungeon".into(),
             Some(dungeon) => format!("you've completed {dungeon}"),
@@ -4201,7 +4221,7 @@ fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> Stri
         }
         TC::ManaSpentCondition { .. } => "mana spent condition".into(),
         TC::HadCounters { .. } => "had counters".into(),
-        TC::ControlsCommander { .. } => "you control a commander".into(),
+        TC::ControlsCommander { ownership } => fmt_commander_ownership(ownership).into(),
         TC::IsRenowned { .. } => "is renowned".into(),
         TC::HasCounters {
             minimum, maximum, ..
@@ -4388,7 +4408,7 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         },
         SC::IsRingBearer => "is the ring-bearer".into(),
         SC::RingLevelAtLeast { level } => format!("ring level ≥ {level}"),
-        SC::ControlsCommander { .. } => "you control a commander".into(),
+        SC::ControlsCommander { ownership } => fmt_commander_ownership(ownership).into(),
         SC::SourceIsTapped => "source is tapped".into(),
         SC::IsTapped { .. } => "is tapped".into(),
         SC::SourceIsSaddled => "source is saddled".into(),
@@ -7899,6 +7919,8 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::ManaColorSpent { .. } => ("ManaColorSpent", Handled),
         AbilityCondition::HasMaxSpeed => ("HasMaxSpeed", Handled),
         AbilityCondition::IsMonarch => ("IsMonarch", Handled),
+        // CR 903.3d: evaluated at resolution via `game::commander`.
+        AbilityCondition::ControlsCommander { .. } => ("ControlsCommander", Handled),
         // CR 309.7: evaluated at resolution via `dungeon::has_completed_dungeon`.
         AbilityCondition::CompletedDungeon { .. } => ("CompletedDungeon", Handled),
         AbilityCondition::IsInitiative => ("IsInitiative", Handled),
@@ -8337,6 +8359,27 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::AnyPlayerAttackedYouLastTurn => ("AnyPlayerAttackedYouLastTurn", Handled),
         StaticCondition::OpponentPoisonAtLeast { .. } => ("OpponentPoisonAtLeast", Unhandled),
         StaticCondition::UnlessPay { .. } => ("UnlessPay", Handled),
+        // CR 903.3d: the RUNTIME does evaluate this static
+        // (`layers::evaluate_static_condition`, layers.rs:1875, delegating both
+        // ownership arms to the single `game::commander` authority), so the
+        // `Unhandled` tag below understates the resolver.
+        //
+        // It stays `Unhandled` DELIBERATELY, and must not be flipped as a rider on
+        // an unrelated change: the tag is currently the only thing holding two
+        // demonstrably MISPARSED Lieutenant cards out of the supported set. Of the
+        // seven `ControlsCommander` statics in the pool, Convergence of Dominion
+        // parses to a static with `modifications: []` (a no-op continuous effect)
+        // and Thunderfoot Baloth collapses "this creature gets +2/+2 and other
+        // creatures you control get +2/+2 and have trample" into ONE `SelfRef`
+        // static, dropping the "other creatures you control" clause and granting
+        // trample to the Baloth itself. Flipping the tag alone would advertise both
+        // as `supported: true, gap_count: 0`.
+        //
+        // Land the flip in its own change, AFTER an empty-`modifications` static
+        // and a dropped continuous-modification clause each register as real gaps.
+        // Nothing in the commander-gate work depends on this tag — Fight for the
+        // Throne's intervening-`if` is an `AbilityCondition`, classified `Handled`
+        // in `condition_feature` above.
         StaticCondition::ControlsCommander { .. } => ("ControlsCommander", Unhandled),
         // SourceIsEquipped resolved by layers::evaluate_condition (layers.rs:1057)
         StaticCondition::SourceIsEquipped => ("SourceIsEquipped", Handled),
@@ -12285,6 +12328,128 @@ mod tests {
         let mut missing = Vec::new();
         check_parse_warnings(&warnings, &mut missing);
         assert!(missing.is_empty());
+    }
+
+    /// CR 903.3d: the Lieutenant STATIC's `Unhandled` coverage tag is a
+    /// deliberate mask, not an oversight — this pins both halves so the flip
+    /// cannot be smuggled in as a rider on an unrelated change.
+    ///
+    /// The runtime DOES evaluate `StaticCondition::ControlsCommander`
+    /// (`layers::evaluate_static_condition`, layers.rs:1875), so on the
+    /// resolver axis alone the tag understates the engine. But the tag is also
+    /// the only thing keeping two demonstrably misparsed Lieutenant cards out
+    /// of the supported set, so it must stay until those misparses register as
+    /// real gaps.
+    ///
+    /// The second assertion is the evidence, on verbatim Oracle text: Thunderfoot
+    /// Baloth's "…this creature gets +2/+2 AND OTHER CREATURES YOU CONTROL get
+    /// +2/+2 and have trample" collapses into a single `SelfRef` static, so the
+    /// other-creatures clause is silently dropped and trample lands on the Baloth
+    /// itself — with no gap recorded anywhere.
+    ///
+    /// FLIP PROTOCOL: when the dropped-clause misparse (and Convergence of
+    /// Dominion's empty-`modifications` no-op static) each register as a gap, the
+    /// second assertion here goes red. THAT is the signal to flip the tag to
+    /// `Handled` and delete this test — not before.
+    #[test]
+    fn lieutenant_commander_static_tag_is_a_deliberate_mask() {
+        let (label, support) = static_condition_feature(&StaticCondition::ControlsCommander {
+            ownership: CommanderOwnership::Own,
+        });
+        assert_eq!(label, "ControlsCommander");
+        assert!(
+            matches!(support, FeatureSupport::Unhandled),
+            "the mask must stay until the two misparses register as gaps; see the \
+             FLIP PROTOCOL on this test"
+        );
+
+        let parsed = crate::parser::parse_oracle_text(
+            "Trample\nLieutenant — As long as you control your commander, this creature gets \
+             +2/+2 and other creatures you control get +2/+2 and have trample.",
+            "Thunderfoot Baloth",
+            &[],
+            &["Creature".to_string()],
+            &["Beast".to_string()],
+        );
+        // Reach-guard: the fixture only exercises the misparse if the parser
+        // really produced the OWNER-scoped commander gate.
+        let commander_statics: Vec<_> = parsed
+            .statics
+            .iter()
+            .filter(|s| {
+                matches!(
+                    &s.condition,
+                    Some(StaticCondition::ControlsCommander {
+                        ownership: CommanderOwnership::Own
+                    })
+                )
+            })
+            .collect();
+        assert!(
+            !commander_statics.is_empty(),
+            "the Lieutenant line must parse to an Own-scoped ControlsCommander static: {:#?}",
+            parsed.statics
+        );
+        assert!(
+            commander_statics
+                .iter()
+                .all(|s| matches!(s.affected, Some(TargetFilter::SelfRef))),
+            "MISPARSE STILL PRESENT (expected): the \"other creatures you control\" clause \
+             is dropped and the whole Lieutenant grant lands on SelfRef. When this goes \
+             red the parser was fixed — flip `static_condition_feature` to Handled and \
+             delete this test. Got {commander_statics:#?}"
+        );
+    }
+
+    /// CR 903.3 vs CR 903.3d: the parse-details label is what bug triage reads,
+    /// so the two ownership arms must never print the same string — in ANY of
+    /// the condition-vocabulary formatters.
+    #[test]
+    fn commander_ownership_labels_differ_in_every_formatter() {
+        for (ability_label, trigger_label, static_label) in [
+            (
+                fmt_ability_condition(&AbilityCondition::ControlsCommander {
+                    ownership: CommanderOwnership::Own,
+                }),
+                fmt_trigger_condition(
+                    &crate::types::ability::TriggerCondition::ControlsCommander {
+                        ownership: CommanderOwnership::Own,
+                    },
+                ),
+                fmt_static_condition(&StaticCondition::ControlsCommander {
+                    ownership: CommanderOwnership::Own,
+                }),
+            ),
+            (
+                fmt_ability_condition(&AbilityCondition::ControlsCommander {
+                    ownership: CommanderOwnership::Any,
+                }),
+                fmt_trigger_condition(
+                    &crate::types::ability::TriggerCondition::ControlsCommander {
+                        ownership: CommanderOwnership::Any,
+                    },
+                ),
+                fmt_static_condition(&StaticCondition::ControlsCommander {
+                    ownership: CommanderOwnership::Any,
+                }),
+            ),
+        ] {
+            assert_eq!(
+                ability_label, trigger_label,
+                "the three mirrors of ONE printed clause must render identically"
+            );
+            assert_eq!(ability_label, static_label);
+        }
+        assert_ne!(
+            fmt_static_condition(&StaticCondition::ControlsCommander {
+                ownership: CommanderOwnership::Own,
+            }),
+            fmt_static_condition(&StaticCondition::ControlsCommander {
+                ownership: CommanderOwnership::Any,
+            }),
+            "CR 903.3 \"your commander\" is strictly narrower than CR 903.3d \"a \
+             commander\"; collapsing them prints a weaker predicate than the card"
+        );
     }
 
     #[test]

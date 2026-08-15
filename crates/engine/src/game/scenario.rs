@@ -1210,6 +1210,57 @@ impl<'a> CardBuilder<'a> {
 
     // --- Special modifiers ---
 
+    /// CR 903.3: Mark this object as its owner's commander IN PLACE, without
+    /// moving it to the command zone (unlike `GameScenario::with_commander`,
+    /// which forces `Zone::Command`).
+    ///
+    /// CR 903.3d resolves "controlling a commander" against a permanent ON THE
+    /// BATTLEFIELD, so every "you control your/a commander" gate — Lieutenant
+    /// statics, Lieutenant triggers, activation restrictions, and
+    /// resolution-time gates alike — needs a battlefield commander to be
+    /// reachable at all. This is that building block.
+    pub fn commander(&mut self) -> &mut Self {
+        self.obj().is_commander = true;
+        self
+    }
+
+    /// CR 613.1b (Layer 2: control-changing effects) + CR 109.5: put this object
+    /// under `player`'s control while leaving `owner` unchanged — the
+    /// owner/controller divergence a stolen permanent has.
+    ///
+    /// This is the only way to exercise the two conjuncts of
+    /// `game::commander::controls_own_commander` (owner, then controller)
+    /// independently, which CR 903.3 makes observable: the commander designation
+    /// is an attribute of the card, so a stolen commander is still its owner's.
+    ///
+    /// Sets BOTH fields on purpose: Layer 2 recomputes `obj.controller` from
+    /// `base_controller.unwrap_or(owner)` on every `evaluate_layers` pass, so
+    /// setting `controller` alone is silently reverted by the first layer pass a
+    /// cast pipeline runs. `controller` is set too so the state is coherent
+    /// before any layer pass.
+    ///
+    /// Battlefield-only: `state.battlefield` is a flat list with no per-player
+    /// split, so no zone-list bookkeeping is needed. Do NOT use this for
+    /// hand/library/graveyard objects, whose zone lists are keyed by owner —
+    /// the `debug_assert_eq!` below ENFORCES that precondition rather than
+    /// merely documenting it, so a misapplied call fails loudly at the fixture
+    /// that wrote it instead of desynchronizing an owner-keyed zone list and
+    /// surfacing somewhere unrelated.
+    pub fn controlled_by(&mut self, player: PlayerId) -> &mut Self {
+        let obj = self.obj();
+        debug_assert_eq!(
+            obj.zone,
+            Zone::Battlefield,
+            "CardBuilder::controlled_by is battlefield-only: object {:?} is in {:?}, whose \
+             zone list is keyed by OWNER, so diverging the controller would corrupt the fixture",
+            obj.id,
+            obj.zone,
+        );
+        obj.base_controller = Some(player);
+        obj.controller = player;
+        self
+    }
+
     /// Mark this creature as having summoning sickness (entered this turn).
     pub fn with_summoning_sickness(&mut self) -> &mut Self {
         let turn = self.state.turn_number;

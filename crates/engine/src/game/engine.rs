@@ -8,12 +8,13 @@ use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::actions::{
     DebugAction, GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp, TriggerOrderTemplateOp,
 };
-use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState, PlayerActionKind};
+use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState};
 use crate::types::game_state::{
     ActionResult, AssistState, AutoMayChoice, AutoPassMode, AutoPassRequest, CastOfferKind,
     CastingVariant, ConvokeMode, CostResume, GameState, LandPlayRecord, LoopDetectionMode,
-    ManaAbilityResume, MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveResume, RetargetScope,
-    StackEntry, StackEntryKind, WaitingFor,
+    ManaAbilityResume, MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveResume,
+    PendingCounterPostAction, PendingEffectResolved, RetargetScope, StackEntry, StackEntryKind,
+    WaitingFor,
 };
 use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIncarnationRef};
 use crate::types::match_config::MatchType;
@@ -11597,21 +11598,14 @@ fn apply_action(
                     ));
                 }
             }
-            if !effects::proliferate::apply_proliferate(state, p, &targets, &mut events) {
-                return Ok(ActionResult {
-                    events,
-                    waiting_for: state.waiting_for.clone(),
-                    log_entries: vec![],
-                });
-            }
-            // CR 701.34a: Emit player-action event so proliferate triggers fire.
-            events.push(GameEvent::PlayerPerformedAction {
-                player_id: p,
-                action: PlayerActionKind::Proliferate,
-                look_count: None,
-                scry_bottom_count: None,
-                scry_top_count: None,
-            });
+            // CR 701.34a + issue #7384: take the frame BEFORE applying counters.
+            // A counter-placement replacement can pause mid-application, and any
+            // path that returns while this direct-choice frame is still resident
+            // strands it on the resolution stack — every later frame transition
+            // then fails `ResolutionStack::validate` against a prompt that has
+            // long since moved on. A wrong stack top degrades to a rejected
+            // action here rather than to silent corruption, because
+            // `take_active_proliferate_frame` reports `UnexpectedTop`.
             let pending = state
                 .take_active_proliferate_frame()
                 .map_err(|error| EngineError::InvalidAction(error.to_string()))?
@@ -11624,6 +11618,15 @@ fn apply_action(
             // (Pentad's charge) — never "all eligible", which could grow an opponent's
             // counters/poison and introduce a loss axis. Slot source = the trigger source (Kilo);
             // `index: 0` (distinct source from the Relic tap-cost/color pins).
+            //
+            // Recorded BEFORE the counters are applied: a counter-placement
+            // replacement can pause `apply_proliferate`, and that path returns
+            // early. Leaving the pin below it would silently drop the pin on
+            // exactly the proliferate this fix made complete, falling back to
+            // the "all eligible" replay this comment rules out. Everything read
+            // here — `state`, `targets`, `p`, `completion_source` — is already
+            // settled, and `object_decision_source` resolves card identity,
+            // which the pending counters do not affect.
             if let Some(source) = object_decision_source(state, completion_source) {
                 let target_pins: Vec<crate::analysis::decision_template::TargetPin> = targets
                     .iter()
@@ -11651,17 +11654,37 @@ fn apply_action(
                     );
                 }
             }
-            if !effects::proliferate::resume_proliferate_actions(state, pending, &mut events) {
+            // The player-action event and any remaining actions are owed once
+            // the counters land, so they ride the completion rather than being
+            // emitted here — `continue_proliferate_actions` is the single
+            // authority for both, on the synchronous and paused paths alike.
+            let completion = PendingEffectResolved::with_post_actions_without_effect(
+                crate::types::ability::EffectKind::Proliferate,
+                completion_source,
+                vec![PendingCounterPostAction::ContinueProliferateActions {
+                    pending: pending.clone(),
+                }],
+            );
+            if !effects::proliferate::apply_proliferate(
+                state,
+                p,
+                &targets,
+                completion,
+                &mut events,
+            ) {
                 return Ok(ActionResult {
                     events,
                     waiting_for: state.waiting_for.clone(),
                     log_entries: vec![],
                 });
             }
-            events.push(GameEvent::EffectResolved {
-                kind: crate::types::ability::EffectKind::Proliferate,
-                source_id: completion_source,
-            subject: None,});
+            if !effects::proliferate::continue_proliferate_actions(state, pending, &mut events) {
+                return Ok(ActionResult {
+                    events,
+                    waiting_for: state.waiting_for.clone(),
+                    log_entries: vec![],
+                });
+            }
             state.waiting_for = WaitingFor::Priority { player: p };
             state.priority_player = p;
             resume_pending_continuation_if_priority(state, &mut events)?;
@@ -18217,6 +18240,127 @@ mod stage2_injector_tests {
                 // shifts combine with #6958's paid-cast outcome exclusion and
                 // #6976's conditional-branch exclusions. None creates an
                 // `OptionalEffect` prompt. Re-pinned against the merged source.
+                // Current-main port: #7221's typed player-action completion seam and the
+                // contemporaneous upstream changes moved these three producers. Re-derived
+                // in the merged source, still in their named production functions.
+                //
+                // Fight for the Throne commander-gate unit (base 8035813e6):
+                // `:6640/:6717/:9922 ⇒ :6647/:6724/:9929`, uniform +7. LOCAL, not upstream,
+                // so the CI-vs-local diagnosis in the header does not apply. `git diff -U0`
+                // on effects/mod.rs has exactly four hunks: `@@ -12,7 +12,7 @@` (net 0 — the
+                // `CommanderOwnership` import reflow), `@@ -3238,0 +3239,3 @@` (+3, the
+                // `AbilityCondition::ControlsCommander` leaf arm in
+                // `condition_reads_filter_population`), `@@ -3639,0 +3643,4 @@` (+4, the same
+                // variant joining `should_resolve_subability_on_optional_decline`'s live-gate
+                // list), and `@@ -12474,0 +12482,23 @@` (+23, the `evaluate_condition`
+                // delegation to `game::commander`) which sits BELOW all three producers and
+                // therefore moves none of them. 3 + 4 = the whole +7, and predicted
+                // `6640+7`/`6717+7`/`9922+7` equal the observed coordinates exactly. None of
+                // the three arms mints a prompt — they are condition CLASSIFICATION arms plus
+                // one boolean predicate delegation. Identity re-established, not assumed: each
+                // producer at its new coordinate is sha256-identical to
+                // `8035813e6:effects/mod.rs` at its old one (`a8512b402f8675b7`,
+                // `82c6c569182ae4ed`, `c9d8e7ba3b9e29e2`) and still sits inside the enclosing
+                // function this row NAMES (`drive_sequential_repeated_optional_payment` ×2,
+                // `resolve_chain_body`). The diff instrument discriminates: the three OLD
+                // coordinates now hold a `PendingRepeatedOptionalPayment` field init, a
+                // `payment_unit` argument, and a `trigger_events` clone — none of which mints
+                // anything. Set preservation: the two asserts above this one ran FIRST and
+                // both fired GREEN on the run that caught this (total still 37, partition
+                // still 5/7/25), and the other two entries did not move.
+                //
+                // Fight for the Throne review-fix round (same base 8035813e6):
+                // `:6647/:6724/:9929 ⇒ :6680/:6757/:9964`, i.e. `+40/+40/+42` measured
+                // from BASE (`:6640/:6717/:9922`), not from the row above. LOCAL, not
+                // upstream, so the CI-vs-local diagnosis in the header does not apply.
+                // `git diff -U0 8035813e6` on effects/mod.rs now has eight hunks; the
+                // ones that move a producer are, in order: `@@ -2935,0 +2936,33 @@`
+                // (+33, `condition_survives_false_parent_gate` — the single authority
+                // the CR 603.4 delayed-hoist carve-out now shares with
+                // `resolve_chain_body`), `@@ -3238,0 +3272,3 @@` (+3) and
+                // `@@ -3639,0 +3676,4 @@` (+4) — the two condition-classification arms
+                // already logged above. 33 + 3 + 4 = the `+40` on the first two. The
+                // third takes a further `+2` from the two hunks INSIDE
+                // `resolve_chain_body` and above its own gate:
+                // `@@ -9679,4 +9719,10 @@` (+6, the twin sub-gate clauses collapsed
+                // into the shared `condition_survives_false_parent_gate` call) and
+                // `@@ -9701,5 +9747 @@` (−4, the corresponding conjunct removal); the
+                // remaining hunks (`@@ -12,7 +12,7 @@` net 0, the `evaluate_condition`
+                // delegation, and `mod tests`) are net-zero or BELOW all three.
+                // Predicted `6640+40`/`6717+40`/`9922+42` equal the observed
+                // coordinates exactly. None of the moved code mints a prompt: it is one
+                // boolean condition classifier plus the call sites that consume it.
+                // Identity re-established, not assumed: each producer at its new
+                // coordinate is sha256-identical to `8035813e6:effects/mod.rs` at its
+                // old one (`9869a19f28c791ee`, `2bc316e3aa0297f8`, `8df98486627bfe15`)
+                // and still sits inside the enclosing production function it always
+                // did — `drive_sequential_repeated_optional_payment` (6653-6687),
+                // `resolve_repeated_optional_payment_choice` (6695-6779) and
+                // `resolve_chain_body`. (The row above names the first two as
+                // `drive_sequential_repeated_optional_payment` ×2; re-derived here, the
+                // second is the `resolve_repeated_optional_payment_choice` resume arm,
+                // which is what the older entries called it.) The diff instrument
+                // discriminates: the three OLD coordinates now hold a blank line, an
+                // `.active_repeated_optional_payment_frame_mut()` call and a `//`
+                // comment, none of which mints anything. Set preservation: the two
+                // asserts above this one ran FIRST and both fired GREEN on the run that
+                // caught this (total still 37, partition still 5/7/25), and the other
+                // two entries did not move.
+                //
+                // Fight for the Throne review-fix round 2 (same base 8035813e6):
+                // `:6715/:6792/:9994`, i.e. `+75/+75/+72` measured from BASE
+                // (`:6640/:6717/:9922`), not from the row above. LOCAL, not upstream, so
+                // the CI-vs-local diagnosis in the header does not apply. `git diff -U0
+                // 8035813e6` on effects/mod.rs has eight hunks; above the first two
+                // producers are `@@ -2935,0 +2936,68 @@` (+68 — the condition classifier
+                // of the row above, now also carrying the shared
+                // `sub_outlives_false_parent_gate` authority the CR 603.4 delayed-hoist
+                // carve-out and `resolve_chain_body` both call), `@@ -3238,0 +3307,3 @@`
+                // (+3) and `@@ -3639,0 +3711,4 @@` (+4): 68 + 3 + 4 = the `+75`. The third
+                // producer nets `−3` more from the two hunks INSIDE `resolve_chain_body`
+                // and above its own gate — `@@ -9679,4 +9753,0 @@` (−4, the twin
+                // `sub_survives_false_parent_gate` / `sub_is_replicated_or_branch` locals
+                // collapsed into the one shared call) and `@@ -9698,9 +9769,10 @@` (+1) —
+                // giving `+72`; the remaining hunks (`@@ -12,7 +12,7 @@` net 0, the
+                // `evaluate_condition` delegation, and `mod tests`) are net-zero or BELOW
+                // all three. Predicted `6640+75`/`6717+75`/`9922+72` equal the observed
+                // coordinates exactly. None of the moved code mints a prompt: it is one
+                // boolean sub-classification predicate plus the call site that consumes it.
+                // Identity re-established, not assumed: each producer at its new coordinate
+                // is sha256-identical to `8035813e6:effects/mod.rs` at its old one
+                // (`9869a19f28c791ee`, `2bc316e3aa0297f8`, `8df98486627bfe15`) and still
+                // sits inside the enclosing production function this row NAMES —
+                // `drive_sequential_repeated_optional_payment` (opens 6702),
+                // `resolve_repeated_optional_payment_choice` (opens 6730) and
+                // `resolve_chain_body`. The diff instrument discriminates: the three OLD
+                // coordinates now hold a `return Ok(());`, an
+                // `optional_cost_payments_this_resolution` binding and a
+                // `resolve_optional_effect_decision(` call, none of which mints anything.
+                // Set preservation: the two asserts above this one ran FIRST and both
+                // fired GREEN on the run that caught this (total still 37, partition still
+                // 5/7/25), and the other two entries did not move.
+                //   Fight for the Throne, same branch, same base `8035813e6`:
+                //   `:6715/:6792/:9994 ⇒ :6722/:6799/:10001`, a UNIFORM `+7` on all three,
+                //   i.e. `+82/+82/+79` measured from the base. The row above measured
+                //   `+75/+75/+72` from that same base, so the delta is `+7` and its sole
+                //   cause is that the FIRST hunk GREW: `@@ -2935,0 +2936,68 @@ ⇒
+                //   @@ -2935,0 +2936,75 @@`, the `condition_survives_false_parent_gate`
+                //   doc/authority block picking up seven more lines. No hunk was added or
+                //   removed and none changed size: the other four are byte-for-byte the
+                //   sizes the row above names (`+3` at `:3307 ⇒ :3314`, `+4` at
+                //   `:3711 ⇒ :3718`, `−4` at `:9753 ⇒ :9760`, `+1` at `:9769 ⇒ :9776`) and
+                //   merely shifted by the same `+7`, which is what makes the shift uniform
+                //   even for the third producer (its `−4/+1` pair still nets the same `−3`
+                //   below the other two). Predicted `6640+82`/`6717+82`/`9922+79` against
+                //   `8035813e6` equal the observed coordinates exactly. Identity
+                //   re-established, not assumed: each producer at its new coordinate is
+                //   sha256-identical to `8035813e6:effects/mod.rs` at its old one
+                //   (`7067db50922da31f`, `975791a569b1f587`, `967e35eb66a5780b` over the
+                //   15-line mint expression at each site). This card's own effects/mod.rs
+                //   edits — the two `AbilityCondition::ControlsCommander` registrations at
+                //   `:3314`/`:3718` and the `evaluate_condition` arm below all three — mint
+                //   nothing: they are classifier list entries and one condition evaluator.
+                //
                 // Wheel of Misfortune (#7266), MEASURED ON THE MERGE TREE. This row's
                 // own header warns that a fork branch's pins are correct for the branch
                 // and wrong for `refs/pull/<n>/merge`; both sides of this conflict were
@@ -18279,13 +18423,13 @@ mod stage2_injector_tests {
                 // added to `compute_options`' sibling classifier in this file,
                 // which sits above all three producers. Nothing added raises a
                 // `WaitingFor`; the census set is still exactly 5.
-                // Doomsday selected-search publication: `:6656/:6733/:9974 ⇒
-                // :6663/:6740/:9981`, uniform +7 from the typed tracked-set
-                // membership detector and its CR annotation. The producers
-                // remain byte-identical and the census set remains exactly 5.
-                "game/effects/mod.rs:6663".to_string(),
-                "game/effects/mod.rs:6740".to_string(),
-                "game/effects/mod.rs:9981".to_string(),
+                // Current-main port: #7403/#7389 move main's three production pins to
+                // `:6738/:6815/:10053`; the Doomsday tracked-set publication adds seven
+                // lines above each. Re-measured in this merged tree: `:6745/:6822/:10060`.
+                // The three sites remain the existing `OptionalEffectChoice` producers.
+                "game/effects/mod.rs:6745".to_string(),
+                "game/effects/mod.rs:6822".to_string(),
+                "game/effects/mod.rs:10060".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
@@ -18942,7 +19086,36 @@ mod stage2_injector_tests {
                 // #7320's random-discard continuation adds ten lines above this producer in the
                 // merged tree. Re-derived by the exact producer text at `:12773`, not by carrying
                 // the prior coordinate.
-                "game/engine.rs:12773".to_string(),
+                // Proliferate frame-orphan fix (#7384): `:12773 ⇒ :12796`, +23, and ONLY this
+                //   engine.rs entry moved — the four `effects/mod.rs` +
+                //   `scoped_library_search` entries were re-read byte-identical AND in
+                //   place, which is the set-preservation evidence. `git diff -U0` on this
+                //   file has exactly seven hunks; six sit at `:11`–`:11687`, entirely ABOVE
+                //   this producer: net `0` (a dropped `PlayerActionKind` import), `+1` (the
+                //   `game_state` import list gaining a line), `-7` and `+9` (the
+                //   `ProliferateChoice` handler taking its frame BEFORE applying counters),
+                //   `+24` (the loop-pin block moved above `apply_proliferate`, plus the
+                //   completion construction) and `-4` (the terminal `EffectResolved` push
+                //   moving into `continue_proliferate_actions`). `0+1-7+9+24-4 = +23`, and
+                //   predicted `12773+23` equals the observed coordinate exactly. The seventh
+                //   and only remaining hunk is THIS drift note, which sits at `:18964` —
+                //   below the producer — so nothing that moved it is unaccounted for.
+                //   Deliberately stated WITHOUT pinning that hunk's own line count or the
+                //   whole-file delta: this note is self-referential, its length feeds any
+                //   such total, and the previous revision of this row asserted a
+                //   whole-file figure that its own next wording edit falsified by exactly
+                //   the size of that edit. The six above-producer hunks are the whole
+                //   load-bearing claim; the seventh is identified by position, which no
+                //   rewording can invalidate.
+                //   None of it mints a prompt: the handler consumes an ALREADY-minted
+                //   `ProliferateChoice`, and the completion defers a keyword action rather
+                //   than creating a recipient, so the census set is still exactly 5.
+                //   Identity re-established, not assumed, on BOTH controls this row uses:
+                //   the line at `:12796` is sha256-identical (`8a544e87…5cc7d63`) to
+                //   `origin/main:crates/engine/src/game/engine.rs:12773`, and its offset from
+                //   `begin_pending_trigger_target_selection` (`:12662`) is STILL 134 — the
+                //   control that caught this row's one historical SILENT drift.
+                "game/engine.rs:12796".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \
