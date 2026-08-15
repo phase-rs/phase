@@ -20239,10 +20239,31 @@ fn mbaku_attack_trigger_keeps_monarch_intervening_if_bound_to_defending_player()
         .execute
         .as_ref()
         .expect("attack trigger should have an execute body");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = execute.effect.as_ref()
+    else {
+        panic!(
+            "expected the +1/+1 and trample grant, got {:?}",
+            execute.effect
+        );
+    };
+    let static_def = static_abilities
+        .first()
+        .expect("M'Baku's grant must contain a static ability");
     assert!(
-        matches!(&*execute.effect, Effect::GenericEffect { .. }),
-        "expected the +1/+1 and trample grant, got {:?}",
-        execute.effect
+        static_def
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 1 })
+            && static_def
+                .modifications
+                .contains(&ContinuousModification::AddToughness { value: 1 })
+            && static_def
+                .modifications
+                .contains(&ContinuousModification::AddKeyword {
+                    keyword: Keyword::Trample,
+                }),
+        "expected the +1/+1 and trample grant, got {static_def:?}"
     );
 
     // CR L4: the Condition_If swallow warning must be cleared.
@@ -20390,25 +20411,31 @@ fn attack_anaphor_rebind_gate_covers_only_player_yielding_attack_scopes() {
         def
     };
 
-    for yes in [
+    let attack_target_scopes = [
         AttackTargetFilter::Player,
-        AttackTargetFilter::PlayerOrPlaneswalker,
-    ] {
-        assert!(
-            attack_intervening_if_anaphor_is_defending_player(&base(Some(yes.clone()))),
-            "{yes:?} yields a unique defending player and must rebind"
-        );
-    }
-    for no in [
         AttackTargetFilter::Planeswalker,
+        AttackTargetFilter::PlayerOrPlaneswalker,
         AttackTargetFilter::Battle,
         AttackTargetFilter::Owner,
         AttackTargetFilter::OwnerOrPlaneswalker,
         AttackTargetFilter::PlayerOrPermanents,
-    ] {
-        assert!(
-            !attack_intervening_if_anaphor_is_defending_player(&base(Some(no.clone()))),
-            "{no:?} names no attacked-player antecedent and must not rebind"
+        AttackTargetFilter::Monarch,
+    ];
+    for scope in attack_target_scopes {
+        let expected_rebind = match scope {
+            AttackTargetFilter::Player
+            | AttackTargetFilter::PlayerOrPlaneswalker
+            | AttackTargetFilter::Monarch => true,
+            AttackTargetFilter::Planeswalker
+            | AttackTargetFilter::Battle
+            | AttackTargetFilter::Owner
+            | AttackTargetFilter::OwnerOrPlaneswalker
+            | AttackTargetFilter::PlayerOrPermanents => false,
+        };
+        assert_eq!(
+            attack_intervening_if_anaphor_is_defending_player(&base(Some(scope.clone()))),
+            expected_rebind,
+            "{scope:?} rebind classification must be exhaustive"
         );
     }
     // No attack-target clause at all (Goblin Guide / Ulamog shape).

@@ -1245,7 +1245,7 @@ fn parse_turn_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
 /// Handles "you're the monarch", "you have the initiative", and "you have the city's blessing".
 fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
-        // CR 725.1 + CR 109.5 + CR 603.2: monarch identity, decomposed into
+        // CR 725.1 + CR 109.5: monarch identity, decomposed into
         // subject × predicate. The subject is one `alt()`; the predicate tag is
         // matched once. Do NOT enumerate (subject × predicate) full-phrase tags.
         map(
@@ -1345,7 +1345,7 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
     .parse(input)
 }
 
-/// CR 109.5 + CR 603.2: subject axis of the monarch-identity predicate.
+/// CR 109.5: subject axis of the monarch-identity predicate.
 ///
 /// "you're"/"you are" is the ability's controller (CR 109.5). "that
 /// player"/"that opponent" is the anaphoric event-scoped player; this

@@ -7776,7 +7776,7 @@ fn extract_static_condition_features(
                 extract_static_condition_features(sub, features);
             }
         }
-        // CR 608.2c: `Not` is a boolean COMBINATOR exactly like `And` / `Or` —
+        // `Not` is a boolean COMBINATOR exactly like `And` / `Or` —
         // `layers::evaluate_condition` negates its operand's own evaluation and
         // has no independent semantics of its own. Letting it fall into the
         // catch-all below emitted only `static_condition:Not` (classified
@@ -8402,7 +8402,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         // Variants below are parsed but not classified as handled by the prior registry.
         StaticCondition::HasMaxSpeed => ("HasMaxSpeed", Unhandled),
         StaticCondition::SpeedGE { .. } => ("SpeedGE", Unhandled),
-        // CR 608.2c: Compound conditions — resolved recursively by
+        // Compound conditions — resolved recursively by
         // `layers::evaluate_condition`, which short-circuits And/Or and
         // negates Not. Verified at layers.rs ~line 263.
         //
@@ -15424,7 +15424,7 @@ mod tests {
         }
     }
 
-    /// CR 608.2c: `extract_static_condition_features` must recurse
+    /// `extract_static_condition_features` must recurse
     /// `StaticCondition::Not` exactly as it recurses `And` / `Or`. Negation is a
     /// combinator with no semantics of its own, so swallowing its operand
     /// reports an UNHANDLED leaf as supported — the fail-open direction coverage
@@ -15437,7 +15437,7 @@ mod tests {
     /// the monarch" shape `layers`' entry gate hard-rejects to `false` — would
     /// be advertised as fully supported.
     #[test]
-    fn static_condition_not_recurses_into_its_operand_cr_608_2c() {
+    fn static_condition_not_recurses_into_its_operand() {
         let feature_map = |cond: &StaticCondition| {
             let mut features = HashMap::new();
             extract_static_condition_features(cond, &mut features);

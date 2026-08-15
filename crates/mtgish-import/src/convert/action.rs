@@ -3644,7 +3644,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             expiry: None,
             target: None,
         },
-        // CR 717.1: The monarch designation. The acting player becomes the
+        // CR 725.1: The monarch designation. The acting player becomes the
         // monarch (singleton — replaces any existing monarch), opting into
         // the end-step draw and the take-damage-yields-monarchy interactions.
         Action::BecomeTheMonarch => Effect::BecomeMonarch {
