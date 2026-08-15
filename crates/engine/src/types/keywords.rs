@@ -787,12 +787,10 @@ pub enum Keyword {
     /// `CastingVariant::Miracle` with the miracle mana cost.
     Miracle(ManaCost),
     Dash(ManaCost),
-    /// CR 702.119a: Emerge is an alternative cost paid by sacrificing a
-    /// creature and reducing the emerge cost by that creature's mana value.
-    Emerge(ManaCost),
-    /// CR 702.119b: "Emerge from [quality]" uses the printed permanent
-    /// quality instead of ordinary Emerge's creature requirement.
-    EmergeFromQuality(EmergeCost),
+    /// CR 702.119a-b: Emerge is an alternative cost paid by sacrificing the
+    /// specified permanent quality and reducing the emerge cost by that
+    /// permanent's mana value.
+    Emerge(EmergeCost),
     /// CR 702.138a: Escape — cast from graveyard for an alternative cost. The
     /// compound escape cost (mana sub-cost plus one or more exile sub-costs) is
     /// modeled by `EscapeCost` and split at runtime by
@@ -1353,7 +1351,6 @@ impl Keyword {
             | Keyword::Miracle(_)
             | Keyword::Dash(_)
             | Keyword::Emerge(_)
-            | Keyword::EmergeFromQuality(_)
             | Keyword::Escape(_)
             | Keyword::Harmonize(_)
             | Keyword::Evoke(_)
@@ -1631,7 +1628,6 @@ impl Keyword {
             | Keyword::DoubleTeam
             | Keyword::Echo(_)
             | Keyword::Emerge(_)
-            | Keyword::EmergeFromQuality(_)
             | Keyword::Encore(_)
             | Keyword::Enlist
             | Keyword::Entwine(_)
@@ -1720,7 +1716,6 @@ impl Keyword {
                 | Keyword::Cipher
                 | Keyword::Evoke(_)
                 | Keyword::Emerge(_)
-                | Keyword::EmergeFromQuality(_)
                 | Keyword::Bestow(_)
                 | Keyword::Madness(_)
                 | Keyword::Suspend { .. }
@@ -2408,7 +2403,11 @@ impl FromStr for Keyword {
                 "madness" => return Ok(Keyword::Madness(parse_keyword_mana_cost(p))),
                 "miracle" => return Ok(Keyword::Miracle(parse_keyword_mana_cost(p))),
                 "dash" => return Ok(Keyword::Dash(parse_keyword_mana_cost(p))),
-                "emerge" => return Ok(Keyword::Emerge(parse_keyword_mana_cost(p))),
+                "emerge" => {
+                    return Ok(Keyword::Emerge(EmergeCost::creature(
+                        parse_keyword_mana_cost(p),
+                    )))
+                }
                 "harmonize" => return Ok(Keyword::Harmonize(parse_keyword_mana_cost(p))),
                 "escape" => {
                     // CR 702.138a: MTGJSON's keywords array carries only the bare
@@ -3268,9 +3267,12 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Madness" => Ok(Keyword::Madness(mana(data)?)),
         "Miracle" => Ok(Keyword::Miracle(mana(data)?)),
         "Dash" => Ok(Keyword::Dash(mana(data)?)),
-        "Emerge" => Ok(Keyword::Emerge(mana(data)?)),
+        "Emerge" => match serde_json::from_value::<EmergeCost>(data.clone()) {
+            Ok(cost) => Ok(Keyword::Emerge(cost)),
+            Err(_) => Ok(Keyword::Emerge(EmergeCost::creature(mana(data)?))),
+        },
         "EmergeFromQuality" => serde_json::from_value(data.clone())
-            .map(Keyword::EmergeFromQuality)
+            .map(Keyword::Emerge)
             .map_err(|error| format!("EmergeFromQuality: {error}")),
         "Harmonize" => Ok(Keyword::Harmonize(mana(data)?)),
         // CR 702.138a: MTGJSON provides bare "Escape" with no structured cost data.
@@ -5193,8 +5195,7 @@ mod tests {
             Keyword::Madness(mc("{2}{R}")),
             Keyword::Miracle(mc("{2}{R}")),
             Keyword::Dash(mc("{2}{R}")),
-            Keyword::Emerge(mc("{2}{R}")),
-            Keyword::EmergeFromQuality(EmergeCost::from_quality(
+            Keyword::Emerge(EmergeCost::from_quality(
                 mc("{2}{R}"),
                 TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
             )),
@@ -5465,7 +5466,6 @@ mod tests {
             Keyword::Miracle(..) => Some("Miracle"),
             Keyword::Dash(..) => Some("Dash"),
             Keyword::Emerge(..) => Some("Emerge"),
-            Keyword::EmergeFromQuality(..) => Some("EmergeFromQuality"),
             Keyword::Escape(..) => Some("Escape"),
             Keyword::Harmonize(..) => Some("Harmonize"),
             Keyword::Evoke(..) => Some("Evoke"),

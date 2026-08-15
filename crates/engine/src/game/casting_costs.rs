@@ -7795,10 +7795,7 @@ fn is_emerge_sacrifice_cost(
     let Some(sacrifice_filter) = super::casting::effective_spell_keywords(state, player, object_id)
         .into_iter()
         .find_map(|keyword| match keyword {
-            crate::types::keywords::Keyword::Emerge(_) => {
-                Some(TargetFilter::Typed(TypedFilter::creature()))
-            }
-            crate::types::keywords::Keyword::EmergeFromQuality(cost) => Some(cost.sacrifice_filter),
+            crate::types::keywords::Keyword::Emerge(cost) => Some(cost.sacrifice_filter),
             _ => None,
         })
     else {

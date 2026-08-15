@@ -37230,7 +37230,8 @@ mod alt_cost_reduction_509 {
         obj.base_power = Some(5);
         obj.base_toughness = Some(5);
         obj.base_characteristics_initialized = true;
-        obj.keywords.push(Keyword::Emerge(emerge));
+        obj.keywords
+            .push(Keyword::Emerge(EmergeCost::creature(emerge)));
         obj_id
     }
 
@@ -37243,7 +37244,7 @@ mod alt_cost_reduction_509 {
     ) -> ObjectId {
         let spell = create_emerge_spell(state, player, card_id, printed, emerge.clone());
         state.objects.get_mut(&spell).unwrap().keywords =
-            vec![Keyword::EmergeFromQuality(EmergeCost::from_quality(
+            vec![Keyword::Emerge(EmergeCost::from_quality(
                 emerge,
                 TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
             ))];
@@ -37976,7 +37977,7 @@ mod alt_cost_reduction_509 {
         let artifact =
             create_sacrifice_artifact(&mut state, PlayerId(0), 812, ManaCost::generic(5));
         let creature =
-            create_sacrifice_creature(&mut state, PlayerId(0), 813, ManaCost::generic(5));
+            create_sacrifice_creature(&mut state, PlayerId(0), 813, ManaCost::generic(1));
 
         assert!(
             can_cast_object_now(&state, PlayerId(0), emerge),

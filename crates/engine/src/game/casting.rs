@@ -7,7 +7,7 @@ use crate::types::ability::{
     ModalSelectionCondition, ObjectScope, PlayerFilter, PlayerScope, ProhibitedActivity,
     QuantityExpr, QuantityRef, ResolvedAbility, RestrictionExpiry, RestrictionPlayerScope,
     StaticCondition, StaticDefinition, SubAbilityLink, TapCreaturesRequirement, TargetFilter,
-    TargetRef, TypedFilter,
+    TargetRef,
 };
 use crate::types::actions::{AlternativeCastDecision, GameAction};
 use crate::types::card::LayoutKind;
@@ -21,7 +21,7 @@ use crate::types::game_state::{
     TargetSelectionSlot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
-use crate::types::keywords::{EmergeCost, FlashbackCost, Keyword, KeywordKind};
+use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::{
     ActivationManaColorConstraint, ManaColor, ManaCost, ManaCostShard, ManaSourceOutput,
     ManaSourceSelection, ManaSpellGrant, ManaType, PaymentContext, SpecialAction, SpellMeta,
@@ -2557,8 +2557,7 @@ fn effective_emerge_sacrifice_filter(
     effective_spell_keywords(state, caster, object_id)
         .into_iter()
         .find_map(|keyword| match keyword {
-            Keyword::Emerge(_) => Some(TargetFilter::Typed(TypedFilter::creature())),
-            Keyword::EmergeFromQuality(cost) => Some(cost.sacrifice_filter),
+            Keyword::Emerge(cost) => Some(cost.sacrifice_filter),
             _ => None,
         })
 }
@@ -5756,13 +5755,7 @@ fn casting_variant_candidates(
     if obj.zone == Zone::Hand
         && effective_spell_keywords(state, player, object_id)
             .iter()
-            .any(|k| {
-                matches!(
-                    k,
-                    crate::types::keywords::Keyword::Emerge(_)
-                        | crate::types::keywords::Keyword::EmergeFromQuality(_)
-                )
-            })
+            .any(|k| matches!(k, crate::types::keywords::Keyword::Emerge(_)))
     {
         candidates.push(CastingVariant::Emerge);
     }
@@ -6568,10 +6561,7 @@ fn prepare_spell_cast_with_variant_override_inner(
         effective_spell_keywords(state, player, object_id)
             .iter()
             .find_map(|k| match k {
-                crate::types::keywords::Keyword::Emerge(cost) => Some(cost.clone()),
-                crate::types::keywords::Keyword::EmergeFromQuality(cost) => {
-                    Some(cost.mana_cost.clone())
-                }
+                crate::types::keywords::Keyword::Emerge(cost) => Some(cost.mana_cost.clone()),
                 _ => None,
             })
     } else {
@@ -11583,10 +11573,7 @@ pub fn handle_cast_spell_with_payment_mode(
             if let Some(emerge_cost) = effective_spell_keywords(state, player, object_id)
                 .into_iter()
                 .find_map(|k| match k {
-                    crate::types::keywords::Keyword::Emerge(cost) => {
-                        Some(EmergeCost::creature(cost))
-                    }
-                    crate::types::keywords::Keyword::EmergeFromQuality(cost) => Some(cost),
+                    crate::types::keywords::Keyword::Emerge(cost) => Some(cost),
                     _ => None,
                 })
             {

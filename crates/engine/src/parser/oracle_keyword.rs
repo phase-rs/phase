@@ -1424,17 +1424,13 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
         return Some(result);
     }
 
-    // CR 702.119b: "Emerge from artifact {cost}" changes the required
-    // sacrifice permanent from Emerge's default creature to an artifact.
-    if let Ok((cost_text, _)) = tag::<_, _, OracleError<'_>>("emerge from artifact ").parse(text) {
-        let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_text);
-        return Some((
-            Keyword::EmergeFromQuality(EmergeCost::from_quality(
-                cost,
-                TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
-            )),
-            "",
-        ));
+    // CR 702.119b: "Emerge from [quality] {cost}" replaces ordinary Emerge's
+    // creature sacrifice with a permanent matching the parsed quality.
+    if tag::<_, _, OracleError<'_>>("emerge from ")
+        .parse(text)
+        .is_ok()
+    {
+        return parse_emerge_from_quality_keyword_line(text);
     }
 
     if let Some(kw) = parse_firebending_keyword_line(text) {
@@ -1961,6 +1957,27 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
         return None;
     }
     Some((parsed, unconsumed))
+}
+
+/// CR 702.119b: Parse "emerge from [quality] {cost}" without swallowing a
+/// missing mana cost or semantic suffix. The type parser owns the quality grammar
+/// and the mana combinator leaves any trailing text for the strict router.
+fn parse_emerge_from_quality_keyword_line(text: &str) -> Option<(Keyword, &str)> {
+    let (after_prefix, _) = tag::<_, _, OracleError<'_>>("emerge from ")
+        .parse(text)
+        .ok()?;
+    let (sacrifice_filter, after_quality) = parse_type_phrase(after_prefix);
+    if after_quality.len() == after_prefix.len() {
+        return None;
+    }
+    let (after_cost, _) = space1::<_, OracleError<'_>>.parse(after_quality).ok()?;
+    let upper_cost = after_cost.to_ascii_uppercase();
+    let (upper_remainder, mana_cost) = nom_primitives::parse_mana_cost(&upper_cost).ok()?;
+    let remainder = &after_cost[after_cost.len() - upper_remainder.len()..];
+    Some((
+        Keyword::Emerge(EmergeCost::from_quality(mana_cost, sacrifice_filter)),
+        remainder,
+    ))
 }
 
 /// Permissive, grant-context keyword parser. Returns the typed leading keyword
@@ -2547,7 +2564,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Madness(_) => "madness".to_string(),
         Keyword::Miracle(_) => "miracle".to_string(),
         Keyword::Dash(_) => "dash".to_string(),
-        Keyword::Emerge(_) | Keyword::EmergeFromQuality(_) => "emerge".to_string(),
+        Keyword::Emerge(_) => "emerge".to_string(),
         Keyword::Escape(_) => "escape".to_string(),
         Keyword::Harmonize(_) => "harmonize".to_string(),
         Keyword::Mayhem(_) => "mayhem".to_string(),
@@ -2904,7 +2921,7 @@ mod tests {
             .expect("artifact-qualified Emerge must parse");
         assert!(remainder.is_empty());
         match keyword {
-            Keyword::EmergeFromQuality(EmergeCost {
+            Keyword::Emerge(EmergeCost {
                 mana_cost,
                 sacrifice_filter: TargetFilter::Typed(filter),
             }) => {
@@ -2919,6 +2936,43 @@ mod tests {
             }
             other => panic!("expected artifact-qualified Emerge, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_keyword_line_core_emerge_from_creature_preserves_quality() {
+        let (keyword, remainder) = parse_keyword_line_core("emerge from creature {3}{u}")
+            .expect("creature-qualified Emerge must parse");
+        assert!(remainder.is_empty());
+        match keyword {
+            Keyword::Emerge(EmergeCost {
+                mana_cost,
+                sacrifice_filter: TargetFilter::Typed(filter),
+            }) => {
+                assert_eq!(
+                    mana_cost,
+                    ManaCost::Cost {
+                        shards: vec![ManaCostShard::Blue],
+                        generic: 3,
+                    }
+                );
+                assert_eq!(filter.type_filters, vec![TypeFilter::Creature]);
+            }
+            other => panic!("expected creature-qualified Emerge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_keyword_line_core_emerge_from_quality_requires_mana_cost() {
+        assert!(parse_keyword_line_core("emerge from artifact").is_none());
+    }
+
+    #[test]
+    fn parse_router_keyword_line_emerge_from_quality_rejects_semantic_suffix() {
+        assert!(
+            parse_router_keyword_line("Emerge from artifact {5} if you control an Island")
+                .is_none(),
+            "a semantic suffix must remain unconsumed so the strict router declines the line"
+        );
     }
 
     #[test]

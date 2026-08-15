@@ -4643,7 +4643,6 @@ pub(crate) fn keyword_cost_reads_growing_class(kw: &Keyword) -> bool {
         | Keyword::Delve
         | Keyword::Craft { .. }
         | Keyword::Emerge(_)
-        | Keyword::EmergeFromQuality(_)
         | Keyword::Offering(_)
         | Keyword::Bargain
         | Keyword::Casualty(_)
@@ -4916,7 +4915,7 @@ fn scan_keyword(kw: &Keyword, mode: ScanMode) -> Axes {
         | Keyword::Buyback(_)
         | Keyword::Cycling(_)
         | Keyword::Flashback(_)
-        | Keyword::EmergeFromQuality(_) => Axes::CONSERVATIVE,
+        | Keyword::Emerge(_) => Axes::CONSERVATIVE,
         // Every other keyword carries a read-free payload (unit / u32 / String /
         // ManaCost / value tag): it reads nothing on any axis here. Its cost-read,
         // if any, is already captured by `cost_read` above.
@@ -5002,7 +5001,6 @@ fn scan_keyword(kw: &Keyword, mode: ScanMode) -> Axes {
         | Keyword::Madness(_)
         | Keyword::Miracle(_)
         | Keyword::Dash(_)
-        | Keyword::Emerge(_)
         | Keyword::Harmonize(_)
         | Keyword::Foretell(_)
         | Keyword::Mutate(_)

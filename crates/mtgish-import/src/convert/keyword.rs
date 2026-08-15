@@ -177,7 +177,9 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
             "Rule::Embalm",
             path,
         )?)),
-        Rule::Emerge(c) => Keyword::Emerge(pure_mana(c, "Rule::Emerge", path)?),
+        Rule::Emerge(c) => Keyword::Emerge(engine::types::keywords::EmergeCost::creature(
+            pure_mana(c, "Rule::Emerge", path)?,
+        )),
         Rule::Encore(c) => Keyword::Encore(pure_mana(c, "Rule::Encore", path)?),
         Rule::Eternalize(c) => Keyword::Eternalize(engine::types::keywords::EternalizeCost::Mana(
             pure_mana(c, "Rule::Eternalize", path)?,
