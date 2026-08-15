@@ -13,7 +13,7 @@ use engine::types::zones::Zone;
 fn top_ability_does_not_follow_new_object_after_key_untaps_it() {
     fn contains_self_ref_library_placement(ability: &ResolvedAbility) -> bool {
         matches!(
-            ability.effect.as_ref(),
+            &ability.effect,
             Effect::PutAtLibraryPosition {
                 target: TargetFilter::SelfRef,
                 ..
@@ -29,7 +29,7 @@ fn top_ability_does_not_follow_new_object_after_key_untaps_it() {
     }
 
     fn contains_unimplemented(ability: &ResolvedAbility) -> bool {
-        matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })
+        matches!(&ability.effect, Effect::Unimplemented { .. })
             || ability
                 .sub_ability
                 .as_deref()
