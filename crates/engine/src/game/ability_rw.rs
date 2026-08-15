@@ -1862,7 +1862,10 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
         | TriggerCondition::AttackedThisTurn
         | TriggerCondition::FirstCombatPhaseOfTurn
         | TriggerCondition::HasMaxSpeed
-        | TriggerCondition::IsMonarch
+        // CR 725.1: no `legacy_player_scope` classifier exists, and both scopes
+        // the parser can emit (`Controller`, `ScopedPlayer`) have non-legacy
+        // `ControllerRef` analogues, so the monarch subject axis stays here.
+        | TriggerCondition::IsMonarch { .. }
         | TriggerCondition::IsInitiative
         | TriggerCondition::NoMonarch
         | TriggerCondition::HasCityBlessing
@@ -1998,7 +2001,9 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::DayNightIs { .. }
         | StaticCondition::CastVariantPaid { .. }
         | StaticCondition::ClassLevelGE { .. }
-        | StaticCondition::IsMonarch
+        // CR 725.1: no `legacy_player_scope` classifier exists; see the
+        // `legacy_trigger_condition` sibling arm for the same reasoning.
+        | StaticCondition::IsMonarch { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -2901,6 +2906,8 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::ReassembleContraptionOnSprocket { target, .. }
         | Effect::ApplySticker { target, .. }
         | Effect::RememberCard { target }
+        // CR 725.1 + CR 115.1: "target opponent becomes the monarch".
+        | Effect::BecomeMonarch { target }
         | Effect::GrantCastingPermission { target, .. }
         | Effect::AddTargetReplacement { target, .. }
         | Effect::DiscardCard { target, .. }
@@ -3440,7 +3447,6 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::Investigate
         | Effect::Tribute { .. }
         | Effect::TimeTravel
-        | Effect::BecomeMonarch
         | Effect::NoOp
         | Effect::Proliferate
         | Effect::Populate
@@ -5614,12 +5620,19 @@ fn rw_effect(
             min: _,
             max: _,
         }
-        | Effect::BecomeMonarch
         | Effect::RingTemptsYou
         | Effect::TimeTravel
         | Effect::Planeswalk
         | Effect::VentureIntoDungeon
         | Effect::SolveCase => (ext_write(StateKind::Other), None),
+        // CR 725.1 + CR 725.3: the designation write, plus the chosen-target
+        // write axis — "target opponent becomes the monarch" writes to a player
+        // named by a CR 115.1 target slot, exactly like `Effect::ExtraTurn`.
+        Effect::BecomeMonarch { target } => {
+            let mut p = ext_write(StateKind::Other);
+            flag_legacy_write_target(&mut p, target);
+            (p, None)
+        }
         Effect::ForceAttack {
             target,
             required_defender: _,
@@ -6373,6 +6386,10 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
 
 fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
     match x {
+        // CR 725.1: the monarch designation itself is global state with no
+        // member/event binding; the read profile is entirely determined by the
+        // subject scope, classified through the shared `PlayerScope` walker.
+        TriggerCondition::IsMonarch { player } => rw_player_scope(player),
         TriggerCondition::GainedLife { minimum: _ }
         | TriggerCondition::LostLife
         | TriggerCondition::LostLifeLastTurn => reads_player_of(StateKind::JournalLife),
@@ -6473,7 +6490,6 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
         | TriggerCondition::AttackedThisTurn
         | TriggerCondition::FirstCombatPhaseOfTurn
         | TriggerCondition::HasMaxSpeed
-        | TriggerCondition::IsMonarch
         | TriggerCondition::IsInitiative
         | TriggerCondition::NoMonarch
         | TriggerCondition::HasCityBlessing
@@ -6495,6 +6511,9 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
 
 fn rw_static_condition(x: &StaticCondition) -> RwProfile {
     match x {
+        // CR 725.1: see the `rw_trigger_condition` sibling — the read profile is
+        // entirely determined by the monarch subject scope.
+        StaticCondition::IsMonarch { player } => rw_player_scope(player),
         StaticCondition::DevotionGE { .. }
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents => reads_zone_membership(),
         StaticCondition::IsPresent { filter } => match filter {
@@ -6574,7 +6593,6 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         | StaticCondition::DayNightIs { .. }
         | StaticCondition::CastVariantPaid { .. }
         | StaticCondition::ClassLevelGE { .. }
-        | StaticCondition::IsMonarch
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing

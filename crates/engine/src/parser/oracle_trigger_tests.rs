@@ -21073,8 +21073,80 @@ fn parse_hixus_keeps_entered_this_turn_intervening_if() {
 #[test]
 fn bridge_monarch() {
     assert_eq!(
-        static_condition_to_trigger_condition(&StaticCondition::IsMonarch),
-        Some(TriggerCondition::IsMonarch),
+        static_condition_to_trigger_condition(&StaticCondition::IsMonarch {
+            player: PlayerScope::Controller
+        }),
+        Some(TriggerCondition::IsMonarch {
+            player: PlayerScope::Controller
+        }),
+    );
+}
+
+/// CR 725.1 + CR 109.5: the subject scope must SURVIVE the static→trigger
+/// bridge. Dropping it here is the silent-degradation failure mode — the
+/// condition would keep parsing but rebind to the ability's controller.
+///
+/// Revert-failing against an `IsMonarch { .. } => IsMonarch { Controller }` arm.
+#[test]
+fn bridge_monarch_carries_a_non_controller_subject_scope() {
+    assert_eq!(
+        static_condition_to_trigger_condition(&StaticCondition::IsMonarch {
+            player: PlayerScope::DefendingPlayer
+        }),
+        Some(TriggerCondition::IsMonarch {
+            player: PlayerScope::DefendingPlayer
+        }),
+    );
+    assert_eq!(
+        static_condition_to_trigger_condition(&StaticCondition::IsMonarch {
+            player: PlayerScope::ScopedPlayer
+        }),
+        Some(TriggerCondition::IsMonarch {
+            player: PlayerScope::ScopedPlayer
+        }),
+    );
+    // The negated bridge arm ("if you're not the monarch") must carry it too.
+    assert_eq!(
+        static_condition_to_trigger_condition(&StaticCondition::Not {
+            condition: Box::new(StaticCondition::IsMonarch {
+                player: PlayerScope::DefendingPlayer
+            }),
+        }),
+        Some(TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::IsMonarch {
+                player: PlayerScope::DefendingPlayer
+            }),
+        }),
+    );
+}
+
+/// CR 725.1: `AbilityCondition` has no player axis, so a scoped monarch gate
+/// must FAIL CLOSED rather than lower to the controller-scoped variant.
+///
+/// Revert-failing against a `{ .. }`-collapsing arm, which would return
+/// `Some(IsMonarch)` for the scoped form and silently rebind it.
+#[test]
+fn ability_condition_lowering_refuses_a_scoped_monarch_gate() {
+    use crate::parser::oracle_effect::conditions::static_condition_to_ability_condition;
+    use crate::parser::oracle_ir::context::ParseContext;
+
+    assert_eq!(
+        static_condition_to_ability_condition(
+            &StaticCondition::IsMonarch {
+                player: PlayerScope::Controller
+            },
+            &mut ParseContext::default()
+        ),
+        Some(AbilityCondition::IsMonarch),
+    );
+    assert_eq!(
+        static_condition_to_ability_condition(
+            &StaticCondition::IsMonarch {
+                player: PlayerScope::DefendingPlayer
+            },
+            &mut ParseContext::default()
+        ),
+        None,
     );
 }
 
@@ -21083,7 +21155,9 @@ fn bridge_opponent_is_monarch_intervening_if() {
     let sc = StaticCondition::And {
         conditions: vec![
             StaticCondition::Not {
-                condition: Box::new(StaticCondition::IsMonarch),
+                condition: Box::new(StaticCondition::IsMonarch {
+                    player: PlayerScope::Controller,
+                }),
             },
             StaticCondition::Not {
                 condition: Box::new(StaticCondition::NoMonarch),
@@ -21095,7 +21169,9 @@ fn bridge_opponent_is_monarch_intervening_if() {
         Some(TriggerCondition::And {
             conditions: vec![
                 TriggerCondition::Not {
-                    condition: Box::new(TriggerCondition::IsMonarch),
+                    condition: Box::new(TriggerCondition::IsMonarch {
+                        player: PlayerScope::Controller
+                    }),
                 },
                 TriggerCondition::Not {
                     condition: Box::new(TriggerCondition::NoMonarch),
@@ -21121,7 +21197,7 @@ fn queen_marchesa_upkeep_attaches_opponent_monarch_intervening_if() {
                 conditions[0],
                 TriggerCondition::Not {
                     condition: ref inner,
-                } if matches!(inner.as_ref(), TriggerCondition::IsMonarch)
+                } if matches!(inner.as_ref(), TriggerCondition::IsMonarch { player: PlayerScope::Controller })
             )
             && matches!(
                 conditions[1],

@@ -4891,27 +4891,41 @@ struct SourceContext<'a> {
     recipient_id: Option<ObjectId>,
 }
 
-/// CR 508.5 + CR 508.5a: Source-relative "defending player" resolution. Prefer
-/// the triggered source's captured combat facts — an attacking creature's own
-/// attack trigger snapshots its defending player, and that captured fact must
-/// answer even after the source changes zones (a recycled storage id must never
-/// answer a different ability's filter).
+/// CR 508.5 + CR 508.5a: `ControllerRef::DefendingPlayer` door for
+/// `TargetFilter` evaluation.
 ///
-/// But an attachment/anthem source (Equipment, Aura) is NOT itself the attacker:
-/// `capture_combat_status` finds it absent from `combat.attackers` and records
-/// `defending_player: None`. "Whenever equipped creature attacks, ... defending
-/// player controls" (Captain America's Shield, Greatsword of Tyr, and the rest
-/// of that class) must then resolve the defender of the *attacking creature*,
-/// carried by the triggering event. So a captured `None` is "no answer here",
-/// not "no defender" — fall through to `resolve_defending_player`, which reads
-/// the triggering event's attacker. Using `.map().unwrap_or_else()` collapsed
-/// that captured `None` into a spurious `Some(None)` and suppressed the
-/// fallback, silently fizzling the ability (issue #6678).
+/// Identical call, identical arguments, identical rule as the two quantity
+/// doors. The binding decision is NOT made here — see
+/// `combat::defending_player_cr508_5`, which owns it so one anaphor read once
+/// as a `PlayerScope` and once as a `ControllerRef` cannot bind two different
+/// players.
+///
+/// The issue-#6678 distinction still governs the latch and now lives on the
+/// authority's `trigger_source` parameter: an attachment/anthem source
+/// (Equipment, Aura) is not itself the attacker, so `capture_combat_status`
+/// records `defending_player: None`, and that captured `None` means "no answer
+/// here", not "no defender".
+///
+/// When `source.trigger_source` is `None` the authority binds no event, so this
+/// door remains byte-identical to its previous `resolve_defending_player`
+/// behaviour and no unrelated in-flight combat can leak into continuous-effect
+/// filter evaluation.
 fn source_defending_player(state: &GameState, source: &SourceContext<'_>) -> Option<PlayerId> {
-    source
-        .trigger_source
-        .and_then(|context| context.combat_status.defending_player)
-        .or_else(|| crate::game::combat::resolve_defending_player(state, source.id))
+    crate::game::combat::defending_player_cr508_5(state, source.id, source.trigger_source)
+}
+
+/// Drive the production `ControllerRef::DefendingPlayer` door from the
+/// cross-door agreement fixture in `combat.rs`. Mirrors
+/// `quantity::defending_player_for_quantity_context_for_test` so the fixture
+/// compares two PRODUCTION doors rather than two hand-built approximations.
+#[cfg(test)]
+pub(crate) fn source_defending_player_for_test(
+    state: &GameState,
+    source_id: ObjectId,
+    trigger_source: Option<&TriggerSourceContext>,
+) -> Option<PlayerId> {
+    let context = source_context_from_filter(state, source_id, None, None, trigger_source, None);
+    source_defending_player(state, &context)
 }
 
 fn source_enchanted_player(source: &SourceContext<'_>) -> Option<PlayerId> {

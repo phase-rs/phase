@@ -13045,7 +13045,13 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
             profile,
             multi_target: _,
         } => Effect::TurnFaceDown { target, profile },
-        ImperativeFamilyAst::BecomeMonarch => Effect::BecomeMonarch,
+        // CR 109.5: a bare "become the monarch" imperative has no printed
+        // subject, so the subject is "you". The targeted form
+        // ("target opponent becomes the monarch") carries an explicit subject
+        // phrase and is lowered by `subject::build_become_clause` instead.
+        ImperativeFamilyAst::BecomeMonarch => Effect::BecomeMonarch {
+            target: TargetFilter::Controller,
+        },
         ImperativeFamilyAst::VentureIntoDungeon => Effect::VentureIntoDungeon,
         ImperativeFamilyAst::VentureIntoUndercity => Effect::VentureInto {
             dungeon: crate::game::dungeon::DungeonId::Undercity,

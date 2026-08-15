@@ -1245,10 +1245,12 @@ fn parse_turn_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
 /// Handles "you're the monarch", "you have the initiative", and "you have the city's blessing".
 fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
-        // CR 725.1: Monarch status
-        value(
-            StaticCondition::IsMonarch,
-            alt((tag("you're the monarch"), tag("you are the monarch"))),
+        // CR 725.1 + CR 109.5 + CR 603.2: monarch identity, decomposed into
+        // subject × predicate. The subject is one `alt()`; the predicate tag is
+        // matched once. Do NOT enumerate (subject × predicate) full-phrase tags.
+        map(
+            terminated(parse_monarch_identity_subject, tag("the monarch")),
+            |player| StaticCondition::IsMonarch { player },
         ),
         // CR 725.1: "if an opponent is the monarch" — a monarch exists and it
         // is not the controller. Distinct from `Not(IsMonarch)` (also true when
@@ -1257,7 +1259,9 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
             StaticCondition::And {
                 conditions: vec![
                     StaticCondition::Not {
-                        condition: Box::new(StaticCondition::IsMonarch),
+                        condition: Box::new(StaticCondition::IsMonarch {
+                            player: PlayerScope::Controller,
+                        }),
                     },
                     StaticCondition::Not {
                         condition: Box::new(StaticCondition::NoMonarch),
@@ -1336,6 +1340,32 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
                 ownership: CommanderOwnership::Any,
             },
             tag("you control a commander"),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 109.5 + CR 603.2: subject axis of the monarch-identity predicate.
+///
+/// "you're"/"you are" is the ability's controller (CR 109.5). "that
+/// player"/"that opponent" is the anaphoric event-scoped player; this
+/// combinator cannot see the owning trigger, so it emits the generic
+/// [`PlayerScope::ScopedPlayer`] anchor, which an attack trigger rebinds to
+/// [`PlayerScope::DefendingPlayer`] when its clause supplies a more specific
+/// antecedent (CR 508.5 — see
+/// `oracle_trigger::rebind_attack_anaphor_to_defending_player`).
+///
+/// Mirrors `parse_that_player_has_conditions` in this module, which already
+/// maps the same two anaphors to [`PlayerScope::ScopedPlayer`].
+fn parse_monarch_identity_subject(input: &str) -> OracleResult<'_, PlayerScope> {
+    alt((
+        value(
+            PlayerScope::Controller,
+            alt((tag("you're "), tag("you are "))),
+        ),
+        value(
+            PlayerScope::ScopedPlayer,
+            alt((tag("that player is "), tag("that opponent is "))),
         ),
     ))
     .parse(input)
@@ -14454,14 +14484,24 @@ mod tests {
     fn test_youre_the_monarch() {
         let (rest, c) = parse_inner_condition("you're the monarch").unwrap();
         assert_eq!(rest, "");
-        assert_eq!(c, StaticCondition::IsMonarch);
+        assert_eq!(
+            c,
+            StaticCondition::IsMonarch {
+                player: PlayerScope::Controller
+            }
+        );
     }
 
     #[test]
     fn test_you_are_the_monarch() {
         let (rest, c) = parse_inner_condition("you are the monarch").unwrap();
         assert_eq!(rest, "");
-        assert_eq!(c, StaticCondition::IsMonarch);
+        assert_eq!(
+            c,
+            StaticCondition::IsMonarch {
+                player: PlayerScope::Controller
+            }
+        );
     }
 
     #[test]
@@ -14473,7 +14513,9 @@ mod tests {
             StaticCondition::And {
                 conditions: vec![
                     StaticCondition::Not {
-                        condition: Box::new(StaticCondition::IsMonarch),
+                        condition: Box::new(StaticCondition::IsMonarch {
+                            player: PlayerScope::Controller
+                        }),
                     },
                     StaticCondition::Not {
                         condition: Box::new(StaticCondition::NoMonarch),
@@ -14481,6 +14523,56 @@ mod tests {
                 ],
             }
         );
+    }
+
+    /// CR 725.1 + CR 109.5: the anaphoric subject "that player"/"that opponent"
+    /// parses to the generic `ScopedPlayer` anchor. Revert-failing: all three
+    /// inputs return `Err` without the subject axis, which is what dropped
+    /// M'Baku's intervening-if entirely.
+    #[test]
+    fn test_that_player_is_the_monarch() {
+        let (rest, c) = parse_inner_condition("that player is the monarch").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::IsMonarch {
+                player: PlayerScope::ScopedPlayer
+            }
+        );
+    }
+
+    #[test]
+    fn test_that_opponent_is_the_monarch() {
+        let (rest, c) = parse_inner_condition("that opponent is the monarch").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::IsMonarch {
+                player: PlayerScope::ScopedPlayer
+            }
+        );
+    }
+
+    /// CR 603.4: the clause-boundary contract `try_extract_intervening` depends
+    /// on — the condition stops at the comma and hands the effect body back.
+    #[test]
+    fn test_that_player_is_the_monarch_stops_at_clause_boundary() {
+        let (rest, c) =
+            parse_inner_condition("that player is the monarch, that creature gets +1/+1").unwrap();
+        assert_eq!(rest, ", that creature gets +1/+1");
+        assert_eq!(
+            c,
+            StaticCondition::IsMonarch {
+                player: PlayerScope::ScopedPlayer
+            }
+        );
+    }
+
+    /// The `tag("the monarch")` predicate guard: a bare subject is not a
+    /// monarch-identity condition.
+    #[test]
+    fn test_that_player_is_the_without_monarch_predicate_is_rejected() {
+        assert!(parse_inner_condition("that player is the").is_err());
     }
 
     #[test]

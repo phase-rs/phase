@@ -4719,7 +4719,7 @@ pub fn resolve_effect(
         // CR 701.56a: Time travel — interactive counter manipulation on suspended/time-countered permanents.
         // Currently a no-op; full interactive implementation requires WaitingFor infrastructure.
         Effect::TimeTravel => time_travel::resolve(state, ability, events),
-        Effect::BecomeMonarch => become_monarch::resolve(state, ability, events),
+        Effect::BecomeMonarch { target } => become_monarch::resolve(state, ability, target, events),
         // CR 101.3 + CR 608.2: An instruction with no game action. Emit
         // `EffectResolved` so the chain continues, and do nothing else.
         Effect::NoOp => {
@@ -13690,7 +13690,9 @@ mod tests {
         );
 
         let ability = ResolvedAbility::new(
-            Effect::BecomeMonarch,
+            Effect::BecomeMonarch {
+                target: TargetFilter::Controller,
+            },
             Vec::new(),
             ObjectId(999),
             PlayerId(0),

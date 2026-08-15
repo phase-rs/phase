@@ -5873,6 +5873,45 @@ pub enum PlayerScope {
     SpecificPlayer { id: PlayerId },
 }
 
+/// CR 109.5: SINGLE serde default for every [`PlayerScope`] subject axis — a
+/// clause with no printed subject means "you", the ability's controller. Keeps
+/// pre-field rows (`{"type":"IsMonarch"}`, `GrantNextSpellAbility` without
+/// `player`) deserializing unchanged.
+///
+/// A named function rather than `#[serde(default)]` because [`PlayerScope`]
+/// deliberately has no `Default` impl: most of its variants are only meaningful
+/// relative to a context, so a blanket default would be wrong everywhere else.
+fn player_scope_controller() -> PlayerScope {
+    PlayerScope::Controller
+}
+
+/// Skip-serialization predicate paired with [`player_scope_controller`]: omit
+/// `player` from JSON when it is the printed default, so existing card-data
+/// rows stay byte-identical.
+fn is_player_scope_controller(player: &PlayerScope) -> bool {
+    matches!(player, PlayerScope::Controller)
+}
+
+impl PlayerScope {
+    /// CR 611.2a + CR 514.2: [`PlayerScope::AnyTurn`] and
+    /// [`PlayerScope::SpecificPlayer`] exist ONLY to key a `Duration`'s expiry.
+    /// They are never produced by the parser and carry no value / quantity /
+    /// player-selection reading, which is why
+    /// `quantity::resolve_single_player_scope` marks them `unreachable!()`.
+    ///
+    /// Any resolver reachable from DESERIALIZED data must reject them here
+    /// rather than reaching that `unreachable!()`: `IsMonarch { player }` is
+    /// serde-constructible from `card-data.json` and from mtgish input, so a
+    /// malformed or hand-authored row must fail closed, not panic the engine
+    /// inside a trigger-condition check.
+    pub(crate) fn duration_timing_only(&self) -> bool {
+        matches!(
+            self,
+            PlayerScope::AnyTurn | PlayerScope::SpecificPlayer { .. }
+        )
+    }
+}
+
 /// Scope selector for object-axis quantities (Round Π-5). Picks WHICH object
 /// to read from when a `QuantityRef` (and future per-object conditions) is
 /// per-object. Mirrors `PlayerScope` for the player axis.
@@ -7163,6 +7202,113 @@ pub enum QuantityRef {
     VoteCount { choice_index: u32 },
 }
 
+impl QuantityRef {
+    /// CR 109.4: mutable access to this reference's single player-relativity
+    /// axis, when it has one.
+    ///
+    /// The mutable sibling of the read-only per-axis classifiers
+    /// (`ability_scan::scan_player_scope`, `ability_rw::rw_player_scope`), and
+    /// exhaustive for the same reason `ability_scan::scan_quantity_ref` is: a
+    /// future reference that carries a [`PlayerScope`] must be a COMPILE ERROR
+    /// here rather than silently escape an anaphor rebind. Object-axis
+    /// references and player-axis references that resolve through an
+    /// `AggregateFunction` population rather than a single scope return `None`.
+    pub(crate) fn player_scope_mut(&mut self) -> Option<&mut PlayerScope> {
+        match self {
+            QuantityRef::HandSize { player }
+            | QuantityRef::LifeTotal { player }
+            | QuantityRef::GraveyardSize { player }
+            | QuantityRef::LifeLostThisTurn { player }
+            | QuantityRef::PartySize { player }
+            | QuantityRef::Speed { player }
+            | QuantityRef::SacrificedThisTurn { player, .. }
+            | QuantityRef::LifeGainedThisTurn { player }
+            | QuantityRef::CardsDrawnThisTurn { player }
+            | QuantityRef::BattlefieldEntriesThisTurn { player, .. }
+            | QuantityRef::LandsPlayedThisTurn { player, .. }
+            | QuantityRef::PlayerChosenNumber { player }
+            | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player }
+            | QuantityRef::CardsDiscardedThisTurn { player }
+            | QuantityRef::TokensCreatedThisTurn { player, .. }
+            | QuantityRef::PlayerActionsThisTurn { player, .. } => Some(player),
+            QuantityRef::LifeAboveStarting
+            | QuantityRef::StartingLifeTotal
+            | QuantityRef::TriggeringDiscoverValue
+            | QuantityRef::TriggeringScryLookCount
+            | QuantityRef::TriggeringScryBottomCount
+            | QuantityRef::ObjectCount { .. }
+            | QuantityRef::ObjectCountDistinct { .. }
+            | QuantityRef::ObjectCountBySharedQuality { .. }
+            | QuantityRef::PlayerCount { .. }
+            | QuantityRef::CountersOn { .. }
+            | QuantityRef::CountersOnObjects { .. }
+            | QuantityRef::PlayerCounter { .. }
+            | QuantityRef::TargetControllerCounter { .. }
+            | QuantityRef::Variable { .. }
+            | QuantityRef::Power { .. }
+            | QuantityRef::Intensity { .. }
+            | QuantityRef::Toughness { .. }
+            | QuantityRef::ObjectManaValue { .. }
+            | QuantityRef::TargetObjectManaValue { .. }
+            | QuantityRef::ObjectColorCount { .. }
+            | QuantityRef::ObjectNameWordCount { .. }
+            | QuantityRef::ObjectTypelineComponentCount { .. }
+            | QuantityRef::ManaSymbolsInManaCost { .. }
+            | QuantityRef::SelfManaValue
+            | QuantityRef::Aggregate { .. }
+            | QuantityRef::ControlledByEachPlayer { .. }
+            | QuantityRef::TargetZoneCardCount { .. }
+            | QuantityRef::Devotion { .. }
+            | QuantityRef::DistinctCardTypes { .. }
+            | QuantityRef::DistinctSubtypes { .. }
+            | QuantityRef::CardsExiledBySource
+            | QuantityRef::ExiledCardPower { .. }
+            | QuantityRef::ZoneCardCount { .. }
+            | QuantityRef::BasicLandTypeCount { .. }
+            | QuantityRef::TrackedSetSize
+            | QuantityRef::FilteredTrackedSetSize { .. }
+            | QuantityRef::TrackedSetAggregate { .. }
+            | QuantityRef::ExiledFromHandThisResolution
+            | QuantityRef::PreviousEffectAmount { .. }
+            | QuantityRef::UnspentMana { .. }
+            | QuantityRef::EventContextAmount
+            | QuantityRef::EventContextPlayerCount { .. }
+            | QuantityRef::AttachmentsOnLeavingObject { .. }
+            | QuantityRef::EventContextSourceCostX
+            | QuantityRef::EventContextSourceModesChosen
+            | QuantityRef::SpellsCastThisTurn { .. }
+            | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
+            | QuantityRef::EnteredThisTurn { .. }
+            | QuantityRef::CrimesCommittedThisTurn
+            | QuantityRef::BendTypesThisTurn
+            | QuantityRef::TurnsTaken
+            | QuantityRef::ZoneChangeCountThisTurn { .. }
+            | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+            | QuantityRef::DamageDealtThisTurn { .. }
+            | QuantityRef::ChosenNumber
+            | QuantityRef::AttackedThisTurn { .. }
+            | QuantityRef::DescendedThisTurn
+            | QuantityRef::SpellsCastLastTurn
+            | QuantityRef::SpellsCastThisGame { .. }
+            | QuantityRef::CounterAddedThisTurn { .. }
+            | QuantityRef::DungeonsCompleted
+            | QuantityRef::CostXPaid
+            | QuantityRef::KickerCount
+            | QuantityRef::AdditionalCostPaymentCount
+            | QuantityRef::AdditionalCostPaymentCountFor { .. }
+            | QuantityRef::ConvokedCreatureCount
+            | QuantityRef::TimesCostPaidThisResolution
+            | QuantityRef::ManaSpentToCast { .. }
+            | QuantityRef::ColorsInCommandersColorIdentity
+            | QuantityRef::CommanderCastFromCommandZoneCount
+            | QuantityRef::CommanderManaValue { .. }
+            | QuantityRef::DistinctColorsAmong { .. }
+            | QuantityRef::DistinctCounterKindsAmong { .. }
+            | QuantityRef::VoteCount { .. } => None,
+        }
+    }
+}
+
 /// CR 107.1a: Rounding direction for fractional Oracle-text expressions.
 /// Every "half X" phrase in Oracle text specifies whether to round up or
 /// down; this enum records that choice verbatim so resolution is deterministic.
@@ -8385,8 +8531,38 @@ pub enum StaticCondition {
     /// Once a creature is blocked, it remains blocked for the rest of combat even
     /// if all its blockers leave — mirrors `AttackerInfo.blocked` (sticky flag).
     SourceIsBlocked,
-    /// CR 725.1: True when the controller is the monarch.
-    IsMonarch,
+    /// CR 725.1: monarch IDENTITY — true when `player` currently holds the
+    /// monarch designation (CR 725.3: exactly one player at a time; CR 725.4
+    /// governs reassignment). Distinct from [`NoMonarch`](Self::NoMonarch),
+    /// true only when the designation is VACANT, and from `Not(IsMonarch)`,
+    /// which is also true when vacant.
+    ///
+    /// CR 725.5: on the STATIC side, a continuous effect whose result depends
+    /// on who is currently the monarch does nothing while there is no monarch,
+    /// and begins to apply once a player becomes one. The
+    /// `layers::evaluate_condition_with_context` arm and its entry gate
+    /// implement exactly that.
+    ///
+    /// `player` is the CR 109.5 subject axis, parameterized within CR 725
+    /// rather than proliferated into `ThatPlayerIsMonarch` siblings:
+    /// - [`PlayerScope::Controller`] ← "you're the monarch" (printed default)
+    /// - [`PlayerScope::ScopedPlayer`] ← "that player is the monarch" (an
+    ///   anaphor to the player named by the triggering event)
+    /// - [`PlayerScope::DefendingPlayer`] ← the same anaphor once an attack
+    ///   trigger's clause has bound it (CR 508.5; see
+    ///   `parser::oracle_trigger::rebind_attack_anaphor_to_defending_player`)
+    ///
+    /// A scope the evaluator cannot resolve makes the condition UNANSWERABLE,
+    /// not false — see the entry-boundary gates in `game::triggers` and
+    /// `game::layers`, which reject the whole condition so `Not` cannot invert
+    /// a missing anchor into a firing trigger or an applied restriction.
+    IsMonarch {
+        #[serde(
+            default = "player_scope_controller",
+            skip_serializing_if = "is_player_scope_controller"
+        )]
+        player: PlayerScope,
+    },
     /// CR 726.3: True when the controller has the initiative.
     IsInitiative,
     /// CR 725.1: True when no player holds the monarch designation. Distinct
@@ -8650,6 +8826,86 @@ pub enum StaticCondition {
         variant: crate::types::game_state::CastingVariant,
     },
     None,
+}
+
+impl StaticCondition {
+    /// CR 109.4 + CR 725.5: the player whose DESIGNATION this leaf tests, when
+    /// the leaf is a designation predicate at all.
+    ///
+    /// Exhaustive by design — there is deliberately no wildcard arm. This is
+    /// the guard that makes the static-side polarity boundary gate in
+    /// `game::layers` total: adding a future designation leaf that carries a
+    /// [`PlayerScope`] (e.g. an `IsInitiative { player }`) is a COMPILE ERROR
+    /// here, not a latent fail-open under [`StaticCondition::Not`].
+    ///
+    /// Boolean combinators return `None`; the gate recurses them itself.
+    /// `QuantityComparison` returns `None` BY DEFINITION — it tests a quantity,
+    /// not a designation.
+    pub(crate) fn designation_player_anchor(&self) -> Option<&PlayerScope> {
+        match self {
+            StaticCondition::IsMonarch { player } => Some(player),
+            StaticCondition::DevotionGE { .. }
+            | StaticCondition::IsPresent { .. }
+            | StaticCondition::ChosenColorIs { .. }
+            | StaticCondition::ChosenLabelIs { .. }
+            | StaticCondition::QuantityComparison { .. }
+            | StaticCondition::HasMaxSpeed
+            | StaticCondition::SpeedGE { .. }
+            | StaticCondition::And { .. }
+            | StaticCondition::Or { .. }
+            | StaticCondition::Not { .. }
+            | StaticCondition::DayNightIs { .. }
+            | StaticCondition::HasCounters { .. }
+            | StaticCondition::CastVariantPaid { .. }
+            | StaticCondition::RecipientHasCounters { .. }
+            | StaticCondition::ClassLevelGE { .. }
+            | StaticCondition::DefendingPlayerControls { .. }
+            | StaticCondition::SourceAttackingAlone
+            | StaticCondition::SourceIsAttacking
+            | StaticCondition::SourceIsBlocking
+            | StaticCondition::SourceIsBlocked
+            | StaticCondition::IsInitiative
+            | StaticCondition::NoMonarch
+            | StaticCondition::HasCityBlessing
+            | StaticCondition::HasEnduringStory
+            | StaticCondition::CompletedADungeon
+            | StaticCondition::WasStartingPlayer { .. }
+            | StaticCondition::SpellCastWithVariantThisTurn { .. }
+            | StaticCondition::AnyPlayerAttackedYouLastTurn
+            | StaticCondition::OpponentPoisonAtLeast { .. }
+            | StaticCondition::UnlessPay { .. }
+            | StaticCondition::Unrecognized { .. }
+            | StaticCondition::DuringYourTurn
+            | StaticCondition::DuringOpponentsTurn
+            | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
+            | StaticCondition::SourceEnteredThisTurn
+            | StaticCondition::SourceHasDealtDamage
+            | StaticCondition::WasCast { .. }
+            | StaticCondition::IsRingBearer
+            | StaticCondition::RingLevelAtLeast { .. }
+            | StaticCondition::ControlsCommander { .. }
+            | StaticCondition::SourceIsTapped
+            | StaticCondition::IsTapped { .. }
+            | StaticCondition::SourceIsFaceUp
+            | StaticCondition::SourceIsSaddled
+            | StaticCondition::SourceControllerEquals { .. }
+            | StaticCondition::SourceIsEquipped
+            | StaticCondition::SourceIsEnchanted
+            | StaticCondition::SourceIsMonstrous
+            | StaticCondition::SourceIsHarnessed
+            | StaticCondition::SourceAttachedToCreature
+            | StaticCondition::SourceMatchesFilter { .. }
+            | StaticCondition::TopOfLibraryMatches { .. }
+            | StaticCondition::RecipientMatchesFilter { .. }
+            | StaticCondition::RecipientAttackingOwnerTarget { .. }
+            | StaticCondition::SourceIsPaired
+            | StaticCondition::SourceInZone { .. }
+            | StaticCondition::EnchantedIsFaceDown
+            | StaticCondition::AdditionalCostPaid
+            | StaticCondition::CastingAsVariant { .. }
+            | StaticCondition::None => None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -12042,8 +12298,37 @@ pub enum Effect {
     /// CR 701.56a: Time travel — for each permanent you control with a time counter
     /// and each suspended card you own, you may add or remove a time counter.
     TimeTravel,
-    /// CR 725.1: Become the monarch. Sets GameState::monarch to the controller.
-    BecomeMonarch,
+    /// CR 725.1 + CR 725.3: Grant the monarch designation to `player`. Exactly
+    /// one player is the monarch at a time, so resolving this always MOVES the
+    /// designation rather than adding one.
+    ///
+    /// `target` is the CR 109.5 subject axis, parameterized within CR 725 rather
+    /// than proliferated into a `TargetBecomesMonarch` sibling. It is a
+    /// [`TargetFilter`] — NOT a [`PlayerScope`] — because the printed grammar is
+    /// "**target** opponent becomes the monarch", exactly like every sibling
+    /// "target player does X" effect ([`Effect::Draw`], [`Effect::Mill`],
+    /// [`Effect::GainLife`], …). Only a `TargetFilter` reaches
+    /// [`Effect::target_filter`], and only that makes `collect_target_slots`
+    /// declare a CR 115.1 target slot whose legality is the printed restriction
+    /// (opponents only). A `PlayerScope::Target` would name the slot without
+    /// ever creating one, so it would resolve to nobody:
+    /// - [`TargetFilter::Controller`] ← "you become the monarch" (printed
+    ///   default, and the only shape the pre-axis unit variant could express).
+    ///   A context ref, so it surfaces no target slot.
+    /// - a player filter ← "target opponent / target player becomes the monarch"
+    ///   (M'Baku, Jabari Chieftain; Garland, Royal Kidnapper; Jared Carthalion,
+    ///   True Heir; Éomer, King of Rohan; Denethor, Stone Seer)
+    ///
+    /// Serde-defaulted to `Controller` and skipped when it holds that value, so
+    /// every pre-existing `{"type":"BecomeMonarch"}` row in `card-data.json`
+    /// keeps deserializing AND re-serializing byte-identically.
+    BecomeMonarch {
+        #[serde(
+            default = "default_target_filter_controller",
+            skip_serializing_if = "is_target_filter_controller"
+        )]
+        target: TargetFilter,
+    },
     /// CR 101.3 + CR 608.2: An instruction with no game action — "there's no
     /// effect." Used as the resolved outcome for a choice that has no printed
     /// clause, e.g. the losing/unlisted option of a single-conditional
@@ -13315,7 +13600,7 @@ pub enum Effect {
         /// `Controller` = "the next spell you cast"; `Target` = "the next
         /// spell they cast / that player casts" (the player this ability
         /// targets, e.g. the mana recipient on Bigger on the Inside).
-        #[serde(default = "default_player_scope_controller")]
+        #[serde(default = "player_scope_controller")]
         player: PlayerScope,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         spell_filter: Option<TargetFilter>,
@@ -14858,13 +15143,6 @@ fn default_duration_until_end_of_turn() -> Duration {
     Duration::UntilEndOfTurn
 }
 
-/// CR 109.5: backward-compatible serde default for `Effect::GrantNextSpellAbility`'s
-/// `player` field — pre-field data and "the next spell YOU cast" grants resolve to
-/// the controller.
-fn default_player_scope_controller() -> PlayerScope {
-    PlayerScope::Controller
-}
-
 fn default_comparator_ge() -> Comparator {
     Comparator::GE
 }
@@ -15462,6 +15740,31 @@ pub enum VoteVisibility {
 }
 
 impl TargetFilter {
+    /// CR 508.3d + CR 508.5a: True when this filter denotes a PLAYER population
+    /// rather than an object population — the distinction
+    /// `trigger_matchers::matching_attack_events` uses to decide whether an
+    /// `Attacks` trigger's `valid_source` names the ATTACKING PLAYER ("Whenever
+    /// a player attacks you") or an attacking OBJECT (`valid_source_matches`).
+    ///
+    /// Single authority: the parser's intervening-if anaphor gate
+    /// (`oracle_trigger::attack_intervening_if_anaphor_is_defending_player`)
+    /// asks the same question and MUST ask it with this method, not with a
+    /// `valid_source.is_none()` proxy — that proxy silently excludes every
+    /// attack trigger whose attacker filter is an OBJECT filter in
+    /// `valid_source`, leaving the wrong `ScopedPlayer` anchor in place with no
+    /// compile error to catch it.
+    pub fn is_player_scope(&self) -> bool {
+        match self {
+            TargetFilter::Player | TargetFilter::Controller | TargetFilter::AllPlayers => true,
+            TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: Some(_),
+                properties,
+            }) => type_filters.is_empty() && properties.is_empty(),
+            _ => false,
+        }
+    }
+
     /// Clone this filter with any `Typed` property equal to `prop` removed.
     /// Used to strip a per-item discriminator leg (e.g. `IsChosenCreatureType`)
     /// so the residual base filter can be enumerated across candidate values.
@@ -16086,6 +16389,11 @@ impl Effect {
         match self {
             // --- Effects with a `target: TargetFilter` field ---
             Effect::DealDamage { target, .. }
+            // CR 115.1 + CR 725.1: "target opponent becomes the monarch". The
+            // printed default (`Controller`, "you become the monarch") is a
+            // context ref, so `extract_target_filter_from_effect`'s final
+            // `is_context_ref` guard still surfaces no slot for it.
+            | Effect::BecomeMonarch { target }
             | Effect::Draw { target, .. }
             | Effect::Scry { target, .. }
             | Effect::Surveil { target, .. }
@@ -16441,7 +16749,6 @@ impl Effect {
             | Effect::Explore
             | Effect::Investigate
             | Effect::Tribute { .. }
-            | Effect::BecomeMonarch
             | Effect::NoOp
             | Effect::Proliferate
             | Effect::Populate
@@ -17178,7 +17485,7 @@ impl Effect {
             | Effect::Attach { .. }
             | Effect::BecomeBlocked { .. }
             | Effect::BecomeCopy { .. }
-            | Effect::BecomeMonarch
+            | Effect::BecomeMonarch { .. }
             | Effect::BecomePrepared { .. }
             | Effect::BecomeSaddled { .. }
             | Effect::BecomeUnprepared { .. }
@@ -17800,7 +18107,7 @@ impl Effect {
             | Effect::Investigate
             | Effect::Tribute { .. }
             | Effect::TimeTravel
-            | Effect::BecomeMonarch
+            | Effect::BecomeMonarch { .. }
             | Effect::NoOp
             | Effect::Proliferate
             | Effect::ProliferateTarget { .. }
@@ -18050,7 +18357,7 @@ impl Effect {
             | Effect::Investigate
             | Effect::Tribute { .. }
             | Effect::TimeTravel
-            | Effect::BecomeMonarch
+            | Effect::BecomeMonarch { .. }
             | Effect::NoOp
             | Effect::Proliferate
             | Effect::ProliferateTarget { .. }
@@ -18313,7 +18620,7 @@ impl Effect {
             | Effect::Investigate
             | Effect::Tribute { .. }
             | Effect::TimeTravel
-            | Effect::BecomeMonarch
+            | Effect::BecomeMonarch { .. }
             | Effect::NoOp
             | Effect::Proliferate
             | Effect::ProliferateTarget { .. }
@@ -18529,7 +18836,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Investigate => "Investigate",
         Effect::Tribute { .. } => "Tribute",
         Effect::TimeTravel => "TimeTravel",
-        Effect::BecomeMonarch => "BecomeMonarch",
+        Effect::BecomeMonarch { .. } => "BecomeMonarch",
         Effect::NoOp => "NoOp",
         Effect::Proliferate => "Proliferate",
         Effect::ProliferateTarget { .. } => "ProliferateTarget",
@@ -19040,7 +19347,7 @@ impl From<&Effect> for EffectKind {
             Effect::Investigate => EffectKind::Investigate,
             Effect::Tribute { .. } => EffectKind::Tribute,
             Effect::TimeTravel => EffectKind::TimeTravel,
-            Effect::BecomeMonarch => EffectKind::BecomeMonarch,
+            Effect::BecomeMonarch { .. } => EffectKind::BecomeMonarch,
             Effect::NoOp => EffectKind::NoOp,
             Effect::Proliferate => EffectKind::Proliferate,
             Effect::ProliferateTarget { .. } => EffectKind::ProliferateTarget,
@@ -21887,8 +22194,27 @@ pub enum TriggerCondition {
     /// CR 702.178a: The trigger functions only while its controller has max speed.
     HasMaxSpeed,
 
-    /// CR 725.1: "if you're the monarch" is true when the controller is the monarch.
-    IsMonarch,
+    /// CR 725.1 + CR 603.4: monarch IDENTITY as an intervening-if — true when
+    /// `player` currently holds the monarch designation. Checked at fire time
+    /// and again as the ability resolves (CR 603.4).
+    ///
+    /// `player` is the CR 109.5 subject axis; see
+    /// [`StaticCondition::IsMonarch`] for the full axis rationale. "if you're
+    /// the monarch" is [`PlayerScope::Controller`]; "if that player is the
+    /// monarch" on an attack trigger is [`PlayerScope::DefendingPlayer`]
+    /// (CR 508.5 — the player the triggering creature is attacking).
+    ///
+    /// An unresolvable scope makes the condition UNANSWERABLE, not false:
+    /// `triggers::check_trigger_condition_with_source` rejects the whole
+    /// condition at its entry boundary so `Not` cannot invert a missing anchor
+    /// into a firing trigger.
+    IsMonarch {
+        #[serde(
+            default = "player_scope_controller",
+            skip_serializing_if = "is_player_scope_controller"
+        )]
+        player: PlayerScope,
+    },
     /// CR 726.3: "if you have the initiative" is true when the controller has
     /// the initiative designation.
     IsInitiative,
@@ -22133,6 +22459,104 @@ pub enum TriggerCondition {
     /// with `And`/`Or`. Replaces per-leaf `negated: bool` fields and the
     /// `NotYourTurn` / `WasNotCast` / `NotCompletedDungeon` sibling-pair variants.
     Not { condition: Box<TriggerCondition> },
+}
+
+impl TriggerCondition {
+    /// CR 109.4 + CR 603.4: the player whose DESIGNATION this leaf tests, when
+    /// the leaf is a designation predicate at all.
+    ///
+    /// Exhaustive by design — there is deliberately no wildcard arm. This is
+    /// the guard that makes the polarity boundary gate in `game::triggers`
+    /// total: adding a future designation leaf that carries a [`PlayerScope`]
+    /// is a COMPILE ERROR here, not a latent fail-open under
+    /// [`TriggerCondition::Not`].
+    ///
+    /// Boolean combinators return `None`; the gate recurses them itself.
+    /// `QuantityComparison` returns `None` BY DEFINITION — it tests a quantity,
+    /// not a designation. The pre-existing fail-open for unresolvable
+    /// [`PlayerScope`]s inside a `QuantityExpr` (an unresolved scope yields 0,
+    /// and `0 > 0` is false, which inverts under `Not`) is orthogonal, affects
+    /// every existing [`PlayerScope::DefendingPlayer`] card, and is deliberately
+    /// out of scope here.
+    pub(crate) fn designation_player_anchor(&self) -> Option<&PlayerScope> {
+        match self {
+            TriggerCondition::IsMonarch { player } => Some(player),
+            TriggerCondition::GainedLife { .. }
+            | TriggerCondition::LostLife
+            | TriggerCondition::Descended
+            | TriggerCondition::ControlsType { .. }
+            | TriggerCondition::NoSpellsCastLastTurn
+            | TriggerCondition::TwoOrMoreSpellsCastLastTurn
+            | TriggerCondition::DuringPlayersTurn { .. }
+            | TriggerCondition::SourceEnteredThisTurn
+            | TriggerCondition::SourceAttackedThisCombat
+            | TriggerCondition::EchoDue
+            | TriggerCondition::MinCoAttackers { .. }
+            | TriggerCondition::SolveConditionMet
+            | TriggerCondition::ClassLevelGE { .. }
+            | TriggerCondition::SourceIsHarnessed
+            | TriggerCondition::AttractionVisitRoll { .. }
+            | TriggerCondition::WasCast { .. }
+            | TriggerCondition::WasPlayed
+            | TriggerCondition::AdditionalCostPaid { .. }
+            | TriggerCondition::SourceIsAttacking
+            | TriggerCondition::CastVariantPaid { .. }
+            | TriggerCondition::CastVariantPaidPersistent { .. }
+            | TriggerCondition::ActivatedAbilityIsNonMana
+            | TriggerCondition::DealtDamageBySourceThisTurn
+            | TriggerCondition::DealtDamageThisTurnBySource { .. }
+            | TriggerCondition::FirstTimeObjectTappedThisTurn
+            | TriggerCondition::FirstTimeObjectCountersAddedThisTurn
+            | TriggerCondition::WasType { .. }
+            | TriggerCondition::LifeTotalGE { .. }
+            | TriggerCondition::ControlCount { .. }
+            | TriggerCondition::ControlsNone { .. }
+            | TriggerCondition::AttackedThisTurn
+            | TriggerCondition::FirstCombatPhaseOfTurn
+            | TriggerCondition::CastSpellThisTurn { .. }
+            | TriggerCondition::QuantityComparison { .. }
+            | TriggerCondition::HasMaxSpeed
+            | TriggerCondition::IsInitiative
+            | TriggerCondition::NoMonarch
+            | TriggerCondition::WasStartingPlayer { .. }
+            | TriggerCondition::SpellCastWithVariantThisTurn { .. }
+            | TriggerCondition::HasCityBlessing
+            | TriggerCondition::HasEnduringStory
+            | TriggerCondition::CompletedDungeon { .. }
+            | TriggerCondition::SourceIsTapped
+            | TriggerCondition::SourceIsTransformed
+            | TriggerCondition::SourceIsFaceUp
+            | TriggerCondition::SourceIsFaceDown
+            | TriggerCondition::SourceInZone { .. }
+            | TriggerCondition::CounterAddedThisTurn
+            | TriggerCondition::LostLifeLastTurn
+            | TriggerCondition::DefendingPlayerControlsNone { .. }
+            | TriggerCondition::TributeNotPaid
+            | TriggerCondition::CastDuringPhase { .. }
+            | TriggerCondition::CastTimingPermission { .. }
+            | TriggerCondition::ManaColorSpent { .. }
+            | TriggerCondition::ManaSpentCondition { .. }
+            | TriggerCondition::HadCounters { .. }
+            | TriggerCondition::ControlsCommander { .. }
+            | TriggerCondition::IsRenowned { .. }
+            | TriggerCondition::HasCounters { .. }
+            | TriggerCondition::ZoneChangeObjectMatchesFilter { .. }
+            | TriggerCondition::ZoneChangeObjectIsTapped
+            | TriggerCondition::SourceMatchesFilter { .. }
+            | TriggerCondition::EventDamageSourceMatchesFilter { .. }
+            | TriggerCondition::EventObjectMatchesFilter { .. }
+            | TriggerCondition::DamagedPlayerIsEventSourceOwner
+            | TriggerCondition::ChosenLabelIs { .. }
+            | TriggerCondition::AttackersDeclaredCount { .. }
+            | TriggerCondition::ExceptFirstDrawInDrawStep
+            | TriggerCondition::PlacedByAbilitySource
+            | TriggerCondition::TriggeringSpellTargetsFilter { .. }
+            | TriggerCondition::TriggeringSpellMatchesFilter { .. }
+            | TriggerCondition::And { .. }
+            | TriggerCondition::Or { .. }
+            | TriggerCondition::Not { .. } => None,
+        }
+    }
 }
 
 /// Condition that gates whether a replacement effect applies.
@@ -30794,5 +31218,192 @@ mod player_target_slot_tests {
                 "{filter:?} does not name a player-only target slot"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod monarch_subject_axis_tests {
+    use super::*;
+
+    /// CR 725.1 + CR 109.5: every pre-existing `{"type":"IsMonarch"}` row in
+    /// `card-data.json` and in the committed integration-card fixture must keep
+    /// deserializing to the controller subject, and must re-serialize
+    /// byte-identically.
+    ///
+    /// Revert-failing twice: without `#[serde(default = ...)]` the deserialize
+    /// errors outright; without `skip_serializing_if` the re-serialize emits a
+    /// `player` key and every existing monarch row churns.
+    #[test]
+    fn is_monarch_round_trips_without_a_player_key_for_the_controller_subject() {
+        let trigger: TriggerCondition = serde_json::from_str(r#"{"type":"IsMonarch"}"#).unwrap();
+        assert_eq!(
+            trigger,
+            TriggerCondition::IsMonarch {
+                player: PlayerScope::Controller
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&trigger).unwrap(),
+            r#"{"type":"IsMonarch"}"#
+        );
+
+        let stat: StaticCondition = serde_json::from_str(r#"{"type":"IsMonarch"}"#).unwrap();
+        assert_eq!(
+            stat,
+            StaticCondition::IsMonarch {
+                player: PlayerScope::Controller
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&stat).unwrap(),
+            r#"{"type":"IsMonarch"}"#
+        );
+    }
+
+    /// CR 725.1 + CR 109.5: the EFFECT-side subject axis has the same serde
+    /// contract as the predicate-side one above. Every shipping
+    /// `{"type":"BecomeMonarch"}` row in `card-data.json` (~40 "you become the
+    /// monarch" cards) must keep deserializing to the controller subject and
+    /// re-serialize byte-identically, while a real target filter survives.
+    ///
+    /// Revert-failing twice: without `#[serde(default = ...)]` the deserialize
+    /// errors outright; without `skip_serializing_if` the re-serialize emits a
+    /// `target` key and every existing monarch row churns.
+    #[test]
+    fn become_monarch_round_trips_without_a_target_key_for_the_controller_subject() {
+        let default_row: Effect = serde_json::from_str(r#"{"type":"BecomeMonarch"}"#).unwrap();
+        assert_eq!(
+            default_row,
+            Effect::BecomeMonarch {
+                target: TargetFilter::Controller
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&default_row).unwrap(),
+            r#"{"type":"BecomeMonarch"}"#
+        );
+
+        // CR 115.1: "target opponent becomes the monarch" — the opponent
+        // restriction must survive export, or the re-imported row would offer
+        // the controller as a legal target.
+        let targeted = Effect::BecomeMonarch {
+            target: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![],
+                controller: Some(ControllerRef::Opponent),
+                properties: vec![],
+            }),
+        };
+        let json = serde_json::to_string(&targeted).unwrap();
+        assert!(
+            json.contains("\"target\""),
+            "a non-default subject must be serialized: {json}"
+        );
+        assert_eq!(serde_json::from_str::<Effect>(&json).unwrap(), targeted);
+    }
+
+    /// A non-default subject must survive the round trip, or the card-data
+    /// export would silently rebind M'Baku's anaphor to the controller.
+    #[test]
+    fn is_monarch_serializes_a_non_default_subject() {
+        let trigger = TriggerCondition::IsMonarch {
+            player: PlayerScope::DefendingPlayer,
+        };
+        let json = serde_json::to_string(&trigger).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"IsMonarch","player":{"type":"DefendingPlayer"}}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<TriggerCondition>(&json).unwrap(),
+            trigger
+        );
+    }
+
+    /// CR 611.2a + CR 514.2: a duration-timing-only scope is serde-reachable
+    /// from a malformed or hand-authored row. It must be REJECTED by
+    /// `duration_timing_only` before `resolve_single_player_scope`'s
+    /// `unreachable!()` can panic the engine inside a trigger check.
+    #[test]
+    fn duration_timing_only_scopes_are_flagged_for_fail_closed_rejection() {
+        let malformed: TriggerCondition =
+            serde_json::from_str(r#"{"type":"IsMonarch","player":{"type":"AnyTurn"}}"#).unwrap();
+        let TriggerCondition::IsMonarch { player } = &malformed else {
+            panic!("expected IsMonarch, got {malformed:?}");
+        };
+        assert!(player.duration_timing_only());
+
+        assert!(PlayerScope::SpecificPlayer { id: PlayerId(3) }.duration_timing_only());
+        // Everything the parser can actually emit must NOT be rejected.
+        for ok in [
+            PlayerScope::Controller,
+            PlayerScope::ScopedPlayer,
+            PlayerScope::DefendingPlayer,
+        ] {
+            assert!(!ok.duration_timing_only(), "{ok:?} must resolve normally");
+        }
+    }
+
+    /// The polarity boundary gates are only sound because these accessors are
+    /// exhaustive. Pin the two answers they must give.
+    #[test]
+    fn designation_player_anchor_reports_the_monarch_subject_and_nothing_else() {
+        assert_eq!(
+            TriggerCondition::IsMonarch {
+                player: PlayerScope::DefendingPlayer
+            }
+            .designation_player_anchor(),
+            Some(&PlayerScope::DefendingPlayer)
+        );
+        assert_eq!(
+            StaticCondition::IsMonarch {
+                player: PlayerScope::ScopedPlayer
+            }
+            .designation_player_anchor(),
+            Some(&PlayerScope::ScopedPlayer)
+        );
+        // CR 725.1: vacancy is a different predicate and carries no subject.
+        assert_eq!(
+            TriggerCondition::NoMonarch.designation_player_anchor(),
+            None
+        );
+        assert_eq!(StaticCondition::NoMonarch.designation_player_anchor(), None);
+        // A quantity tests a quantity, not a designation — by definition.
+        assert_eq!(
+            TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::DefendingPlayer
+                    }
+                },
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            }
+            .designation_player_anchor(),
+            None
+        );
+    }
+
+    /// CR 109.4: the mutable player-axis accessor must reach every reference
+    /// that carries one, and must leave object-axis references alone.
+    #[test]
+    fn quantity_ref_player_scope_mut_reaches_the_player_axis() {
+        let mut life = QuantityRef::LifeTotal {
+            player: PlayerScope::ScopedPlayer,
+        };
+        *life.player_scope_mut().unwrap() = PlayerScope::DefendingPlayer;
+        assert_eq!(
+            life,
+            QuantityRef::LifeTotal {
+                player: PlayerScope::DefendingPlayer
+            }
+        );
+
+        let mut hand = QuantityRef::HandSize {
+            player: PlayerScope::ScopedPlayer,
+        };
+        assert!(hand.player_scope_mut().is_some());
+
+        let mut object_axis = QuantityRef::SelfManaValue;
+        assert!(object_axis.player_scope_mut().is_none());
     }
 }

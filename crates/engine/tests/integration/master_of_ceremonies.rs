@@ -141,7 +141,9 @@ fn make_threshold_vote(controller: PlayerId, source_id: ObjectId) -> ResolvedAbi
                 Box::new(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
                 Box::new(AbilityDefinition::new(
                     AbilityKind::Spell,
-                    Effect::BecomeMonarch,
+                    Effect::BecomeMonarch {
+                        target: TargetFilter::Controller,
+                    },
                 )),
             ],
             starting_with: ControllerRef::You,

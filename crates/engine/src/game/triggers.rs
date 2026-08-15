@@ -1254,9 +1254,7 @@ fn contextual_batched_trigger_event(
             let defending_player = matching
                 .first()
                 .map(|(_, target)| {
-                    super::trigger_matchers::attack_target_defending_player(
-                        state, *target, fallback,
-                    )
+                    super::combat::defending_player_for_target_or(state, *target, fallback)
                 })
                 .unwrap_or(fallback);
             (defending_player, matching)
@@ -5188,7 +5186,12 @@ fn collect_pending_triggers_with_collection(
                 if let Some(attacker) = state.objects.get(source_id) {
                     let new_monarch = attacker.controller;
                     if new_monarch != *target_player {
-                        let become_effect = Effect::BecomeMonarch;
+                        // CR 725.2: the synthetic trigger's controller IS the
+                        // new monarch, so the printed-default subject axis is
+                        // exactly right here.
+                        let become_effect = Effect::BecomeMonarch {
+                            target: TargetFilter::Controller,
+                        };
                         let source_context = trigger_source_context_for_latch(state, attacker);
                         let mut become_ability = ResolvedAbility::new(
                             become_effect,
@@ -10513,6 +10516,27 @@ pub(crate) fn check_trigger_condition_with_source(
         return false;
     }
 
+    // CR 603.4 + CR 109.4: polarity-safe fail-closed for designation leaves.
+    //
+    // A leaf whose PLAYER ANCHOR cannot be resolved is UNANSWERABLE, not false.
+    // Returning `false` from inside the recursion inverts to `true` under
+    // `TriggerCondition::Not` — the shape every "unless" grammar and the
+    // "if you're not the monarch" bridge produce — firing the trigger precisely
+    // when the engine cannot identify the player. Reject here, at the same outer
+    // boundary that already rejects incoherent zone-change provenance directly
+    // above, so the boolean combinators in
+    // `evaluate_trigger_condition_with_source` can never reinterpret it as an
+    // ordinary false operand.
+    if !trigger_condition_designation_anchors_resolvable(
+        state,
+        condition,
+        controller,
+        source_context,
+        trigger_event,
+    ) {
+        return false;
+    }
+
     evaluate_trigger_condition_with_source(
         state,
         condition,
@@ -10520,6 +10544,62 @@ pub(crate) fn check_trigger_condition_with_source(
         source_context,
         trigger_event,
     )
+}
+
+/// CR 603.4 + CR 109.4: boundary predicate — does every designation leaf in this
+/// tree have a resolvable player anchor?
+///
+/// NOT a second evaluator: it recurses only the boolean combinators and
+/// delegates every anchor question to
+/// `quantity::resolve_player_scope_for_trigger_check`, the same single authority
+/// the leaves use, via the compiler-forced
+/// [`TriggerCondition::designation_player_anchor`] accessor. The `_ => true`
+/// leaf arm is safe precisely because that accessor is exhaustive: a future
+/// anchored leaf is a compile error there, not a silent fail-open here.
+///
+/// Deliberately conservative: an unresolvable anchor anywhere rejects the whole
+/// condition, INCLUDING inside an `Or` whose other operand is true. No corpus
+/// card places a designation leaf under `Or`; the choice is pinned by
+/// `unresolvable_designation_anchor_absorbs_or_cr_603_4` so a future card
+/// needing the looser reading has a failing test to point at.
+fn trigger_condition_designation_anchors_resolvable(
+    state: &GameState,
+    condition: &TriggerCondition,
+    controller: PlayerId,
+    source_context: Option<&TriggerSourceContext>,
+    trigger_event: Option<&GameEvent>,
+) -> bool {
+    if let Some(scope) = condition.designation_player_anchor() {
+        return crate::game::quantity::resolve_player_scope_for_trigger_check(
+            state,
+            scope,
+            controller,
+            source_context,
+            trigger_event,
+        )
+        .is_some();
+    }
+    match condition {
+        TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
+            conditions.iter().all(|inner| {
+                trigger_condition_designation_anchors_resolvable(
+                    state,
+                    inner,
+                    controller,
+                    source_context,
+                    trigger_event,
+                )
+            })
+        }
+        TriggerCondition::Not { condition } => trigger_condition_designation_anchors_resolvable(
+            state,
+            condition,
+            controller,
+            source_context,
+            trigger_event,
+        ),
+        _ => true,
+    }
 }
 
 /// Evaluates a condition after the outer event-provenance boundary has accepted
@@ -11316,8 +11396,29 @@ fn evaluate_trigger_condition_with_source(
         TriggerCondition::SpellCastWithVariantThisTurn { variant } => {
             crate::game::restrictions::spell_cast_with_variant_this_turn(state, variant)
         }
-        // CR 725.1: True when the controller is the monarch.
-        TriggerCondition::IsMonarch => eval_is_monarch(state, controller),
+        // CR 725.1 + CR 603.4: the monarch check is evaluated against the player
+        // the condition names. `PlayerScope::Controller` is CR 109.5's "you";
+        // every other scope is an event/combat anchor resolved from the SAME
+        // explicit `trigger_event` this function threads everywhere else, so the
+        // fire-time check and the CR 603.4 resolution-time recheck read the same
+        // player.
+        //
+        // An unresolvable scope cannot reach this arm: the entry boundary in
+        // `check_trigger_condition_with_source` has already rejected the whole
+        // condition (see `trigger_condition_designation_anchors_resolvable`).
+        // The `is_some_and` below is therefore a total-function formality, not
+        // the fail-closed mechanism — putting the rejection here instead would
+        // fail OPEN under `TriggerCondition::Not`.
+        TriggerCondition::IsMonarch { player } => {
+            crate::game::quantity::resolve_player_scope_for_trigger_check(
+                state,
+                player,
+                controller,
+                source_context,
+                trigger_event,
+            )
+            .is_some_and(|pid| eval_is_monarch(state, pid))
+        }
         // CR 726.3: True when the controller has the initiative.
         TriggerCondition::IsInitiative => eval_is_initiative(state, controller),
         // CR 725.1: True when no player holds the monarch designation.
@@ -19052,8 +19153,14 @@ pub mod tests {
             }
             let victim = make_creature(&mut state, PlayerId(1), "Doomed Squire", 1, 1);
 
-            let mut ability =
-                ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+            let mut ability = ResolvedAbility::new(
+                Effect::BecomeMonarch {
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                controller,
+            );
             // The intervening-`if` as the parser lowers it onto the delayed BODY.
             ability.condition = Some(AbilityCondition::ControlsCommander {
                 ownership: CommanderOwnership::Own,
@@ -19176,8 +19283,14 @@ pub mod tests {
                     .is_commander = true;
             }
 
-            let mut ability =
-                ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+            let mut ability = ResolvedAbility::new(
+                Effect::BecomeMonarch {
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                controller,
+            );
             ability.condition = Some(AbilityCondition::ControlsCommander {
                 ownership: CommanderOwnership::Own,
             });
@@ -19265,8 +19378,14 @@ pub mod tests {
             let mut trigger_def = TriggerDefinition::new(TriggerMode::LandPlayed);
             trigger_def.valid_target = Some(TargetFilter::Controller);
 
-            let mut ability =
-                ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+            let mut ability = ResolvedAbility::new(
+                Effect::BecomeMonarch {
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                controller,
+            );
             ability.condition = Some(AbilityCondition::ControlsCommander {
                 ownership: CommanderOwnership::Own,
             });
@@ -19419,8 +19538,14 @@ pub mod tests {
             let mut trigger_def = TriggerDefinition::new(TriggerMode::LandPlayed);
             trigger_def.valid_target = Some(TargetFilter::Controller);
 
-            let mut ability =
-                ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+            let mut ability = ResolvedAbility::new(
+                Effect::BecomeMonarch {
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                controller,
+            );
             ability.condition = Some(AbilityCondition::ControlsCommander {
                 ownership: CommanderOwnership::Own,
             });
@@ -19546,7 +19671,14 @@ pub mod tests {
 
         // Gate is FALSE (no commander anywhere), so the Otherwise branch is the
         // one that must run.
-        let mut ability = ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+        let mut ability = ResolvedAbility::new(
+            Effect::BecomeMonarch {
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            controller,
+        );
         ability.condition = Some(AbilityCondition::ControlsCommander {
             ownership: CommanderOwnership::Own,
         });
@@ -19640,8 +19772,14 @@ pub mod tests {
             }
             let victim = make_creature(&mut state, PlayerId(1), "Doomed Squire", 1, 1);
 
-            let mut ability =
-                ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+            let mut ability = ResolvedAbility::new(
+                Effect::BecomeMonarch {
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                controller,
+            );
             ability.condition = Some(AbilityCondition::ControlsCommander {
                 ownership: CommanderOwnership::Own,
             });
@@ -19759,8 +19897,14 @@ pub mod tests {
             );
             let victim = make_creature(&mut state, PlayerId(1), "Doomed Squire", 1, 1);
 
-            let mut ability =
-                ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+            let mut ability = ResolvedAbility::new(
+                Effect::BecomeMonarch {
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                controller,
+            );
             ability.condition = Some(condition);
             state.delayed_triggers.push(DelayedTrigger {
                 condition: DelayedTriggerCondition::WhenDies {
@@ -19907,8 +20051,14 @@ pub mod tests {
             }
             let victim = make_creature(&mut state, PlayerId(1), "Doomed Squire", 1, 1);
 
-            let mut ability =
-                ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+            let mut ability = ResolvedAbility::new(
+                Effect::BecomeMonarch {
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                controller,
+            );
             ability.condition = Some(AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::ObjectCount {
@@ -20020,8 +20170,14 @@ pub mod tests {
             );
             let victim = make_creature(&mut state, PlayerId(1), "Doomed Squire", 1, 1);
 
-            let mut ability =
-                ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+            let mut ability = ResolvedAbility::new(
+                Effect::BecomeMonarch {
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                controller,
+            );
             ability.condition = Some(AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref { qty },
                 comparator: crate::types::ability::Comparator::GE,
@@ -20099,8 +20255,14 @@ pub mod tests {
         /// conditional continuation and whose GRANDCHILD carries an
         /// `else_ability` (life gain) that only runs if the chain gets that far.
         fn body(source: ObjectId, controller: PlayerId) -> ResolvedAbility {
-            let mut grandchild =
-                ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+            let mut grandchild = ResolvedAbility::new(
+                Effect::BecomeMonarch {
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                controller,
+            );
             grandchild.condition = Some(AbilityCondition::ControlsCommander {
                 ownership: CommanderOwnership::Own,
             });
@@ -20114,7 +20276,14 @@ pub mod tests {
                 controller,
             )));
 
-            let mut sub = ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+            let mut sub = ResolvedAbility::new(
+                Effect::BecomeMonarch {
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                controller,
+            );
             // NOT one of the surviving classes: an ordinary game-state gate on a
             // continuation link, so `resolve_chain_body` stops here when the
             // parent gate is false.
@@ -20122,8 +20291,14 @@ pub mod tests {
             sub.sub_link = crate::types::ability::SubAbilityLink::ContinuationStep;
             sub.sub_ability = Some(Box::new(grandchild));
 
-            let mut ability =
-                ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+            let mut ability = ResolvedAbility::new(
+                Effect::BecomeMonarch {
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                controller,
+            );
             ability.condition = Some(AbilityCondition::ControlsCommander {
                 ownership: CommanderOwnership::Own,
             });
@@ -20280,8 +20455,14 @@ pub mod tests {
             );
             let victim = make_creature(&mut state, PlayerId(1), "Doomed Squire", 1, 1);
 
-            let mut ability =
-                ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+            let mut ability = ResolvedAbility::new(
+                Effect::BecomeMonarch {
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                controller,
+            );
             // Gate FALSE: no commander is staged anywhere.
             ability.condition = Some(AbilityCondition::ControlsCommander {
                 ownership: CommanderOwnership::Own,
@@ -20382,8 +20563,14 @@ pub mod tests {
             }
             let victim = make_creature(&mut state, PlayerId(1), "Doomed Squire", 1, 1);
 
-            let mut ability =
-                ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+            let mut ability = ResolvedAbility::new(
+                Effect::BecomeMonarch {
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                controller,
+            );
             ability.condition = Some(AbilityCondition::Not {
                 condition: Box::new(AbilityCondition::ControlsCommander {
                     ownership: CommanderOwnership::Own,
@@ -20453,7 +20640,14 @@ pub mod tests {
         );
         let victim = make_creature(&mut state, PlayerId(1), "Doomed Squire", 1, 1);
 
-        let mut ability = ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+        let mut ability = ResolvedAbility::new(
+            Effect::BecomeMonarch {
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            controller,
+        );
         ability.condition = Some(AbilityCondition::ControlsCommander {
             ownership: CommanderOwnership::Own,
         });
@@ -24945,6 +25139,391 @@ pub mod tests {
             PlayerId(0),
             Some(source),
             None,
+        ));
+    }
+
+    /// Three-player state with a battlefield source controlled by P0, used by
+    /// the monarch-subject fixtures below.
+    fn monarch_setup() -> (GameState, ObjectId) {
+        let mut state = GameState::new(crate::types::format::FormatConfig::commander(), 3, 42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Monarch subject source".to_string(),
+            Zone::Battlefield,
+        );
+        (state, source)
+    }
+
+    fn attackers_declared(attacker: ObjectId, defender: PlayerId) -> GameEvent {
+        GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker],
+            defending_player: defender,
+            attacks: vec![(
+                attacker,
+                crate::game::combat::AttackTarget::Player(defender),
+            )],
+        }
+    }
+
+    /// CR 725.1 + CR 109.5: the controller subject is CR 109.5's "you".
+    #[test]
+    fn is_monarch_controller_subject_reads_the_ability_controller() {
+        let (mut state, source) = monarch_setup();
+        let condition = TriggerCondition::IsMonarch {
+            player: PlayerScope::Controller,
+        };
+
+        state.monarch = Some(PlayerId(2));
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            None
+        ));
+
+        state.monarch = Some(PlayerId(0));
+        assert!(check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            None
+        ));
+    }
+
+    /// CR 725.1 + CR 508.5 + CR 603.4: the defending-player subject reads the
+    /// player the TRIGGERING creature is attacking, not the ability controller.
+    ///
+    /// Revert-failing: an arm that ignores `player` and calls
+    /// `eval_is_monarch(state, controller)` answers `false` for the positive
+    /// case (P0 is not the monarch) and `true` for the negative one.
+    #[test]
+    fn is_monarch_defending_player_subject_reads_the_attacked_player_cr_508_5() {
+        let (mut state, source) = monarch_setup();
+        let attacker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        let condition = TriggerCondition::IsMonarch {
+            player: PlayerScope::DefendingPlayer,
+        };
+
+        state.monarch = Some(PlayerId(2));
+        assert!(
+            check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(source),
+                Some(&attackers_declared(attacker, PlayerId(2))),
+            ),
+            "the attacked player (P2) is the monarch"
+        );
+        assert!(
+            !check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(source),
+                Some(&attackers_declared(attacker, PlayerId(1))),
+            ),
+            "the attacked player (P1) is not the monarch"
+        );
+    }
+
+    /// CR 603.4 + CR 109.4: an unresolvable anchor makes the condition
+    /// UNANSWERABLE. It must be false in BOTH polarities — the whole point of
+    /// rejecting at the entry boundary instead of inside the recursion.
+    ///
+    /// Revert-failing on the negated case: without the boundary gate the leaf
+    /// returns `false` and `Not` inverts it to `true`, firing the trigger
+    /// precisely when the engine cannot identify the player.
+    #[test]
+    fn unresolvable_designation_anchor_is_false_in_both_polarities_cr_603_4() {
+        let (mut state, source) = monarch_setup();
+        state.monarch = Some(PlayerId(2));
+
+        for scope in [
+            PlayerScope::DefendingPlayer,
+            PlayerScope::Target,
+            // CR 611.2a: serde-reachable duration-timing-only scope; must fail
+            // closed rather than hit `resolve_single_player_scope`'s panic.
+            PlayerScope::AnyTurn,
+            // CR 603.4: the scope `parse_monarch_identity_subject` actually
+            // EMITS for "that player is the monarch". Every anchor that the
+            // attack-trigger rebind does not convert to `DefendingPlayer`
+            // arrives here as `ScopedPlayer`, so this is the one row that must
+            // not inherit `resolve_single_player_scope`'s value-context
+            // `unwrap_or(controller)` fallback.
+            PlayerScope::ScopedPlayer,
+        ] {
+            let affirmative = TriggerCondition::IsMonarch {
+                player: scope.clone(),
+            };
+            assert!(
+                !check_trigger_condition(&state, &affirmative, PlayerId(0), Some(source), None),
+                "{scope:?}: affirmative must be false with no attack in scope"
+            );
+            let negated = TriggerCondition::Not {
+                condition: Box::new(affirmative),
+            };
+            assert!(
+                !check_trigger_condition(&state, &negated, PlayerId(0), Some(source), None),
+                "{scope:?}: NEGATED must also be false — `Not` must not invert an \
+                 unanswerable anchor into a firing trigger"
+            );
+        }
+
+        // Reach-guard: the arm IS reached — a resolvable subject still answers.
+        state.monarch = Some(PlayerId(0));
+        assert!(check_trigger_condition(
+            &state,
+            &TriggerCondition::IsMonarch {
+                player: PlayerScope::Controller
+            },
+            PlayerId(0),
+            Some(source),
+            None
+        ));
+    }
+
+    /// CR 603.4 + CR 109.4: `PlayerScope::ScopedPlayer` — the scope
+    /// `parse_monarch_identity_subject` emits for "that player is the monarch"
+    /// — must read the player NAMED BY THE TRIGGERING EVENT, and must be
+    /// unanswerable when no event names one. It must never inherit
+    /// `resolve_single_player_scope`'s value-context `unwrap_or(controller)`
+    /// fallback.
+    ///
+    /// Revert-failing: drop the `ScopedPlayer`/`scoped_player.is_none()` guard
+    /// in `quantity::resolve_player_scope_for_trigger_check` and the
+    /// no-event affirmative below answers `true` — the ability CONTROLLER (P0)
+    /// is the monarch in that arm, which is precisely the wrong player — while
+    /// the negated case answers `false` for the wrong reason.
+    #[test]
+    fn is_monarch_scoped_player_subject_needs_an_event_anchor_cr_603_4() {
+        let (mut state, source) = monarch_setup();
+        let condition = TriggerCondition::IsMonarch {
+            player: PlayerScope::ScopedPlayer,
+        };
+        let life_changed = |player_id: PlayerId| GameEvent::LifeChanged {
+            player_id,
+            amount: -1,
+        };
+
+        // Reach-guard: with an event that NAMES a player, the arm resolves and
+        // discriminates between the named player and everyone else.
+        state.monarch = Some(PlayerId(2));
+        assert!(
+            check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(source),
+                Some(&life_changed(PlayerId(2))),
+            ),
+            "the event's player (P2) is the monarch"
+        );
+        assert!(
+            !check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(source),
+                Some(&life_changed(PlayerId(1))),
+            ),
+            "the event's player (P1) is not the monarch"
+        );
+
+        // The controller IS the monarch, and no event names a player. Both
+        // polarities must be false: the anchor is missing, so the question is
+        // unanswerable — not silently re-pointed at the controller.
+        state.monarch = Some(PlayerId(0));
+        assert!(
+            !check_trigger_condition(&state, &condition, PlayerId(0), Some(source), None),
+            "an unanchored `that player` must not fall back to the controller"
+        );
+        assert!(
+            !check_trigger_condition(
+                &state,
+                &TriggerCondition::Not {
+                    condition: Box::new(condition.clone()),
+                },
+                PlayerId(0),
+                Some(source),
+                None
+            ),
+            "`Not` must not invert the missing anchor into a firing trigger"
+        );
+
+        // Reach-guard for the negative rows: the same anchored event that
+        // resolves above still resolves with the controller as monarch, so the
+        // rows above are about the MISSING ANCHOR, not about a dead arm.
+        assert!(check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            Some(&life_changed(PlayerId(0))),
+        ));
+    }
+
+    /// The boundary gate is deliberately conservative: an unresolvable anchor
+    /// rejects the whole condition even inside an `Or` whose other operand is
+    /// true. No corpus card places a designation leaf under `Or`; this pins the
+    /// choice so a future card needing the looser reading has a failing test to
+    /// point at rather than a silent behaviour change.
+    #[test]
+    fn unresolvable_designation_anchor_absorbs_or_cr_603_4() {
+        let (mut state, source) = monarch_setup();
+        state.monarch = Some(PlayerId(0));
+
+        let true_operand = TriggerCondition::IsMonarch {
+            player: PlayerScope::Controller,
+        };
+        // Reach-guard: on its own the true operand fires.
+        assert!(check_trigger_condition(
+            &state,
+            &true_operand,
+            PlayerId(0),
+            Some(source),
+            None
+        ));
+
+        let disjunction = TriggerCondition::Or {
+            conditions: vec![
+                TriggerCondition::IsMonarch {
+                    player: PlayerScope::DefendingPlayer,
+                },
+                true_operand,
+            ],
+        };
+        assert!(
+            !check_trigger_condition(&state, &disjunction, PlayerId(0), Some(source), None),
+            "documented conservative choice, not an accident"
+        );
+    }
+
+    /// CR 725.1: vacancy and identity stay distinct predicates after the
+    /// subject axis is added.
+    #[test]
+    fn monarch_vacancy_and_identity_remain_distinct_cr_725_1() {
+        let (mut state, source) = monarch_setup();
+        state.monarch = None;
+
+        assert!(!check_trigger_condition(
+            &state,
+            &TriggerCondition::IsMonarch {
+                player: PlayerScope::Controller
+            },
+            PlayerId(0),
+            Some(source),
+            None
+        ));
+        assert!(check_trigger_condition(
+            &state,
+            &TriggerCondition::NoMonarch,
+            PlayerId(0),
+            Some(source),
+            None
+        ));
+    }
+
+    /// CR 508.5a / CR 802.2a: `DefendingPlayerControlsNone` quantifies over
+    /// EVERY live defender rather than the one defending player CR 508.5a
+    /// specifies. That is a real gap on Siege Dragon / Spectral Force /
+    /// Spectral Bears / Fear of the Dark, but it is an all-defenders
+    /// QUANTIFIER bug, not an anchor-resolution bug: it shares no code with the
+    /// three `defending_player_cr508_5` doors and fixing it would change those
+    /// four cards' firing behaviour.
+    ///
+    /// This test pins TODAY's behaviour so a later change that routes the arm
+    /// through the CR 508.5 authority fails here and forces an explicit
+    /// decision instead of a silent behaviour swap.
+    #[test]
+    fn defending_player_controls_none_quantifies_all_defenders_cr_508_5a_gap() {
+        let (mut state, source) = monarch_setup();
+        // Two attackers, two DIFFERENT defenders. Only P2 controls a Wall.
+        let attacker_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Attacker A".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Attacker B".to_string(),
+            Zone::Battlefield,
+        );
+        let wall = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(2),
+            "Wall".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&wall).unwrap().card_types.core_types = vec![CoreType::Creature];
+
+        let mut combat = crate::game::combat::CombatState::default();
+        combat.attackers = vec![
+            crate::game::combat::AttackerInfo::new(
+                attacker_a,
+                crate::game::combat::AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+            ),
+            crate::game::combat::AttackerInfo::new(
+                attacker_b,
+                crate::game::combat::AttackTarget::Player(PlayerId(2)),
+                PlayerId(2),
+            ),
+        ];
+        state.combat = Some(combat);
+
+        let condition = TriggerCondition::DefendingPlayerControlsNone {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: None,
+                properties: vec![],
+            }),
+        };
+
+        // TODAY: P1 controls no creature but P2 does, and the `all` quantifier
+        // over BOTH defenders makes the condition false. Under CR 508.5a the
+        // per-attacker defending player would be determined individually, so
+        // the P1 attacker's copy of this ability should see "controls none".
+        assert!(
+            !check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(source),
+                Some(&attackers_declared(attacker_a, PlayerId(1))),
+            ),
+            "pins the all-defenders quantifier; if this now passes, the arm was \
+             routed through combat::defending_player_cr508_5 — re-derive Siege \
+             Dragon, Spectral Force, Spectral Bears and Fear of the Dark \
+             explicitly rather than letting their firing behaviour change silently"
+        );
+
+        // Reach-guard: with the only creature removed, the arm reports true, so
+        // the assertion above is about the quantifier and not about an
+        // unreachable arm.
+        state.battlefield.retain(|id| *id != wall);
+        state.objects.remove(&wall);
+        assert!(check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            Some(&attackers_declared(attacker_a, PlayerId(1))),
         ));
     }
 

@@ -786,18 +786,6 @@ fn damage_recipient_filter_can_match_player(filter: &TargetFilter) -> bool {
     }
 }
 
-fn is_player_scope_attack_filter(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Player | TargetFilter::Controller | TargetFilter::AllPlayers => true,
-        TargetFilter::Typed(TypedFilter {
-            type_filters,
-            controller: Some(_),
-            properties,
-        }) => type_filters.is_empty() && properties.is_empty(),
-        _ => false,
-    }
-}
-
 /// Basic runtime matching of a TargetFilter against a game object.
 /// Handles the common filter patterns used in triggers.
 pub(super) fn target_filter_matches_object(
@@ -1798,7 +1786,7 @@ pub(super) fn matching_attack_events(
         if let Some(filter) = trigger
             .valid_source
             .as_ref()
-            .filter(|filter| is_player_scope_attack_filter(filter))
+            .filter(|filter| filter.is_player_scope())
         {
             // CR 508.3d + CR 508.5a: "[player] attacks [opponent]" triggers
             // once per attacked defending player, not once per attacking
@@ -1830,7 +1818,11 @@ pub(super) fn matching_attack_events(
                         return None;
                     }
                     let event_defending_player =
-                        attack_target_defending_player(state, target, *defending_player);
+                        crate::game::combat::defending_player_for_target_or(
+                            state,
+                            target,
+                            *defending_player,
+                        );
                     if seen_defending_players.contains(&event_defending_player) {
                         return None;
                     }
@@ -1884,8 +1876,11 @@ pub(super) fn matching_attack_events(
                 {
                     return None;
                 }
-                let event_defending_player =
-                    attack_target_defending_player(state, target, *defending_player);
+                let event_defending_player = crate::game::combat::defending_player_for_target_or(
+                    state,
+                    target,
+                    *defending_player,
+                );
                 if dedup_by_player {
                     if seen_defending_players.contains(&event_defending_player) {
                         return None;
@@ -1922,8 +1917,11 @@ fn attack_target_matches(
         // player is the monarch (CR 725.1), the trigger does not fire (The Spear
         // of Bashenga).
         if matches!(filter, crate::types::triggers::AttackTargetFilter::Monarch) {
-            let defending_player =
-                attack_target_defending_player(state, target, fallback_defending_player);
+            let defending_player = crate::game::combat::defending_player_for_target_or(
+                state,
+                target,
+                fallback_defending_player,
+            );
             if state.monarch != Some(defending_player) {
                 return false;
             }
@@ -1931,8 +1929,11 @@ fn attack_target_matches(
     }
 
     if trigger.valid_target.is_some() {
-        let defending_player =
-            attack_target_defending_player(state, target, fallback_defending_player);
+        let defending_player = crate::game::combat::defending_player_for_target_or(
+            state,
+            target,
+            fallback_defending_player,
+        );
         valid_player_matches(trigger, state, defending_player, source_context)
     } else {
         true
@@ -1966,26 +1967,6 @@ pub(super) fn attack_target_type_matches(
             crate::game::combat::AttackTarget::Player(_)
         )
     )
-}
-
-pub(super) fn attack_target_defending_player(
-    state: &GameState,
-    target: crate::game::combat::AttackTarget,
-    fallback_defending_player: PlayerId,
-) -> PlayerId {
-    match target {
-        crate::game::combat::AttackTarget::Player(player) => player,
-        crate::game::combat::AttackTarget::Planeswalker(object_id) => state
-            .objects
-            .get(&object_id)
-            .map(|object| object.controller)
-            .unwrap_or(fallback_defending_player),
-        crate::game::combat::AttackTarget::Battle(object_id) => state
-            .objects
-            .get(&object_id)
-            .and_then(|object| object.protector())
-            .unwrap_or(fallback_defending_player),
-    }
 }
 
 /// Compound matcher for "Whenever ~ enters or attacks" — fires on either
@@ -4162,7 +4143,7 @@ pub(super) fn matching_you_attack_unblocked_pairs(
                 return None;
             }
             if trigger.valid_target.is_some() {
-                let defending_player = attack_target_defending_player(
+                let defending_player = crate::game::combat::defending_player_for_target_or(
                     state,
                     attacker.attack_target,
                     attacker.defending_player,

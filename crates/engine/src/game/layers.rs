@@ -919,6 +919,9 @@ pub(crate) fn evaluate_condition(
     controller: PlayerId,
     source_id: ObjectId,
 ) -> bool {
+    if static_condition_has_unresolvable_designation_anchor(condition) {
+        return false;
+    }
     evaluate_condition_with_context(state, condition, controller, source_id, None)
 }
 
@@ -929,7 +932,42 @@ pub(crate) fn evaluate_condition_with_recipient(
     source_id: ObjectId,
     recipient_id: ObjectId,
 ) -> bool {
+    if static_condition_has_unresolvable_designation_anchor(condition) {
+        return false;
+    }
     evaluate_condition_with_context(state, condition, controller, source_id, Some(recipient_id))
+}
+
+/// CR 109.4 + CR 725.5 (static analogue of the trigger-side CR 603.4 gate):
+/// layer evaluation has no triggering event and no combat anchor, so it cannot
+/// resolve any [`PlayerScope`] other than `Controller`. A scoped designation
+/// leaf is therefore unanswerable here.
+///
+/// Reject the whole condition at the entry boundary — returning `false` from the
+/// leaf would let [`StaticCondition::Not`] invert it into an APPLIED
+/// restriction, which is exactly the printed "unless that player is the
+/// monarch" shape. CR 725.5 independently prescribes "the effect does nothing"
+/// for the analogous vacant-monarch case, so `false` here is the
+/// rules-prescribed outcome rather than an invented default.
+///
+/// Purely structural (no `GameState` needed), mirroring the shape of
+/// `condition_uses_recipient_context` and `static_condition_uses_object_population`
+/// in this module. The `_ => false` leaf arm is safe because the leaf question
+/// is delegated to the compiler-forced
+/// [`StaticCondition::designation_player_anchor`] accessor.
+fn static_condition_has_unresolvable_designation_anchor(condition: &StaticCondition) -> bool {
+    if let Some(scope) = condition.designation_player_anchor() {
+        return !matches!(scope, PlayerScope::Controller);
+    }
+    match condition {
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => conditions
+            .iter()
+            .any(static_condition_has_unresolvable_designation_anchor),
+        StaticCondition::Not { condition } => {
+            static_condition_has_unresolvable_designation_anchor(condition)
+        }
+        _ => false,
+    }
 }
 
 /// Selects the controller that supplies "you" for an active effect's
@@ -1098,7 +1136,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::RecipientAttackingOwnerTarget { .. }
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
-        | StaticCondition::IsMonarch
+        | StaticCondition::IsMonarch { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -1256,7 +1294,7 @@ fn static_condition_characteristic_reads_at(
         | StaticCondition::RecipientAttackingOwnerTarget { .. }
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
-        | StaticCondition::IsMonarch
+        | StaticCondition::IsMonarch { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -1381,7 +1419,7 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::RecipientAttackingOwnerTarget { .. }
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
-        | StaticCondition::IsMonarch
+        | StaticCondition::IsMonarch { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -1839,8 +1877,22 @@ fn evaluate_condition_with_context(
                 .find(|a| a.object_id == source_id)
                 .is_some_and(|a| a.blocked)
         }),
-        // CR 725.1: True when the controller is the monarch.
-        StaticCondition::IsMonarch => eval_is_monarch(state, controller),
+        // CR 725.1 + CR 109.5: a static ability's "you" is the object's current
+        // controller. Layer evaluation has no trigger event and no combat
+        // anchor, so no other scope can EVER resolve here. The scoped form never
+        // reaches this arm — `evaluate_condition{,_with_recipient}` has already
+        // rejected the condition at its entry boundary — and
+        // `coverage::static_condition_feature` reports those scopes `Unhandled`,
+        // so coverage does not claim support.
+        //
+        // CR 725.5: while there is no monarch, a monarch-dependent continuous
+        // effect does nothing, and begins to apply once a player becomes the
+        // monarch. `eval_is_monarch` returns false for a vacant designation and
+        // layers re-evaluate on the monarch change, which is exactly that.
+        StaticCondition::IsMonarch {
+            player: PlayerScope::Controller,
+        } => eval_is_monarch(state, controller),
+        StaticCondition::IsMonarch { .. } => false,
         // CR 726.3: True when the controller has the initiative.
         StaticCondition::IsInitiative => eval_is_initiative(state, controller),
         // CR 725.1: True when no player holds the monarch designation.
@@ -3505,7 +3557,7 @@ fn static_condition_reads_life(condition: &StaticCondition) -> bool {
         | StaticCondition::SourceIsAttacking
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
-        | StaticCondition::IsMonarch
+        | StaticCondition::IsMonarch { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -16883,7 +16935,9 @@ mod tests {
             obj.timestamp = anthem_ts;
             obj.static_definitions.push(
                 StaticDefinition::continuous()
-                    .condition(StaticCondition::IsMonarch)
+                    .condition(StaticCondition::IsMonarch {
+                        player: PlayerScope::Controller,
+                    })
                     .affected(TargetFilter::Typed(
                         TypedFilter::creature().controller(ControllerRef::You),
                     ))
@@ -16918,6 +16972,77 @@ mod tests {
         let bear_obj = state.objects.get(&bear).unwrap();
         assert_eq!(bear_obj.power, Some(3));
         assert_eq!(bear_obj.toughness, Some(3));
+    }
+
+    /// CR 109.4 + CR 725.5: layer evaluation has no triggering event and no
+    /// combat anchor, so a SCOPED monarch subject is unanswerable there. It must
+    /// be false in BOTH polarities.
+    ///
+    /// The negated case is the revert-failing one: without the entry-boundary
+    /// gate in `evaluate_condition{,_with_recipient}` the leaf's `false` inverts
+    /// under `StaticCondition::Not` and the anthem applies UNCONDITIONALLY —
+    /// which is exactly the printed "unless that player is the monarch"
+    /// (Fall from Favor) restriction shape, applied when the engine cannot
+    /// identify the player at all.
+    #[test]
+    fn scoped_monarch_static_condition_is_false_in_both_polarities_cr_725_5() {
+        for (label, condition) in [
+            (
+                "affirmative",
+                StaticCondition::IsMonarch {
+                    player: PlayerScope::DefendingPlayer,
+                },
+            ),
+            (
+                "negated",
+                StaticCondition::Not {
+                    condition: Box::new(StaticCondition::IsMonarch {
+                        player: PlayerScope::DefendingPlayer,
+                    }),
+                },
+            ),
+        ] {
+            let mut state = setup();
+            // Even with the controller AS the monarch, an unresolvable subject
+            // must not let the effect apply.
+            state.monarch = Some(PlayerId(0));
+
+            let anthem = create_object(
+                &mut state,
+                CardId(0),
+                PlayerId(0),
+                "Scoped Monarch Anthem".to_string(),
+                Zone::Battlefield,
+            );
+            let anthem_ts = state.next_timestamp();
+            {
+                let obj = state.objects.get_mut(&anthem).unwrap();
+                obj.card_types.core_types.push(CoreType::Enchantment);
+                obj.timestamp = anthem_ts;
+                obj.static_definitions.push(
+                    StaticDefinition::continuous()
+                        .condition(condition)
+                        .affected(TargetFilter::Typed(
+                            TypedFilter::creature().controller(ControllerRef::You),
+                        ))
+                        .modifications(vec![
+                            ContinuousModification::AddPower { value: 1 },
+                            ContinuousModification::AddToughness { value: 1 },
+                        ]),
+                );
+            }
+            let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+            evaluate_layers(&mut state);
+
+            let bear_obj = state.objects.get(&bear).unwrap();
+            assert_eq!(
+                bear_obj.power,
+                Some(2),
+                "{label}: an unanswerable monarch subject must not apply"
+            );
+            assert_eq!(bear_obj.toughness, Some(2), "{label}: toughness unchanged");
+        }
     }
 
     /// CR 702.94a + CR 400.3: A continuous static ability whose `affected`

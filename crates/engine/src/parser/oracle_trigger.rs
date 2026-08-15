@@ -1935,6 +1935,23 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         }
     }
 
+    // CR 508.5 + CR 603.2 + CR 603.4: resolve the intervening-if's "that player"
+    // anaphor against the trigger clause's own player nouns. On
+    // "Whenever a creature attacks one of your opponents, if that player ...",
+    // the antecedent is the ATTACKED player, but `parse_inner_condition` cannot
+    // see the trigger clause and emits the generic `ScopedPlayer` anchor — which
+    // `targeting::extract_player_from_event` resolves to the ATTACKING player
+    // for an `AttackersDeclared` event. Placed here, after the intervening-if
+    // has been ANDed onto `def.condition` above and after the event clause has
+    // produced `mode`/`valid_source`/`valid_target`/`attack_target_filter`,
+    // because the condition parser can see none of them. Direct sibling of the
+    // spell-cast anaphor remap directly above.
+    if attack_intervening_if_anaphor_is_defending_player(&def) {
+        if let Some(cond) = def.condition.as_mut() {
+            rebind_attack_anaphor_to_defending_player(cond);
+        }
+    }
+
     // CR 121.1 + CR 603.4: "draw cards equal to the difference" inside a
     // trigger body (Kozilek the Great Distortion, Damia Sage of Stone, Krang
     // Master Mind, The Ten Rings, Doctor Octopus). The "if you have fewer than
@@ -4425,6 +4442,152 @@ fn remap_self_cast_scope_in_quantity(expr: &mut QuantityExpr) {
     }
 }
 
+/// CR 508.5 + CR 603.2 + CR 603.4: True when a bare "that player"/"that
+/// opponent" anaphor inside this attack trigger's intervening-if has the
+/// ATTACKED player as its only antecedent.
+///
+/// Three conjuncts, each with its own reason:
+/// - `mode == Attacks` — only attack declarations produce an attacked-player
+///   noun. Ghirapur Orrery's `Phase` mode reaches the same anaphor with a
+///   different antecedent and must not be touched.
+/// - `valid_source` is absent OR is not a player-scope filter — the clause names
+///   no ATTACKING-PLAYER noun. Same predicate the runtime matcher gates on in
+///   `trigger_matchers::matching_attack_events`. "Whenever a CREATURE attacks
+///   one of your opponents" qualifies; "Whenever a PLAYER attacks you"
+///   (Suppressor Skyguard) does not, because there the attacking player is also
+///   a candidate antecedent. An OBJECT filter in `valid_source` is an
+///   attacking-creature noun, not a player noun, and must NOT block the rebind.
+/// - the clause names an ATTACKED-PLAYER noun — see
+///   [`attack_clause_names_attacked_player`], which owns that question.
+///
+/// When the attacked-player noun is the controller ("attacks you"), the attacked
+/// player IS the controller, so `DefendingPlayer` and the controller name the
+/// same player and the rebind cannot diverge.
+// pub(crate) so the `AttackTargetFilter` variant matrix in `oracle_tests.rs`
+// can drive the production gate directly rather than a hand-built proxy.
+pub(crate) fn attack_intervening_if_anaphor_is_defending_player(def: &TriggerDefinition) -> bool {
+    def.mode == TriggerMode::Attacks
+        && def
+            .valid_source
+            .as_ref()
+            .is_none_or(|filter| !filter.is_player_scope())
+        && attack_clause_names_attacked_player(def)
+}
+
+/// CR 508.5 + CR 725.1: does this attack clause name a unique ATTACKED PLAYER —
+/// the antecedent a bare "that player" anaphor needs?
+///
+/// Two distinct noun sources, which is why this is a `match` on
+/// `attack_target_filter` rather than one flat `valid_target.is_some()` conjunct:
+///
+/// - `Monarch` is SELF-SUFFICIENT. "attacks the monarch" names the attacked
+///   player by DESIGNATION (CR 725.1), and the parser emits it with
+///   `valid_target: None` — the designation is the whole noun, so there is no
+///   residual player filter to record (The Spear of Bashenga). Requiring
+///   `valid_target` here made this arm dead on the production path: a real
+///   "Whenever a creature attacks the monarch, if that player …" card failed the
+///   gate and kept the `ScopedPlayer` anchor, which
+///   `targeting::extract_player_from_event` resolves to the ATTACKING player for
+///   `AttackersDeclared`. `Monarch` is a Player-type attack per
+///   `trigger_matchers::attack_target_type_matches`, with an added CR 725.1
+///   identity constraint, so the defending player is still unique.
+/// - `Player` / `PlayerOrPlaneswalker` are attack SCOPES, not nouns: they say a
+///   player may be attacked, not WHICH one. The named player lives in
+///   `valid_target` ("attacks you", "attacks one of your opponents"), so without
+///   it the clause is the bare "Whenever ~ attacks" shape (Goblin Guide) and
+///   supplies no antecedent.
+///
+/// `Planeswalker` and `Battle` name no player noun at all — the correct anaphor
+/// for a battle would be "its protector" (CR 310.8d), a different reference.
+/// `Owner`, `OwnerOrPlaneswalker` and `PlayerOrPermanents` are attack-RESTRICTION
+/// scopes with no arm in `attack_target_type_matches`, so a trigger carrying one
+/// never fires at all. Exhaustive — a future attack scope must decide here.
+fn attack_clause_names_attacked_player(def: &TriggerDefinition) -> bool {
+    match def.attack_target_filter.as_ref() {
+        Some(AttackTargetFilter::Monarch) => true,
+        Some(AttackTargetFilter::Player | AttackTargetFilter::PlayerOrPlaneswalker) => {
+            def.valid_target.is_some()
+        }
+        Some(
+            AttackTargetFilter::Planeswalker
+            | AttackTargetFilter::Battle
+            | AttackTargetFilter::Owner
+            | AttackTargetFilter::OwnerOrPlaneswalker
+            | AttackTargetFilter::PlayerOrPermanents,
+        )
+        | None => false,
+    }
+}
+
+/// CR 508.5 + CR 603.2: Rebind [`PlayerScope::ScopedPlayer`] to
+/// [`PlayerScope::DefendingPlayer`] throughout an attack trigger's
+/// intervening-if.
+///
+/// `parse_inner_condition` cannot see the owning trigger, so the generic anaphor
+/// lands as `ScopedPlayer`, which resolves through
+/// `targeting::extract_player_from_event` — for `GameEvent::AttackersDeclared`
+/// that is the ATTACKING player, not the attacked one. Only here, where the
+/// trigger clause's player nouns are known, can the antecedent be resolved.
+/// Direct sibling of `remap_self_cast_scope_to_triggering_spell` above, which
+/// does the same job for the spell-cast "it"/"this spell" anaphor.
+///
+/// Generic over the condition tree, not specific to any predicate: it repairs
+/// the antecedent for `IsMonarch { player }` and for every `QuantityRef`
+/// carrying a player axis (hand size, life total, cards drawn, …).
+/// `ControllerRef::ScopedPlayer` inside a nested `TargetFilter` is deliberately
+/// NOT rewritten — no "that player controls …" grammar currently produces one,
+/// and rewriting controller axes inside arbitrary filters would over-reach.
+fn rebind_attack_anaphor_to_defending_player(cond: &mut TriggerCondition) {
+    match cond {
+        TriggerCondition::IsMonarch {
+            player: player @ PlayerScope::ScopedPlayer,
+        } => *player = PlayerScope::DefendingPlayer,
+        TriggerCondition::QuantityComparison { lhs, rhs, .. } => {
+            rebind_attack_anaphor_in_quantity(lhs);
+            rebind_attack_anaphor_in_quantity(rhs);
+        }
+        TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
+            conditions
+                .iter_mut()
+                .for_each(rebind_attack_anaphor_to_defending_player);
+        }
+        TriggerCondition::Not { condition } => rebind_attack_anaphor_to_defending_player(condition),
+        // All other variants are leaves that carry no `PlayerScope`, which
+        // `TriggerCondition::designation_player_anchor` enforces exhaustively
+        // for the designation family — nothing to rebind.
+        _ => {}
+    }
+}
+
+/// Recursive `QuantityExpr` companion of
+/// [`rebind_attack_anaphor_to_defending_player`]. Exhaustive over `QuantityExpr`
+/// — no wildcard — so a new arithmetic wrapper is a compile error rather than a
+/// silently skipped nested [`PlayerScope`]. The leaf question is delegated to
+/// the equally exhaustive [`QuantityRef::player_scope_mut`].
+fn rebind_attack_anaphor_in_quantity(expr: &mut QuantityExpr) {
+    match expr {
+        QuantityExpr::Ref { qty } => {
+            if let Some(player @ PlayerScope::ScopedPlayer) = qty.player_scope_mut() {
+                *player = PlayerScope::DefendingPlayer;
+            }
+        }
+        QuantityExpr::Fixed { .. } => {}
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => rebind_attack_anaphor_in_quantity(inner),
+        QuantityExpr::UpTo { max } => rebind_attack_anaphor_in_quantity(max),
+        QuantityExpr::Power { exponent, .. } => rebind_attack_anaphor_in_quantity(exponent),
+        QuantityExpr::Difference { left, right } => {
+            rebind_attack_anaphor_in_quantity(left);
+            rebind_attack_anaphor_in_quantity(right);
+        }
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter_mut().for_each(rebind_attack_anaphor_in_quantity);
+        }
+    }
+}
+
 // pub(crate) so the runtime gate tests in game/triggers.rs can drive the
 // production bridge directly (discriminating against this function rather than a
 // hand-built filter). Sole non-test caller remains parse_trigger_line below.
@@ -4599,9 +4762,14 @@ pub(crate) fn static_condition_to_trigger_condition(
             StaticCondition::SourceIsTapped => Some(TriggerCondition::Not {
                 condition: Box::new(TriggerCondition::SourceIsTapped),
             }),
-            // CR 725.1: "if you're not the monarch" / "if an opponent is the monarch".
-            StaticCondition::IsMonarch => Some(TriggerCondition::Not {
-                condition: Box::new(TriggerCondition::IsMonarch),
+            // CR 725.1 + CR 109.5: "if you're not the monarch" / "if an opponent
+            // is the monarch". The subject scope must survive the bridge —
+            // collapsing it to `Controller` here would silently rebind
+            // "that player is the monarch" to the ability's controller.
+            StaticCondition::IsMonarch { player } => Some(TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::IsMonarch {
+                    player: player.clone(),
+                }),
             }),
             // CR 725.1: "if there is a monarch" (negated no-monarch check).
             StaticCondition::NoMonarch => Some(TriggerCondition::Not {
@@ -4662,8 +4830,11 @@ pub(crate) fn static_condition_to_trigger_condition(
             })
         }
 
-        // CR 725.1: Monarch status bridges directly.
-        StaticCondition::IsMonarch => Some(TriggerCondition::IsMonarch),
+        // CR 725.1 + CR 109.5: Monarch status bridges directly, carrying its
+        // subject scope. Never collapse `player` to `Controller` here.
+        StaticCondition::IsMonarch { player } => Some(TriggerCondition::IsMonarch {
+            player: player.clone(),
+        }),
         // CR 726.3: Initiative status bridges directly.
         StaticCondition::IsInitiative => Some(TriggerCondition::IsInitiative),
         // CR 725.1: "there is no monarch" bridges directly.

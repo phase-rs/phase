@@ -3800,7 +3800,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Unimplemented { .. }
         | Effect::Explore
         | Effect::Investigate
-        | Effect::BecomeMonarch
+        | Effect::BecomeMonarch { .. }
         | Effect::NoOp
         | Effect::Proliferate
         | Effect::ProliferateTarget { .. }
@@ -4243,7 +4243,13 @@ fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> Stri
             fmt_quantity(rhs)
         ),
         TC::HasMaxSpeed => "has max speed".into(),
-        TC::IsMonarch => "is monarch".into(),
+        // CR 725.1 + CR 109.5: keep the controller-scoped description byte-stable
+        // so existing gap strings do not churn; a scoped subject reads
+        // differently and gets its own phrase.
+        TC::IsMonarch {
+            player: PlayerScope::Controller,
+        } => "is monarch".into(),
+        TC::IsMonarch { .. } => "that player is monarch".into(),
         TC::IsInitiative => "has the initiative".into(),
         TC::NoMonarch => "no monarch".into(),
         TC::WasStartingPlayer { .. } => "was the starting player".into(),
@@ -4434,7 +4440,11 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         SC::SourceIsAttacking => "source is attacking".into(),
         SC::SourceIsBlocking => "source is blocking".into(),
         SC::SourceIsBlocked => "source is blocked".into(),
-        SC::IsMonarch => "is monarch".into(),
+        // CR 725.1 + CR 109.5: see the `TC::IsMonarch` arm above.
+        SC::IsMonarch {
+            player: PlayerScope::Controller,
+        } => "is monarch".into(),
+        SC::IsMonarch { .. } => "that player is monarch".into(),
         SC::IsInitiative => "has the initiative".into(),
         SC::NoMonarch => "no monarch".into(),
         SC::HasCityBlessing => "has the city's blessing".into(),
@@ -6574,7 +6584,7 @@ fn visit_direct_effect_ability_payloads<'a>(
         | Effect::Investigate
         | Effect::Tribute { .. }
         | Effect::TimeTravel
-        | Effect::BecomeMonarch
+        | Effect::BecomeMonarch { .. }
         | Effect::NoOp
         | Effect::Proliferate
         | Effect::ProliferateTarget { .. }
@@ -7766,8 +7776,21 @@ fn extract_static_condition_features(
                 extract_static_condition_features(sub, features);
             }
         }
+        // CR 608.2c: `Not` is a boolean COMBINATOR exactly like `And` / `Or` —
+        // `layers::evaluate_condition` negates its operand's own evaluation and
+        // has no independent semantics of its own. Letting it fall into the
+        // catch-all below emitted only `static_condition:Not` (classified
+        // `Handled`, correctly, because negation itself is implemented) and
+        // SWALLOWED the operand, so an unhandled leaf under a negation was
+        // reported as supported. That is a fail-open in the direction coverage
+        // must never fail: `Not(IsMonarch { ScopedPlayer })` — the "unless that
+        // player is the monarch" shape the `layers` entry gate hard-rejects to
+        // `false` — would advertise a restriction that silently never applies.
+        StaticCondition::Not { condition } => {
+            extract_static_condition_features(condition, features);
+        }
         _ => {
-            // All other variants (including `Not`) emit a single tag. The
+            // Every remaining variant is a LEAF and emits a single tag. The
             // classifier carries compiler-enforced handled/unhandled status.
             let (name, support) = static_condition_feature(cond);
             features.insert(format!("static_condition:{name}"), support);
@@ -8382,6 +8405,11 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         // CR 608.2c: Compound conditions — resolved recursively by
         // `layers::evaluate_condition`, which short-circuits And/Or and
         // negates Not. Verified at layers.rs ~line 263.
+        //
+        // All three arms are UNREACHABLE from `extract_static_condition_features`:
+        // that walker recurses every combinator and only classifies leaves, so a
+        // combinator never contributes a tag of its own. They exist for
+        // exhaustiveness and for the direct unit-test callers below.
         StaticCondition::And { .. } => ("And", Handled),
         StaticCondition::Or { .. } => ("Or", Handled),
         StaticCondition::Not { .. } => ("Not", Handled),
@@ -8392,7 +8420,14 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::SourceIsAttacking => ("SourceIsAttacking", Handled),
         StaticCondition::SourceIsBlocking => ("SourceIsBlocking", Handled),
         StaticCondition::SourceIsBlocked => ("SourceIsBlocked", Handled),
-        StaticCondition::IsMonarch => ("IsMonarch", Handled),
+        // CR 725.1: only the controller subject has a static-side evaluator.
+        // `layers::evaluate_condition{,_with_recipient}` rejects every other
+        // scope at its entry boundary (no trigger event, no combat anchor), so
+        // coverage must report those `Unhandled` rather than claim support.
+        StaticCondition::IsMonarch {
+            player: PlayerScope::Controller,
+        } => ("IsMonarch", Handled),
+        StaticCondition::IsMonarch { .. } => ("IsMonarch", Unhandled),
         StaticCondition::IsInitiative => ("IsInitiative", Handled),
         StaticCondition::NoMonarch => ("NoMonarch", Handled),
         StaticCondition::HasCityBlessing => ("HasCityBlessing", Handled),
@@ -15387,6 +15422,86 @@ mod tests {
                 "StaticCondition::{expected_name} is resolved by layers::evaluate_condition",
             );
         }
+    }
+
+    /// CR 608.2c: `extract_static_condition_features` must recurse
+    /// `StaticCondition::Not` exactly as it recurses `And` / `Or`. Negation is a
+    /// combinator with no semantics of its own, so swallowing its operand
+    /// reports an UNHANDLED leaf as supported — the fail-open direction coverage
+    /// must never take.
+    ///
+    /// Revert-failing: restore the `_ =>` catch-all for `Not` and the first
+    /// assertion fails — the map holds only `static_condition:Not` (Handled) and
+    /// the `IsMonarch` leaf disappears, so
+    /// `Not(IsMonarch { player: ScopedPlayer })` — the "unless that player is
+    /// the monarch" shape `layers`' entry gate hard-rejects to `false` — would
+    /// be advertised as fully supported.
+    #[test]
+    fn static_condition_not_recurses_into_its_operand_cr_608_2c() {
+        let feature_map = |cond: &StaticCondition| {
+            let mut features = HashMap::new();
+            extract_static_condition_features(cond, &mut features);
+            features
+        };
+
+        let negated_scoped_monarch = StaticCondition::Not {
+            condition: Box::new(StaticCondition::IsMonarch {
+                player: PlayerScope::ScopedPlayer,
+            }),
+        };
+        let features = feature_map(&negated_scoped_monarch);
+        assert_eq!(
+            features.get("static_condition:IsMonarch"),
+            Some(&FeatureSupport::Unhandled),
+            "the operand under `Not` must reach the classifier"
+        );
+        assert!(
+            !features.contains_key("static_condition:Not"),
+            "`Not` is a combinator and contributes no tag of its own, exactly \
+             like `And` / `Or`"
+        );
+
+        // Discrimination guard: recursion reports the operand's OWN class — it
+        // does not blanket-downgrade everything under a negation.
+        assert_eq!(
+            feature_map(&StaticCondition::Not {
+                condition: Box::new(StaticCondition::SourceIsTapped),
+            })
+            .get("static_condition:SourceIsTapped"),
+            Some(&FeatureSupport::Handled),
+        );
+
+        // Nesting guard: `Not(Or(..))` is a real corpus shape; both operands
+        // must surface, not just the first.
+        let nested = feature_map(&StaticCondition::Not {
+            condition: Box::new(StaticCondition::Or {
+                conditions: vec![
+                    StaticCondition::SourceIsTapped,
+                    StaticCondition::IsMonarch {
+                        player: PlayerScope::ScopedPlayer,
+                    },
+                ],
+            }),
+        });
+        assert_eq!(
+            nested.get("static_condition:SourceIsTapped"),
+            Some(&FeatureSupport::Handled)
+        );
+        assert_eq!(
+            nested.get("static_condition:IsMonarch"),
+            Some(&FeatureSupport::Unhandled)
+        );
+
+        // Reach-guard for the affirmative shape: the printed default subject is
+        // still `Handled`, so the rows above are about the SCOPE, not about
+        // `IsMonarch` having become unsupported wholesale.
+        assert_eq!(
+            feature_map(&StaticCondition::IsMonarch {
+                player: PlayerScope::Controller,
+            })
+            .get("static_condition:IsMonarch"),
+            Some(&FeatureSupport::Handled)
+        );
     }
 
     /// CR 614.1b + CR 614.10: `SkipStep { step: Draw }` must be recognised by

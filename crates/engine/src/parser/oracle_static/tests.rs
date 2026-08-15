@@ -2185,7 +2185,9 @@ fn extra_blockers_static_gated_on_trailing_as_long_as_condition() {
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
     assert_eq!(
         def.condition,
-        Some(StaticCondition::IsMonarch),
+        Some(StaticCondition::IsMonarch {
+            player: PlayerScope::Controller
+        }),
         "the 'as long as you're the monarch' rider must gate the extra-block grant, got {:?}",
         def.condition
     );

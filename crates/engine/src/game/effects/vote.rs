@@ -2021,7 +2021,9 @@ mod tests {
             Box::new(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
             Box::new(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::BecomeMonarch,
+                Effect::BecomeMonarch {
+                    target: crate::types::ability::TargetFilter::Controller,
+                },
             )),
         ];
         let options = vec!["innocent".to_string(), "guilty".to_string()];
@@ -2067,7 +2069,9 @@ mod tests {
             Box::new(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
             Box::new(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::BecomeMonarch,
+                Effect::BecomeMonarch {
+                    target: crate::types::ability::TargetFilter::Controller,
+                },
             )),
         ];
         let options = vec!["innocent".to_string(), "guilty".to_string()];

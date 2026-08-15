@@ -52484,7 +52484,9 @@ fn delayed_trigger_intervening_if_retains_the_commander_control_gate() {
     );
     assert_eq!(
         *delayed_body.effect,
-        Effect::BecomeMonarch,
+        Effect::BecomeMonarch {
+            target: crate::types::ability::TargetFilter::Controller
+        },
         "the delayed body must still be the monarch effect"
     );
     // CR 903.3 + CR 109.5: the regression assertion. Reverting the bridge arm in

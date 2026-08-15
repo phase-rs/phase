@@ -814,7 +814,10 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
         Effect::Investigate => Axes::NONE,
         Effect::Tribute { count: _ } => Axes::NONE,
         Effect::TimeTravel => Axes::NONE,
-        Effect::BecomeMonarch => Axes::NONE,
+        // CR 725.1 + CR 115.1: the designation subject is a target filter,
+        // walked through the same single authority every other targeted effect
+        // uses.
+        Effect::BecomeMonarch { target } => scan_target_filter(target, target_ctx, mode),
         Effect::NoOp => Axes::NONE,
         // Captured at activation time; no resolution-time dynamic read.
         Effect::NoteManaSpent => Axes::NONE,
@@ -3355,7 +3358,11 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
             acc
         }
         TriggerCondition::HasMaxSpeed => Axes::NONE,
-        TriggerCondition::IsMonarch => Axes::NONE,
+        // CR 725.1: the monarch predicate itself reads no axis; its subject
+        // scope is classified per-axis by the shared `PlayerScope` classifier,
+        // mirroring `WasStartingPlayer { controller }`'s delegation to
+        // `scan_controller_ref`.
+        TriggerCondition::IsMonarch { player } => scan_player_scope(player),
         TriggerCondition::IsInitiative => Axes::NONE,
         TriggerCondition::NoMonarch => Axes::NONE,
         TriggerCondition::WasStartingPlayer { controller, .. } => {
@@ -3659,7 +3666,9 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes {
         StaticCondition::SourceIsAttacking => Axes::NONE,
         StaticCondition::SourceIsBlocking => Axes::NONE,
         StaticCondition::SourceIsBlocked => Axes::NONE,
-        StaticCondition::IsMonarch => Axes::NONE,
+        // CR 725.1: see the `TriggerCondition::IsMonarch` arm above — the
+        // subject scope is classified through the shared `PlayerScope` walker.
+        StaticCondition::IsMonarch { player } => scan_player_scope(player),
         StaticCondition::IsInitiative => Axes::NONE,
         StaticCondition::NoMonarch => Axes::NONE,
         StaticCondition::HasCityBlessing => Axes::NONE,
@@ -5505,7 +5514,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::Investigate
         | Effect::Tribute { .. }
         | Effect::TimeTravel
-        | Effect::BecomeMonarch
+        | Effect::BecomeMonarch { .. }
         | Effect::NoOp
         | Effect::NoteManaSpent
         | Effect::Proliferate
@@ -5913,7 +5922,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::Investigate
         | Effect::Tribute { .. }
         | Effect::TimeTravel
-        | Effect::BecomeMonarch
+        | Effect::BecomeMonarch { .. }
         | Effect::NoOp
         | Effect::NoteManaSpent
         | Effect::Proliferate
@@ -6150,7 +6159,7 @@ pub(crate) fn effect_is_randomness_bearing(e: &Effect) -> bool {
         | Effect::Investigate
         | Effect::Tribute { .. }
         | Effect::TimeTravel
-        | Effect::BecomeMonarch
+        | Effect::BecomeMonarch { .. }
         | Effect::NoOp
         | Effect::NoteManaSpent
         | Effect::Proliferate

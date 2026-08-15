@@ -3647,7 +3647,9 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         // CR 717.1: The monarch designation. The acting player becomes the
         // monarch (singleton — replaces any existing monarch), opting into
         // the end-step draw and the take-damage-yields-monarchy interactions.
-        Action::BecomeTheMonarch => Effect::BecomeMonarch,
+        Action::BecomeTheMonarch => Effect::BecomeMonarch {
+            target: TargetFilter::Controller,
+        },
 
         // CR 100.6 / "Time Travel" planar mechanic: travel to an adjacent
         // plane / step a time counter. Engine slot is the zero-arg
