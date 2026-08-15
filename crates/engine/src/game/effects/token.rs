@@ -2973,7 +2973,10 @@ pub(crate) fn resolve_token_spec(
 /// the chosen target out of `ability.targets`. Returns `None` when no legal
 /// host has been bound — the apply path then leaves the token unattached and
 /// the CR 704.5m SBA (an unattached Aura) moves the orphaned Aura to the
-/// graveyard.
+/// graveyard. That observed path is itself a divergence from CR 303.4i, which
+/// says an Aura token whose host is undefined is not created at all; the missing
+/// guard is tracked separately (#7302). Binding the host correctly is what keeps
+/// a card off that path, not a substitute for the guard.
 ///
 /// This does NOT duplicate attach legality: the actual attach is performed by
 /// `attach::attach_to` / `attach::attach_to_player`, the single authority for
@@ -2983,25 +2986,288 @@ fn resolve_attach_host(
     ability: &ResolvedAbility,
     filter: &TargetFilter,
 ) -> Option<AttachTarget> {
-    match filter {
+    match classify_attach_host_authority(filter) {
+        // CR 115.1a: the chosen OBJECT target carried in `ability.targets` — the
+        // single-target "attached to target creature" case. A player-valued
+        // slot never reaches this arm; `denotes_player_target` routes it to
+        // `SelectedPlayerTarget` below.
+        AttachHostAuthority::SelectedTarget => first_object_host(ability),
+        // CR 115.1a + CR 303.4: the chosen PLAYER target is the host. Curse
+        // Auras (Selenia's Curse) are the shipped shape; `attach_to_player`
+        // downstream carries the CR 303.4i legality gate, exactly as
+        // `attach_to` does for an object host.
+        AttachHostAuthority::SelectedPlayerTarget => first_player_host(ability),
+        // CR 608.2c + CR 109.4: the resolution-chosen player, read from the
+        // resolution's own chosen-player list.
+        //
+        // Read from the slot directly rather than through
+        // `resolve_player_for_context_ref`: that helper falls back to
+        // `ability.controller` when the index is unbound, which is right for a
+        // sub-effect that must still act ("the chosen player draws a card") and
+        // wrong here. An unbound slot means the sentence names nobody, and this
+        // path may not invent a host — inventing one is the whole defect this
+        // resolver exists to prevent. No host, and CR 704.5m takes it from there.
+        AttachHostAuthority::ChosenPlayer(index) => ability
+            .chosen_players
+            .get(index as usize)
+            .copied()
+            .map(AttachTarget::Player),
         // Event-context hosts ("attached to the triggering creature") resolve the
         // triggering event's subject via the shared event-context resolver.
-        TargetFilter::TriggeringSource | TargetFilter::AttachedTo => {
+        AttachHostAuthority::EventContext => {
             crate::game::targeting::resolve_event_context_target(state, filter, ability.source_id)
                 .map(target_ref_to_attach_target)
         }
-        // ParentTarget and any targeting filter resolve to the chosen target
-        // carried in `ability.targets`. ParentTarget is bound per-iteration by the
-        // for-each rebind; a `Typed` targeting filter is the single-target
-        // "attached to target creature" case (CR 115.1a). Both read the first
-        // `TargetRef::Object` in `ability.targets`. Player-host Auras (CR 303.4
-        // permits a player host) are not yet implemented — no current card creates
-        // a token attached to a player, so a Player slot yields `None` here.
-        _ => ability.targets.iter().find_map(|target| match target {
-            TargetRef::Object(id) => Some(AttachTarget::Object(*id)),
-            TargetRef::Player(_) => None,
+        // The bare-pronoun host ("attached to it"). It normally reads the chosen
+        // target out of `ability.targets` — the for-each rebind binds it per
+        // iteration — but the pronoun also appears in abilities that choose no
+        // target at all, where there is no back-reference for it to make.
+        //
+        // CR 608.2k: such a pronoun names the specific untargeted object the
+        // ability's trigger condition already referred to ("When this creature
+        // enters, create a Monster Role token attached to IT").
+        //
+        // `ParentTarget` IS that anaphor, and `targeting::resolved_targets` is
+        // its authority — so the fallback asks it rather than substituting a
+        // neighbouring one. It carries referents this clause has no business
+        // re-deriving: the attack batch, the cast spell, the blocked attacker,
+        // and the Stationed / VehicleCrewed / Saddled subjects (CR 702.184a,
+        // CR 702.122, CR 702.171). On a zone change it hands back the ENTERING
+        // object only when that is not the source — Gylwain, Casting Director
+        // creates the Role for another creature that entered — and otherwise
+        // falls back to the source, which is what "When THIS creature enters …
+        // attached to it" needs. Resolving `TriggeringSource` here happened to
+        // agree on both zone-change shapes and on nothing else.
+        //
+        // The fallback is confined to this arm and to an ability that chose
+        // NOTHING. A typed targeting filter that legally selected zero targets
+        // ("attached to target creature you control" with no legal target) keeps
+        // its own no-host outcome: nothing in its text names an untargeted
+        // object, so CR 608.2k does not reach it.
+        //
+        // One host is taken from what may be a batch: the clause creates one
+        // token and its pronoun names one thing.
+        AttachHostAuthority::Pronoun => first_object_host(ability).or_else(|| {
+            ability.targets.is_empty().then(|| {
+                crate::game::targeting::resolved_targets(
+                    ability,
+                    &TargetFilter::ParentTarget,
+                    state,
+                )
+                .into_iter()
+                .next()
+                .map(target_ref_to_attach_target)
+            })?
         }),
+        // CR 608.2c: a numbered anaphor resolves against the whole resolving
+        // chain's targets, which is why it routes through the same authority
+        // `attach::resolve_object_filter` uses rather than reading this clause's
+        // nearest target.
+        AttachHostAuthority::ParentSlot(index) => {
+            crate::game::targeting::resolve_parent_slot_from_root(state, ability, index)
+                .map(target_ref_to_attach_target)
+        }
+        AttachHostAuthority::Source => Some(AttachTarget::Object(ability.source_id)),
+        AttachHostAuthority::SpecificObject(id) => Some(AttachTarget::Object(id)),
+        AttachHostAuthority::NoHost => None,
     }
+}
+
+/// CR 303.4 + CR 608.2c: which authority names the host of a token created
+/// "attached to" something.
+///
+/// Reading the enclosing ability's chosen targets is correct only for a filter
+/// that describes a target slot (CR 115.1a). Every other family names its object
+/// through its own authority, and a filter that names no object must leave the
+/// token hostless rather than inherit whatever the ability happened to select.
+enum AttachHostAuthority {
+    /// A predicate over objects, which the targeting layer used to choose a
+    /// target. The host is that chosen target.
+    SelectedTarget,
+    /// CR 115.1a + CR 303.4: a target slot that holds a PLAYER, not an object
+    /// ("… attached to target opponent"). The host is that chosen player.
+    SelectedPlayerTarget,
+    /// CR 608.2c + CR 109.4: the Nth resolution-chosen player. Fixed while the
+    /// ability resolves, never declared as a target — so it names its player
+    /// through the chosen-player list, not through `ability.targets`.
+    ChosenPlayer(u8),
+    /// An object the triggering event or the resolution context names.
+    EventContext,
+    /// The bare anaphoric pronoun, which reads the chosen target and otherwise
+    /// falls back to the untargeted object the trigger condition named.
+    Pronoun,
+    /// One numbered slot of the resolving chain's accumulated targets.
+    ParentSlot(usize),
+    /// The ability's own source object.
+    Source,
+    /// An object the ability definition names outright.
+    SpecificObject(ObjectId),
+    /// No host from this path: a player-valued filter, a filter that names no
+    /// object at all, or a reference family whose authority this path does not
+    /// resolve. The token is then left unattached (see the `resolve_attach_host`
+    /// doc comment for what happens to it).
+    NoHost,
+}
+
+/// The classification is exhaustive over [`TargetFilter`] on purpose: a new
+/// variant has to be triaged here rather than inheriting selected-target
+/// semantics from a wildcard.
+fn classify_attach_host_authority(filter: &TargetFilter) -> AttachHostAuthority {
+    let authority = match filter {
+        // CR 608.2c + CR 109.4: a reference to the resolution-chosen player is a
+        // `Typed` filter BY SHAPE, but it is a context reference — the engine
+        // says so through `chosen_player_index`, which is what
+        // `is_context_ref` itself consults. Asked ahead of the generic `Typed`
+        // arm below, which would otherwise read the ability's chosen targets and
+        // attach the token to an unrelated object.
+        TargetFilter::Typed(_) if filter.chosen_player_index().is_some() => {
+            AttachHostAuthority::ChosenPlayer(
+                filter
+                    .chosen_player_index()
+                    .expect("guarded by the arm above"),
+            )
+        }
+        // CR 115.1a: whether a target slot holds a player or an object is the
+        // targeting layer's question, and `denotes_player_target` is the single
+        // authority both it and this classification read. "… attached to target
+        // opponent" (Selenia, the Cursed Heart) parses to the property-free
+        // `Typed` shape, so without this arm its Curse would look for an object
+        // target, find none, and enter unattached.
+        TargetFilter::Typed(_) if filter.denotes_player_target() => {
+            AttachHostAuthority::SelectedPlayerTarget
+        }
+
+        // CR 601.3 + CR 608.2c: a composite can CONTAIN a context reference —
+        // the parser builds `And { ExiledBySource, Typed }` for "an exiled card
+        // that is a creature" — and `is_context_ref` reports the whole filter as
+        // one. Its object comes from the exile link, not from a target slot, so
+        // it fails closed here rather than reading `ability.targets`. Asked
+        // before the object-predicate arm below, which would otherwise claim the
+        // composite by its outer shape.
+        TargetFilter::And { .. } | TargetFilter::Or { .. } | TargetFilter::Not { .. }
+            if filter.is_context_ref() =>
+        {
+            AttachHostAuthority::NoHost
+        }
+
+        // Predicates over objects — what a target slot is chosen with.
+        TargetFilter::Any
+        | TargetFilter::Typed(_)
+        | TargetFilter::Not { .. }
+        | TargetFilter::Or { .. }
+        | TargetFilter::And { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::HasChosenName
+        | TargetFilter::StackSpell
+        | TargetFilter::StackAbility { .. } => AttachHostAuthority::SelectedTarget,
+
+        // CR 603.7c + CR 608.2c: event- and resolution-context references.
+        TargetFilter::EventTarget
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::TriggeringSource
+        | TargetFilter::AttachedTo => AttachHostAuthority::EventContext,
+
+        TargetFilter::ParentTarget => AttachHostAuthority::Pronoun,
+        TargetFilter::ParentTargetSlot { index } => AttachHostAuthority::ParentSlot(*index),
+        TargetFilter::SelfRef => AttachHostAuthority::Source,
+        TargetFilter::SpecificObject { id } => AttachHostAuthority::SpecificObject(*id),
+
+        // CR 115.1a: the remaining player-valued TARGET SLOTS, which
+        // `denotes_player_target` also claims. Kept as their own arm rather than
+        // folded into a guard so the variant list stays readable, and asserted
+        // to agree with that authority in `attach_host_authority_tests`.
+        TargetFilter::Player | TargetFilter::SpecificPlayer { .. } => {
+            AttachHostAuthority::SelectedPlayerTarget
+        }
+
+        // Player-valued filters that are NOT target slots. CR 303.4 permits a
+        // player host, but each of these names its player through a context
+        // authority this path does not resolve, so they fail closed rather than
+        // guess one.
+        TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => AttachHostAuthority::NoHost,
+
+        // Object references this path does not resolve. Each names its object
+        // through an authority of its own (an exile link, a tracked set, a
+        // recorded choice, a paid cost); none of them is the enclosing ability's
+        // selected target, so an unsupported one yields no host instead.
+        // `OriginalSource` never survives to resolution — it is concretized to
+        // `SpecificObject` beforehand.
+        // CR 702.95b: `SourceOrPaired` names the source AND the creature it is
+        // paired with — two objects, not one host — and `is_context_ref` already
+        // classifies it as an automatic context reference rather than a target
+        // slot. It fails closed here until a host authority for the pair exists.
+        TargetFilter::SourceOrPaired
+        | TargetFilter::None
+        | TargetFilter::GrantingObject
+        | TargetFilter::CostPaidObject
+        | TargetFilter::ChosenCard
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::OriginalSource => AttachHostAuthority::NoHost,
+    };
+
+    // CR 115.1a: the two authorities above are the engine's, not this function's,
+    // so the classification is checked against them rather than against a
+    // hand-kept list of filters — every filter the engine classifies anywhere is
+    // covered, including shapes nobody thought to write down. `is_context_ref`
+    // says a filter surfaces no target slot; `denotes_player_target` says the
+    // slot holds a player. Either one rules out reading the ability's chosen
+    // OBJECT targets.
+    debug_assert!(
+        !(matches!(authority, AttachHostAuthority::SelectedTarget)
+            && (filter.is_context_ref() || filter.denotes_player_target())),
+        "{filter:?} is not an object target slot, so it must not inherit the ability's \
+         chosen object targets as its attachment host"
+    );
+    authority
+}
+
+/// The first object target the ability chose, which is the host every targeting
+/// attachment filter reads. Mirrors `attach::resolve_object_filter`'s
+/// ParentTarget arm.
+fn first_object_host(ability: &ResolvedAbility) -> Option<AttachTarget> {
+    ability.targets.iter().find_map(|target| match target {
+        TargetRef::Object(id) => Some(AttachTarget::Object(*id)),
+        TargetRef::Player(_) => None,
+    })
+}
+
+/// The first player target the ability chose — the mirror of
+/// [`first_object_host`] for a host filter whose slot holds a player
+/// (CR 115.1a). Object slots are skipped rather than converted: an ability can
+/// carry both ("tap target creature, then create a Curse attached to target
+/// opponent"), and the object slot is the other clause's, not this one's.
+fn first_player_host(ability: &ResolvedAbility) -> Option<AttachTarget> {
+    ability.targets.iter().find_map(|target| match target {
+        TargetRef::Player(id) => Some(AttachTarget::Player(*id)),
+        TargetRef::Object(_) => None,
+    })
 }
 
 /// Convert a resolved `TargetRef` into an `AttachTarget` host. Player and Object
@@ -8582,6 +8848,123 @@ mod tests {
             zabu_plus1_counters(&state, kazar),
             0,
             "counter must NOT land on Ka-Zar"
+        );
+    }
+}
+
+#[cfg(test)]
+mod attach_host_authority_tests {
+    use super::*;
+    use crate::types::ability::{SeatDirection, TypedFilter};
+
+    /// The selected-target class must stay disjoint from
+    /// [`TargetFilter::is_context_ref`], the engine's existing authority on which
+    /// filters never surface a chosen target slot. Anything that authority calls
+    /// a context reference has to resolve through its own authority here, or
+    /// yield no host — it may never read `ability.targets`.
+    #[test]
+    fn selected_target_filters_are_never_context_refs() {
+        for filter in [
+            TargetFilter::Any,
+            TargetFilter::Typed(TypedFilter::creature()),
+            TargetFilter::Not {
+                filter: Box::new(TargetFilter::Any),
+            },
+            TargetFilter::Or {
+                filters: vec![TargetFilter::Any],
+            },
+            TargetFilter::And {
+                filters: vec![TargetFilter::Any],
+            },
+            TargetFilter::Named {
+                name: "Grizzly Bears".to_string(),
+            },
+            TargetFilter::HasChosenName,
+            TargetFilter::StackSpell,
+            TargetFilter::StackAbility {
+                controller: None,
+                tag: None,
+                kind: None,
+            },
+        ] {
+            assert!(
+                matches!(
+                    classify_attach_host_authority(&filter),
+                    AttachHostAuthority::SelectedTarget
+                ),
+                "fixture guard: {filter:?} is meant to be a selected-target filter"
+            );
+            assert!(
+                !filter.is_context_ref(),
+                "{filter:?} is an automatic context reference and must not read the \
+                 ability's chosen targets"
+            );
+        }
+    }
+
+    /// The same disjointness read from the other side, which is the direction
+    /// that catches a misfiling: every filter the engine calls a context
+    /// reference must resolve through an authority of its own or yield no host.
+    #[test]
+    fn context_references_never_classify_as_a_selected_target() {
+        for filter in [
+            TargetFilter::SourceOrPaired,
+            TargetFilter::SelfRef,
+            TargetFilter::CostPaidObject,
+            TargetFilter::LastCreated,
+            TargetFilter::AttachedTo,
+            TargetFilter::EventTarget,
+            TargetFilter::ParentTarget,
+            TargetFilter::ParentTargetSlot { index: 0 },
+            TargetFilter::OriginalSource,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            },
+            TargetFilter::PostReplacementDamageSource,
+            TargetFilter::Neighbor {
+                direction: SeatDirection::Left,
+            },
+        ] {
+            assert!(
+                filter.is_context_ref(),
+                "fixture guard: {filter:?} is meant to be a context reference"
+            );
+            assert!(
+                !matches!(
+                    classify_attach_host_authority(&filter),
+                    AttachHostAuthority::SelectedTarget
+                ),
+                "{filter:?} is a context reference and must not inherit the ability's \
+                 chosen targets as its attachment host"
+            );
+        }
+    }
+
+    /// CR 601.3: the case where the two ways of deciding disagree. A composite
+    /// that CONTAINS the exile anaphor is a context reference as a whole —
+    /// `is_context_ref` says so through `references_exiled_by_source`, which
+    /// recurses — while its OUTER shape is `And`, which is otherwise an object
+    /// predicate. The parser builds exactly this for "an exiled card that is a
+    /// creature", so classifying by shape would read the enclosing ability's
+    /// chosen targets for an object the exile link already names.
+    #[test]
+    fn a_composite_carrying_the_exile_anaphor_is_not_a_selected_target() {
+        let filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::ExiledBySource,
+                TargetFilter::Typed(TypedFilter::creature()),
+            ],
+        };
+        assert!(
+            filter.is_context_ref(),
+            "fixture guard: the composite must be a context reference"
+        );
+        assert!(
+            matches!(
+                classify_attach_host_authority(&filter),
+                AttachHostAuthority::NoHost
+            ),
+            "a composite naming an exile-linked object has no host authority here"
         );
     }
 }

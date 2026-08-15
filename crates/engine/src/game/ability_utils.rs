@@ -4270,6 +4270,43 @@ fn filter_target_slot_filter(filter: &TargetFilter) -> Option<TargetFilter> {
     }
 }
 
+/// The first target-slot filter reachable through a [`CardTypeSetSource`]
+/// population.
+///
+/// Only the object-filter and journal-filter arms carry a `TargetFilter` that
+/// could name a target slot; the zone / linked-exile / tracked-set arms are
+/// fixed-vocabulary. `AnyOf` recurses so a union member's slot is not dropped.
+///
+/// Deliberately UNCITED. This is a structural query over the AST — which arms
+/// hold a filter — not a rule implementation. It previously cited CR 109.2,
+/// which says a bare type description means a permanent on the battlefield;
+/// that rule has nothing to say about target-slot extraction, and a citation
+/// that does not support its code is worse than none because it reads as
+/// evidence the behavior was checked against the rules.
+fn characteristic_source_target_slot_filter(source: &CardTypeSetSource) -> Option<TargetFilter> {
+    // FIRST match wins, preserving the previous `find_map` semantics: the walker
+    // visits members in declaration order, and later members do not overwrite an
+    // earlier hit. Truncation needs no conservative branch here — this returns a
+    // slot to wire, and inventing one would be worse than finding none.
+    let mut found: Option<TargetFilter> = None;
+    source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
+        if found.is_some() {
+            return;
+        }
+        found = match leaf {
+            CardTypeSetSource::Objects { filter } => filter_target_slot_filter(filter),
+            CardTypeSetSource::TurnJournal { filter, .. } => {
+                filter.as_ref().and_then(filter_target_slot_filter)
+            }
+            CardTypeSetSource::Zone { .. }
+            | CardTypeSetSource::ExiledBySource
+            | CardTypeSetSource::TrackedSet { .. }
+            | CardTypeSetSource::AnyOf { .. } => None,
+        };
+    });
+    found
+}
+
 fn filter_prop_target_slot_filter(
     prop: &crate::types::ability::FilterProp,
 ) -> Option<TargetFilter> {
@@ -4393,25 +4430,17 @@ fn quantity_ref_target_slot_spec(qty: &QuantityRef) -> Option<TargetFilter> {
         | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
         | QuantityRef::CounterAddedThisTurn { target: filter, .. }
         | QuantityRef::TokensCreatedThisTurn { filter, .. }
-        | QuantityRef::DistinctColorsAmongPermanents { filter }
         | QuantityRef::DistinctCounterKindsAmong { filter } => filter_target_slot_filter(filter),
         QuantityRef::SpellsCastThisTurn { filter, .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
         | QuantityRef::SpellsCastThisGame { filter, .. } => {
             filter.as_ref().and_then(filter_target_slot_filter)
         }
-        QuantityRef::DistinctCardTypes { source } => match source {
-            CardTypeSetSource::Objects { filter } => filter_target_slot_filter(filter),
-            CardTypeSetSource::Zone { .. }
-            | CardTypeSetSource::ExiledBySource
-            | CardTypeSetSource::TrackedSet { .. } => None,
-        },
-        QuantityRef::DistinctSubtypes { source, .. } => match source {
-            CardTypeSetSource::Objects { filter } => filter_target_slot_filter(filter),
-            CardTypeSetSource::Zone { .. }
-            | CardTypeSetSource::ExiledBySource
-            | CardTypeSetSource::TrackedSet { .. } => None,
-        },
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => {
+            characteristic_source_target_slot_filter(source)
+        }
         QuantityRef::ManaSpentToCast { metric, .. } => match metric {
             CastManaSpentMetric::FromSource { source_filter } => {
                 filter_target_slot_filter(source_filter)

@@ -2386,6 +2386,58 @@ pub fn matches_target_filter_in_owner_zone(
     )
 }
 
+/// CR 400.3: the zones whose membership is keyed by OWNER rather than controller —
+/// "If an object would go to any library, graveyard, or hand other than its owner's,
+/// it goes to its owner's corresponding zone." The rule enumerates the partition
+/// itself; this predicate is that enumeration and nothing more.
+///
+/// Why ownership is the correct scope for a `ControllerRef::You` filter there:
+/// CR 108.4 + CR 108.4a — a card has a controller only when it represents a
+/// permanent or spell; if it has no controller, use its owner instead. A card in a
+/// hand, library, or graveyard is neither, so CR 109.5 routes "you"/"your" to its
+/// owner. Thus "your graveyard" is an ownership claim even though the parser
+/// represents its player scope as `ControllerRef::You`.
+///
+/// EXILE IS DELIBERATELY EXCLUDED, and CR 400.3 excludes it too — the rule names
+/// library, graveyard, and hand, not exile. The engine matches exiled objects
+/// against their AT-EXILE controller via `effective_controller`'s LKI fallback,
+/// which the Oversimplify class depends on ("creatures they controlled that were
+/// exiled this way" is keyed on who controlled the object when it left, not on who
+/// owns it now). Substituting ownership there would break that class.
+///
+/// The single authority for this partition: `game::targeting::add_zone_targets`
+/// (target enumeration) and `game::off_zone_characteristics` (off-zone keyword
+/// grants) both route through it, so the two cannot drift on which zones are
+/// owner-scoped.
+pub fn is_owner_scoped_zone(zone: Zone) -> bool {
+    matches!(zone, Zone::Hand | Zone::Library | Zone::Graveyard)
+}
+
+/// CR 400.3 + CR 109.5 + CR 108.4a: match `object_id` against `filter` using the
+/// ownership semantics of the zone it is being enumerated from.
+///
+/// The single entry point for "evaluate this filter against an object in zone Z".
+/// In an owner-scoped zone (see [`is_owner_scoped_zone`]) this delegates to
+/// [`matches_target_filter_in_owner_zone`], so a stale `obj.controller` left behind
+/// by a control-change effect cannot exclude the object from its own owner's
+/// player-scoped query — the state `effects::change_zone` documents for a stolen
+/// creature that dies into its owner's graveyard, where `reset_for_battlefield_exit`
+/// leaves `controller = thief`. Everywhere else it delegates to the ordinary
+/// controller-scoped [`matches_target_filter`].
+pub fn matches_target_filter_for_zone(
+    state: &GameState,
+    object_id: ObjectId,
+    zone: Zone,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    if is_owner_scoped_zone(zone) {
+        matches_target_filter_in_owner_zone(state, object_id, filter, ctx)
+    } else {
+        matches_target_filter(state, object_id, filter, ctx)
+    }
+}
+
 pub fn matches_target_filter_on_battlefield_entry(
     state: &GameState,
     event: &ProposedEvent,

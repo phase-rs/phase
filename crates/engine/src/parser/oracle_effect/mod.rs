@@ -35672,9 +35672,15 @@ pub(super) fn split_counterless_enter_counters(
     ) {
         return (clause, Vec::new());
     }
-    let (counters, offset) = parse_with_counters_suffix_spanned(&lower);
-    match offset {
-        Some(off) if !counters.is_empty() => (clause[..off].trim_end(), counters),
+    let (counters, span) = parse_with_counters_suffix_spanned(&lower);
+    match span {
+        // Truncating at the span's START (rather than excising `start..end`) is
+        // deliberate here and loses nothing: `clause` is the TARGET text of an
+        // exile whose descriptive target was drawn from a counterless origin
+        // zone, and the counter rider is the last thing printed in it. Anything
+        // after the rider would belong to the following instruction, which the
+        // clause splitter has already peeled off before this runs.
+        Some(span) if !counters.is_empty() => (clause[..span.start].trim_end(), counters),
         _ => (clause, Vec::new()),
     }
 }

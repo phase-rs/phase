@@ -220,8 +220,12 @@ fn find_legal_targets_with_context(
     // (handled above as `is_any_other_target`) is the sole property-bearing
     // exception: it adds players above and falls through to the object
     // enumeration below instead of collapsing to players-only here.
+    //
+    // The players-only shape test itself lives on `TargetFilter` as
+    // `denotes_player_target`, so the Aura-token host resolver reads the same
+    // authority rather than re-deriving it (CR 115.1a).
     if let TargetFilter::Typed(ref tf) = filter {
-        if tf.type_filters.is_empty() && tf.properties.is_empty() && !is_any_other_target {
+        if filter.denotes_player_target() && !is_any_other_target {
             let controller = &tf.controller;
             for player in &state.players {
                 // CR 115.1: one authority for player-target legality — existence
@@ -305,6 +309,7 @@ fn find_legal_targets_with_context(
                 }
                 Zone::Exile => add_zone_targets(
                     state,
+                    Zone::Exile,
                     state.exile.iter().copied(),
                     filter,
                     target_ctx,
@@ -315,6 +320,7 @@ fn find_legal_targets_with_context(
                     for player in &state.players {
                         add_zone_targets(
                             state,
+                            Zone::Graveyard,
                             player.graveyard.iter().copied(),
                             filter,
                             target_ctx,
@@ -327,6 +333,7 @@ fn find_legal_targets_with_context(
                     for player in &state.players {
                         add_zone_targets(
                             state,
+                            Zone::Hand,
                             player.hand.iter().copied(),
                             filter,
                             target_ctx,
@@ -339,6 +346,7 @@ fn find_legal_targets_with_context(
                     for player in &state.players {
                         add_zone_targets(
                             state,
+                            Zone::Library,
                             player.library.iter().copied(),
                             filter,
                             target_ctx,
@@ -1009,9 +1017,26 @@ fn target_ref_matches_resolved_filter_with_context(
         TargetRef::Object(id) if state.stack.iter().any(|entry| entry.id == *id) => {
             super::filter::matches_stack_target_filter(state, *id, target_filter, ctx)
         }
-        TargetRef::Object(id) => {
-            super::filter::matches_target_filter(state, *id, target_filter, ctx)
-        }
+        // CR 109.5 + CR 108.4 + CR 108.4a + CR 400.3: RE-VALIDATION must use the same
+        // ownership semantics as enumeration, or a target that was legal when chosen
+        // becomes illegal when the spell resolves. Unlike the battlefield scans in
+        // this file, an explicit target can live in ANY zone, so the zone is read off
+        // the object rather than assumed — `matches_target_filter_for_zone` then
+        // owner-scopes hand/library/graveyard and leaves battlefield and exile on
+        // controller matching, exactly as `add_zone_targets` does at selection time.
+        // Keeping the two seams on one authority is the point: while enumeration was
+        // owner-scoped and this check was not, a card in its owner's graveyard with a
+        // stale controller could be selected and then fizzle on resolution.
+        TargetRef::Object(id) => match state.objects.get(id) {
+            Some(obj) => super::filter::matches_target_filter_for_zone(
+                state,
+                *id,
+                obj.zone,
+                target_filter,
+                ctx,
+            ),
+            None => false,
+        },
         TargetRef::Player(player) => super::filter::player_matches_target_filter_in_state(
             state,
             target_filter,
@@ -2030,8 +2055,28 @@ fn stack_entry_controller_matches(
     }
 }
 
+/// Enumerate legal targets among `object_ids`, all of which are being read out of
+/// `zone`.
+///
+/// CR 109.5 + CR 108.4 + CR 108.4a + CR 400.3: `zone` is not bookkeeping — it selects
+/// the ownership semantics the filter is evaluated under, via
+/// `filter::matches_target_filter_for_zone`. A player-scoped query on a hand,
+/// library, or graveyard ("target creature card from YOUR graveyard") is an
+/// ownership claim as a matter of rule: a card has a controller only when it
+/// represents a permanent or spell, and CR 108.4a uses the owner when it has none.
+/// Cards in those zones are neither, so CR 109.5 resolves "your" to the owner.
+/// CR 400.3 fixes which zones those are.
+///
+/// Matching them against `obj.controller` excluded a card from its OWN owner's
+/// query whenever a control-change effect left a stale controller behind — the
+/// state `effects::change_zone` documents for a creature stolen via Mind Control
+/// that dies into its owner's graveyard, where `reset_for_battlefield_exit` does
+/// not reset controller and the layer pass that would skips objects off the
+/// battlefield. Exile keeps controller matching deliberately; see
+/// `filter::is_owner_scoped_zone` for why.
 fn add_zone_targets(
     state: &GameState,
+    zone: Zone,
     object_ids: impl IntoIterator<Item = ObjectId>,
     filter: &TargetFilter,
     target_ctx: &super::filter::FilterContext,
@@ -2049,7 +2094,7 @@ fn add_zone_targets(
     let source_ignores_hexproof = require_full_targeting
         && crate::game::static_abilities::player_ignores_hexproof(state, source_controller);
     for obj_id in object_ids {
-        if super::filter::matches_target_filter(state, obj_id, filter, target_ctx) {
+        if super::filter::matches_target_filter_for_zone(state, obj_id, zone, filter, target_ctx) {
             let obj = match state.objects.get(&obj_id) {
                 Some(o) => o,
                 None => continue,
@@ -5186,6 +5231,111 @@ mod tests {
         assert!(
             !opposing_targets.contains(&TargetRef::Player(PlayerId(0))),
             "opposing-team source must not target the hexproof player, got {opposing_targets:?}"
+        );
+    }
+
+    /// CR 109.5 + CR 108.4 + CR 108.4a + CR 400.3: a player-scoped query on an
+    /// owner-scoped zone follows OWNERSHIP, and — the point of this test — it does so
+    /// identically at both seams.
+    ///
+    /// Selection (`find_legal_targets`) and resolution-time re-validation
+    /// (`resolved_object_ids_for_filter`, via
+    /// `target_ref_matches_resolved_filter_with_context`) are separate code paths that
+    /// must agree, or a target legally chosen on announcement becomes illegal on
+    /// resolution and the spell fizzles. Fixing only enumeration would leave exactly
+    /// that split, so both are asserted here on one state.
+    ///
+    /// The fixture stages the divergence CR 400.3 makes reachable: a card goes to its
+    /// OWNER's graveyard, while `reset_for_battlefield_exit` leaves a stale
+    /// `controller` behind from a control-change effect. So `mine` (owner P0,
+    /// controller P1) is in P0's graveyard and must match "creature card in YOUR
+    /// graveyard"; `theirs` (owner P1, controller P0) is in P1's graveyard and must
+    /// not — under controller matching the two verdicts invert exactly.
+    #[test]
+    fn owner_scoped_zone_query_agrees_across_selection_and_resolution() {
+        let mut state = GameState::new_two_player(42);
+
+        let mut graveyard_creature =
+            |card: u64, owner: PlayerId, controller: PlayerId, name: &str| {
+                let id = create_object(
+                    &mut state,
+                    CardId(card),
+                    owner,
+                    name.to_string(),
+                    Zone::Graveyard,
+                );
+                let obj = state.objects.get_mut(&id).expect("fixture present");
+                obj.card_types.core_types.push(CoreType::Creature);
+                obj.controller = controller;
+                id
+            };
+        let mine = graveyard_creature(1, PlayerId(0), PlayerId(1), "My Stolen Bear");
+        let theirs = graveyard_creature(2, PlayerId(1), PlayerId(0), "Their Stolen Bear");
+
+        // Premise: owner and controller really do diverge on both fixtures, so
+        // neither verdict below can be produced by a state where they coincide.
+        for (id, owner, controller) in [
+            (mine, PlayerId(0), PlayerId(1)),
+            (theirs, PlayerId(1), PlayerId(0)),
+        ] {
+            let obj = &state.objects[&id];
+            assert_eq!(obj.owner, owner);
+            assert_eq!(obj.controller, controller);
+        }
+
+        // "target creature card in your graveyard", as the parser represents it:
+        // the player scope rides `ControllerRef::You`, and the ZONE decides that it
+        // is read as ownership.
+        let filter = TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                }]),
+        );
+
+        let source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Reanimation Spell".to_string(),
+            Zone::Stack,
+        );
+
+        // Seam 1 — selection.
+        let selectable = find_legal_targets(&state, &filter, PlayerId(0), source);
+        assert!(
+            selectable.contains(&TargetRef::Object(mine)),
+            "a card YOU OWN in your graveyard must be selectable despite a stale \
+             opponent controller: {selectable:?}"
+        );
+        assert!(
+            !selectable.contains(&TargetRef::Object(theirs)),
+            "a card an OPPONENT OWNS must not be selectable however it is \
+             controlled: {selectable:?}"
+        );
+
+        // Seam 2 — resolution-time re-validation of an already-chosen target.
+        let resolved = resolved_object_ids_for_filter(
+            &state,
+            &make_resolved_with_targets(vec![TargetRef::Object(mine)], source),
+            &filter,
+        );
+        assert!(
+            resolved.contains(&mine),
+            "the selected owner-scoped target must survive re-validation rather than \
+             fizzling: {resolved:?}"
+        );
+
+        let resolved_foreign = resolved_object_ids_for_filter(
+            &state,
+            &make_resolved_with_targets(vec![TargetRef::Object(theirs)], source),
+            &filter,
+        );
+        assert!(
+            !resolved_foreign.contains(&theirs),
+            "re-validation must not admit an opponent-owned card that selection \
+             refused: {resolved_foreign:?}"
         );
     }
 

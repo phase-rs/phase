@@ -4,7 +4,7 @@ use std::borrow::Cow;
 
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until, take_while_m_n};
-use nom::character::complete::{char, digit1, satisfy, space0};
+use nom::character::complete::{char, digit1, multispace0, satisfy, space0};
 use nom::combinator::{all_consuming, eof, map, map_res, not, opt, peek, recognize, value};
 use nom::multi::{many0, many1};
 use nom::sequence::{delimited, preceded, terminated};
@@ -1124,6 +1124,85 @@ where
     last
 }
 
+/// Recognize one period-terminated sentence.
+///
+/// The recognized slice INCLUDES the trailing '.' and EXCLUDES any leading
+/// whitespace (`multispace0` is consumed by `preceded`, outside `recognize`).
+///
+/// This is the single authority for period-sentence segmentation, and every
+/// consumer that decides "is THIS sentence the represented CR 608.2c rider?"
+/// delegates here, directly or through [`parse_period_sentences`] /
+/// [`split_sentence_units`], so they cannot develop divergent sentence models.
+/// Today's delegating consumers:
+///   * the replacement-line dispatcher (`oracle::parse_replacement_sentences`,
+///     which feeds `is_replacement_pattern` at its only sentence-scoped call
+///     site, `parse_replacement_sentence_sequence_ir`);
+///   * the classifier's rider head-scoper
+///     (`oracle_classifier::strip_entry_this_way_riders`), itself shared by the
+///     replacement, static and Priority 5-pre classification gates;
+///   * the entry-rider and cast-rider swallow residual builders
+///     (`swallow_check::{conditional_enter_counters_if_is_only_if_marker,
+///     enters_with_finality_this_way_is_only_if_marker}`).
+///
+/// A `split('.')`-based model would diverge in three ways that all matter to the
+/// classifier: it keeps the leading space, drops the terminal '.', and emits an
+/// empty tail element.
+///
+/// Scope of the claim, stated exactly so it stays checkable: older
+/// `swallow_check` strip/residual builders that predate this authority still
+/// carry their own `split('.')` model — today
+/// `enters_modified_if_is_only_if_marker`,
+/// `cast_this_way_alt_cost_is_only_if_marker`,
+/// `strip_represented_replacement_instead_sentences`,
+/// `strip_cr_implicit_if_phrases` and `strip_represented_tiered_pairs_from_line`
+/// (`rg "split\('\.'\)" crates/engine/src/parser/swallow_check.rs` enumerates
+/// them). They are the known remaining drift surface, NOT a claim of delegation;
+/// converting one is a behavior-affecting change (a newline directly after a
+/// period becomes a space, so a post-newline " if " starts being seen) and must
+/// be done deliberately, not incidentally.
+pub fn parse_period_sentence(input: &str) -> OracleResult<'_, &str> {
+    preceded(
+        multispace0,
+        recognize(terminated(take_until("."), tag("."))),
+    )
+    .parse(input)
+}
+
+/// Recognize a run of one or more period-terminated sentences.
+///
+/// Deliberately NOT `all_consuming` — a printed Oracle line need not end in a
+/// period. Callers that require full consumption wrap this themselves (see
+/// `oracle::parse_replacement_sentences`); callers that must also handle an
+/// unterminated tail read it from the returned remainder.
+pub fn parse_period_sentences(input: &str) -> OracleResult<'_, Vec<&str>> {
+    many1(parse_period_sentence).parse(input)
+}
+
+/// Segment a text unit into sentence units, INCLUDING a final unterminated
+/// fragment.
+///
+/// [`parse_period_sentences`] is deliberately partial (a printed Oracle line need
+/// not end in a period); this is the total wrapper every classifier and swallow
+/// detector wants, so none of them has to re-derive tail handling — the exact
+/// place a second, `split('.')`-shaped sentence model keeps growing back.
+///
+/// Units carry their terminal '.' and never carry leading whitespace (that is
+/// [`parse_period_sentence`]'s contract); the unterminated tail is trimmed on
+/// both ends. Text with no period at all yields exactly one unit, and
+/// whitespace-only text yields none.
+pub fn split_sentence_units(input: &str) -> Vec<&str> {
+    let (tail, mut units) = match parse_period_sentences(input) {
+        Ok((tail, units)) => (tail, units),
+        // No period at all: the whole input is one unterminated unit.
+        Err(_) => (input, Vec::new()),
+    };
+    let tail = tail.trim();
+    if !tail.is_empty() {
+        units.push(tail);
+    }
+    units
+}
+
 /// Check whether `phrase` appears at any word boundary in `text`.
 ///
 /// More precise than `str::contains()` — matches complete phrases at word
@@ -1383,6 +1462,38 @@ pub(crate) fn parse_property_keyword(input: &str) -> OracleResult<'_, ObjectProp
 mod tests {
     use super::*;
     use nom::bytes::complete::tag;
+
+    /// The total wrapper keeps `parse_period_sentence`'s contract (terminal '.'
+    /// kept, leading whitespace excluded) and adds exactly one thing: the
+    /// unterminated tail every classifier and swallow detector needs. Those three
+    /// properties are what make a `split('.')` model non-substitutable.
+    #[test]
+    fn split_sentence_units_keeps_periods_and_recovers_the_tail() {
+        assert_eq!(
+            split_sentence_units("return it to the battlefield. if a hero enters this way, it enters with a counter on it."),
+            vec![
+                "return it to the battlefield.",
+                "if a hero enters this way, it enters with a counter on it."
+            ]
+        );
+        // Unterminated tail is recovered and trimmed, not dropped.
+        assert_eq!(
+            split_sentence_units("first. second"),
+            vec!["first.", "second"]
+        );
+        // No period at all: exactly one unit.
+        assert_eq!(
+            split_sentence_units("no period here"),
+            vec!["no period here"]
+        );
+        // Whitespace-only input has no units at all.
+        assert!(split_sentence_units("   ").is_empty());
+        // A newline separator is leading whitespace of the next unit, not part of it.
+        assert_eq!(
+            split_sentence_units("flying.\nreach."),
+            vec!["flying.", "reach."]
+        );
+    }
 
     #[test]
     fn strip_double_quoted_spans_no_quote_borrows_unchanged() {

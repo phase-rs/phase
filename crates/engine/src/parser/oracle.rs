@@ -4,8 +4,7 @@ use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until, take_while};
 use nom::character::complete::multispace0;
-use nom::combinator::{all_consuming, opt, recognize, value};
-use nom::multi::many1;
+use nom::combinator::{all_consuming, opt, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 use serde::{Deserialize, Serialize};
@@ -34,8 +33,8 @@ use crate::types::zones::Zone;
 use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
 use super::oracle_nom::condition::parse_graveyard_keyword_grant_sentence;
 use super::oracle_nom::primitives::{
-    parse_number as nom_parse_number, parse_object_recipient_pronoun, scan_at_word_boundaries,
-    scan_contains, scan_preceded,
+    parse_number as nom_parse_number, parse_object_recipient_pronoun, parse_period_sentences,
+    scan_at_word_boundaries, scan_contains, scan_preceded,
 };
 
 use super::oracle_attraction::parse_attraction_visit_triggers;
@@ -54,7 +53,7 @@ use super::oracle_classifier::{
     is_instead_replacement_line, is_opening_hand_begin_game, is_pay_life_as_colored_mana_pattern,
     is_replacement_pattern, is_spells_alternative_cost_pattern, is_static_pattern,
     is_vehicle_tier_line, lower_starts_with, should_defer_spell_to_effect,
-    split_flashback_trailing_self_spell_cost_reduction,
+    split_flashback_trailing_self_spell_cost_reduction, strip_entry_this_way_riders,
 };
 use super::oracle_condition::parse_restriction_condition;
 use super::oracle_cost::{parse_oracle_cost, parse_single_cost, try_parse_cost_reduction};
@@ -250,16 +249,14 @@ fn parse_replacement_sentence_sequence_ir(
     Some(replacements)
 }
 
+/// Split a replacement line into its period-terminated sentences, requiring the
+/// line to be fully consumed (a trailing unterminated fragment rejects the whole
+/// line, so the multi-sentence replacement path never sees a partial tail).
+///
+/// Segmentation itself is delegated to `oracle_nom::primitives::parse_period_sentences`,
+/// the single authority shared with `oracle_classifier::strip_entry_this_way_riders`.
 fn parse_replacement_sentences(input: &str) -> OracleResult<'_, Vec<&str>> {
-    all_consuming(many1(parse_replacement_sentence)).parse(input)
-}
-
-fn parse_replacement_sentence(input: &str) -> OracleResult<'_, &str> {
-    preceded(
-        multispace0,
-        recognize(terminated(take_until("."), tag("."))),
-    )
-    .parse(input)
+    all_consuming(parse_period_sentences).parse(input)
 }
 
 // CR 100.2a / CR 903.5b: Deck-construction overrides like "A deck can have
@@ -1550,7 +1547,6 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
         | QuantityRef::CountersOnObjects { filter, .. }
         | QuantityRef::Aggregate { filter, .. }
         | QuantityRef::ControlledByEachPlayer { filter, .. }
-        | QuantityRef::DistinctColorsAmongPermanents { filter }
         | QuantityRef::DistinctCounterKindsAmong { filter }
         | QuantityRef::EnteredThisTurn { filter }
         // CR 608.2i: the look-back sibling carries a `TargetFilter` too, and this
@@ -1560,15 +1556,48 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
         | QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => {
             target_filter_uses_filter_prop(filter, pred)
         }
-        QuantityRef::DistinctCardTypes {
-            source: crate::types::ability::CardTypeSetSource::Objects { filter },
+        // CR 109.2: the three distinct-characteristic counts embed their filters
+        // through the shared population enum; recurse over it so a union member
+        // or a journal's narrowing filter is not dropped.
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => {
+            characteristic_source_uses_filter_prop(source, pred)
         }
-        | QuantityRef::DistinctSubtypes {
-            source: crate::types::ability::CardTypeSetSource::Objects { filter },
-            ..
-        } => target_filter_uses_filter_prop(filter, pred),
         _ => false,
     }
+}
+
+/// CR 109.2: Does any `TargetFilter` reachable through a `CardTypeSetSource`
+/// population use `pred`? The fixed-vocabulary zone / linked-exile / tracked-set
+/// arms carry none.
+fn characteristic_source_uses_filter_prop(
+    source: &crate::types::ability::CardTypeSetSource,
+    pred: &impl Fn(&FilterProp) -> bool,
+) -> bool {
+    use crate::types::ability::CardTypeSetSource;
+    let mut found = false;
+    let complete =
+        source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
+            if found {
+                return;
+            }
+            found = match leaf {
+                CardTypeSetSource::Objects { filter } => {
+                    target_filter_uses_filter_prop(filter, pred)
+                }
+                CardTypeSetSource::TurnJournal { filter, .. } => filter
+                    .as_ref()
+                    .is_some_and(|filter| target_filter_uses_filter_prop(filter, pred)),
+                CardTypeSetSource::Zone { .. }
+                | CardTypeSetSource::ExiledBySource
+                | CardTypeSetSource::TrackedSet { .. }
+                | CardTypeSetSource::AnyOf { .. } => false,
+            };
+        });
+    // A truncated walk claims the prop: this feeds parse-time capability
+    // reporting, where over-reporting a dependency is the harmless direction.
+    found || !complete
 }
 
 fn target_filter_uses_filter_prop(
@@ -2676,7 +2705,20 @@ fn is_spell_resolution_instruction_line(
     } else {
         std::borrow::Cow::Borrowed(effect_lower.as_str())
     };
-    if is_static_pattern(&static_view) && !should_defer_spell_to_effect(&effect_lower) {
+    // CR 608.2c: head-scope this gate for the same reason `is_replacement_pattern`
+    // is head-scoped. `is_static_compound_pattern` classifies on
+    // `"enters with " && !"counter"` — tokens a reflexive "… this way" rider's
+    // CONSEQUENT supplies just as readily as the replacement tokens did, and this
+    // predicate short-circuits the spell path one branch EARLIER than the
+    // replacement one. Heroic Return survives today only because its rider happens
+    // to contain the word "counter"; a rider with a non-counter consequent ("… it
+    // enters with your choice of …", "… it enters with flying") would otherwise
+    // drop the head reanimation instruction. `None` (text unit is only riders) is
+    // not a static.
+    let static_head = strip_entry_this_way_riders(&static_view);
+    if static_head.as_deref().is_some_and(is_static_pattern)
+        && !should_defer_spell_to_effect(&effect_lower)
+    {
         return false;
     }
 
@@ -5159,12 +5201,18 @@ pub(crate) fn parse_oracle_ir(
         // trigger and excludes it from this replacement interceptor.
         // CR 608.2c: "If a [type] enters this way, it enters with …" is a reflexive
         // conditional rider on a non-ETB trigger (Winter Soldier, Reborn Avenger),
-        // not a CR 614.1c enters-with replacement head. Skip the replacement
-        // interceptor so the line routes through trigger dispatch.
+        // not a CR 614.1c enters-with replacement head. The "enters with" token must
+        // therefore be sought in the HEAD instruction only, through the same
+        // `strip_entry_this_way_riders` authority the classifier uses. A literal
+        // `"enters this way,"` scan modelled just ONE grammatical voice of the rider
+        // class (present-tense, comma-terminated), so it still handed a passive-voice
+        // ("… is put onto the battlefield this way, …") or comma-less rider to the
+        // replacement interceptor and lost the head instruction. `None` (the line is
+        // only riders) has no head to intercept either.
         if has_trigger_prefix(&lower)
             && !is_enters_with_counter_trigger(&lower)
-            && scan_contains(&lower, "enters with")
-            && !scan_contains(&lower, "enters this way,")
+            && strip_entry_this_way_riders(&lower)
+                .is_some_and(|head| scan_contains(&head, "enters with"))
         {
             // CR 603.1 + CR 603.3 + CR 614.1c/614.12: "Whenever you cast [spell],
             // that [subject] enters with … counter(s) on it[, where X is …]"

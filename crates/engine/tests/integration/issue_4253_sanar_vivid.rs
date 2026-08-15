@@ -26,9 +26,9 @@ use engine::game::effects::resolve_ability_chain;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{
-    AbilityKind, CardPlayMode, CastFromZoneDriver, CastingPermission, Chooser, ControllerRef,
-    Effect, ForEachCategoryAction, IterationCategory, QuantityExpr, QuantityRef, ResolvedAbility,
-    RevealUntilDisposition, TargetFilter, ThisWayCause, TypeFilter, TypedFilter,
+    AbilityKind, CardPlayMode, CardTypeSetSource, CastFromZoneDriver, CastingPermission, Chooser,
+    ControllerRef, Effect, ForEachCategoryAction, IterationCategory, QuantityExpr, QuantityRef,
+    ResolvedAbility, RevealUntilDisposition, TargetFilter, ThisWayCause, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -45,8 +45,12 @@ cast the exiled cards this turn.";
 
 fn distinct_colors_count() -> QuantityExpr {
     QuantityExpr::Ref {
-        qty: QuantityRef::DistinctColorsAmongPermanents {
-            filter: TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+        qty: QuantityRef::DistinctColorsAmong {
+            source: CardTypeSetSource::Objects {
+                filter: TargetFilter::Typed(
+                    TypedFilter::permanent().controller(ControllerRef::You),
+                ),
+            },
         },
     }
 }

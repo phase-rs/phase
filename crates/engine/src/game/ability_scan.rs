@@ -2106,6 +2106,10 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             sibling: true,
             projected: false,
         },
+        // Deliberately coarse: `Axes::CONSERVATIVE` is FAIL-CLOSED, so a new
+        // `CardTypeSetSource` variant reached through this compiler-blind `{ .. }`
+        // pattern can only over-report, never under-report. The population axis is
+        // not decomposed here because no caller needs a narrower answer.
         QuantityRef::DistinctCardTypes { .. } => Axes::CONSERVATIVE,
         QuantityRef::DistinctSubtypes { .. } => Axes::CONSERVATIVE,
         QuantityRef::CardsExiledBySource => Axes::NONE,
@@ -2524,19 +2528,32 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             acc = acc.or(scan_controller_ref(owner));
             acc
         }
-        QuantityRef::DistinctColorsAmongPermanents { filter } => {
-            let mut acc = Axes {
-                event: false,
-                sibling: true,
-                projected: false,
-            };
-            acc = acc.or(scan_target_filter(
-                filter,
-                FilterReadContext::LiveBoardCensus,
-                mode,
-            ));
-            acc
-        }
+        QuantityRef::DistinctColorsAmong { source } => match source {
+            // CR 105.1 + CR 109.2: unchanged classification for the live board
+            // census — the only population this head could name before it was
+            // parameterized onto the shared axis.
+            crate::types::ability::CardTypeSetSource::Objects { filter } => {
+                let mut acc = Axes {
+                    event: false,
+                    sibling: true,
+                    projected: false,
+                };
+                acc = acc.or(scan_target_filter(
+                    filter,
+                    FilterReadContext::LiveBoardCensus,
+                    mode,
+                ));
+                acc
+            }
+            // Zone / linked-exile / tracked-set / turn-journal / union
+            // populations are classified like their card-type and subtype peers
+            // above: `Axes::CONSERVATIVE`, which is fail-closed.
+            crate::types::ability::CardTypeSetSource::Zone { .. }
+            | crate::types::ability::CardTypeSetSource::ExiledBySource
+            | crate::types::ability::CardTypeSetSource::TrackedSet { .. }
+            | crate::types::ability::CardTypeSetSource::TurnJournal { .. }
+            | crate::types::ability::CardTypeSetSource::AnyOf { .. } => Axes::CONSERVATIVE,
+        },
         QuantityRef::DistinctCounterKindsAmong { filter } => {
             let mut acc = Axes {
                 event: false,

@@ -58,6 +58,7 @@ function shortcutInteraction(
       },
     ],
     attachmentFans: {},
+  attachmentViews: {},
     availability: { type: "inputRequired" },
   };
 }

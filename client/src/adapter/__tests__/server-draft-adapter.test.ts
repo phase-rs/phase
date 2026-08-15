@@ -115,6 +115,7 @@ const viewerInteraction = {
   autoPassRecommended: false,
   opportunities: [],
   attachmentFans: {},
+  attachmentViews: {},
   availability: { type: "inputRequired" },
 } as LegalActionsResult["viewerInteraction"];
 

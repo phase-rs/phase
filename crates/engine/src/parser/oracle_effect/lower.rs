@@ -2,6 +2,7 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
 use nom::character::complete::{multispace0, multispace1, satisfy};
 use nom::combinator::{all_consuming, eof, map, not, opt, peek, rest, value, verify};
+use nom::multi::separated_list1;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -3854,13 +3855,14 @@ pub(crate) fn strip_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String
             terminated(take_until(", "), tag::<_, _, OracleError<'_>>(", ")).parse(rest_lower)
         {
             if let Some(qty) = parse_for_each_clause(clause) {
-                // CR 106.1: "for each color among [X], add one mana of that color"
+                // CR 105.1: "for each color among [X], add one mana of that color"
                 // must NOT be split into (repeat_for, "add one mana of that color").
                 // The "that color" anaphors the per-iteration color, not the
                 // source's `ChosenAttribute::Color`. Let the full text flow
-                // through to `try_parse_for_each_color_mana_public` which emits
-                // a single `DistinctColorsAmongPermanents` mana ability.
-                if matches!(qty, QuantityRef::DistinctColorsAmongPermanents { .. })
+                // through to `try_parse_for_each_color_mana_public` which emits a
+                // single `ManaProduction::DistinctColorsAmongPermanents` mana
+                // ability (a DIFFERENT enum from the `QuantityRef` matched here).
+                if matches!(qty, QuantityRef::DistinctColorsAmong { .. })
                     && remainder
                         .trim_end_matches('.')
                         .trim()
@@ -7122,64 +7124,69 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             // rows, whose `control` is always `None` per CR 110.1 @ :614).
             // `*row_control` is a `Copy` read out of the `&'static` table row.
             let mut control: Option<ControlClausePossessor> = *row_control;
-            if *zone == Zone::Battlefield {
-                let (rider_rest, riders) =
-                    strip_trailing_battlefield_riders(&lower[entry_offset..]);
-                face_down |= riders.face_down;
-                transformed |= riders.transformed;
-                enter_tapped |= riders.enter_tapped;
-                enters_attacking |= riders.enters_attacking;
-                entry_offset = lower.len() - rider_rest.len();
-                // CR 110.2a: the table enumerates only the first- and
-                // owner-person spellings, so a third-person clause ("under
-                // their control", "under that player's control") survives on
-                // the tail. Consume it HERE, BEFORE `after_destination`, the
-                // counters-suffix scan and `original_after_destination` all
-                // read `entry_offset` — otherwise the clause is both dropped
-                // from the destination AND re-emitted as a dangling remainder.
-                if control.is_none() {
-                    if let Ok((rest, p)) = parse_leading_control_clause(&lower[entry_offset..]) {
-                        control = Some(p);
-                        entry_offset = lower.len() - rest.len();
-                        // CR 614.1c (:3060) + CR 508.4 (:2309) + CR 708.3
-                        // (:5707): entry riders are order-independent and may
-                        // ALSO trail the control clause ("under your control
-                        // face down and tapped").
-                        let (rest2, riders2) =
-                            strip_trailing_battlefield_riders(&lower[entry_offset..]);
-                        face_down |= riders2.face_down;
-                        transformed |= riders2.transformed;
-                        enter_tapped |= riders2.enter_tapped;
-                        enters_attacking |= riders2.enters_attacking;
-                        entry_offset = lower.len() - rest2.len();
+            // CR 122.6 (:1208): putting counters on an object includes giving
+            // counters to it as it enters the battlefield. Battlefield-entry
+            // riders, the control
+            // clause and the "with … counter(s)" clause are INDEPENDENT entry
+            // conditions printed in any order ("under your control face down and
+            // tapped", "tapped and with two stun counters on it"). Consume them
+            // as one order-independent run to a fixpoint rather than as a fixed
+            // riders → control → riders pass sequence.
+            //
+            // CONSUMING (advancing `entry_offset`) rather than excising a span
+            // out of the middle is what keeps the remainder a true SUFFIX, so an
+            // instruction printed AFTER the entry clauses stays reachable by
+            // normal clause processing. The previous code truncated the
+            // remainder at the counter clause's start offset and so discarded
+            // everything past it — Heart-Shaped Herb's "…with three +1/+1
+            // counters on it and you become the monarch" lost the monarch
+            // instruction outright, and any trailing control clause vanished
+            // with it.
+            let mut enter_with_counters: Vec<(CounterType, QuantityExpr)> = Vec::new();
+            loop {
+                let before = entry_offset;
+                if *zone == Zone::Battlefield {
+                    let (rider_rest, riders) =
+                        strip_trailing_battlefield_riders(&lower[entry_offset..]);
+                    face_down |= riders.face_down;
+                    transformed |= riders.transformed;
+                    enter_tapped |= riders.enter_tapped;
+                    enters_attacking |= riders.enters_attacking;
+                    entry_offset = lower.len() - rider_rest.len();
+                    // CR 110.2a: the table enumerates only the first- and
+                    // owner-person spellings, so a third-person clause ("under
+                    // their control", "under that player's control") survives on
+                    // the tail. Consume it here so it is neither dropped from
+                    // the destination NOR re-emitted as a dangling remainder.
+                    if control.is_none() {
+                        if let Ok((rest, p)) = parse_leading_control_clause(&lower[entry_offset..])
+                        {
+                            control = Some(p);
+                            entry_offset = lower.len() - rest.len();
+                        }
                     }
                 }
-            }
-            let after_destination = &lower[entry_offset..];
-            let (enter_with_counters, counters_offset) =
-                parse_with_counters_suffix_spanned(after_destination);
-            // CR 614.1c: when the "with N <type> counter(s)" clause is lifted
-            // onto `enter_with_counters`, excise it (and any leading " and"
-            // connector) from the returned remainder so the caller does not
-            // re-parse "and with two stun counters …" into a dangling
-            // Unimplemented follow-up clause (Unstoppable Slasher).
-            let original_after_destination = match counters_offset {
-                Some(off) => {
-                    // CR 614.1c: strip a trailing " and" connector left after
-                    // excising the consumed counter clause. Space-anchored
-                    // `strip_suffix(" and")` (not `trim_end_matches("and")`,
-                    // which is not word-anchored and would corrupt a remainder
-                    // ending in "brand"/"island"); mirrors the leading
-                    // `strip_leading_sequence_connector` analogue.
-                    let trimmed = text[entry_offset..entry_offset + off].trim_end();
-                    trimmed
-                        // allow-noncombinator: structural cleanup of a trailing " and" connector on an already-sliced remainder, not parsing dispatch
-                        .strip_suffix(" and")
-                        .map(|s| s.trim_end())
-                        .unwrap_or(trimmed)
+                // CR 122.1: the counter rider is zone-agnostic here — the
+                // pre-loop scan it replaces ran for every destination row, not
+                // just the battlefield ones, so it stays outside the gate above.
+                if enter_with_counters.is_empty() {
+                    if let Ok((rest, counters)) =
+                        parse_leading_enter_counters_clause(&lower[entry_offset..])
+                    {
+                        enter_with_counters = counters;
+                        entry_offset = lower.len() - rest.len();
+                    }
                 }
-                None => &text[entry_offset..],
-            };
+                if entry_offset == before {
+                    break;
+                }
+            }
+            // A true suffix of the ORIGINAL-case `text`: everything the entry
+            // clauses did not consume, in printed order. Riders, control clauses
+            // and counter types are pure ASCII and case-invariant, so advancing
+            // the offset on `lower` indexes `text` identically — the same
+            // invariant the pre-existing `pos + phrase_len` indexing assumes.
+            let original_after_destination = &text[entry_offset..];
             return (
                 text[..pos].trim(),
                 Some(ReturnDestination {
@@ -10788,7 +10795,7 @@ fn parse_signed_pt_component(text: &str) -> Option<PtValue> {
     Some(PtValue::Fixed(sign * value))
 }
 
-/// CR 122.1 + CR 614.1c: Scan a remainder for a "with [N] [type] counter(s) on
+/// CR 122.6: Scan a remainder for a "with [N] [type] counter(s) on
 /// it" suffix and lift the matched counter type + count into a
 /// `Vec<(CounterType, QuantityExpr)>` slot for `Effect::ChangeZone.enter_with_counters`.
 ///
@@ -10797,43 +10804,118 @@ fn parse_signed_pt_component(text: &str) -> Option<PtValue> {
 ///   * "with a/an <type> counter on it" — singular article.
 ///   * Optional "additional " between count and type — purely a synonym in
 ///     this position; the counter is still added once during the move.
+///   * Two or more of the above conjoined by `" and "` inside a single "with"
+///     ("with a hexproof counter and an indestructible counter on it",
+///     Perennation) — the returned `Vec` carries one entry per conjunct.
 ///
 /// Returns an empty `Vec` when no clause is present, so the caller can stamp
 /// it unconditionally.
 ///
-/// Implemented as a `scan_preceded` over the body combinator — the scanner
-/// advances at word boundaries, so the suffix can appear anywhere after the
-/// destination phrase ("onto the battlefield tapped under your control with
-/// two additional +1/+1 counters on it") without the caller having to
-/// pre-trim. The body combinator gates on `tag("with ")` then dispatches to
-/// `parse_counter_suffix_body`.
+/// Implemented as a `scan_preceded` over [`parse_enter_counters_clause_body`] —
+/// the scanner advances at word boundaries, so the suffix can appear anywhere
+/// after the destination phrase ("onto the battlefield tapped under your control
+/// with two additional +1/+1 counters on it") without the caller having to
+/// pre-trim.
 pub(crate) fn parse_with_counters_suffix(lower: &str) -> Vec<(CounterType, QuantityExpr)> {
     parse_with_counters_suffix_spanned(lower).0
 }
 
-/// Like [`parse_with_counters_suffix`], but also reports the byte offset in
-/// `lower` at which the matched `"with N <type> counter(s) [on it]"` clause
-/// begins (the start of the `"with "` token). Callers that need to excise the
-/// consumed counter clause from a larger remainder — e.g.
-/// `strip_return_destination_ext_with_remainder`, so "return it to the
-/// battlefield tapped and with two stun counters under its owner's control"
-/// does not leave a dangling "and with two stun counters …" clause once the
-/// counters are lifted onto `enter_with_counters` (Unstoppable Slasher) — use
-/// this offset to truncate. Returns `None` for the offset when no counter
-/// clause matched.
+/// Like [`parse_with_counters_suffix`], but also reports the byte range in
+/// `lower` that the matched `"with … counter(s) [on it]"` clause occupies —
+/// `start` at the `"with "` token, `end` one past the last byte the clause
+/// consumed. Returns `None` when no counter clause matched.
+///
+/// CR 122.1: counters are the marker this clause places.
+///
+/// The range is a full span, not a bare start offset, precisely so a caller can
+/// excise ONLY the clause and keep whatever follows it. Counter clauses are
+/// often not clause-final — "…with three +1/+1 counters on it and you become
+/// the monarch" (Heart-Shaped Herb), "…with X +1/+1 counters on it and draw X
+/// cards" (Cosima, God of the Voyage) — so a caller that truncates at `start`
+/// silently discards a printed instruction. Exactly one call site still
+/// truncates at `start` (`split_counterless_enter_counters`, mod.rs) and
+/// documents in place why its tail is empty by construction.
+///
+/// The return-destination path does not use this function at all: it consumes
+/// the counter clause as a leading entry rider via
+/// [`parse_leading_enter_counters_clause`], which keeps its remainder a true
+/// suffix rather than an excised span.
 pub(crate) fn parse_with_counters_suffix_spanned(
     lower: &str,
-) -> (Vec<(CounterType, QuantityExpr)>, Option<usize>) {
-    nom_primitives::scan_preceded(lower, |i| {
-        let (i, _) = tag::<_, _, OracleError<'_>>("with ").parse(i)?;
-        parse_counter_suffix_body_combinator(i)
-    })
-    .map(|(prefix, val, _)| (vec![val], Some(prefix.len())))
-    .unwrap_or((Vec::new(), None))
+) -> (
+    Vec<(CounterType, QuantityExpr)>,
+    Option<std::ops::Range<usize>>,
+) {
+    nom_primitives::scan_preceded(lower, parse_enter_counters_clause_body)
+        .map(|(prefix, counters, rest)| {
+            let span = prefix.len()..lower.len() - rest.len();
+            (counters, Some(span))
+        })
+        .unwrap_or((Vec::new(), None))
 }
 
-/// CR 122.1 + CR 614.1c: Combinator body for "[N|a|an] [additional ]<type>
-/// counter(s) on it". Used by `parse_with_counters_suffix` AND by the exile-
+/// CR 122.6: the body of a `"with …"` rider that gives counters as an object
+/// enters the battlefield —
+/// the `"with "` token followed by ONE OR MORE counter clauses conjoined by
+/// `" and "`. The conjoined form is printed and load-bearing:
+///   * "return target permanent card from your graveyard to the battlefield
+///     with a hexproof counter and an indestructible counter on it"
+///     (Perennation)
+///   * "…return that card to the battlefield under its owner's control with a
+///     vigilance counter and a lifelink counter on it" (Gilraen, Dúnedain
+///     Protector)
+///
+/// Those two are the cards this combinator actually reaches, confirmed against
+/// the CI parse diff. The self-referential "…enters with two +1/+1 counters and
+/// a lifelink counter on it" shape (Dust Animus, Voidpouncer) prints the SAME
+/// conjoined grammar but is parsed at a different seam that calls
+/// `parse_counter_suffix_body_combinator` directly rather than through this
+/// list, so it still lifts only the first conjunct. Routing that seam through
+/// here is the follow-up; do not assume this function already covers it.
+///
+/// `separated_list1` is the right combinator rather than a hand-rolled loop
+/// because nom backtracks the separator when the following element fails, which
+/// is what stops the list from swallowing a non-counter conjunct: on "…counters
+/// on it and you become the monarch" the `" and "` separator matches but
+/// `parse_counter_suffix_body_combinator` rejects "you" at its leading
+/// `parse_number`, so the list ends with the separator unconsumed and the
+/// monarch instruction stays in the remainder. Same for "and draw X cards"
+/// (Cosima) and "and with haste" (Voidpouncer) — every non-counter conjunct is
+/// rejected by the element's mandatory leading count/article.
+fn parse_enter_counters_clause_body(
+    input: &str,
+) -> OracleResult<'_, Vec<(CounterType, QuantityExpr)>> {
+    preceded(
+        tag("with "),
+        separated_list1(tag(" and "), parse_counter_suffix_body_combinator),
+    )
+    .parse(input)
+}
+
+/// CR 122.6: the enter-with-counters rider in LEADING position, tolerating the
+/// same optional `" and"` / `","` connector that [`parse_one_battlefield_rider`]
+/// accepts — the two are sibling entry conditions printed in any order ("to the
+/// battlefield tapped and with two stun counters on it"), so they must agree on
+/// how conjuncts are joined.
+///
+/// Anchoring at the front (rather than scanning, as
+/// [`parse_with_counters_suffix_spanned`] does) is what lets
+/// `strip_return_destination_ext_with_remainder` CONSUME the clause — advancing
+/// its entry offset past it — instead of cutting a span out of the middle of the
+/// remainder. A consumed prefix leaves the remainder a genuine suffix slice, so
+/// any instruction printed after the entry clauses stays reachable.
+fn parse_leading_enter_counters_clause(
+    input: &str,
+) -> OracleResult<'_, Vec<(CounterType, QuantityExpr)>> {
+    preceded(
+        (opt(alt((tag(" and"), tag(",")))), tag(" ")),
+        parse_enter_counters_clause_body,
+    )
+    .parse(input)
+}
+
+/// Combinator body for "[N|a|an] [additional ]<type> counter(s) on it". Used by
+/// `parse_with_counters_suffix` AND by the exile-
 /// anaphor counter clause in `oracle_replacement.rs` so both paths share the
 /// same grammar.
 ///
@@ -10905,11 +10987,17 @@ pub(crate) fn parse_counter_suffix_body_combinator(
     let (rest, _) = tag(" counter").parse(rest)?;
     // Optional plural "s".
     let (rest, _) = nom::combinator::opt(tag::<_, _, OracleError<'_>>("s")).parse(rest)?;
-    // CR 614.1c: "on it" is grammatical filler — present in "return it to the
-    // battlefield with two +1/+1 counters on it" but absent when a controller
-    // clause follows ("return it to the battlefield tapped and with two stun
-    // counters under its owner's control", Unstoppable Slasher). Optional so
-    // both shapes lift the counters onto `enter_with_counters`.
+    // "on it" is grammatical filler with no rules content — BOTH spellings are
+    // printed, so the terminator is `opt` rather than required. Filler PRESENT:
+    // "…with two stun counters on it." (Unstoppable Slasher), "…with a +1/+1
+    // counter on it." Filler ABSENT: "…with a vigilance counter and a lifelink
+    // counter on it." (Gilraen, Dúnedain Protector — the filler closes the
+    // conjoined list, so the non-final element carries none), "…with two +1/+1
+    // counters and a lifelink counter on it." (Dust Animus). This is an
+    // observation about printed wording, not a rule; no CR section governs it,
+    // which is why none is cited here. When a caller gives counters as an object
+    // enters the battlefield, CR 122.6 describes that effect; this shared
+    // grammar does not determine whether its caller is an entry clause.
     let (rest, _) = nom::combinator::opt(tag::<_, _, OracleError<'_>>(" on it")).parse(rest)?;
 
     Ok((
@@ -10923,16 +11011,12 @@ pub(crate) fn parse_counter_suffix_body_combinator(
     ))
 }
 
-/// CR 122.1 + CR 614.1c: "a number of <type> counter(s) on it equal to
-/// <quantity>" — dynamic counter count for "enters with counters" clauses
-/// (e.g. The Eleventh Doctor: "with a number of time counters on it equal to
-/// its mana value") AND for the post-token "create a … token and put[s] a
-/// number of <type> counters on it equal to <quantity>" form (Oversimplify,
-/// Fractal Anomaly class). Delegates the quantity to the shared
-/// `parse_cda_quantity` building block so any "<verb> a number of X
-/// counters … equal to …" card parses composed dynamic quantities
-/// (twice/half/aggregate/difference), not just bare refs. CR 614.1c is the
-/// authorizing rule for "enters with counters" replacement effects.
+/// Parses "a number of <type> counter(s) on it equal to <quantity>" dynamic
+/// counts for entry-counter clauses (e.g. The Eleventh Doctor) and post-token
+/// counter effects (Oversimplify, Fractal Anomaly class). Delegates the quantity
+/// to the shared `parse_cda_quantity` building block so any "<verb> a number of
+/// X counters … equal to …" card parses composed dynamic quantities
+/// (twice/half/aggregate/difference), not just bare refs.
 pub(crate) fn parse_dynamic_counter_suffix_body(
     input: &str,
 ) -> nom::IResult<&str, (CounterType, QuantityExpr), OracleError<'_>> {
@@ -10958,11 +11042,12 @@ pub(crate) fn parse_dynamic_counter_suffix_body(
 mod tests {
     use super::{
         match_create_of_those_tokens, nest_whenever_this_turn_token_cleanup_delayed_trigger,
-        parse_where_x_quantity_expression, patch_choose_from_zone_counter_continuation_target,
-        relink_gated_token_referent_consumers, strip_redundant_flip_win_quantifier,
-        strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
-        strip_trailing_duration, strip_trailing_where_x,
-        value_quantity_clause_owns_this_turn_suffix,
+        parse_enter_counters_clause_body, parse_where_x_quantity_expression,
+        patch_choose_from_zone_counter_continuation_target, relink_gated_token_referent_consumers,
+        strip_redundant_flip_win_quantifier, strip_return_destination_ext_with_remainder,
+        strip_temporal_prefix, strip_temporal_suffix, strip_trailing_duration,
+        strip_trailing_where_x, value_quantity_clause_owns_this_turn_suffix,
+        ControlClausePossessor,
     };
     use crate::parser::oracle_util::TextPair;
     use crate::types::ability::{
@@ -10972,6 +11057,7 @@ mod tests {
         TargetFilter, TriggerDefinition,
     };
     use crate::types::counter::CounterType;
+    use crate::types::keywords::KeywordKind;
     use crate::types::phase::Phase;
     use crate::types::triggers::{PlaneswalkRole, TriggerMode};
     use crate::types::zones::Zone;
@@ -11700,7 +11786,7 @@ mod tests {
         ));
     }
 
-    /// CR 614.1c: dynamic enter-with-counters suffix accepts composed quantities.
+    /// The shared dynamic counter grammar accepts composed quantities.
     #[test]
     fn dynamic_counter_suffix_parses_aggregate_equal_to() {
         use super::parse_dynamic_counter_suffix_body;
@@ -11721,12 +11807,24 @@ mod tests {
         ));
     }
 
-    /// CR 614.1c + issue #1498: "return it to the battlefield tapped and with
-    /// two stun counters under its owner's control" (Unstoppable Slasher) must
-    /// lift the stun counters onto `enter_with_counters` and excise the counter
-    /// clause from the returned remainder so no dangling follow-up clause is
-    /// re-parsed. The `" on it"` filler is absent here (a controller clause
-    /// follows the counters), which the optional terminator now tolerates.
+    /// CR 122.6 (:1208) + CR 110.2a (:618) + issue #1498: a counter clause with
+    /// no `" on it"` filler must lift its counters onto `enter_with_counters`,
+    /// and — the discriminating half — whatever is printed AFTER it must survive
+    /// and reach the normal entry-clause path rather than being truncated away.
+    /// Here the trailing "under its owner's control" must land on
+    /// `dest.control`; under the old start-offset truncation it was discarded
+    /// outright, so `control` came back `None` and this test fails if that
+    /// behavior returns.
+    ///
+    /// SYNTHETIC INPUT — not a printed card. This text was once attributed to
+    /// Unstoppable Slasher; that attribution was fabricated. The real card reads
+    /// "…return it to the battlefield tapped under its owner's control with two
+    /// stun counters on it." (filler present, clause-final). The filler-less
+    /// shape this test pins IS real, but only clause-finally ("…with a vigilance
+    /// counter and a lifelink counter on it", where the non-final element
+    /// carries no filler); the trailing controller clause is an artificial
+    /// stress case for the consumption path, kept because no printed card
+    /// exercises an entry clause after the counters.
     #[test]
     fn return_to_battlefield_lifts_stun_counters_without_on_it_filler() {
         let (target, dest, remainder) = strip_return_destination_ext_with_remainder(
@@ -11740,12 +11838,120 @@ mod tests {
             dest.enter_with_counters,
             vec![(CounterType::Stun, QuantityExpr::Fixed { value: 2 })]
         );
-        // The counter clause (and its leading " and" connector) is excised, so
-        // nothing dangling remains to be re-parsed as a follow-up clause.
+        // DISCRIMINATING: the clause printed after the counters is consumed as
+        // an entry clause, not dropped. Truncating at the counter clause's start
+        // offset (the previous behavior) left this `None`.
+        assert_eq!(
+            dest.control,
+            Some(ControlClausePossessor::Owner),
+            "the control clause printed after the counters must survive, got {:?}",
+            dest.control
+        );
         assert_eq!(
             remainder, "",
-            "the counter clause must be excised from the remainder, got {remainder:?}"
+            "every entry clause is consumed, so nothing dangles, got {remainder:?}"
         );
+    }
+
+    /// CR 725.1 (:6240) + CR 608.2c (:2795) + CR 122.1 (:1178): Heart-Shaped
+    /// Herb. An instruction printed after the counter clause is NOT part of the
+    /// destination and must be handed back as the remainder for normal clause
+    /// processing. This is the unit-level discriminator for the bug the PR
+    /// fixes: the old start-offset truncation returned "" here, so the monarch
+    /// instruction never reached a dispatcher.
+    ///
+    /// The full-sentence form is split upstream by `starts_bare_and_clause`
+    /// (sequence.rs) before this function sees it; this test pins the seam
+    /// itself so the destination parser stops depending on that split for
+    /// correctness.
+    #[test]
+    fn return_to_battlefield_keeps_instruction_printed_after_counters() {
+        let (target, dest, remainder) = strip_return_destination_ext_with_remainder(
+            "that card to the battlefield under its owner's control with three +1/+1 counters on it and you become the monarch",
+        );
+        assert_eq!(target, "that card");
+        let dest = dest.expect("expected a battlefield return destination");
+        assert_eq!(dest.zone, Zone::Battlefield);
+        assert_eq!(dest.control, Some(ControlClausePossessor::Owner));
+        assert_eq!(
+            dest.enter_with_counters,
+            vec![(CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 3 })]
+        );
+        // DISCRIMINATING: `" and you become the monarch"` is not a counter, a
+        // rider or a control clause, so it must come back untouched.
+        assert_eq!(
+            remainder, " and you become the monarch",
+            "the trailing instruction must survive the counter-clause consumption, got {remainder:?}"
+        );
+    }
+
+    /// CR 122.1 (:1178): conjoined counter clauses inside ONE "with …" rider.
+    /// Verbatim Oracle text of Perennation; Gilraen, Dúnedain Protector prints
+    /// the same shape after a control clause. Parsing only the first conjunct
+    /// (the previous behavior) silently dropped the second counter.
+    #[test]
+    fn return_to_battlefield_lifts_conjoined_counter_clauses() {
+        let (_, dest, remainder) = strip_return_destination_ext_with_remainder(
+            "target permanent card from your graveyard to the battlefield with a hexproof counter and an indestructible counter on it",
+        );
+        let dest = dest.expect("expected a battlefield return destination");
+        assert_eq!(
+            dest.enter_with_counters,
+            vec![
+                (
+                    CounterType::Keyword(KeywordKind::Hexproof),
+                    QuantityExpr::Fixed { value: 1 }
+                ),
+                (
+                    CounterType::Keyword(KeywordKind::Indestructible),
+                    QuantityExpr::Fixed { value: 1 }
+                ),
+            ],
+            "both conjuncts of the counter rider must be lifted"
+        );
+        assert_eq!(remainder, "");
+    }
+
+    /// The conjoined-counter list must NOT swallow a non-counter conjunct: nom
+    /// backtracks the `" and "` separator when the element parser rejects the
+    /// text after it, because every element must open with a count or article.
+    /// Pins the boundary against the conjunct shapes printed after a counter
+    /// rider — a subject+predicate ("and you become the monarch",
+    /// Heart-Shaped Herb), an imperative verb ("and draw two cards", the shape
+    /// Cosima, God of the Voyage prints with an X count) and a second `"with"`
+    /// rider ("and with haste", Voidpouncer).
+    ///
+    /// Cosima's literal `"with X +1/+1 counters"` is deliberately NOT used here:
+    /// `parse_counter_suffix_body_combinator` opens on
+    /// `nom_primitives::parse_number`, which accepts digits and English number
+    /// words but not `"x"`, so an X-counted rider never reaches this list at
+    /// all. That is a pre-existing gap in the count axis, unrelated to the
+    /// conjunct boundary this test pins.
+    #[test]
+    fn counter_clause_list_stops_at_non_counter_conjunct() {
+        for (input, expected_rest) in [
+            (
+                "with three +1/+1 counters on it and you become the monarch",
+                " and you become the monarch",
+            ),
+            (
+                "with two +1/+1 counters on it and draw two cards",
+                " and draw two cards",
+            ),
+            // Voidpouncer: a second "with" rider, not a second counter.
+            (
+                "with two +1/+1 counters and a trample counter on it and with haste",
+                " and with haste",
+            ),
+        ] {
+            let (rest, counters) =
+                parse_enter_counters_clause_body(input).expect("counter rider must parse");
+            assert_eq!(rest, expected_rest, "wrong stop point for {input:?}");
+            assert!(
+                !counters.is_empty(),
+                "reach guard: the rider itself must have parsed for {input:?}"
+            );
+        }
     }
 
     fn variable_x() -> QuantityExpr {

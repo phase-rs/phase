@@ -3038,15 +3038,44 @@ fn filter_contains_last_created(filter: &TargetFilter) -> bool {
 /// Whether the object population a `CardTypeSetSource` reads is selected by a
 /// filter satisfying `filter_pred`.
 ///
-/// Exhaustive: the three non-`Objects` sources name a zone, the source's exile
-/// set, or a tracked set, none of which carries a `TargetFilter`.
+/// Exhaustive: the three fixed-vocabulary sources name a zone, the source's
+/// exile set, or a tracked set, none of which carries a `TargetFilter`. The
+/// journal carries an optional narrowing filter, and `AnyOf` recurses.
 fn card_type_set_source_counts_population_matching(
+    source: &crate::types::ability::CardTypeSetSource,
+    filter_pred: &dyn Fn(&TargetFilter) -> bool,
+) -> bool {
+    let mut found = false;
+    let complete =
+        source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
+            if !found {
+                found = card_type_set_leaf_counts_population_matching(leaf, filter_pred);
+            }
+        });
+    // A truncated walk claims the match: an unreported anaphor is the silent
+    // failure this predicate exists to prevent.
+    found || !complete
+}
+
+fn card_type_set_leaf_counts_population_matching(
     source: &crate::types::ability::CardTypeSetSource,
     filter_pred: &dyn Fn(&TargetFilter) -> bool,
 ) -> bool {
     use crate::types::ability::CardTypeSetSource;
     match source {
         CardTypeSetSource::Objects { filter } => filter_pred(filter),
+        // The journal's optional narrowing filter is a population selector like
+        // any other, so an anaphor inside it must be reported. Uncited: this is
+        // an engine claim about where filters live, not a rule. (It cited
+        // CR 601.2a, which describes putting a spell on the stack as it is cast
+        // — the event the journal records, not its narrowing filter.)
+        CardTypeSetSource::TurnJournal { filter, .. } => filter.as_ref().is_some_and(filter_pred),
+        // Unrolled by the bounded walker in the caller, so a union never reaches
+        // this arm. Uncited for the same reason as the union arm in
+        // `ability_rw::characteristic_source_read`: no CR rule defines set union
+        // of populations. (It cited CR 109.2, the battlefield-default rule for a
+        // bare type description.)
+        CardTypeSetSource::AnyOf { .. } => false,
         CardTypeSetSource::Zone { .. }
         | CardTypeSetSource::ExiledBySource
         | CardTypeSetSource::TrackedSet { .. } => false,
@@ -3085,7 +3114,6 @@ fn quantity_ref_counts_population_matching(
         | QuantityRef::CountersOnObjects { filter, .. }
         | QuantityRef::Aggregate { filter, .. }
         | QuantityRef::ControlledByEachPlayer { filter, .. }
-        | QuantityRef::DistinctColorsAmongPermanents { filter }
         | QuantityRef::DistinctCounterKindsAmong { filter }
         | QuantityRef::EnteredThisTurn { filter }
         | QuantityRef::SacrificedThisTurn { filter, .. }
@@ -3112,7 +3140,8 @@ fn quantity_ref_counts_population_matching(
             filter_pred(source) || filter_pred(target)
         }
         QuantityRef::DistinctCardTypes { source }
-        | QuantityRef::DistinctSubtypes { source, .. } => {
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => {
             card_type_set_source_counts_population_matching(source, filter_pred)
         }
         // No `TargetFilter` anywhere: player-scoped totals, per-object scopes,
@@ -5167,7 +5196,14 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
         }
     }
     if let Effect::ChangeZoneAll { target, .. } = effect {
-        if filter_references_tracked_set(target) {
+        // CR 608.2c: a mass zone move can consume the selected set through a
+        // typed property as well as a bare `TrackedSet` leg. In particular,
+        // "exile the rest" uses `Not(InTrackedSet)` inside its typed filter;
+        // the search choice must publish its chosen set before this effect
+        // resolves or that complement would include the chosen cards too.
+        if filter_references_tracked_set(target)
+            || filter_properties_reference_tracked_membership(target)
+        {
             return true;
         }
     }
@@ -12406,19 +12442,36 @@ pub(crate) fn evaluate_condition(
             .is_some_and(|f| f.flipper == ability.controller && f.result == *result),
         // CR 603.12: A reflexive triggered ability ("when you do") triggers
         // "based on whether the trigger event or events occurred earlier during
-        // the resolution" of the parent. For a cost-payment parent
-        // (`Effect::PayCost`), an unpayable or declined cost is NOT a trigger
-        // event occurrence, so the reflexive sub-ability must NOT fire — the
-        // `PayCost` and mandatory-discard handlers signal this via
-        // `cost_payment_failed_flag` (mirrors `IfYouDo` above). An accepted
-        // "you may discard a card" with an empty hand did not discard a card,
-        // so it cannot create the reflexive trigger. Other non-cost parents
-        // (e.g. `BecomeCopy` reflexives) remain unconditional.
+        // the resolution" of the parent. Two independent ways the parent event
+        // can fail to occur, each read through the authority that owns it:
+        //
+        // 1. An OPTIONAL parent whose action was never performed — declined, or
+        //    never offered because it was impossible (CR 608.2d;
+        //    `optional_effect_is_infeasible`, e.g. "you may remove an oil
+        //    counter" with no oil counters). `optional_effect_performed` is the
+        //    engine's single record of "the player took the optional action",
+        //    and it is exactly what the sibling connector `IfYouDo`
+        //    (`EffectOutcome { OptionalEffectPerformed }`, above) reads. The two
+        //    connectors ask the same question about the same parent, so they
+        //    must consult the same authority — "when you do" is not a weaker
+        //    "if you do". A MANDATORY parent carries no such record (the flag
+        //    stays false because no choice was ever offered), so the gate is
+        //    scoped to `ability.optional` and mandatory reflexives
+        //    (`BecomeCopy`, `RollDie`) remain unconditional.
+        // 2. An accepted parent whose payment then failed: unpayable cost, or an
+        //    accepted "you may discard a card" with an empty hand. The `PayCost`
+        //    and mandatory-discard handlers signal this via
+        //    `cost_payment_failed_flag`. This is NOT subsumed by (1) — the
+        //    optional action WAS taken, it is the payment underneath that did
+        //    not happen — so both gates are load-bearing.
         AbilityCondition::WhenYouDo => {
-            !(matches!(
+            let optional_action_not_taken =
+                ability.optional && !ability.context.optional_effect_performed;
+            let payment_failed = matches!(
                 ability.effect,
                 Effect::PayCost { .. } | Effect::Discard { .. } | Effect::DiscardCard { .. }
-            ) && state.cost_payment_failed_flag)
+            ) && state.cost_payment_failed_flag;
+            !optional_action_not_taken && !payment_failed
         }
         // CR 601.2a + CR 707.10: "was cast (from [zone])" — check cast origin.
         // `zone: None` = cast from any origin; a copy or put-into-play object has
@@ -18183,6 +18236,52 @@ mod tests {
         assert!(
             !evaluate_condition(&AbilityCondition::WhenYouDo, &state, &pay_cost_parent),
             "WhenYouDo on a PayCost parent must be suppressed when cost_payment_failed_flag is set"
+        );
+    }
+
+    /// CR 603.12 + CR 608.2d: the reflexive connector "when you do" asks the
+    /// same question about the same parent as its sibling "if you do", so it
+    /// must read the same authority — `optional_effect_performed`. An optional
+    /// parent whose action was declined or never offered (because it was
+    /// impossible: "you may remove an oil counter" with no oil counters,
+    /// Atraxa's Skitterfang) did not produce the trigger event.
+    ///
+    /// The mandatory axis is the discriminator that keeps this from
+    /// over-suppressing: a parent with no "may" carries no performed-record at
+    /// all, so gating on the bare flag would silence every mandatory reflexive
+    /// (`RollDie`, `BecomeCopy`). All three rows below run against the same
+    /// `RemoveCounter` effect so the only thing varying is optionality and the
+    /// record — the effect type cannot be what carries the answer.
+    #[test]
+    fn when_you_do_reads_the_optional_performed_record_not_the_effect_type() {
+        let state = GameState::new_two_player(42);
+        let remove_counter = || Effect::RemoveCounter {
+            counter_type: Some(CounterType::Generic("oil".to_string())),
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        };
+        let parent = |optional: bool, performed: bool| {
+            let mut ability =
+                ResolvedAbility::new(remove_counter(), vec![], ObjectId(100), PlayerId(0));
+            ability.optional = optional;
+            ability.context.optional_effect_performed = performed;
+            ability
+        };
+
+        assert!(
+            !evaluate_condition(&AbilityCondition::WhenYouDo, &state, &parent(true, false)),
+            "an optional parent whose action was never performed produced no \
+             trigger event, so the reflexive must not fire (CR 603.12)"
+        );
+        assert!(
+            evaluate_condition(&AbilityCondition::WhenYouDo, &state, &parent(true, true)),
+            "an optional parent whose action WAS performed must still fire its \
+             reflexive — the gate must not suppress the working card"
+        );
+        assert!(
+            evaluate_condition(&AbilityCondition::WhenYouDo, &state, &parent(false, false)),
+            "a MANDATORY parent carries no performed-record; gating on the bare \
+             flag would silence every mandatory reflexive"
         );
     }
 

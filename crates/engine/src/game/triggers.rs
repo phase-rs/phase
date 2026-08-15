@@ -9116,7 +9116,6 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
         | QuantityRef::CountersOnObjects { filter, .. }
         | QuantityRef::Aggregate { filter, .. }
         | QuantityRef::EnteredThisTurn { filter }
-        | QuantityRef::DistinctColorsAmongPermanents { filter }
         | QuantityRef::DistinctCounterKindsAmong { filter }
         | QuantityRef::ControlledByEachPlayer { filter, .. }
         | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
@@ -9136,10 +9135,15 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
         | QuantityRef::AttackedThisTurn { filter, .. } => {
             filter.as_ref().is_some_and(filter_binding_diverges)
         }
-        // CR 205.2a + CR 205.3: the distinct-type family carries its population
-        // as a `CardTypeSetSource` rather than a bare filter.
+        // CR 205.2a + CR 205.3 + CR 105.1: the distinct-characteristic family
+        // carries its population as a `CardTypeSetSource` rather than a bare
+        // filter. The COLOURS head joins its two siblings here rather than the
+        // bare-filter arm above: it was lifted onto the shared population axis in
+        // this change, so `DistinctColorsAmongPermanents { filter }` no longer
+        // exists to sit alongside `ObjectCount`.
         QuantityRef::DistinctCardTypes { source }
-        | QuantityRef::DistinctSubtypes { source, .. } => {
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => {
             card_type_set_source_binding_diverges(source)
         }
         // CR 601.2h: `AbilityTarget` is a target-slot read that
@@ -9250,15 +9254,36 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
 /// Exhaustive for the same reason: each source names a different population, and
 /// two of them are resolution-scoped.
 fn card_type_set_source_binding_diverges(source: &CardTypeSetSource) -> bool {
-    match source {
-        // CR 400.1: a zone census keyed by `CountScope` (controller / opponents /
-        // all) — the fire-time leg has the controller and reads the same zones.
-        CardTypeSetSource::Zone { .. } => false,
-        CardTypeSetSource::Objects { filter } => filter_binding_diverges(filter),
-        // CR 607.2a + CR 608.2c: the same two resolution-scoped populations
-        // `CardsExiledBySource` / `TrackedSetSize` are declined for.
-        CardTypeSetSource::ExiledBySource | CardTypeSetSource::TrackedSet { .. } => true,
-    }
+    let mut diverges = false;
+    let complete =
+        source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
+            if diverges {
+                return;
+            }
+            diverges = match leaf {
+                // CR 400.1: a zone census keyed by `CountScope` (controller /
+                // opponents / all) — the fire-time leg has the controller and
+                // reads the same zones.
+                CardTypeSetSource::Zone { .. } => false,
+                CardTypeSetSource::Objects { filter } => filter_binding_diverges(filter),
+                // CR 601.2a: the journal's optional narrowing filter is the only
+                // re-scopable part; the journal itself is per-player history that
+                // binds the same on both legs.
+                CardTypeSetSource::TurnJournal { filter, .. } => {
+                    filter.as_ref().is_some_and(filter_binding_diverges)
+                }
+                // CR 607.2a + CR 608.2i: the same two resolution-scoped
+                // populations `CardsExiledBySource` / `TrackedSetSize` are
+                // declined for.
+                CardTypeSetSource::ExiledBySource | CardTypeSetSource::TrackedSet { .. } => true,
+                // Unrolled by the walker; never reaches this arm.
+                CardTypeSetSource::AnyOf { .. } => false,
+            };
+        });
+    // CR 603.4: a truncated walk DECLINES the hoist. Declining costs a delayed
+    // trigger its fire-time shortcut; wrongly allowing it re-scopes a population
+    // against the wrong binding, which is a rules error.
+    diverges || !complete
 }
 
 /// CR 603.4: the filter half of [`quantity_ref_binding_diverges`]. Recurses
@@ -12252,6 +12277,37 @@ fn quantity_expr_refs_cost_paid_object(expr: &QuantityExpr) -> bool {
     }
 }
 
+/// Does a [`CardTypeSetSource`] population route a filter that references the
+/// cost-paid object? Only the object filter and the journal's optional
+/// narrowing filter can; `AnyOf` recurses so a union member's reference is not
+/// dropped.
+///
+/// Uncited: a structural query over which arms hold a `TargetFilter`, not a rule
+/// implementation. (It cited CR 109.2, the battlefield-default rule for a bare
+/// type description, which does not speak to filter routing.)
+fn characteristic_source_references_cost_paid_object(source: &CardTypeSetSource) -> bool {
+    let mut found = false;
+    let complete =
+        source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
+            if found {
+                return;
+            }
+            found = match leaf {
+                CardTypeSetSource::Objects { filter } => filter.references_cost_paid_object(),
+                CardTypeSetSource::TurnJournal { filter, .. } => filter
+                    .as_ref()
+                    .is_some_and(TargetFilter::references_cost_paid_object),
+                CardTypeSetSource::Zone { .. }
+                | CardTypeSetSource::ExiledBySource
+                | CardTypeSetSource::TrackedSet { .. }
+                | CardTypeSetSource::AnyOf { .. } => false,
+            };
+        });
+    // A truncated walk claims the reference: this gate exists to stop a
+    // cost-paid-object read from escaping, so exhaustion must not let one past.
+    found || !complete
+}
+
 /// CR 400.7d + CR 608.2k: True when this `QuantityRef` reads the cost-paid
 /// object, by either of the two structural axes a ref can carry it on:
 ///
@@ -12292,7 +12348,6 @@ fn quantity_ref_refs_cost_paid_object(qty: &QuantityRef) -> bool {
         | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
         | QuantityRef::CounterAddedThisTurn { target: filter, .. }
         | QuantityRef::TokensCreatedThisTurn { filter, .. }
-        | QuantityRef::DistinctColorsAmongPermanents { filter }
         | QuantityRef::DistinctCounterKindsAmong { filter } => filter.references_cost_paid_object(),
 
         // Filter-bearing refs (boxed `TargetFilter`): recurse (auto-deref).
@@ -12315,21 +12370,13 @@ fn quantity_ref_refs_cost_paid_object(qty: &QuantityRef) -> bool {
             source.references_cost_paid_object() || target.references_cost_paid_object()
         }
 
-        // Card-type counting embeds a `TargetFilter` through its source enum.
-        QuantityRef::DistinctCardTypes { source } => match source {
-            CardTypeSetSource::Objects { filter } => filter.references_cost_paid_object(),
-            CardTypeSetSource::Zone { .. }
-            | CardTypeSetSource::ExiledBySource
-            | CardTypeSetSource::TrackedSet { .. } => false,
-        },
-
-        // Subtype counting embeds a `TargetFilter` through its source enum too.
-        QuantityRef::DistinctSubtypes { source, .. } => match source {
-            CardTypeSetSource::Objects { filter } => filter.references_cost_paid_object(),
-            CardTypeSetSource::Zone { .. }
-            | CardTypeSetSource::ExiledBySource
-            | CardTypeSetSource::TrackedSet { .. } => false,
-        },
+        // Card-type / subtype / colour counting all embed their `TargetFilter`s
+        // through the shared population enum.
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => {
+            characteristic_source_references_cost_paid_object(source)
+        }
 
         // Mana-spent metering embeds a `TargetFilter` through its metric enum.
         QuantityRef::ManaSpentToCast { metric, .. } => match metric {
@@ -18272,6 +18319,92 @@ pub mod tests {
             !quantity_ref_refs_cost_paid_object(&counters_on_objects(TargetFilter::Controller)),
             "a filter with no CostPaidObject reference must not be detected"
         );
+    }
+
+    /// The shared characteristic-source branch, which the three distinct-count
+    /// heads all route through. Sibling to the two tests above, which cover the
+    /// per-`QuantityRef` arms but never reach this population axis.
+    ///
+    /// Each filter-BEARING arm is exercised, plus the recursion and the
+    /// fixed-vocabulary arms that must stay false — a gate that answered `true`
+    /// for everything would pass a positive-only test.
+    #[test]
+    fn cost_paid_object_gate_covers_every_characteristic_source_arm() {
+        use crate::types::ability::{CardTypeSetSource, CountScope, TurnJournalKind, ZoneRef};
+
+        let objects = |filter| CardTypeSetSource::Objects { filter };
+        let journal = |filter| CardTypeSetSource::TurnJournal {
+            journal: TurnJournalKind::SpellsCast,
+            scope: CountScope::Controller,
+            filter,
+        };
+
+        // Every head shares one population axis, so detection must not depend on
+        // which characteristic is being counted.
+        for qty in [
+            QuantityRef::DistinctColorsAmong {
+                source: objects(TargetFilter::CostPaidObject),
+            },
+            QuantityRef::DistinctCardTypes {
+                source: objects(TargetFilter::CostPaidObject),
+            },
+        ] {
+            assert!(
+                quantity_ref_refs_cost_paid_object(&qty),
+                "an Objects population over the cost-paid object must be detected: {qty:?}"
+            );
+        }
+
+        // The journal's optional narrowing filter is the second filter-bearing
+        // arm, and `None` there must not be mistaken for a reference.
+        assert!(
+            quantity_ref_refs_cost_paid_object(&QuantityRef::DistinctCardTypes {
+                source: journal(Some(TargetFilter::CostPaidObject)),
+            }),
+            "a cost-paid-object reference in the journal's narrowing filter must be detected"
+        );
+        assert!(
+            !quantity_ref_refs_cost_paid_object(&QuantityRef::DistinctCardTypes {
+                source: journal(None),
+            }),
+            "an unfiltered journal references nothing"
+        );
+
+        // `AnyOf` recursion: a reference in ANY member is a reference, including
+        // one nested a union deep, and a union of clean members stays false.
+        let clean = CardTypeSetSource::Zone {
+            zone: ZoneRef::Graveyard,
+            scope: CountScope::Controller,
+        };
+        let nested = CardTypeSetSource::any_of(vec![
+            clean.clone(),
+            CardTypeSetSource::any_of(vec![
+                CardTypeSetSource::ExiledBySource,
+                objects(TargetFilter::CostPaidObject),
+            ])
+            .expect("two-member union"),
+        ])
+        .expect("two-member union");
+        assert!(
+            quantity_ref_refs_cost_paid_object(&QuantityRef::DistinctSubtypes {
+                source: nested,
+                exclude: Default::default(),
+            }),
+            "a reference nested inside a union of unions must be detected"
+        );
+
+        // Fixed-vocabulary arms carry no filter and must stay false — this is
+        // what stops the gate from degenerating into "always true".
+        for source in [
+            clean,
+            CardTypeSetSource::ExiledBySource,
+            CardTypeSetSource::TrackedSet { caused_by: None },
+        ] {
+            assert!(
+                !characteristic_source_references_cost_paid_object(&source),
+                "a fixed-vocabulary population routes no filter: {source:?}"
+            );
+        }
     }
 
     /// CR 400.7d end-to-end: `build_triggered_ability` propagates the emerge

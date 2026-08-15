@@ -18423,6 +18423,87 @@ mod stage2_injector_tests {
                 // added to `compute_options`' sibling classifier in this file,
                 // which sits above all three producers. Nothing added raises a
                 // `WaitingFor`; the census set is still exactly 5.
+                //
+                // MERGE OF `origin/main` (`59f5a51e`) INTO THIS BRANCH (First Family's
+                // characteristic-set union). This array conflicted, and the header's rule
+                // applied a third time: `origin/main` carried `:6656/:6733/:9974` and this
+                // branch carried `:6648/:6725/:9947`, each correct for its own tree and
+                // neither correct for the merge. NEITHER SIDE WAS TAKEN — the merged file
+                // was re-measured: `:6656/:6733/:9974 => :6664/:6741/:9982`, a uniform
+                // `+8` over main's coordinates.
+                //
+                // The `+8` is exactly this branch's net insertion into effects/mod.rs, and
+                // all of it sits above the FIRST producer, which is why the shift is
+                // uniform rather than staggered. `git diff -U0 origin/main` on that file
+                // has exactly four hunks, ALL between `:2966` and `:3047`:
+                //   `filter_contains_last_created`'s characteristic-source arm (+1),
+                //   `card_type_set_source_counts_population_matching`'s zone/tracked-set/
+                //     union population cases (+7),
+                //   the `quantity_ref_counts_population_matching` arm the union folds
+                //     into the shared helper (-1), and
+                //   its replacement delegation (+1).
+                // 1 + 7 - 1 + 1 = 8, with nothing below `:3047` — predicted and observed
+                // agree. None of the four raises a prompt: they are population COUNTS
+                // (pure reads over zones, tracked sets and unions), so the census set is
+                // still exactly 5.
+                //
+                // Identity re-established at the new coordinates rather than assumed. Each
+                // producer line is byte-identical by sha256 to the same producer on BOTH
+                // parents — `9869a19f…`, `2bc316e3…` and `8df98486…` respectively, the
+                // same three digests the line carries at `:6656/:6733/:9974` on main and
+                // at `:6648/:6725/:9947` on this branch. The two asserts above this one
+                // fired GREEN on the merged tree — total still 38, partition still 5/8/25
+                // — and the other two entries did not move (`scoped_library_search.rs:452`
+                // unmoved, `engine.rs:12773` unmoved, both re-read and sha256-confirmed in
+                // place). A merge that had gained or lost a producer could not leave two
+                // entries byte-identical AND at their coordinates while moving the other
+                // three by a figure the diff predicts exactly.
+                //
+                // CR-CITATION ROUND (review follow-up), LOCAL not upstream — so the
+                // CI-vs-local diagnosis in the header does not apply, the shift
+                // originates in this same diff. `:6664/:6741/:9982 => :6670/:6747/:9988`,
+                // a uniform `+6`.
+                //
+                // A COMMENT-ONLY round, and the census caught it, which is the row
+                // working exactly as designed rather than a defect in the row.
+                // effects/mod.rs's entire delta is two comment hunks in
+                // `card_type_set_source_counts_population_matching`, both ABOVE all three
+                // producers: `@@ -2976,2 +2976,5 @@` (+3, the `TurnJournal` arm's
+                // citation corrected off CR 601.2a) and `@@ -2979 +2982,4 @@` (+3, the
+                // `AnyOf` arm's off CR 109.2). 3 + 3 = 6, with nothing below `:2985` —
+                // predicted and observed agree. Prose cannot mint a prompt, and the
+                // census agrees: the two asserts above this one fired GREEN on the run
+                // that caught this (total still 38, partition still 5/8/25) and the
+                // panic was on this third assert alone, which is what makes it a
+                // coordinate shift rather than a set change.
+                //
+                // Identity re-established rather than assumed: the three producer lines
+                // are byte-identical by sha256 at their new coordinates to the same
+                // producers at `:6664/:6741/:9982` — `9869a19f…`, `2bc316e3…`,
+                // `8df98486…`, the same digests this log recorded one entry above. The
+                // other two entries did not move (`scoped_library_search.rs:452` and
+                // `engine.rs:12773`, both re-read and sha256-confirmed in place); this
+                // round does not touch either file's producer region at all.
+                //
+                // BOUNDED-UNION-WALKER ROUND (review follow-up), LOCAL not upstream.
+                // `:6670/:6747/:9988 => :6685/:6762/:10003`, a uniform `+15`.
+                //
+                // effects/mod.rs's whole delta is the split of
+                // `card_type_set_source_counts_population_matching` into a bounded
+                // walker plus a leaf classifier, both ABOVE all three producers:
+                // `@@ -2971,0 +2972,16 @@` (+16, the walker and its truncation
+                // contract) and `@@ -2982,7 +2998,6 @@` (-1, the `AnyOf` recursion arm
+                // collapsing to a no-op now that unions are unrolled before the
+                // classifier sees them). 16 - 1 = 15, with nothing below `:3004` —
+                // predicted and observed agree.
+                //
+                // The split moves a recursion; it mints nothing. The census agrees: the
+                // two asserts above this one fired GREEN (total still 38, partition
+                // still 5/8/25) and the panic was on this third assert alone. Identity
+                // re-established rather than assumed — `9869a19f…`, `2bc316e3…`,
+                // `8df98486…` at the new coordinates, the same digests recorded one
+                // entry above — and the other two entries did not move.
+                //
                 // THIRD merge with main (this branch × `origin/main` @ 59f5a51e, which
                 // by now carries Wheel of Misfortune's unbounded-number round). Same rule
                 // as the two merges logged above, applied a third time: each side's pins
@@ -18450,9 +18531,78 @@ mod stage2_injector_tests {
                 // contribution here is the unbounded-range arm in `compute_options`' sibling
                 // classifier and this branch's is the CR 603.4 delayed-hoist carve-out, both
                 // pure classification code.
-                "game/effects/mod.rs:6738".to_string(),
-                "game/effects/mod.rs:6815".to_string(),
-                "game/effects/mod.rs:10053".to_string(),
+                //
+                // FOURTH MERGE (this branch × `origin/main` @ `2ae92459`). The header's
+                // rule applies again and for the same reason: `origin/main` carried
+                // `:6738/:6815/:10053` and this branch carried `:6685/:6762/:10003`, each
+                // correct for its own tree and NEITHER correct for the merge. Neither side
+                // was taken — the merged file was re-measured to
+                // `:6767/:6844/:10082`, a uniform `+29` over main's coordinates.
+                //
+                // The `+29` is this branch's CUMULATIVE net insertion into
+                // effects/mod.rs relative to main, not any single round's:
+                // `git diff --numstat origin/main` on that file reads `33 4` = `+29`, and
+                // its five hunks all sit between `:3041` and `:3144`, above the first
+                // producer with nothing below. It is the sum of the three rounds this log
+                // records — `+8` (union population), `+6` (CR citations), `+15` (bounded
+                // walker) — which is exactly why the per-round figure is the WRONG one to
+                // compose here.
+                //
+                // Recorded because the first attempt at this entry got it wrong: it
+                // composed only the last round's `+15` onto main and predicted
+                // `:6753/:6830/:10068`, which the measurement contradicted. The pins below
+                // come from measuring the merged tree, and the arithmetic is reconciled
+                // to that measurement rather than the other way round. A prediction is
+                // evidence only when it is made against the cumulative offset.
+                //
+                // Identity re-established rather than assumed — `9869a19f…`, `2bc316e3…`,
+                // `8df98486…` at the new coordinates, the same three digests this log has
+                // carried since the first merge — and the other two entries did not move:
+                // `scoped_library_search.rs:452`, and `engine.rs:12796`, which is main's
+                // own coordinate for that producer (this branch's engine.rs edits are all
+                // in the census array far below it).
+                //
+                // NOTE on the prose above from main: that entry's "total still 37,
+                // partition still 5/7/25" describes an older census. The asserts in this
+                // file read 38 and 5/8/25, and both fired GREEN on the merged tree.
+                //
+                // FIFTH MERGE (this branch × `origin/main` @ `0f37d27b`, Doomsday).
+                // Main's own entry for this round, preserved: "#7403/#7389 move main's
+                // three production pins to `:6738/:6815/:10053`; the Doomsday tracked-set
+                // publication adds seven lines above each. Re-measured in this merged
+                // tree: `:6745/:6822/:10060`. The three sites remain the existing
+                // producers." That is main's coordinate, correct for main.
+                //
+                // Neither side taken, again. Main carried `:6745/:6822/:10060` and this
+                // branch carried `:6767/:6844/:10082`; the merged file measures
+                // `:6774/:6851/:10089`.
+                //
+                // Predicted with the CUMULATIVE offset, which is the lesson the previous
+                // entry records: main's `:6745` plus this branch's `+29` net insertion
+                // into effects/mod.rs gives `6745+29`/`6822+29`/`10060+29` =
+                // `:6774`/`:6851`/`:10089`, equal to the measurement. Main's `+7`
+                // (Doomsday) and this branch's `+29` compose additively, which is the
+                // set-preservation evidence: a merge that gained or lost a producer would
+                // break the additivity rather than merely shift a pin.
+                //
+                // Identity re-established: `9869a19f…`, `2bc316e3…`, `8df98486…` at the
+                // new coordinates. The other two entries did not move.
+                //
+                // CONVERGENT RE-MEASUREMENT, and the strongest evidence in this log. The
+                // maintainer merged the same upstream commit into this branch
+                // independently and in parallel, and recorded it thus: "#7404's Doomsday
+                // tracked-set publication and this branch's characteristic-source work
+                // both shift the producer coordinates. Re-measured in this merged tree:
+                // `:6774/:6851/:10089`. The three sites remain the existing producers."
+                //
+                // Two independent measurements of the same merged tree, agreeing to the
+                // line on all three coordinates. That is what a coordinate this log can
+                // trust looks like — and it is why the two prose entries are BOTH kept
+                // rather than one overwriting the other: they are separate witnesses, not
+                // duplicates.
+                "game/effects/mod.rs:6774".to_string(),
+                "game/effects/mod.rs:6851".to_string(),
+                "game/effects/mod.rs:10089".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
