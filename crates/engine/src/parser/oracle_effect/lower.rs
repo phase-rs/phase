@@ -10794,7 +10794,7 @@ fn parse_signed_pt_component(text: &str) -> Option<PtValue> {
     Some(PtValue::Fixed(sign * value))
 }
 
-/// CR 122.1 + CR 614.1c: Scan a remainder for a "with [N] [type] counter(s) on
+/// CR 122.6: Scan a remainder for a "with [N] [type] counter(s) on
 /// it" suffix and lift the matched counter type + count into a
 /// `Vec<(CounterType, QuantityExpr)>` slot for `Effect::ChangeZone.enter_with_counters`.
 ///
@@ -11811,7 +11811,7 @@ mod tests {
         ));
     }
 
-    /// CR 614.1c (:3062) + CR 110.2a (:618) + issue #1498: a counter clause with
+    /// CR 122.6 (:1208) + CR 110.2a (:618) + issue #1498: a counter clause with
     /// no `" on it"` filler must lift its counters onto `enter_with_counters`,
     /// and — the discriminating half — whatever is printed AFTER it must survive
     /// and reach the normal entry-clause path rather than being truncated away.
