@@ -7,7 +7,7 @@ use crate::types::ability::{
     ModalSelectionCondition, ObjectScope, PlayerFilter, PlayerScope, ProhibitedActivity,
     QuantityExpr, QuantityRef, ResolvedAbility, RestrictionExpiry, RestrictionPlayerScope,
     StaticCondition, StaticDefinition, SubAbilityLink, TapCreaturesRequirement, TargetFilter,
-    TargetRef,
+    TargetRef, TypedFilter,
 };
 use crate::types::actions::{AlternativeCastDecision, GameAction};
 use crate::types::card::LayoutKind;
@@ -21,7 +21,7 @@ use crate::types::game_state::{
     TargetSelectionSlot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
-use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
+use crate::types::keywords::{EmergeCost, FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::{
     ActivationManaColorConstraint, ManaColor, ManaCost, ManaCostShard, ManaSourceOutput,
     ManaSourceSelection, ManaSpellGrant, ManaType, PaymentContext, SpecialAction, SpellMeta,
@@ -2545,6 +2545,22 @@ pub(crate) fn effective_spell_keywords(
     object_id: ObjectId,
 ) -> Vec<Keyword> {
     effective_spell_keywords_for(state, caster, object_id, false)
+}
+
+/// CR 702.119a-b: The active Emerge keyword supplies the permanent quality for
+/// its required sacrifice cost.
+fn effective_emerge_sacrifice_filter(
+    state: &GameState,
+    caster: PlayerId,
+    object_id: ObjectId,
+) -> Option<TargetFilter> {
+    effective_spell_keywords(state, caster, object_id)
+        .into_iter()
+        .find_map(|keyword| match keyword {
+            Keyword::Emerge(_) => Some(TargetFilter::Typed(TypedFilter::creature())),
+            Keyword::EmergeFromQuality(cost) => Some(cost.sacrifice_filter),
+            _ => None,
+        })
 }
 
 /// Fuse-aware sibling of [`effective_spell_keywords`]. `fused` projects a
@@ -5734,13 +5750,19 @@ fn casting_variant_candidates(
         candidates.push(CastingVariant::Overload);
     }
 
-    // CR 702.119a-c + CR 118.9: Emerge is a hand-zone alternative cost that
-    // requires sacrificing a creature and reducing the emerge cost by that
-    // creature's mana value.
+    // CR 702.119a-b + CR 118.9: Emerge is a hand-zone alternative cost that
+    // requires sacrificing its printed permanent quality and reducing the
+    // emerge cost by that permanent's mana value.
     if obj.zone == Zone::Hand
         && effective_spell_keywords(state, player, object_id)
             .iter()
-            .any(|k| matches!(k, crate::types::keywords::Keyword::Emerge(_)))
+            .any(|k| {
+                matches!(
+                    k,
+                    crate::types::keywords::Keyword::Emerge(_)
+                        | crate::types::keywords::Keyword::EmergeFromQuality(_)
+                )
+            })
     {
         candidates.push(CastingVariant::Emerge);
     }
@@ -6547,6 +6569,9 @@ fn prepare_spell_cast_with_variant_override_inner(
             .iter()
             .find_map(|k| match k {
                 crate::types::keywords::Keyword::Emerge(cost) => Some(cost.clone()),
+                crate::types::keywords::Keyword::EmergeFromQuality(cost) => {
+                    Some(cost.mana_cost.clone())
+                }
                 _ => None,
             })
     } else {
@@ -11549,26 +11574,38 @@ pub fn handle_cast_spell_with_payment_mode(
         }
     }
 
-    // CR 702.119a-c: Emerge — when a hand card has Keyword::Emerge and both
+    // CR 702.119a-b: Emerge — when a hand card has Keyword::Emerge and both
     // costs are affordable, present a choice. Emerge affordability includes a
-    // legal creature sacrifice and the reduced emerge cost after that
-    // sacrificed creature's mana value is subtracted.
+    // legal printed-quality sacrifice and the reduced emerge cost after that
+    // permanent's mana value is subtracted.
     if let Some(obj) = state.objects.get(&object_id) {
         if obj.zone == Zone::Hand {
             if let Some(emerge_cost) = effective_spell_keywords(state, player, object_id)
                 .into_iter()
                 .find_map(|k| match k {
-                    crate::types::keywords::Keyword::Emerge(cost) => Some(cost),
+                    crate::types::keywords::Keyword::Emerge(cost) => {
+                        Some(EmergeCost::creature(cost))
+                    }
+                    crate::types::keywords::Keyword::EmergeFromQuality(cost) => Some(cost),
                     _ => None,
                 })
             {
                 let (normal_cost, normal_affordable) =
                     normal_cast_choice_cost_and_affordability(state, player, object_id, obj);
-                let emerge_cost_eff =
-                    apply_cost_modifiers_to_base(state, player, object_id, emerge_cost.clone())
-                        .unwrap_or_else(|| emerge_cost.clone());
-                let emerge_affordable =
-                    casting_costs::can_pay_emerge_cost(state, player, object_id, &emerge_cost_eff);
+                let emerge_cost_eff = apply_cost_modifiers_to_base(
+                    state,
+                    player,
+                    object_id,
+                    emerge_cost.mana_cost.clone(),
+                )
+                .unwrap_or_else(|| emerge_cost.mana_cost.clone());
+                let emerge_affordable = casting_costs::can_pay_emerge_cost(
+                    state,
+                    player,
+                    object_id,
+                    &emerge_cost_eff,
+                    &emerge_cost.sacrifice_filter,
+                );
                 if normal_affordable && emerge_affordable {
                     return Ok(WaitingFor::AlternativeCastChoice {
                         player,
@@ -11578,7 +11615,9 @@ pub fn handle_cast_spell_with_payment_mode(
                         keyword: crate::types::game_state::AlternativeCastKeyword::Emerge,
                         normal_cost,
                         alternative_cost: Some(emerge_cost_eff),
-                        alternative_additional_cost: Some(casting_costs::emerge_sacrifice_cost()),
+                        alternative_additional_cost: Some(casting_costs::emerge_sacrifice_cost(
+                            emerge_cost.sacrifice_filter,
+                        )),
                     });
                 }
                 if !normal_affordable && emerge_affordable {
@@ -12843,11 +12882,13 @@ fn continue_with_prepared(
         ));
     }
 
-    // CR 702.119a-c + CR 601.2b/h: Emerge requires choosing which creature to
-    // sacrifice as the player chooses to pay the emerge cost, then sacrificing
-    // it as that cost is paid. Route this before any target selection so the
-    // required sacrifice is declared on the CR 601.2b axis.
+    // CR 702.119a-c + CR 601.2b/h: Emerge requires choosing the matching
+    // permanent to sacrifice as the player chooses to pay the emerge cost,
+    // then sacrificing it as that cost is paid. Route this before any target
+    // selection so the required sacrifice is declared on the CR 601.2b axis.
     if prepared.casting_variant == CastingVariant::Emerge {
+        let sacrifice_filter = effective_emerge_sacrifice_filter(state, player, prepared.object_id)
+            .expect("Emerge casting variant requires an effective Emerge keyword");
         return casting_costs::begin_required_cost_before_targets(
             state,
             player,
@@ -12856,7 +12897,7 @@ fn continue_with_prepared(
             resolved,
             prepared.mana_cost,
             Some(prepared.base_mana_cost.clone()),
-            casting_costs::emerge_sacrifice_cost(),
+            casting_costs::emerge_sacrifice_cost(sacrifice_filter),
             SpellCostSource::Emerge,
             prepared.casting_variant,
             prepared.casting_permission_index,
@@ -13358,6 +13399,8 @@ fn continue_with_no_ability(
         player,
     );
     if prepared.casting_variant == CastingVariant::Emerge {
+        let sacrifice_filter = effective_emerge_sacrifice_filter(state, player, prepared.object_id)
+            .expect("Emerge casting variant requires an effective Emerge keyword");
         return casting_costs::begin_required_cost_before_targets(
             state,
             player,
@@ -13366,7 +13409,7 @@ fn continue_with_no_ability(
             placeholder,
             prepared.mana_cost,
             Some(prepared.base_mana_cost.clone()),
-            casting_costs::emerge_sacrifice_cost(),
+            casting_costs::emerge_sacrifice_cost(sacrifice_filter),
             SpellCostSource::Emerge,
             prepared.casting_variant,
             prepared.casting_permission_index,
@@ -14239,16 +14282,22 @@ fn can_cast_prepared_now_with_probe(
         return false;
     }
 
-    // CR 702.119a-c: Emerge affordability is the reduced emerge cost after
-    // sacrificing a legal creature, not the unreduced `prepared.mana_cost`.
+    // CR 702.119a-b: Emerge affordability is the reduced emerge cost after
+    // sacrificing a legal matching permanent, not the unreduced
+    // `prepared.mana_cost`.
     if prepared.casting_variant == CastingVariant::Emerge {
         return (prepared.modal.is_some()
             || spell_has_legal_targets_with_probe(state, obj.id, player, probe))
-            && casting_costs::can_pay_emerge_cost(
-                state,
-                player,
-                prepared.object_id,
-                &prepared.mana_cost,
+            && effective_emerge_sacrifice_filter(state, player, prepared.object_id).is_some_and(
+                |sacrifice_filter| {
+                    casting_costs::can_pay_emerge_cost(
+                        state,
+                        player,
+                        prepared.object_id,
+                        &prepared.mana_cost,
+                        &sacrifice_filter,
+                    )
+                },
             );
     }
 

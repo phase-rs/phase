@@ -1877,7 +1877,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Corruption of Towashi
 - Cosmic Horror
 - Covenant of Minds
-- Crabomination
 - Crosis, the Purger
 - Cry of the Carnarium
 - Cunning Nightbonder

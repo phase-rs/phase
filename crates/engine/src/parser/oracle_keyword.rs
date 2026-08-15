@@ -21,7 +21,7 @@ use crate::types::ability::{
 };
 use crate::types::keywords::{
     normalize_bands_with_other_quality, BloodthirstValue, BuybackCost, CyclingCost, DisguiseCost,
-    EmbalmCost, EscapeCost, EternalizeCost, FlashbackCost, Keyword, WardCost,
+    EmbalmCost, EmergeCost, EscapeCost, EternalizeCost, FlashbackCost, Keyword, WardCost,
 };
 use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::zones::Zone;
@@ -1424,6 +1424,19 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
         return Some(result);
     }
 
+    // CR 702.119b: "Emerge from artifact {cost}" changes the required
+    // sacrifice permanent from Emerge's default creature to an artifact.
+    if let Ok((cost_text, _)) = tag::<_, _, OracleError<'_>>("emerge from artifact ").parse(text) {
+        let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_text);
+        return Some((
+            Keyword::EmergeFromQuality(EmergeCost::from_quality(
+                cost,
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+            )),
+            "",
+        ));
+    }
+
     if let Some(kw) = parse_firebending_keyword_line(text) {
         return Some((kw, ""));
     }
@@ -2534,7 +2547,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Madness(_) => "madness".to_string(),
         Keyword::Miracle(_) => "miracle".to_string(),
         Keyword::Dash(_) => "dash".to_string(),
-        Keyword::Emerge(_) => "emerge".to_string(),
+        Keyword::Emerge(_) | Keyword::EmergeFromQuality(_) => "emerge".to_string(),
         Keyword::Escape(_) => "escape".to_string(),
         Keyword::Harmonize(_) => "harmonize".to_string(),
         Keyword::Mayhem(_) => "mayhem".to_string(),
@@ -2884,6 +2897,29 @@ mod tests {
     use crate::types::ability::{AbilityCost, SacrificeCost};
     use crate::types::mana::ManaCost;
     use crate::types::player::PlayerCounterKind;
+
+    #[test]
+    fn parse_keyword_line_core_emerge_from_artifact_preserves_quality() {
+        let (keyword, remainder) = parse_keyword_line_core("emerge from artifact {5}{b}{b}")
+            .expect("artifact-qualified Emerge must parse");
+        assert!(remainder.is_empty());
+        match keyword {
+            Keyword::EmergeFromQuality(EmergeCost {
+                mana_cost,
+                sacrifice_filter: TargetFilter::Typed(filter),
+            }) => {
+                assert_eq!(
+                    mana_cost,
+                    ManaCost::Cost {
+                        shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+                        generic: 5,
+                    }
+                );
+                assert_eq!(filter.type_filters, vec![TypeFilter::Artifact]);
+            }
+            other => panic!("expected artifact-qualified Emerge, got {other:?}"),
+        }
+    }
 
     #[test]
     fn ward_get_poison_counters_parses_as_player_counter_cost() {

@@ -116,6 +116,37 @@ pub enum BestowCost {
     NonMana(AbilityCost),
 }
 
+/// CR 702.119a-b: Emerge's mana cost and the permanent quality required for
+/// its sacrifice cost. Ordinary emerge sacrifices a creature; "emerge from
+/// [quality]" uses the printed permanent filter instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmergeCost {
+    pub mana_cost: ManaCost,
+    pub sacrifice_filter: TargetFilter,
+}
+
+impl EmergeCost {
+    pub fn creature(mana_cost: ManaCost) -> Self {
+        Self {
+            mana_cost,
+            sacrifice_filter: TargetFilter::Typed(TypedFilter::creature()),
+        }
+    }
+
+    pub fn from_quality(mana_cost: ManaCost, sacrifice_filter: TargetFilter) -> Self {
+        Self {
+            mana_cost,
+            sacrifice_filter,
+        }
+    }
+}
+
+impl Default for EmergeCost {
+    fn default() -> Self {
+        Self::creature(ManaCost::default())
+    }
+}
+
 /// CR 702.138a + CR 118.9 + CR 601.2f-h: Escape cost — an alternative cost paid
 /// to cast a card from the graveyard (CR 702.138a). Almost always a compound
 /// cost: a mana sub-cost plus "Exile N other cards from your graveyard". A few
@@ -756,9 +787,12 @@ pub enum Keyword {
     /// `CastingVariant::Miracle` with the miracle mana cost.
     Miracle(ManaCost),
     Dash(ManaCost),
-    /// CR 702.119a-c: Emerge is an alternative cost paid by sacrificing a
+    /// CR 702.119a: Emerge is an alternative cost paid by sacrificing a
     /// creature and reducing the emerge cost by that creature's mana value.
     Emerge(ManaCost),
+    /// CR 702.119b: "Emerge from [quality]" uses the printed permanent
+    /// quality instead of ordinary Emerge's creature requirement.
+    EmergeFromQuality(EmergeCost),
     /// CR 702.138a: Escape — cast from graveyard for an alternative cost. The
     /// compound escape cost (mana sub-cost plus one or more exile sub-costs) is
     /// modeled by `EscapeCost` and split at runtime by
@@ -1319,6 +1353,7 @@ impl Keyword {
             | Keyword::Miracle(_)
             | Keyword::Dash(_)
             | Keyword::Emerge(_)
+            | Keyword::EmergeFromQuality(_)
             | Keyword::Escape(_)
             | Keyword::Harmonize(_)
             | Keyword::Evoke(_)
@@ -1596,6 +1631,7 @@ impl Keyword {
             | Keyword::DoubleTeam
             | Keyword::Echo(_)
             | Keyword::Emerge(_)
+            | Keyword::EmergeFromQuality(_)
             | Keyword::Encore(_)
             | Keyword::Enlist
             | Keyword::Entwine(_)
@@ -1684,6 +1720,7 @@ impl Keyword {
                 | Keyword::Cipher
                 | Keyword::Evoke(_)
                 | Keyword::Emerge(_)
+                | Keyword::EmergeFromQuality(_)
                 | Keyword::Bestow(_)
                 | Keyword::Madness(_)
                 | Keyword::Suspend { .. }
@@ -3232,6 +3269,9 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Miracle" => Ok(Keyword::Miracle(mana(data)?)),
         "Dash" => Ok(Keyword::Dash(mana(data)?)),
         "Emerge" => Ok(Keyword::Emerge(mana(data)?)),
+        "EmergeFromQuality" => serde_json::from_value(data.clone())
+            .map(Keyword::EmergeFromQuality)
+            .map_err(|error| format!("EmergeFromQuality: {error}")),
         "Harmonize" => Ok(Keyword::Harmonize(mana(data)?)),
         // CR 702.138a: MTGJSON provides bare "Escape" with no structured cost data.
         // Accept both legacy ManaCost format and new EscapeCost tagged format
@@ -5154,6 +5194,10 @@ mod tests {
             Keyword::Miracle(mc("{2}{R}")),
             Keyword::Dash(mc("{2}{R}")),
             Keyword::Emerge(mc("{2}{R}")),
+            Keyword::EmergeFromQuality(EmergeCost::from_quality(
+                mc("{2}{R}"),
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+            )),
             Keyword::Escape(EscapeCost::NonMana(pay_life_cost())),
             Keyword::Harmonize(mc("{2}{R}")),
             Keyword::Evoke(EvokeCost::NonMana(pay_life_cost())),
@@ -5421,6 +5465,7 @@ mod tests {
             Keyword::Miracle(..) => Some("Miracle"),
             Keyword::Dash(..) => Some("Dash"),
             Keyword::Emerge(..) => Some("Emerge"),
+            Keyword::EmergeFromQuality(..) => Some("EmergeFromQuality"),
             Keyword::Escape(..) => Some("Escape"),
             Keyword::Harmonize(..) => Some("Harmonize"),
             Keyword::Evoke(..) => Some("Evoke"),

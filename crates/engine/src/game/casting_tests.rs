@@ -21,7 +21,7 @@ use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ManaChoice, ManaChoicePrompt, SpellCastRecord};
-use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
+use crate::types::keywords::{EmergeCost, EscapeCost, FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::{
     ManaColor, ManaCost, ManaCostShard, ManaRestriction, ManaSourceSelection, ManaSpellGrant,
     ManaType, ManaUnit,
@@ -37234,6 +37234,43 @@ mod alt_cost_reduction_509 {
         obj_id
     }
 
+    fn create_artifact_emerge_spell(
+        state: &mut GameState,
+        player: PlayerId,
+        card_id: u64,
+        printed: ManaCost,
+        emerge: ManaCost,
+    ) -> ObjectId {
+        let spell = create_emerge_spell(state, player, card_id, printed, emerge.clone());
+        state.objects.get_mut(&spell).unwrap().keywords =
+            vec![Keyword::EmergeFromQuality(EmergeCost::from_quality(
+                emerge,
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+            ))];
+        spell
+    }
+
+    fn create_sacrifice_artifact(
+        state: &mut GameState,
+        player: PlayerId,
+        card_id: u64,
+        mana_cost: ManaCost,
+    ) -> ObjectId {
+        let artifact = create_object(
+            state,
+            CardId(card_id),
+            player,
+            "Sacrifice Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&artifact).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.base_card_types.core_types.push(CoreType::Artifact);
+        obj.mana_cost = mana_cost.clone();
+        obj.base_mana_cost = mana_cost;
+        artifact
+    }
+
     fn create_sacrifice_creature(
         state: &mut GameState,
         player: PlayerId,
@@ -37916,6 +37953,73 @@ mod alt_cost_reduction_509 {
             state.players[0].mana_pool.total(),
             0,
             "Emerge should charge the reduced {{1}}{{U}}{{U}} cost, consuming exactly three mana"
+        );
+    }
+
+    /// CR 702.119b-c: Emerge from artifact must offer only qualifying artifacts
+    /// and reduce the emerge cost by the selected artifact's mana value.
+    #[test]
+    fn emerge_from_artifact_casts_after_sacrificing_an_artifact() {
+        let mut state = setup_game_at_main_phase();
+        add_mana(&mut state, PlayerId(0), ManaType::Black, 2);
+
+        let emerge = create_artifact_emerge_spell(
+            &mut state,
+            PlayerId(0),
+            811,
+            ManaCost::generic(6),
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+                generic: 5,
+            },
+        );
+        let artifact =
+            create_sacrifice_artifact(&mut state, PlayerId(0), 812, ManaCost::generic(5));
+        let creature =
+            create_sacrifice_creature(&mut state, PlayerId(0), 813, ManaCost::generic(5));
+
+        assert!(
+            can_cast_object_now(&state, PlayerId(0), emerge),
+            "an artifact with mana value 5 must reduce {{5}}{{B}}{{B}} to payable {{B}}{{B}}"
+        );
+
+        let mut events = Vec::new();
+        let waiting_for =
+            handle_cast_spell(&mut state, PlayerId(0), emerge, CardId(811), &mut events)
+                .expect("artifact emerge should enter sacrifice payment");
+        match &waiting_for {
+            WaitingFor::PayCost {
+                kind: PayCostKind::Sacrifice,
+                choices,
+                ..
+            } => {
+                assert!(
+                    choices.contains(&artifact),
+                    "artifact must be a legal emerge sacrifice"
+                );
+                assert!(
+                    !choices.contains(&creature),
+                    "a creature must not be legal for emerge from artifact"
+                );
+            }
+            other => panic!("expected Emerge PayCost(Sacrifice), got {other:?}"),
+        }
+
+        state.waiting_for = waiting_for;
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![artifact],
+            },
+        )
+        .expect("sacrificing the artifact should complete the emerge cast");
+
+        assert_eq!(state.objects[&artifact].zone, Zone::Graveyard);
+        assert_eq!(state.objects[&emerge].zone, Zone::Stack);
+        assert_eq!(
+            state.players[0].mana_pool.total(),
+            0,
+            "artifact mana value must reduce the emerge cost before black mana is paid"
         );
     }
 

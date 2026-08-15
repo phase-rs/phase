@@ -34007,6 +34007,7 @@ pub mod tests {
             | Keyword::Miracle(_)
             | Keyword::Dash(_)
             | Keyword::Emerge(_)
+            | Keyword::EmergeFromQuality(_)
             | Keyword::Escape(_)
             | Keyword::Harmonize(_)
             | Keyword::Evoke(_)
