@@ -80,6 +80,9 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * of silently corrupting state.
  *
  * Bumps to date:
+ *  23 — WaitingFor::AlternativeCastChoice.alternative_additional_cost_description
+ *       changed from a string to a typed Emerge-sacrifice descriptor. Older
+ *       clients would receive an object where their modal expects display text.
  *  22 — LegalActionsWire.viewerInteraction carries attachmentViews: the engine's
  *       membership list for each host's attachment fan. It parses on a v21 peer
  *       as an empty map, so the loss is silent — a guest paired with a v21 host
@@ -120,7 +123,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 22 as const;
+export const WIRE_PROTOCOL_VERSION = 23 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | { type: "guest_deck"; deckData: unknown; displayName?: string; reservationToken?: string }
