@@ -59,6 +59,23 @@ pub fn resolve(
         && ability.targets.is_empty()
         && ability.parent_target_missing_reason == Some(ParentTargetMissingReason::Dig);
 
+    // CR 400.7 + CR 113.7a: An activated ability's SelfRef must not follow a
+    // later object that reuses the source ID. Triggered abilities retain the
+    // trigger-aware SelfRef exceptions for their own departure successors.
+    let stale_self_ref = if ability.trigger_source.is_some() {
+        !ability.self_ref_is_current(state)
+    } else {
+        !ability.source_is_current(state)
+    };
+    if matches!(target_filter, TargetFilter::SelfRef) && stale_self_ref {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::PutAtLibraryPosition,
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
+
     // CR 608.2c + 603.10a: Delegate to the unified 3-tier dispatch
     // (`resolved_targets`). `SelfRef` always resolves to the source object;
     // `None` / `ParentTarget` fall back to the source only when

@@ -102,22 +102,22 @@ fn push_to_stack_with_firing(
         entry.kind,
         StackEntryKind::ActivatedAbility { .. } | StackEntryKind::TriggeredAbility { .. }
     ) {
+        if let Some(ability) = entry.ability_mut() {
+            // CR 400.7 + CR 113.7a: Capture the source incarnation for every
+            // activated or triggered ability, including non-transforming
+            // permanents. The transformation guard below has a narrower scope.
+            if ability.source_incarnation.is_none() {
+                ability
+                    .set_source_incarnation_recursive(source_ref.map(|source| source.incarnation));
+            }
+        }
+
         let source = state
             .objects
             .get(&entry.source_id)
             .filter(|object| object.back_face.is_some());
         let count = source.map(|object| object.transformation_count);
         if let Some(ability) = entry.ability_mut() {
-            // CR 608.2h + CR 113.7a: Every activated/triggered ability needs
-            // its source incarnation, not only a transforming source. Effects
-            // such as "~'s controller loses life" use it to read the source's
-            // current controller while it remains in its expected zone and its
-            // LKI controller after it leaves, without rebinding a re-entered
-            // object that reuses this storage id.
-            if ability.source_incarnation.is_none() {
-                ability
-                    .set_source_incarnation_recursive(source_ref.map(|source| source.incarnation));
-            }
             // CR 701.27f: delayed triggered abilities already carry their
             // creation-time generation and must not be restamped when fired.
             if ability.context.source_transformation_count.is_none() {
