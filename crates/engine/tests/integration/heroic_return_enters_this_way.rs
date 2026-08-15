@@ -29,7 +29,8 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
-    Effect, EffectKind, QuantityExpr, TargetFilter, TargetRef, TypeFilter,
+    ControllerRef, Effect, EffectKind, FilterProp, QuantityExpr, TargetFilter, TargetRef,
+    TypeFilter,
 };
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
@@ -116,9 +117,34 @@ fn heroic_return_parses_to_reanimation_with_conditional_entry_counters() {
     };
     assert_eq!(*origin, Some(Zone::Graveyard));
     assert_eq!(*destination, Zone::Battlefield);
+
+    // CR 109.5 + CR 400.3: "from your graveyard" is a PLAYER-SCOPED query on a
+    // non-battlefield zone. Its representation is `InZone { Graveyard }` +
+    // `ControllerRef::You` on the typed filter — the player scope is carried by
+    // `TypedFilter::controller`, and the owner substitution CR 400.3 requires is an
+    // evaluator concern (`game::filter::matches_target_filter_in_owner_zone`
+    // re-evaluates the same filter with ownership standing in for controller),
+    // not a second filter representation. Pinned here so head-scoping cannot
+    // silently drop either half of the scope: dropping `InZone` would make every
+    // graveyard on the table eligible, and dropping `ControllerRef::You` would make
+    // an opponent's graveyard eligible.
+    let TargetFilter::Typed(typed) = target else {
+        panic!("target must be a typed filter, got {target:?}");
+    };
     assert!(
-        matches!(target, TargetFilter::Typed(t) if t.type_filters.contains(&TypeFilter::Creature)),
+        typed.type_filters.contains(&TypeFilter::Creature),
         "target must be the graveyard creature card, got {target:?}"
+    );
+    assert_eq!(
+        typed.controller,
+        Some(ControllerRef::You),
+        "\"your graveyard\" must survive as a You-scoped player constraint, got {target:?}"
+    );
+    assert!(
+        typed.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }),
+        "the graveyard zone constraint must survive head-scoping, got {target:?}"
     );
 
     // CR 122.1 + CR 614.12: the rider's counters ride the ENTRY, keyed on the
@@ -254,10 +280,25 @@ fn heroic_return_reanimates_hero_with_two_extra_counters() {
         "premise: the ability must be the reanimation ChangeZone: {spell_abilities:?}"
     );
 
-    // CR 109.5: "your" on an object refers to that object's controller, so
-    // "from YOUR graveyard" restricts the reanimation to P0's graveyard — an
-    // opponent's graveyard Hero is never a legal target. This proves the head's
-    // `controller: You` + `InZone: Graveyard` filter survived head-scoping.
+    // CR 109.5 + CR 400.3: "from YOUR graveyard" restricts the reanimation to P0's
+    // graveyard — an opponent's graveyard Hero is never a legal target. This proves
+    // the head's `controller: You` + `InZone: Graveyard` filter survived
+    // head-scoping and is enforced at enumeration, not merely present in the AST.
+    //
+    // SCOPE NOTE: these fixtures are ordinary graveyard cards, where controller and
+    // owner coincide, so they do not separate the two scopes — and deliberately so.
+    // Target ENUMERATION for non-battlefield zones runs through
+    // `game::targeting::add_zone_targets`, which evaluates `matches_target_filter`
+    // (controller-scoped) rather than `matches_target_filter_in_owner_zone`
+    // (CR 400.3 / CR 109.5 owner-scoped). A card owned by P0 but carrying a stale
+    // `controller = P1` — the state `change_zone.rs` documents for a Mind Control
+    // victim that died into its owner's graveyard — is therefore NOT enumerated as
+    // a legal target today. That is a pre-existing property of the shared
+    // enumeration path affecting every graveyard/hand/library-targeting card in the
+    // engine, unrelated to this card's parse, so it is not pinned here: an
+    // owner-scoped assertion at this seam would fail for reasons Heroic Return does
+    // not control, and asserting the current controller-scoped behavior would
+    // enshrine the gap.
     let slots = legal_target_slots_for_castable_spell(runner.state(), spell);
     let slot = slots
         .first()

@@ -9275,8 +9275,8 @@ fn parse_pronoun_enters_this_way_clause(input: &str) -> OracleResult<'_, ()> {
 /// CR 608.2c: the core reflexive **battlefield-entry** back-reference — a subject,
 /// then an entry verb, then `" this way"`, with no conditional word.
 ///
-/// Returns the NEGATION FLAG; it is deliberately never value-discarded, because
-/// the two wrapper voices below decide negation differently (see their doc
+/// Returns `(SUBJECT FILTER, NEGATION FLAG)`. Neither component is value-discarded,
+/// because the two wrapper voices below read them differently (see their doc
 /// comments).
 ///
 /// Three subject voices, all delegated to existing combinators:
@@ -9286,23 +9286,50 @@ fn parse_pronoun_enters_this_way_clause(input: &str) -> OracleResult<'_, ()> {
 ///   * active `you put …` — `parse_you_put_onto_battlefield_this_way_clause`;
 ///   * bare pronoun — `parse_pronoun_enters_this_way_clause` ("it enters this way").
 ///
+/// The subject filter is `None` for EXACTLY the bare-pronoun voice, which names its
+/// referent anaphorically and therefore yields no typed filter. That distinction is
+/// load-bearing downstream, not cosmetic: `oracle_effect::conditions` lowers only
+/// the two filter-carrying voices to `AbilityCondition::ZoneChangedThisWay { filter }`,
+/// and `oracle_effect::lower::fold_enters_this_way_counter_rider` folds only that
+/// condition into `Effect::ChangeZone.conditional_enter_with_counters`. A
+/// filter-less subject is thus never REPRESENTED by that slot, so the swallow-detector
+/// voice must not treat it as represented — see
+/// [`parse_conditional_entry_this_way_rider`].
+///
+/// POSITION (deliberate): the clause is recognized CLAUSE-INITIALLY only — every
+/// subject alternative anchors at the start of `input`. A trailing-position entry
+/// rider ("… it enters with a +1/+1 counter on it if a Hero enters this way.") is
+/// therefore NOT recognized, and no printed card uses that voice: a Scryfall regex
+/// sweep for a sentence-final battlefield-entry back-reference
+/// (`o:/(enters|enter|is put onto the battlefield|are put onto the battlefield) this way\./`)
+/// returns zero cards. What DOES print sentence-finally is the opposite shape — a
+/// genuine CR 614.1c head carrying a trailing NON-entry back-reference ("This creature
+/// enters with a +1/+1 counter on it for each card revealed this way" — Arsenal
+/// Thresher, Gluttonous Hellkite, Thief of Blood, Mimeoplasm Revered One, Naya
+/// Soulbeast, Sin Unending Cataclysm). Those heads must keep their tokens, and
+/// [`ThisWayVerbScope::BattlefieldEntry`] already withholds their verbs. Word-boundary
+/// scanning is the right tool for a phrase class that genuinely occurs at arbitrary
+/// positions; this class does not, so scanning would buy no coverage while widening
+/// the blast radius against that printed head class. Pinned by
+/// `oracle_classifier::head_scoping_leaves_the_unprinted_trailing_rider_voice_alone`.
+///
 /// A trailing word boundary is required so the clause cannot match a prefix of a
 /// longer word.
-pub fn parse_entry_this_way_clause(input: &str) -> OracleResult<'_, bool> {
-    let (rest, negated) = alt((
+pub fn parse_entry_this_way_clause(input: &str) -> OracleResult<'_, (Option<TargetFilter>, bool)> {
+    let (rest, subject) = alt((
         map(
             |i| parse_zone_changed_this_way_clause_scoped(i, ThisWayVerbScope::BattlefieldEntry),
-            |(_filter, negated)| negated,
+            |(filter, negated)| (Some(filter), negated),
         ),
         map(
             parse_you_put_onto_battlefield_this_way_clause,
-            |(_filter, negated)| negated,
+            |(filter, negated)| (Some(filter), negated),
         ),
-        value(false, parse_pronoun_enters_this_way_clause),
+        map(parse_pronoun_enters_this_way_clause, |()| (None, false)),
     ))
     .parse(input)?;
     let (rest, _) = peek(alt((tag(","), tag(" "), tag("."), eof))).parse(rest)?;
-    Ok((rest, negated))
+    Ok((rest, subject))
 }
 
 /// CR 608.2c: a "… this way" rider is a back-reference to an instruction EARLIER
@@ -9343,6 +9370,21 @@ pub fn parse_entry_this_way_clause(input: &str) -> OracleResult<'_, bool> {
 /// Invocations). That class is owned by
 /// `StaticMode::{Graveyard,Exile}CastPermission.enters_with_counter`, and its tokens
 /// legitimately participate in classification.
+///
+/// CONSUMPTION CONTRACT (deliberate): this is a PREFIX recognizer, not a
+/// full-consumption one. The returned remainder is the rider's CONSEQUENT (", it
+/// enters with two additional +1/+1 counters on it."), which is exactly why the
+/// consumer discards the whole sentence: `oracle_classifier::strip_entry_this_way_riders`
+/// asks "does this sentence OPEN with a CR 608.2c back-reference?", and if it does,
+/// every token after the comma belongs to that back-reference's consequent rather
+/// than to a CR 614.1c head. Wrapping this in `all_consuming` at the consumer would
+/// therefore reject every real rider — the class exists only because it HAS a
+/// consequent. Fail-closed behavior is supplied instead by the narrowness of the
+/// recognizer itself: an article-or-pronoun subject plus a battlefield-entry verb
+/// plus `" this way"` is not a shape any CR 614.1c head can take, and the
+/// `oracle_classifier` test module pins both directions (a genuine head keeps its
+/// tokens; a rider sentence loses them). See
+/// `oracle_classifier::a_rider_prefix_drops_its_whole_sentence_by_contract`.
 pub fn parse_reflexive_entry_this_way_rider(input: &str) -> OracleResult<'_, ()> {
     let (rest, _) = opt(alt((tag("if "), tag("when "), tag("whenever ")))).parse(input)?;
     let (rest, _) = parse_entry_this_way_clause(rest)?;
@@ -9351,20 +9393,36 @@ pub fn parse_reflexive_entry_this_way_rider(input: &str) -> OracleResult<'_, ()>
 
 /// CR 608.2c + CR 614.1c: the swallow-detector voice of
 /// [`parse_entry_this_way_clause`] — the conditional word is MANDATORY and fixed at
-/// "if ", and negation is REJECTED.
+/// "if ", negation is REJECTED, and the subject must carry a TYPED FILTER.
 ///
-/// Both restrictions are load-bearing and deliberately narrower than
-/// [`parse_reflexive_entry_this_way_rider`]:
-///   * `tag("if ")` mandatory — this recognizer decides whether a `Condition_If`
-///     swallow warning is SUPPRESSED. Accepting the trigger voice ("When an
-///     Equipment enters this way, …" — Adaptive Armorer, Masterpiece Vault) would
-///     newly silence clauses whose trigger rider is genuinely unrepresented.
-///   * negation rejected — `Effect::ChangeZone.conditional_enter_with_counters`
-///     represents an affirmative existential filter match only, so a negated gate
-///     is not representable by that slot and must stay visible to the audit.
+/// All three restrictions are load-bearing and deliberately narrower than
+/// [`parse_reflexive_entry_this_way_rider`]. Each one names a shape the typed slot
+/// `Effect::ChangeZone.conditional_enter_with_counters` cannot represent, and this
+/// recognizer decides whether a `Condition_If` swallow warning is SUPPRESSED — so
+/// accepting an unrepresentable shape here is coverage dishonesty, not leniency:
+///   * `tag("if ")` mandatory — the trigger voice ("When an Equipment enters this
+///     way, …" — Adaptive Armorer, Masterpiece Vault) is not lowered into the slot,
+///     so accepting it would newly silence a genuinely unrepresented clause.
+///   * negation rejected — the slot represents an affirmative existential filter
+///     match only (`enter_with_counters_for_object` pushes counters when
+///     `matches_target_filter` is TRUE), so a negated gate is not representable.
+///   * typed subject required (`filter.is_some()`) — the bare-pronoun voice ("if it
+///     enters this way, …") produces no filter, so nothing lowers it to
+///     `AbilityCondition::ZoneChangedThisWay { filter }` and
+///     `fold_enters_this_way_counter_rider` — which matches on exactly that
+///     condition — never folds it into the slot. Accepting it would let a compound
+///     card whose OTHER rider populates the slot silently strip this unrepresented
+///     one out of the residual. No card prints the conditional pronoun voice (a
+///     Scryfall sweep for `o:/(it|they) (enters|enter) this way/` returns only
+///     Pharika's Spawn, which is trigger-voiced and already excluded by the `if `
+///     gate), so the restriction closes the hole at zero coverage cost.
 pub fn parse_conditional_entry_this_way_rider(input: &str) -> OracleResult<'_, ()> {
     let (rest, _) = tag("if ").parse(input)?;
-    let (rest, _) = verify(parse_entry_this_way_clause, |negated: &bool| !*negated).parse(rest)?;
+    let (rest, _) = verify(
+        parse_entry_this_way_clause,
+        |(filter, negated): &(Option<TargetFilter>, bool)| filter.is_some() && !*negated,
+    )
+    .parse(rest)?;
     Ok((rest, ()))
 }
 
@@ -18816,7 +18874,8 @@ mod tests {
     }
 
     /// V0b (swallow-detector voice): differs from the classifier voice on
-    /// exactly two axes — mandatory "if " and affirmative-only polarity.
+    /// exactly three axes — mandatory "if ", affirmative-only polarity, and a
+    /// subject that carries a typed filter.
     #[test]
     fn conditional_entry_this_way_rider_fixes_voice_and_polarity() {
         // Shared accept: both voices take the affirmative "if" form.
@@ -18840,6 +18899,59 @@ mod tests {
         let active_negated = "if you didn't put a card onto the battlefield this way, draw a card";
         assert!(parse_conditional_entry_this_way_rider(active_negated).is_err());
         assert!(parse_reflexive_entry_this_way_rider(active_negated).is_err());
+
+        // A TYPED SUBJECT is required here (fail-on-revert pin for the
+        // `filter.is_some()` conjunct): the bare-pronoun voice names its referent
+        // anaphorically, so `parse_entry_this_way_clause` yields no filter, nothing
+        // lowers it to `ZoneChangedThisWay { filter }`, and
+        // `fold_enters_this_way_counter_rider` never folds it into
+        // `conditional_enter_with_counters`. Suppressing its warning would claim a
+        // representation that does not exist.
+        let bare_pronoun = "if it enters this way, it enters with a +1/+1 counter on it";
+        assert!(parse_conditional_entry_this_way_rider(bare_pronoun).is_err());
+        assert!(parse_reflexive_entry_this_way_rider(bare_pronoun).is_ok());
+
+        // The subject axis is about the FILTER, not the pronoun spelling: the
+        // active and passive voices both keep their typed subject and stay accepted.
+        for typed in [
+            "if an equipment is put onto the battlefield this way, put a counter on it",
+            "if you put a land onto the battlefield this way, put a counter on it",
+        ] {
+            assert!(
+                parse_conditional_entry_this_way_rider(typed).is_ok(),
+                "typed subject must stay represented: {typed}"
+            );
+        }
+    }
+
+    /// V0b (subject filter): the value `parse_entry_this_way_clause` now returns
+    /// is the SUBJECT of the back-reference, and `None` marks exactly the voice
+    /// that carries no typed filter. Pins the discriminator the swallow detector
+    /// keys on, at the combinator rather than only through its consumers.
+    #[test]
+    fn entry_this_way_clause_reports_its_subject_filter() {
+        let (_, (filter, negated)) =
+            parse_entry_this_way_clause("a hero enters this way,").unwrap();
+        assert!(!negated);
+        assert!(
+            matches!(filter, Some(TargetFilter::Typed(ref t))
+                if t.type_filters.contains(&TypeFilter::Subtype("Hero".to_string()))),
+            "the typed subject must surface its filter, got {filter:?}"
+        );
+
+        let (_, (filter, _)) =
+            parse_entry_this_way_clause("you put a land onto the battlefield this way,").unwrap();
+        assert!(
+            filter.is_some(),
+            "the active voice carries a typed subject too, got {filter:?}"
+        );
+
+        let (_, (filter, negated)) = parse_entry_this_way_clause("it enters this way,").unwrap();
+        assert!(!negated);
+        assert!(
+            filter.is_none(),
+            "the bare-pronoun voice must report NO subject filter, got {filter:?}"
+        );
     }
 
     // ---------------------------------------------------------------------

@@ -764,6 +764,16 @@ const REPLACEMENT_CONTAINS_PATTERNS: &[&str] = &[
 /// The whole rider sentence is dropped, consequent included: the consequent's
 /// tokens are the rider's, not the head's.
 ///
+/// CONSUMPTION: `parse_reflexive_entry_this_way_rider` is a PREFIX recognizer and
+/// is deliberately NOT wrapped in `all_consuming` here. Its remainder is the
+/// rider's own consequent (", it enters with two additional +1/+1 counters on
+/// it."), so requiring full consumption would reject every real rider — the class
+/// exists only because it has a consequent. Fail-closed behavior comes from the
+/// recognizer's narrowness instead (an article-or-pronoun subject + a
+/// battlefield-entry verb + `" this way"` is not a shape any CR 614.1c head can
+/// take), pinned in both directions by
+/// `a_rider_prefix_drops_its_whole_sentence_by_contract`.
+///
 /// Segmentation uses `oracle_nom::primitives::split_sentence_units`, the total
 /// wrapper over `parse_period_sentence` — the SAME combinator that feeds
 /// `is_replacement_pattern` at its only sentence-scoped call site (`oracle.rs` via
@@ -1404,13 +1414,19 @@ mod tests {
             "the passive rider must be scoped off the head, got {head:?}"
         );
 
-        // Comma-less voice: the rider's clause ends at the period, not a comma.
+        // Comma-less voice: the rider's clause ends at the period, not a comma —
+        // the SUBJECT is still clause-initial, which is the position
+        // `parse_entry_this_way_clause` recognizes.
         const COMMA_LESS: &str = "return target creature card from your graveyard to the \
-             battlefield. it enters with an additional +1/+1 counter on it if a hero \
-             enters this way.";
+             battlefield. a hero enters this way.";
         assert!(
             !scan_contains(COMMA_LESS, "enters this way,"),
             "premise: the retired literal does not match the comma-less voice"
+        );
+        let head = strip_entry_this_way_riders(COMMA_LESS).expect("head survives");
+        assert!(
+            !scan_contains(&head, "enters this way"),
+            "the comma-less rider must be scoped off the head, got {head:?}"
         );
 
         // Active "you put …" voice.
@@ -1468,5 +1484,88 @@ mod tests {
         assert!(
             strip_entry_this_way_riders(REAL_STATIC).is_some_and(|head| is_static_pattern(&head))
         );
+    }
+
+    /// POSITION BOUNDARY: `parse_entry_this_way_clause` recognizes a rider only
+    /// CLAUSE-INITIALLY, so a trailing-position entry rider is deliberately left
+    /// unscoped. This test states that limit rather than implying coverage the
+    /// combinator does not have.
+    ///
+    /// The limit is safe because the trailing voice is UNPRINTED: a Scryfall regex
+    /// sweep for a sentence-final battlefield-entry back-reference
+    /// (`o:/(enters|enter|is put onto the battlefield|are put onto the battlefield) this way\./`)
+    /// returns zero cards. The shape that DOES print sentence-finally is the
+    /// second assertion below — a genuine CR 614.1c head whose trailing back-reference
+    /// is a NON-entry zone change — and that one must keep its tokens.
+    #[test]
+    fn head_scoping_leaves_the_unprinted_trailing_rider_voice_alone() {
+        // Trailing-position entry rider: synthetic, unprinted, and out of scope.
+        const TRAILING_RIDER: &str = "return target creature card from your graveyard to the \
+             battlefield. it enters with an additional +1/+1 counter on it if a hero \
+             enters this way.";
+        let head = strip_entry_this_way_riders(TRAILING_RIDER).expect("head survives");
+        assert!(
+            scan_contains(&head, "enters with"),
+            "documented limit: a trailing-position rider is NOT scoped off the head, \
+             got {head:?}"
+        );
+
+        // Arsenal Thresher (verbatim second sentence): a real CR 614.1c head with a
+        // trailing NON-entry back-reference. `ThisWayVerbScope::BattlefieldEntry`
+        // withholds "revealed", so this head keeps its tokens — the property a
+        // position-scanning recognizer would put at risk.
+        const ARSENAL_THRESHER_HEAD: &str =
+            "this creature enters with a +1/+1 counter on it for each card revealed this way.";
+        let head = strip_entry_this_way_riders(ARSENAL_THRESHER_HEAD).expect("head survives");
+        assert!(
+            scan_contains(&head, "enters with"),
+            "a printed CR 614.1c head with a trailing non-entry back-reference must \
+             keep its tokens, got {head:?}"
+        );
+    }
+
+    /// CONSUMPTION CONTRACT: `parse_reflexive_entry_this_way_rider` is a PREFIX
+    /// recognizer, and this consumer discards the WHOLE sentence on a prefix match.
+    /// That is the intended contract, not an oversight: the text after the comma is
+    /// the back-reference's own consequent, so its "enters"/"counter"/"tapped"
+    /// tokens are the rider's and never a CR 614.1c head's. Wrapping the recognizer
+    /// in `all_consuming` here would reject every real rider, since the class exists
+    /// only because it HAS a consequent.
+    ///
+    /// Fail-closed behavior comes from the recognizer's narrowness instead, pinned
+    /// in both directions below.
+    #[test]
+    fn a_rider_prefix_drops_its_whole_sentence_by_contract() {
+        // Prefix match → whole sentence gone, consequent included.
+        const RIDER_WITH_CONSEQUENT: &str = "return target creature card from your graveyard \
+             to the battlefield. if a hero enters this way, it enters tapped and enters \
+             under the control of an opponent.";
+        let head = strip_entry_this_way_riders(RIDER_WITH_CONSEQUENT).expect("head survives");
+        assert!(
+            !scan_contains(&head, "enters tapped")
+                && !scan_contains(&head, "enters under the control of"),
+            "the consequent's tokens belong to the rider and must go with it, got {head:?}"
+        );
+        assert!(
+            scan_contains(&head, "return target creature card"),
+            "the head instruction must survive, got {head:?}"
+        );
+
+        // The other direction: a sentence that merely CONTAINS an entry verb does
+        // not open with a back-reference, so nothing is dropped. The recognizer's
+        // narrowness — not full consumption — is what keeps this fail-closed.
+        for retained in [
+            "this creature enters with two +1/+1 counters on it.",
+            "when this creature enters, draw a card.",
+            "if a creature card was exiled this way, you may cast it.",
+        ] {
+            assert!(
+                matches!(
+                    strip_entry_this_way_riders(retained),
+                    Some(std::borrow::Cow::Borrowed(_))
+                ),
+                "a non-rider sentence must be handed back untouched: {retained}"
+            );
+        }
     }
 }

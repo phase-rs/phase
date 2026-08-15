@@ -6439,6 +6439,55 @@ mod tests {
                 "If a land enters this way, it enters tapped"
             )
         );
+        // Subject: the bare-pronoun voice carries no typed filter, so nothing
+        // lowers it to `ZoneChangedThisWay { filter }` and
+        // `fold_enters_this_way_counter_rider` never folds it into
+        // `conditional_enter_with_counters`. Treating it as represented would let
+        // a compound card whose OTHER rider populates the slot strip this
+        // unrepresented one out of the residual below.
+        assert!(
+            !crate::parser::oracle_effect::sequence::is_moved_object_entry_this_way_counters_clause(
+                "If it enters this way, it enters with a +1/+1 counter on it"
+            ),
+            "the filter-less pronoun subject must not be treated as represented"
+        );
+    }
+
+    /// V5: the pronoun exclusion is not merely a combinator property — it must
+    /// survive to the detector. A card carrying the represented typed rider AND an
+    /// unrepresented bare-pronoun rider must still flag, because only the typed one
+    /// reaches `conditional_enter_with_counters`. Before the subject restriction,
+    /// the pronoun sentence was stripped from the residual alongside the typed one
+    /// and its warning vanished with it.
+    #[test]
+    fn represented_typed_rider_does_not_hide_an_unrepresented_pronoun_rider() {
+        let parsed = parse_named(
+            "Return target creature card from your graveyard to the battlefield. \
+             If a Hero enters this way, it enters with two additional +1/+1 counters on it. \
+             If it enters this way, draw a card.",
+            "Pronoun Rider Compound Fixture",
+            &["Instant"],
+        );
+        // Reach-guard: the typed rider really is represented, so the assertion
+        // below is about the pronoun sentence and not about a total parse failure.
+        let carries_slot = parsed.abilities.iter().any(|a| {
+            matches!(
+                a.effect.as_ref(),
+                Effect::ChangeZone {
+                    conditional_enter_with_counters,
+                    ..
+                } if !conditional_enter_with_counters.is_empty()
+            )
+        });
+        assert!(
+            carries_slot,
+            "premise: the typed rider must be represented by the slot: {parsed:?}"
+        );
+        assert!(
+            has_swallowed_detector(&parsed, "Condition_If"),
+            "the unrepresented pronoun rider must stay visible to Condition_If, got {:?}",
+            parsed.parse_warnings
+        );
     }
 
     /// V5: a card carrying the represented gate PLUS an unrelated bare " if "

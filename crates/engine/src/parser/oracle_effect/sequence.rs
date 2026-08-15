@@ -6630,21 +6630,25 @@ pub(crate) fn is_moved_object_enters_modifier_clause(sentence: &str) -> bool {
 /// `is_moved_object_enters_modifier_clause`: it keys on the entry-this-way
 /// condition AND a "counter" payoff tail so it drops only the represented clause.
 ///
-/// CLAUSE VOICES accepted (all four are represented by the same typed slot):
+/// CLAUSE VOICES accepted (all three are represented by the same typed slot):
 ///   * active — "If you put an artifact onto the battlefield this way, put two
 ///     +1/+1 counters on it" (Oviya, Automech Artisan);
 ///   * present-tense typed — "If a Hero enters this way, it enters with two
 ///     additional +1/+1 counters on it" (Heroic Return, Recommission, Winter
 ///     Soldier Reborn Avenger);
-///   * passive typed — "If an Equipment is put onto the battlefield this way, …";
-///   * bare pronoun — "If it enters this way, …".
+///   * passive typed — "If an Equipment is put onto the battlefield this way, …".
 ///
-/// CONDITIONAL VOICE is deliberately held at `if ` only, and POLARITY at
-/// affirmative only — both are enforced by
+/// CONDITIONAL VOICE is deliberately held at `if ` only, POLARITY at affirmative
+/// only, and the SUBJECT at typed-filter-carrying only — all three are enforced by
 /// `parse_conditional_entry_this_way_rider`, whose doc comment carries the
 /// rationale. A trigger-voiced rider ("When an Equipment enters this way, …" —
-/// Adaptive Armorer, Masterpiece Vault) and a negated gate both stay visible to
-/// the audit.
+/// Adaptive Armorer, Masterpiece Vault), a negated gate, and the bare-pronoun
+/// voice ("If it enters this way, …") all stay visible to the audit. The pronoun
+/// exclusion is the one that matters most here: no lowering produces
+/// `AbilityCondition::ZoneChangedThisWay { filter }` for a filter-less subject, so
+/// `fold_enters_this_way_counter_rider` never folds it into the slot — treating it
+/// as represented would let a compound card whose OTHER rider populates the slot
+/// strip this unrepresented one out of the swallow detector's residual.
 ///
 /// The "counter" payoff gate is load-bearing and unchanged: it keeps a non-counter
 /// entry rider ("if a land enters this way, it enters tapped" — Silver Surfer,
