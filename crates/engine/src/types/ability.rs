@@ -6064,17 +6064,74 @@ pub enum CardTypeSetSource {
     /// match `FilterProp::AnyOf` / `TypeFilter::AnyOf` (set-union-of-alternatives),
     /// not `Or` (reserved for boolean condition enums).
     ///
-    /// INVARIANT: `sources.len() >= 2`. A 0- or 1-member union is not a union,
-    /// and an empty one is actively unsound: `characteristic_source_read`'s fold
-    /// would return `RwProfile::empty()`, which is FAIL-OPEN for the CR 603.3b
-    /// ordering gate, and the resolver would return 0 with no diagnostic.
-    /// Enforced by [`CardTypeSetSource::any_of`] at construction and by
-    /// `deserialize_union_sources` on load, so a saved game or hand-authored JSON
-    /// cannot smuggle one in.
-    AnyOf {
-        #[serde(deserialize_with = "deserialize_union_sources")]
-        sources: Vec<CardTypeSetSource>,
-    },
+    /// INVARIANT: at least two members, carried by [`UnionSources`] rather than
+    /// asserted. A 0- or 1-member union is not a union, and an empty one is
+    /// actively unsound: `characteristic_source_read`'s fold would return
+    /// `RwProfile::empty()`, which is FAIL-OPEN for the CR 603.3b ordering gate,
+    /// and the resolver would return 0 with no diagnostic.
+    AnyOf { sources: UnionSources },
+}
+
+/// CR 109.2: the members of a [`CardTypeSetSource::AnyOf`], carrying the
+/// at-least-two invariant IN THE TYPE.
+///
+/// The `Vec` is private, so the only ways in are [`UnionSources::new`] and
+/// `Deserialize` — both of which reject a 0- or 1-member list. This replaces a
+/// public `Vec` field guarded by a `debug_assert!`: that assertion compiles out
+/// of release builds, and the field let any caller in the crate write
+/// `AnyOf { sources: vec![] }` directly, bypassing both the constructor and the
+/// serde check. Several already did. An invariant that arbitrary callers can
+/// step around is documentation, not an invariant.
+///
+/// Derefs to `[CardTypeSetSource]`, so every existing `sources.iter()` /
+/// `sources.len()` read is unchanged — the type is a construction gate, not a
+/// new collection API.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct UnionSources(Vec<CardTypeSetSource>);
+
+impl UnionSources {
+    /// The ONLY in-crate constructor. `None` when the arity invariant fails, so
+    /// a caller cannot get a degenerate union by ignoring an error.
+    ///
+    /// Callers that want the collapse-to-single behavior want
+    /// [`CardTypeSetSource::any_of`], which is written on top of this.
+    pub fn new(sources: Vec<CardTypeSetSource>) -> Option<Self> {
+        (sources.len() >= 2).then_some(Self(sources))
+    }
+
+    pub fn into_vec(self) -> Vec<CardTypeSetSource> {
+        self.0
+    }
+}
+
+impl std::ops::Deref for UnionSources {
+    type Target = [CardTypeSetSource];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<'a> IntoIterator for &'a UnionSources {
+    type Item = &'a CardTypeSetSource;
+    type IntoIter = std::slice::Iter<'a, CardTypeSetSource>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+/// CR 109.2: Enforce the arity invariant on load, so a saved game or
+/// hand-authored payload cannot smuggle a degenerate union past the constructor.
+impl<'de> Deserialize<'de> for UnionSources {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let sources = Vec::<CardTypeSetSource>::deserialize(deserializer)?;
+        let len = sources.len();
+        UnionSources::new(sources).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "CardTypeSetSource::AnyOf requires at least 2 sources, got {len}"
+            ))
+        })
+    }
 }
 
 impl CardTypeSetSource {
@@ -6087,7 +6144,7 @@ impl CardTypeSetSource {
         match sources.len() {
             0 => None,
             1 => sources.pop(),
-            _ => Some(CardTypeSetSource::AnyOf { sources }),
+            _ => UnionSources::new(sources).map(|sources| CardTypeSetSource::AnyOf { sources }),
         }
     }
 
@@ -6125,33 +6182,42 @@ impl CardTypeSetSource {
     ///   zones changes neither the set
     ///   nor the card types its members have (CR 205.2a).
     pub fn population_zones(&self) -> Vec<crate::types::zones::Zone> {
-        let mut out = Vec::new();
-        self.collect_population_zones(&mut out);
-        out
+        self.population_zones_checked().0
     }
 
-    fn collect_population_zones(&self, out: &mut Vec<crate::types::zones::Zone>) {
-        fn push(out: &mut Vec<crate::types::zones::Zone>, zone: crate::types::zones::Zone) {
-            if !out.contains(&zone) {
-                out.push(zone);
+    /// [`population_zones`](Self::population_zones) plus whether the union walk
+    /// completed within its depth budget. Split out because the two consumers
+    /// need OPPOSITE things from a truncated walk: the evaluation walk can only
+    /// scan what it found, while [`reads_zone`](Self::reads_zone) must answer
+    /// `true` rather than miss an invalidation.
+    fn population_zones_checked(&self) -> (Vec<crate::types::zones::Zone>, bool) {
+        let mut out: Vec<crate::types::zones::Zone> = Vec::new();
+        let complete = self.try_for_each_member(UNION_DEPTH_BUDGET, &mut |leaf| {
+            for zone in leaf.leaf_population_zones() {
+                if !out.contains(&zone) {
+                    out.push(zone);
+                }
             }
-        }
+        });
+        (out, complete)
+    }
+
+    /// The zones ONE non-union population reads. `AnyOf` is handled by
+    /// [`try_for_each_member`](Self::try_for_each_member), which is the only
+    /// caller and never hands a union here.
+    fn leaf_population_zones(&self) -> Vec<crate::types::zones::Zone> {
         match self {
-            CardTypeSetSource::Zone { zone, .. } => push(out, zone.zone()),
+            CardTypeSetSource::Zone { zone, .. } => vec![zone.zone()],
             // CR 607.2a + CR 406.6: a linked-exile pool lives in exile.
-            CardTypeSetSource::ExiledBySource => push(out, crate::types::zones::Zone::Exile),
-            CardTypeSetSource::Objects { filter } => {
-                for zone in filter.population_zones() {
-                    push(out, zone);
-                }
-            }
+            CardTypeSetSource::ExiledBySource => vec![crate::types::zones::Zone::Exile],
+            CardTypeSetSource::Objects { filter } => filter.population_zones(),
             // Not zone reads — see the doc comment on `population_zones`.
-            CardTypeSetSource::TrackedSet { .. } | CardTypeSetSource::TurnJournal { .. } => {}
-            CardTypeSetSource::AnyOf { sources } => {
-                for member in sources {
-                    member.collect_population_zones(out);
-                }
+            CardTypeSetSource::TrackedSet { .. } | CardTypeSetSource::TurnJournal { .. } => {
+                Vec::new()
             }
+            // Unreachable through the walker; empty rather than a panic so a
+            // future direct caller degrades instead of crashing a game.
+            CardTypeSetSource::AnyOf { .. } => Vec::new(),
         }
     }
 
@@ -6159,30 +6225,66 @@ impl CardTypeSetSource {
     ///
     /// The dependency-tracking half of [`population_zones`](Self::population_zones),
     /// kept as one call so a caller cannot accidentally ask a narrower question.
+    ///
+    /// A truncated union walk answers `true`: an over-report costs one redundant
+    /// layer recompute, an under-report strands a stale characteristic, and only
+    /// one of those is a correctness bug.
     pub fn reads_zone(&self, zone: crate::types::zones::Zone) -> bool {
-        self.population_zones().contains(&zone)
+        let (zones, complete) = self.population_zones_checked();
+        !complete || zones.contains(&zone)
+    }
+
+    /// CR 109.2: Visit every NON-union member of this population, depth-bounded.
+    ///
+    /// THE single bounded walker for the `AnyOf` axis. Every consumer that
+    /// recurses a `CardTypeSetSource` routes through this instead of writing its
+    /// own `AnyOf` arm, so the recursion is written once and bounded once.
+    ///
+    /// `AnyOf` nests without limit — its arity invariant bounds WIDTH, not
+    /// DEPTH — and a persisted or hand-authored payload can carry whatever
+    /// nesting it likes. Every consumer recursing independently meant every
+    /// consumer was a separate unbounded traversal.
+    ///
+    /// Returns `false` when the budget is exhausted before the walk completed,
+    /// and callers MUST treat that as "I did not see everything" and answer
+    /// conservatively — the same fail-safe contract
+    /// `target_filter_characteristic_reads_at` uses when it returns
+    /// `CharacteristicKinds::ALL`. The visitor still runs for everything reached
+    /// within budget, so a `false` return means incomplete, not empty.
+    ///
+    /// [`UNION_DEPTH_BUDGET`] is the depth every in-engine caller passes.
+    pub fn try_for_each_member(
+        &self,
+        depth: u32,
+        visit: &mut impl FnMut(&CardTypeSetSource),
+    ) -> bool {
+        let Some(depth) = depth.checked_sub(1) else {
+            return false;
+        };
+        match self {
+            CardTypeSetSource::AnyOf { sources } => {
+                let mut complete = true;
+                for member in sources {
+                    // Not short-circuited: a truncated branch must not stop the
+                    // siblings a caller can still legitimately see.
+                    complete &= member.try_for_each_member(depth, visit);
+                }
+                complete
+            }
+            leaf => {
+                visit(leaf);
+                true
+            }
+        }
     }
 }
 
-/// CR 109.2: Enforce [`CardTypeSetSource::AnyOf`]'s arity invariant on load.
+/// CR 109.2: Depth budget for [`CardTypeSetSource::try_for_each_member`].
 ///
-/// A deserialized 0- or 1-member union would bypass [`CardTypeSetSource::any_of`]
-/// and reach `characteristic_source_read` as a fold over nothing —
-/// `RwProfile::empty()`, which is fail-open for the CR 603.3b same-event ordering
-/// gate. Rejecting loudly at the boundary keeps the invariant total.
-fn deserialize_union_sources<'de, D>(deserializer: D) -> Result<Vec<CardTypeSetSource>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let sources = Vec::<CardTypeSetSource>::deserialize(deserializer)?;
-    if sources.len() < 2 {
-        return Err(serde::de::Error::invalid_length(
-            sources.len(),
-            &"at least 2 union members",
-        ));
-    }
-    Ok(sources)
-}
+/// Sized so no real card comes close — printed unions are two or three members
+/// deep — while still bounding a hostile or corrupt payload. Mirrors the filter
+/// walkers' budgets rather than inventing a second convention.
+pub const UNION_DEPTH_BUDGET: u32 = 64;
 
 /// CR 205.3: Which subtypes are excluded when counting distinct subtypes.
 ///
@@ -26511,6 +26613,96 @@ mod tests {
         );
     }
 
+    /// CR 109.2: the arity invariant is carried by the TYPE, so it holds in
+    /// release builds and against callers that never touch `any_of`.
+    ///
+    /// The previous form — a public `Vec` field plus a `debug_assert!` — was
+    /// unenforceable twice over: the assert compiled out of release, and any
+    /// in-crate caller could write the struct literal directly. Several did.
+    #[test]
+    fn union_sources_arity_is_unconstructible_below_two() {
+        let member = || CardTypeSetSource::ExiledBySource;
+
+        // Construction: the ONLY in-crate way in rejects both degenerate arities.
+        assert!(UnionSources::new(vec![]).is_none());
+        assert!(UnionSources::new(vec![member()]).is_none());
+        assert!(UnionSources::new(vec![member(), member()]).is_some());
+
+        // `any_of` keeps its collapse-to-single behavior on top of that gate.
+        assert_eq!(CardTypeSetSource::any_of(vec![]), None);
+        assert_eq!(CardTypeSetSource::any_of(vec![member()]), Some(member()));
+
+        // Deserialization: a saved game or hand-authored payload is rejected
+        // with a message naming the arity, not a generic length error.
+        for payload in [
+            r#"{"type":"AnyOf","sources":[]}"#,
+            r#"{"type":"AnyOf","sources":[{"type":"ExiledBySource"}]}"#,
+        ] {
+            let err = serde_json::from_str::<CardTypeSetSource>(payload)
+                .expect_err("a degenerate union must be rejected on load");
+            assert!(
+                err.to_string().contains("at least 2"),
+                "the error should name the invariant, got {err}"
+            );
+        }
+
+        // Round-trip: the wire shape is unchanged by the newtype, so saved games
+        // written before it still load.
+        let json =
+            r#"{"type":"AnyOf","sources":[{"type":"ExiledBySource"},{"type":"ExiledBySource"}]}"#;
+        let loaded: CardTypeSetSource =
+            serde_json::from_str(json).expect("a two-member union must still load");
+        assert_eq!(
+            serde_json::to_string(&loaded).expect("serialize"),
+            json,
+            "the newtype must be serde-transparent"
+        );
+    }
+
+    /// CR 109.2: the single bounded walker unrolls unions, visits every leaf
+    /// once, and reports truncation instead of recursing without limit.
+    #[test]
+    fn try_for_each_member_unrolls_unions_and_bounds_depth() {
+        let leaf = |n: u32| CardTypeSetSource::TrackedSet {
+            caused_by: (n > 0).then_some(ThisWayCause::Discarded),
+        };
+        let union = CardTypeSetSource::any_of(vec![
+            leaf(0),
+            CardTypeSetSource::any_of(vec![leaf(1), CardTypeSetSource::ExiledBySource])
+                .expect("two-member union"),
+        ])
+        .expect("two-member union");
+
+        // Every leaf, exactly once, with nested unions flattened.
+        let mut seen = Vec::new();
+        assert!(union.try_for_each_member(UNION_DEPTH_BUDGET, &mut |m| seen.push(m.clone())));
+        assert_eq!(
+            seen,
+            vec![leaf(0), leaf(1), CardTypeSetSource::ExiledBySource],
+            "unions unroll in declaration order and yield only non-union members"
+        );
+
+        // A non-union source is its own single member.
+        let mut single = Vec::new();
+        assert!(CardTypeSetSource::ExiledBySource
+            .try_for_each_member(UNION_DEPTH_BUDGET, &mut |m| single.push(m.clone())));
+        assert_eq!(single, vec![CardTypeSetSource::ExiledBySource]);
+
+        // Exhaustion reports FALSE rather than recursing, and still visits what
+        // it reached — "incomplete", not "empty".
+        let mut partial = Vec::new();
+        assert!(
+            !union.try_for_each_member(1, &mut |m| partial.push(m.clone())),
+            "a budget too small for the nesting must report truncation"
+        );
+        assert!(
+            partial.len() < seen.len(),
+            "a truncated walk sees strictly fewer members"
+        );
+        // Depth 0 cannot even visit a leaf.
+        assert!(!CardTypeSetSource::ExiledBySource.try_for_each_member(0, &mut |_| {}));
+    }
+
     /// CR 400.1: the population-zone authority reports EVERY zone a population
     /// reads, per variant. The craft row is the one that was silently wrong:
     /// evaluation scanned exile for `And[ExiledBySource, Owned{You}]` while the
@@ -26765,16 +26957,15 @@ mod tests {
             CardTypeSetSource::ExiledBySource,
             CardTypeSetSource::TrackedSet { caused_by: None },
             objects.clone(),
-            CardTypeSetSource::AnyOf {
-                sources: vec![
-                    objects,
-                    CardTypeSetSource::TurnJournal {
-                        journal: TurnJournalKind::SpellsCast,
-                        scope: CountScope::Controller,
-                        filter: None,
-                    },
-                ],
-            },
+            CardTypeSetSource::any_of(vec![
+                objects,
+                CardTypeSetSource::TurnJournal {
+                    journal: TurnJournalKind::SpellsCast,
+                    scope: CountScope::Controller,
+                    filter: None,
+                },
+            ])
+            .expect("two-member union"),
         ] {
             let node = QuantityRef::DistinctColorsAmong {
                 source: source.clone(),

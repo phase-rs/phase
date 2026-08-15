@@ -18340,9 +18340,28 @@ mod stage2_injector_tests {
                 // other two entries did not move (`scoped_library_search.rs:452` and
                 // `engine.rs:12773`, both re-read and sha256-confirmed in place); this
                 // round does not touch either file's producer region at all.
-                "game/effects/mod.rs:6670".to_string(),
-                "game/effects/mod.rs:6747".to_string(),
-                "game/effects/mod.rs:9988".to_string(),
+                //
+                // BOUNDED-UNION-WALKER ROUND (review follow-up), LOCAL not upstream.
+                // `:6670/:6747/:9988 => :6685/:6762/:10003`, a uniform `+15`.
+                //
+                // effects/mod.rs's whole delta is the split of
+                // `card_type_set_source_counts_population_matching` into a bounded
+                // walker plus a leaf classifier, both ABOVE all three producers:
+                // `@@ -2971,0 +2972,16 @@` (+16, the walker and its truncation
+                // contract) and `@@ -2982,7 +2998,6 @@` (-1, the `AnyOf` recursion arm
+                // collapsing to a no-op now that unions are unrolled before the
+                // classifier sees them). 16 - 1 = 15, with nothing below `:3004` —
+                // predicted and observed agree.
+                //
+                // The split moves a recursion; it mints nothing. The census agrees: the
+                // two asserts above this one fired GREEN (total still 38, partition
+                // still 5/8/25) and the panic was on this third assert alone. Identity
+                // re-established rather than assumed — `9869a19f…`, `2bc316e3…`,
+                // `8df98486…` at the new coordinates, the same digests recorded one
+                // entry above — and the other two entries did not move.
+                "game/effects/mod.rs:6685".to_string(),
+                "game/effects/mod.rs:6762".to_string(),
+                "game/effects/mod.rs:10003".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.

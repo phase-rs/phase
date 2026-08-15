@@ -11598,18 +11598,26 @@ fn quantity_expr_refs_cost_paid_object(expr: &QuantityExpr) -> bool {
 /// implementation. (It cited CR 109.2, the battlefield-default rule for a bare
 /// type description, which does not speak to filter routing.)
 fn characteristic_source_references_cost_paid_object(source: &CardTypeSetSource) -> bool {
-    match source {
-        CardTypeSetSource::Objects { filter } => filter.references_cost_paid_object(),
-        CardTypeSetSource::TurnJournal { filter, .. } => filter
-            .as_ref()
-            .is_some_and(TargetFilter::references_cost_paid_object),
-        CardTypeSetSource::AnyOf { sources } => sources
-            .iter()
-            .any(characteristic_source_references_cost_paid_object),
-        CardTypeSetSource::Zone { .. }
-        | CardTypeSetSource::ExiledBySource
-        | CardTypeSetSource::TrackedSet { .. } => false,
-    }
+    let mut found = false;
+    let complete =
+        source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
+            if found {
+                return;
+            }
+            found = match leaf {
+                CardTypeSetSource::Objects { filter } => filter.references_cost_paid_object(),
+                CardTypeSetSource::TurnJournal { filter, .. } => filter
+                    .as_ref()
+                    .is_some_and(TargetFilter::references_cost_paid_object),
+                CardTypeSetSource::Zone { .. }
+                | CardTypeSetSource::ExiledBySource
+                | CardTypeSetSource::TrackedSet { .. }
+                | CardTypeSetSource::AnyOf { .. } => false,
+            };
+        });
+    // A truncated walk claims the reference: this gate exists to stop a
+    // cost-paid-object read from escaping, so exhaustion must not let one past.
+    found || !complete
 }
 
 /// CR 400.7d + CR 608.2k: True when this `QuantityRef` reads the cost-paid

@@ -2970,6 +2970,22 @@ fn card_type_set_source_counts_population_matching(
     source: &crate::types::ability::CardTypeSetSource,
     filter_pred: &dyn Fn(&TargetFilter) -> bool,
 ) -> bool {
+    let mut found = false;
+    let complete =
+        source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
+            if !found {
+                found = card_type_set_leaf_counts_population_matching(leaf, filter_pred);
+            }
+        });
+    // A truncated walk claims the match: an unreported anaphor is the silent
+    // failure this predicate exists to prevent.
+    found || !complete
+}
+
+fn card_type_set_leaf_counts_population_matching(
+    source: &crate::types::ability::CardTypeSetSource,
+    filter_pred: &dyn Fn(&TargetFilter) -> bool,
+) -> bool {
     use crate::types::ability::CardTypeSetSource;
     match source {
         CardTypeSetSource::Objects { filter } => filter_pred(filter),
@@ -2979,13 +2995,12 @@ fn card_type_set_source_counts_population_matching(
         // CR 601.2a, which describes putting a spell on the stack as it is cast
         // — the event the journal records, not its narrowing filter.)
         CardTypeSetSource::TurnJournal { filter, .. } => filter.as_ref().is_some_and(filter_pred),
-        // A union reaches every member's population. Uncited for the same reason
-        // as the union arm in `ability_rw::characteristic_source_read`: no CR
-        // rule defines set union of populations. (It cited CR 109.2, the
-        // battlefield-default rule for a bare type description.)
-        CardTypeSetSource::AnyOf { sources } => sources
-            .iter()
-            .any(|member| card_type_set_source_counts_population_matching(member, filter_pred)),
+        // Unrolled by the bounded walker in the caller, so a union never reaches
+        // this arm. Uncited for the same reason as the union arm in
+        // `ability_rw::characteristic_source_read`: no CR rule defines set union
+        // of populations. (It cited CR 109.2, the battlefield-default rule for a
+        // bare type description.)
+        CardTypeSetSource::AnyOf { .. } => false,
         CardTypeSetSource::Zone { .. }
         | CardTypeSetSource::ExiledBySource
         | CardTypeSetSource::TrackedSet { .. } => false,

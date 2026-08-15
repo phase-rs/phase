@@ -4284,18 +4284,27 @@ fn filter_target_slot_filter(filter: &TargetFilter) -> Option<TargetFilter> {
 /// that does not support its code is worse than none because it reads as
 /// evidence the behavior was checked against the rules.
 fn characteristic_source_target_slot_filter(source: &CardTypeSetSource) -> Option<TargetFilter> {
-    match source {
-        CardTypeSetSource::Objects { filter } => filter_target_slot_filter(filter),
-        CardTypeSetSource::TurnJournal { filter, .. } => {
-            filter.as_ref().and_then(filter_target_slot_filter)
+    // FIRST match wins, preserving the previous `find_map` semantics: the walker
+    // visits members in declaration order, and later members do not overwrite an
+    // earlier hit. Truncation needs no conservative branch here — this returns a
+    // slot to wire, and inventing one would be worse than finding none.
+    let mut found: Option<TargetFilter> = None;
+    source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
+        if found.is_some() {
+            return;
         }
-        CardTypeSetSource::AnyOf { sources } => sources
-            .iter()
-            .find_map(characteristic_source_target_slot_filter),
-        CardTypeSetSource::Zone { .. }
-        | CardTypeSetSource::ExiledBySource
-        | CardTypeSetSource::TrackedSet { .. } => None,
-    }
+        found = match leaf {
+            CardTypeSetSource::Objects { filter } => filter_target_slot_filter(filter),
+            CardTypeSetSource::TurnJournal { filter, .. } => {
+                filter.as_ref().and_then(filter_target_slot_filter)
+            }
+            CardTypeSetSource::Zone { .. }
+            | CardTypeSetSource::ExiledBySource
+            | CardTypeSetSource::TrackedSet { .. }
+            | CardTypeSetSource::AnyOf { .. } => None,
+        };
+    });
+    found
 }
 
 fn filter_prop_target_slot_filter(

@@ -1579,18 +1579,28 @@ fn characteristic_source_uses_filter_prop(
     pred: &impl Fn(&FilterProp) -> bool,
 ) -> bool {
     use crate::types::ability::CardTypeSetSource;
-    match source {
-        CardTypeSetSource::Objects { filter } => target_filter_uses_filter_prop(filter, pred),
-        CardTypeSetSource::TurnJournal { filter, .. } => filter
-            .as_ref()
-            .is_some_and(|filter| target_filter_uses_filter_prop(filter, pred)),
-        CardTypeSetSource::AnyOf { sources } => sources
-            .iter()
-            .any(|member| characteristic_source_uses_filter_prop(member, pred)),
-        CardTypeSetSource::Zone { .. }
-        | CardTypeSetSource::ExiledBySource
-        | CardTypeSetSource::TrackedSet { .. } => false,
-    }
+    let mut found = false;
+    let complete =
+        source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
+            if found {
+                return;
+            }
+            found = match leaf {
+                CardTypeSetSource::Objects { filter } => {
+                    target_filter_uses_filter_prop(filter, pred)
+                }
+                CardTypeSetSource::TurnJournal { filter, .. } => filter
+                    .as_ref()
+                    .is_some_and(|filter| target_filter_uses_filter_prop(filter, pred)),
+                CardTypeSetSource::Zone { .. }
+                | CardTypeSetSource::ExiledBySource
+                | CardTypeSetSource::TrackedSet { .. }
+                | CardTypeSetSource::AnyOf { .. } => false,
+            };
+        });
+    // A truncated walk claims the prop: this feeds parse-time capability
+    // reporting, where over-reporting a dependency is the harmless direction.
+    found || !complete
 }
 
 fn target_filter_uses_filter_prop(

@@ -2491,7 +2491,7 @@ fn filter_is_population_anchored(filter: &TargetFilter) -> bool {
 /// that particular phrase is zone-unambiguous by the time it reaches here. The
 /// guard exists because nothing in the type-phrase grammar GUARANTEES that
 /// distribution, and the failure it would cause is silent.
-fn objects_filter_zone_is_unambiguous(filter: &TargetFilter) -> bool {
+pub(crate) fn objects_filter_zone_is_unambiguous(filter: &TargetFilter) -> bool {
     match filter {
         // CR 601.2b: each disjunct is its OWN domain, so a zone-free disjunct
         // means the battlefield (CR 110.1) and genuinely conflicts with a
@@ -2750,6 +2750,12 @@ fn parse_objects_source(
     // panics on underflow or, worse, silently yields a wrong offset that
     // over-consumes the population. `strip_suffix` fails CLOSED instead: no
     // suffix relationship, no source.
+    // Nothing here consumes input or decides a branch: both grammars have
+    // already run, and this only measures how much of `type_text` they took. A
+    // combinator cannot express the question, because the text was read by a
+    // foreign (Legacy) reader whose returned remainder is the only evidence of
+    // its own consumption.
+    // allow-noncombinator: structural offset derivation from an already-parsed remainder, not parsing dispatch.
     let Some(consumed) = type_text.strip_suffix(remainder) else {
         return Err(oracle_err(input));
     };

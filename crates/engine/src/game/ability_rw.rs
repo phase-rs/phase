@@ -3682,22 +3682,33 @@ fn characteristic_source_read(source: &CardTypeSetSource) -> RwProfile {
         // CR rule defines set union of populations — "among <A> and <B>" is
         // English, and each member carries its own citation above. (This arm
         // cited CR 109.2, which is the battlefield-default rule for a bare type
-        // description and says nothing about unions.) Arity >= 2 is
-        // guaranteed by `CardTypeSetSource::any_of` at construction and by
-        // `deserialize_union_sources` on load, so this fold can never collapse to
-        // the fail-open `RwProfile::empty()`; the assert documents the dependency
-        // at the point that relies on it.
-        CardTypeSetSource::AnyOf { sources } => {
-            debug_assert!(
-                sources.len() >= 2,
-                "CardTypeSetSource::AnyOf arity invariant violated: {} member(s)",
-                sources.len()
-            );
-            sources.iter().fold(RwProfile::empty(), |mut acc, member| {
-                acc.merge(characteristic_source_read(member));
-                acc
-            })
-        }
+        // description and says nothing about unions.) Unrolled by the bounded
+        // walker in the caller, so a union never reaches this arm.
+        //
+        // The arity >= 2 invariant is now carried by `UnionSources`, whose
+        // private `Vec` makes a degenerate union unconstructible rather than
+        // merely asserted — the `debug_assert!` this replaces compiled out of
+        // release builds, which is where a fold collapsing to the fail-open
+        // `RwProfile::empty()` would actually have mattered.
+        CardTypeSetSource::AnyOf { .. } => RwProfile::empty(),
+    }
+}
+
+/// CR 603.3b: the read profile of a whole population, unions unrolled.
+///
+/// A truncated union walk yields `reads_everything()`, NOT the partial fold: an
+/// omitted read is FAIL-OPEN for the same-event ordering gate, so an unseen
+/// member has to be assumed to read everything.
+fn characteristic_source_read_bounded(source: &CardTypeSetSource) -> RwProfile {
+    let mut profile = RwProfile::empty();
+    let complete = source
+        .try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
+            profile.merge(characteristic_source_read(leaf))
+        });
+    if complete {
+        profile
+    } else {
+        reads_zone_membership()
     }
 }
 
@@ -5997,7 +6008,7 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         // fail-open for the CR 603.3b same-event ordering gate.
         QuantityRef::DistinctCardTypes { source }
         | QuantityRef::DistinctSubtypes { source, .. }
-        | QuantityRef::DistinctColorsAmong { source } => characteristic_source_read(source),
+        | QuantityRef::DistinctColorsAmong { source } => characteristic_source_read_bounded(source),
         // CR 603.10a (PR-6.75 c5): promoted out of the fail-closed group below to
         // its own arm so the next field addition is compiler-visible (a read-bearing
         // field must force a re-audit). `reads_member_bound = true` is the HONEST
@@ -6831,12 +6842,11 @@ mod tests {
         assert_eq!(characteristic_source_read(&zone), reads_zone_membership());
 
         // (d) CR 109.2: the union is the MERGE of its members' profiles.
-        let union = CardTypeSetSource::AnyOf {
-            sources: vec![objects.clone(), journal.clone()],
-        };
+        let union = CardTypeSetSource::any_of(vec![objects.clone(), journal.clone()])
+            .expect("two-member union");
         let mut expected = characteristic_source_read(&objects);
         expected.merge(characteristic_source_read(&journal));
-        let union_profile = characteristic_source_read(&union);
+        let union_profile = characteristic_source_read_bounded(&union);
         assert_eq!(
             union_profile, expected,
             "AnyOf must union both members' reads"
@@ -6859,9 +6869,10 @@ mod tests {
 
         // Idempotence: a union of two identical members equals that member.
         assert_eq!(
-            characteristic_source_read(&CardTypeSetSource::AnyOf {
-                sources: vec![journal.clone(), journal.clone()],
-            }),
+            characteristic_source_read_bounded(
+                &CardTypeSetSource::any_of(vec![journal.clone(), journal.clone()])
+                    .expect("two-member union")
+            ),
             characteristic_source_read(&journal)
         );
 

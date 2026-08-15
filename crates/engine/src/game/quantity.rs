@@ -190,7 +190,7 @@ impl<'a> CharacteristicView<'a> {
 /// only its own characteristic extractor. Callers tally into a `HashSet`, so
 /// `AnyOf`'s recursion yields a genuine set UNION: a member present in two
 /// sources contributes its characteristics once.
-fn visit_characteristic_source<'s>(
+fn visit_characteristic_leaf<'s>(
     state: &'s GameState,
     source: &CardTypeSetSource,
     ctx: QuantityContext,
@@ -333,23 +333,33 @@ fn visit_characteristic_source<'s>(
                 }
             }
         },
-        // CR 109.2: set union of two or more populations. Deduplication is
+        // CR 109.2: unions are unrolled by `try_for_each_member` before this is
+        // called, so a union never reaches the leaf walk. Deduplication remains
         // automatic because every caller tallies into one `HashSet` — which is
-        // exactly why the union must live HERE and not above the leaf:
+        // why the union must be unrolled INTO this walk and not summed above it:
         // `|A ∪ B| != |A| + |B|`.
-        CardTypeSetSource::AnyOf { sources } => {
-            for member in sources {
-                visit_characteristic_source(
-                    state,
-                    member,
-                    ctx.clone(),
-                    filter_ctx,
-                    controller,
-                    visit,
-                );
-            }
-        }
+        CardTypeSetSource::AnyOf { .. } => {}
     }
+}
+
+/// CR 109.2: Walk a population, unrolling any union through the single bounded
+/// walker.
+///
+/// Every member reached within the depth budget is visited. A truncated walk
+/// UNDERCOUNTS rather than over-counts, which is why the budget is set far above
+/// any printed union — the honest alternative would be refusing to resolve the
+/// quantity at all, and no card can reach the bound.
+fn visit_characteristic_source<'s>(
+    state: &'s GameState,
+    source: &CardTypeSetSource,
+    ctx: QuantityContext,
+    filter_ctx: &FilterContext<'_>,
+    controller: PlayerId,
+    visit: &mut impl FnMut(CharacteristicView<'s>),
+) {
+    source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
+        visit_characteristic_leaf(state, leaf, ctx.clone(), filter_ctx, controller, visit);
+    });
 }
 
 fn source_chosen_player_for_context(state: &GameState, ctx: &QuantityContext) -> Option<PlayerId> {
@@ -1162,16 +1172,30 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
 /// appended at cast time and is unaffected by an object entering or leaving the
 /// battlefield. `AnyOf` reads the census iff any member does.
 fn characteristic_source_reads_object_count(source: &CardTypeSetSource) -> bool {
-    match source {
-        CardTypeSetSource::Objects { .. } => true,
-        CardTypeSetSource::AnyOf { sources } => {
-            sources.iter().any(characteristic_source_reads_object_count)
-        }
-        CardTypeSetSource::Zone { .. }
-        | CardTypeSetSource::ExiledBySource
-        | CardTypeSetSource::TrackedSet { .. }
-        | CardTypeSetSource::TurnJournal { .. } => false,
-    }
+    any_characteristic_member(source, &mut |leaf| {
+        matches!(leaf, CardTypeSetSource::Objects { .. })
+    })
+}
+
+/// CR 109.2: Does ANY non-union member of `source` satisfy `pred`?
+///
+/// The shared shape for every boolean question asked of a population, routed
+/// through the single bounded walker so no consumer writes its own `AnyOf`
+/// recursion. A truncated walk answers `true`: each of these gates gains a
+/// redundant re-evaluation when it over-reports and misses one when it
+/// under-reports, so exhaustion resolves to the harmless direction.
+fn any_characteristic_member(
+    source: &CardTypeSetSource,
+    pred: &mut impl FnMut(&CardTypeSetSource) -> bool,
+) -> bool {
+    let mut found = false;
+    let complete =
+        source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
+            if !found {
+                found = pred(leaf);
+            }
+        });
+    found || !complete
 }
 
 fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
@@ -1372,6 +1396,20 @@ pub(crate) fn quantity_expr_characteristic_reads_at(
 /// inconsistency that stops being harmless the moment a caller passes a
 /// hand-built source.
 fn characteristic_source_reads_at(source: &CardTypeSetSource, depth: u32) -> CharacteristicKinds {
+    let mut kinds = CharacteristicKinds::EMPTY;
+    let complete = source.try_for_each_member(depth, &mut |leaf| {
+        kinds = kinds.union(characteristic_leaf_reads_at(leaf, depth));
+    });
+    if complete {
+        kinds
+    } else {
+        // Fail-SAFE: an unseen member may read anything, so over-report and
+        // force conservative re-evaluation rather than skip one.
+        CharacteristicKinds::ALL
+    }
+}
+
+fn characteristic_leaf_reads_at(source: &CardTypeSetSource, depth: u32) -> CharacteristicKinds {
     let Some(depth) = depth.checked_sub(1) else {
         return CharacteristicKinds::ALL;
     };
@@ -1384,11 +1422,10 @@ fn characteristic_source_reads_at(source: &CardTypeSetSource, depth: u32) -> Cha
             .map_or(CharacteristicKinds::EMPTY, |filter| {
                 target_filter_characteristic_reads_at(filter, depth)
             }),
-        CardTypeSetSource::AnyOf { sources } => sources
-            .iter()
-            .fold(CharacteristicKinds::EMPTY, |acc, member| {
-                acc.union(characteristic_source_reads_at(member, depth))
-            }),
+        // Unions are unrolled by `try_for_each_member` above, so a union reaching
+        // this arm has already been walked; contributing EMPTY here keeps the
+        // fold identity correct rather than double-counting.
+        CardTypeSetSource::AnyOf { .. } => CharacteristicKinds::EMPTY,
         CardTypeSetSource::Zone { .. }
         | CardTypeSetSource::ExiledBySource
         | CardTypeSetSource::TrackedSet { .. } => CharacteristicKinds::EMPTY,
@@ -1657,13 +1694,23 @@ fn characteristic_source_perturbed_by_entry(
     ctx: &FilterContext<'_>,
     source: &CardTypeSetSource,
 ) -> bool {
+    any_characteristic_member(source, &mut |leaf| {
+        characteristic_leaf_perturbed_by_entry(state, entered, ctx, leaf)
+    })
+}
+
+fn characteristic_leaf_perturbed_by_entry(
+    state: &GameState,
+    entered: &crate::game::game_object::GameObject,
+    ctx: &FilterContext<'_>,
+    source: &CardTypeSetSource,
+) -> bool {
     match source {
         CardTypeSetSource::Objects { filter } => {
             matches_target_filter(state, entered.id, filter, ctx)
         }
-        CardTypeSetSource::AnyOf { sources } => sources
-            .iter()
-            .any(|member| characteristic_source_perturbed_by_entry(state, entered, ctx, member)),
+        // Unrolled by the bounded walker below; a union never reaches this arm.
+        CardTypeSetSource::AnyOf { .. } => false,
         CardTypeSetSource::Zone { .. }
         | CardTypeSetSource::ExiledBySource
         | CardTypeSetSource::TrackedSet { .. }
@@ -7448,9 +7495,47 @@ mod tests {
                 }]),
         );
 
-        // WRONG SHAPE: one `Objects` population over a cross-zone `Or`. The
-        // first member has no `InZone`, so `extract_in_zone` yields `None` and
-        // the scan defaults to the battlefield — the graveyard leg is dropped.
+        // SUPPORTED MULTI-ZONE SHAPE: one `Objects` population whose filter names
+        // BOTH zones. `population_zones` enumerates the whole `InAnyZone` union,
+        // so the walk visits both and both colours are counted.
+        //
+        // This is the assertion the old version of this test lacked. It pinned
+        // only the unsupported fold below and described it as "extract_in_zone
+        // collapses to one zone", which stopped being true when the walk started
+        // enumerating every zone — the number it asserted was still right, for a
+        // reason the comment no longer named.
+        let multi_zone = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctColorsAmong {
+                source: CardTypeSetSource::Objects {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::default()
+                            .controller(ControllerRef::You)
+                            .properties(vec![FilterProp::InAnyZone {
+                                zones: vec![Zone::Battlefield, Zone::Graveyard],
+                            }]),
+                    ),
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &multi_zone, controller, bear),
+            2,
+            "an InAnyZone population counts EVERY named zone: green (battlefield) \
+             + blue (graveyard). A walk that kept only the first zone reads 1"
+        );
+
+        // UNSUPPORTED SHAPE, and the boundary is asserted rather than assumed: a
+        // PARTIALLY zone-constrained `Or`. The first disjunct names no zone (so
+        // it means the battlefield, CR 110.1) while the second names the
+        // graveyard, and `population_zones` returns ONE FLAT LIST that cannot say
+        // "battlefield for that branch only". The list is `[Graveyard]`, which is
+        // non-empty, so the battlefield default never applies and the first
+        // disjunct's permanents are never scanned.
+        //
+        // The count is 1 — blue, from the graveyard — NOT the green the old
+        // comment here predicted. Both readings happen to be 1, which is exactly
+        // why the stale explanation survived: the number could not distinguish
+        // them. Asserting the identity below can.
         let folded = QuantityExpr::Ref {
             qty: QuantityRef::DistinctColorsAmong {
                 source: CardTypeSetSource::Objects {
@@ -7463,23 +7548,35 @@ mod tests {
         assert_eq!(
             resolve_quantity(&state, &folded, controller, bear),
             1,
-            "a folded cross-zone Or silently scans ONE zone — this is the shape \
-             the parser must never emit"
+            "a partially zone-constrained Or scans only the zone it names"
+        );
+        // The parser refuses to emit this shape, which is what keeps the
+        // undercount above unreachable from real Oracle text. If this guard ever
+        // goes green, the shape becomes expressible and the undercount becomes a
+        // live defect.
+        assert!(
+            !crate::parser::oracle_nom::quantity::objects_filter_zone_is_unambiguous(
+                &TargetFilter::Or {
+                    filters: vec![battlefield_creatures.clone(), graveyard_cards.clone()],
+                }
+            ),
+            "the parser guard must refuse the partially zone-constrained Or that \
+             the resolver cannot represent"
         );
 
-        // RIGHT SHAPE: a union whose members each carry their own zone.
+        // RIGHT SHAPE for genuinely distinct populations: a union whose members
+        // each carry their own zone.
         let union = QuantityExpr::Ref {
             qty: QuantityRef::DistinctColorsAmong {
-                source: CardTypeSetSource::AnyOf {
-                    sources: vec![
-                        CardTypeSetSource::Objects {
-                            filter: battlefield_creatures,
-                        },
-                        CardTypeSetSource::Objects {
-                            filter: graveyard_cards,
-                        },
-                    ],
-                },
+                source: CardTypeSetSource::any_of(vec![
+                    CardTypeSetSource::Objects {
+                        filter: battlefield_creatures,
+                    },
+                    CardTypeSetSource::Objects {
+                        filter: graveyard_cards,
+                    },
+                ])
+                .expect("two-member union"),
             },
         };
         assert_eq!(
@@ -7523,21 +7620,19 @@ mod tests {
 
         let union = QuantityExpr::Ref {
             qty: QuantityRef::DistinctColorsAmong {
-                source: CardTypeSetSource::AnyOf {
-                    sources: vec![
-                        CardTypeSetSource::Objects {
-                            filter: TargetFilter::Typed(
-                                TypedFilter::new(TypeFilter::Permanent)
-                                    .controller(ControllerRef::You),
-                            ),
-                        },
-                        CardTypeSetSource::TurnJournal {
-                            journal: TurnJournalKind::SpellsCast,
-                            scope: CountScope::Controller,
-                            filter: None,
-                        },
-                    ],
-                },
+                source: CardTypeSetSource::any_of(vec![
+                    CardTypeSetSource::Objects {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::new(TypeFilter::Permanent).controller(ControllerRef::You),
+                        ),
+                    },
+                    CardTypeSetSource::TurnJournal {
+                        journal: TurnJournalKind::SpellsCast,
+                        scope: CountScope::Controller,
+                        filter: None,
+                    },
+                ])
+                .expect("two-member union"),
             },
         };
         assert_eq!(

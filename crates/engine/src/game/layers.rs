@@ -2725,18 +2725,26 @@ fn characteristic_source_reads_zone(source: &CardTypeSetSource, zone: Zone) -> b
 /// that reads a life total? Mirrors [`characteristic_source_reads_zone`]'s
 /// recursion over the same axis.
 fn characteristic_source_reads_life_total(source: &CardTypeSetSource) -> bool {
-    match source {
-        CardTypeSetSource::Objects { filter } => target_filter_reads_life_total(filter),
-        CardTypeSetSource::TurnJournal { filter, .. } => {
-            filter.as_ref().is_some_and(target_filter_reads_life_total)
-        }
-        CardTypeSetSource::AnyOf { sources } => {
-            sources.iter().any(characteristic_source_reads_life_total)
-        }
-        CardTypeSetSource::Zone { .. }
-        | CardTypeSetSource::ExiledBySource
-        | CardTypeSetSource::TrackedSet { .. } => false,
-    }
+    let mut found = false;
+    let complete =
+        source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
+            if found {
+                return;
+            }
+            found = match leaf {
+                CardTypeSetSource::Objects { filter } => target_filter_reads_life_total(filter),
+                CardTypeSetSource::TurnJournal { filter, .. } => {
+                    filter.as_ref().is_some_and(target_filter_reads_life_total)
+                }
+                CardTypeSetSource::Zone { .. }
+                | CardTypeSetSource::ExiledBySource
+                | CardTypeSetSource::TrackedSet { .. }
+                | CardTypeSetSource::AnyOf { .. } => false,
+            };
+        });
+    // A truncated walk claims the read: one redundant recompute beats a stale
+    // layer surviving a life change.
+    found || !complete
 }
 
 /// CR 404 + CR 611.3a: Does a `QuantityExpr` read the card count / object
