@@ -284,21 +284,8 @@ fn heroic_return_reanimates_hero_with_two_extra_counters() {
     // graveyard — an opponent's graveyard Hero is never a legal target. This proves
     // the head's `controller: You` + `InZone: Graveyard` filter survived
     // head-scoping and is enforced at enumeration, not merely present in the AST.
-    //
-    // SCOPE NOTE: these fixtures are ordinary graveyard cards, where controller and
-    // owner coincide, so they do not separate the two scopes — and deliberately so.
-    // Target ENUMERATION for non-battlefield zones runs through
-    // `game::targeting::add_zone_targets`, which evaluates `matches_target_filter`
-    // (controller-scoped) rather than `matches_target_filter_in_owner_zone`
-    // (CR 400.3 / CR 109.5 owner-scoped). A card owned by P0 but carrying a stale
-    // `controller = P1` — the state `change_zone.rs` documents for a Mind Control
-    // victim that died into its owner's graveyard — is therefore NOT enumerated as
-    // a legal target today. That is a pre-existing property of the shared
-    // enumeration path affecting every graveyard/hand/library-targeting card in the
-    // engine, unrelated to this card's parse, so it is not pinned here: an
-    // owner-scoped assertion at this seam would fail for reasons Heroic Return does
-    // not control, and asserting the current controller-scoped behavior would
-    // enshrine the gap.
+    // The owner-vs-stale-controller axis is separated in
+    // `heroic_return_targets_by_owner_not_stale_controller` below.
     let slots = legal_target_slots_for_castable_spell(runner.state(), spell);
     let slot = slots
         .first()
@@ -350,6 +337,108 @@ fn heroic_return_reanimates_hero_with_two_extra_counters() {
          PutCounter effect: {:?}",
         outcome.events()
     );
+}
+
+/// CR 400.3 + CR 109.5 + CR 110.1 (RUNTIME): "your graveyard" is an OWNERSHIP claim,
+/// so the reanimation target set follows `obj.owner`, never a stale `obj.controller`.
+///
+/// Both fixtures separate the two players on the two fields independently — the
+/// preceding test's cards keep owner == controller, so they cannot distinguish the
+/// scopes and this one exists to do exactly that:
+///   * `mine_stolen`   — owner P0, controller P1. Legal: it sits in P0's graveyard.
+///   * `theirs_stolen` — owner P1, controller P0. Illegal: it sits in P1's graveyard.
+///
+/// The state is not synthetic. `effects::change_zone` documents that a creature
+/// stolen via Mind Control retains `obj.controller = thief` after dying into its
+/// OWNER's graveyard, because `reset_for_battlefield_exit` does not reset controller
+/// and the layer pass that would skips objects off the battlefield. Under
+/// controller-scoped enumeration the two assertions below invert exactly: P0's own
+/// card vanishes from its own query and the opponent's card becomes targetable.
+///
+/// REVERT DISCRIMINATOR: restore `matches_target_filter` in
+/// `game::targeting::add_zone_targets` and both assertions fail.
+#[test]
+fn heroic_return_targets_by_owner_not_stale_controller() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Heroic Return", true, HEROIC_RETURN)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 5,
+            shards: vec![ManaCostShard::White],
+        })
+        .id();
+    // Owner P0 — lands in P0's graveyard, so it is in "your graveyard" for P0.
+    let mine_stolen = scenario
+        .add_creature_to_graveyard(P0, "My Stolen Hero", 2, 2)
+        .with_subtypes(vec!["Hero"])
+        .id();
+    // Owner P1 — lands in P1's graveyard, so it is NOT in "your graveyard" for P0.
+    let theirs_stolen = scenario
+        .add_creature_to_graveyard(P1, "Their Stolen Hero", 2, 2)
+        .with_subtypes(vec!["Hero"])
+        .id();
+    scenario.with_mana_pool(P0, {
+        let mut pool = mana(ManaType::White, 1);
+        pool.extend(mana(ManaType::Colorless, 5));
+        pool
+    });
+    let mut runner = scenario.build();
+
+    // Stamp the divergence AFTER the build so the zone movers cannot normalize it:
+    // each card's controller is the OTHER player than its owner.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&mine_stolen)
+        .expect("fixture present")
+        .controller = P1;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&theirs_stolen)
+        .expect("fixture present")
+        .controller = P0;
+
+    // Premise: the divergence really is staged, so neither assertion below can pass
+    // by accident on a state where owner and controller still coincide.
+    for (id, owner, controller) in [(mine_stolen, P0, P1), (theirs_stolen, P1, P0)] {
+        let obj = &runner.state().objects[&id];
+        assert_eq!(obj.owner, owner, "fixture owner for {}", obj.name);
+        assert_eq!(
+            obj.controller, controller,
+            "fixture stale controller for {}",
+            obj.name
+        );
+    }
+
+    let slots = legal_target_slots_for_castable_spell(runner.state(), spell);
+    let slot = slots
+        .first()
+        .expect("the reanimation ability must publish a target slot");
+    let legal: Vec<_> = slot.legal_targets.iter().collect();
+
+    assert!(
+        legal
+            .iter()
+            .any(|t| matches!(t, TargetRef::Object(id) if *id == mine_stolen)),
+        "a card YOU OWN in your graveyard must be targetable even while a stale \
+         opponent controller clings to it: {legal:?}"
+    );
+    assert!(
+        !legal
+            .iter()
+            .any(|t| matches!(t, TargetRef::Object(id) if *id == theirs_stolen)),
+        "a card an OPPONENT OWNS must never enter your \"your graveyard\" query, \
+         however it is controlled: {legal:?}"
+    );
+
+    // End-to-end: the owner-scoped target actually resolves, so the fix holds
+    // through casting and not merely through enumeration.
+    let outcome = runner.cast(spell).target_objects(&[mine_stolen]).resolve();
+    outcome.assert_zone(&[mine_stolen], Zone::Battlefield);
+    outcome.assert_counters(mine_stolen, CounterType::Plus1Plus1, 2);
+    outcome.assert_zone(&[theirs_stolen], Zone::Graveyard);
 }
 
 /// V3 (RUNTIME), the negative branch of the same seam: a non-Hero reanimated by
