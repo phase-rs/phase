@@ -39,11 +39,12 @@
 //! A successful move IS distinguishable in the event stream: it commits through
 //! `apply_counter_move_commit` (game/effects/counters.rs), which emits
 //! `GameEvent::CounterRemoved` then `GameEvent::CounterAdded`. Every one of the
-//! four no-op paths returns before those. What the event stream does NOT
-//! distinguish is WHICH of the four fired — all four emit only
-//! `EffectResolved`, and three of them present no prompt, so they are
-//! indistinguishable from one another at the table. That is why the reporting
-//! game could not be diagnosed after the fact.
+//! four no-op paths returns before those counter events. These tests use prompt
+//! observations to distinguish the user-visible paths; they do not assert that
+//! their full event streams are identical. In particular, no legal target drops
+//! the trigger before it reaches the stack, while a failed intervening-if is
+//! handled during stack resolution. That is why the reporting game could not be
+//! diagnosed after the fact.
 //!
 //! CR references (verified against docs/MagicCompRules.txt):
 //!   - CR 122.5: If an effect says to move a counter, it's removed from the
