@@ -2401,19 +2401,89 @@ fn filter_is_population_anchored(filter: &TargetFilter) -> bool {
             !filters.is_empty() && filters.iter().all(filter_is_population_anchored)
         }
         TargetFilter::Not { filter } => filter_is_population_anchored(filter),
-        _ => false,
+        // Every remaining variant is a LEAF that is neither controller-anchored
+        // nor zone-anchored (the zone case already returned above). Enumerated
+        // explicitly rather than defaulted, so a future variant that IS a
+        // population anchor has to be classified here instead of being silently
+        // declined. Not merged with the zone-bearing leaves above: those exit
+        // through `extract_in_zone` and never reach this match.
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
     }
 }
 
-/// CR 400.1 + CR 109.2: Does this `Objects` filter denote exactly one zone?
+/// CR 400.1 + CR 109.2: Does this `Objects` filter denote ONE population domain?
 ///
-/// `visit_characteristic_source`'s `Objects` arm derives ONE zone via
-/// `TargetFilter::extract_in_zone`, which for a composite returns the FIRST
-/// member's zone. A cross-zone `Or` would therefore scan a single zone and drop
-/// the other leg with no diagnostic. Refused, so the card surfaces as an honest
-/// gap instead of a confident wrong count — cross-zone populations ARE
-/// expressible, as [`CardTypeSetSource::AnyOf`], where each member carries its
-/// own zone.
+/// REASON UPDATED — the original one is obsolete. This guard was written because
+/// `visit_characteristic_source` derived a single zone via `extract_in_zone` and
+/// would silently drop the other leg of a cross-zone `Or`. That collapse is
+/// gone: the walk now enumerates every zone in
+/// [`CardTypeSetSource::population_zones`].
+///
+/// What remains, and what this still guards, is narrower and lives one level
+/// down. `population_zones` returns a FLAT zone list for the whole filter, so it
+/// cannot express "battlefield for this branch, graveyard for that one". A
+/// PARTIALLY zone-constrained `Or` — `Or[Typed{Creature}, Typed{Card,
+/// InZone(Graveyard)}]`, "creatures and cards in your graveyard" — yields
+/// `[Graveyard]`, which is non-empty, so the battlefield default never applies
+/// and the unconstrained disjunct's permanents are dropped. Refused, so the card
+/// surfaces as an honest gap instead of a confident undercount. Cross-zone
+/// populations ARE expressible as [`CardTypeSetSource::AnyOf`], where each
+/// member carries its own zone.
+///
+/// (`game::quantity::filter_candidate_universe` solves the same problem the
+/// other way, by recursing per branch so an unconstrained branch keeps its
+/// battlefield domain. Teaching `population_zones` that shape would retire this
+/// guard and widen coverage; it is deliberately NOT done here, because it
+/// changes which cards parse and belongs in its own change.)
 ///
 /// A GRAMMAR-REACHABILITY guard, not a card-driven one, and deliberately not
 /// claimed to be more: measured, Legacy's `TYPE_SEPARATORS` fold of "creatures
@@ -2423,7 +2493,10 @@ fn filter_is_population_anchored(filter: &TargetFilter) -> bool {
 /// distribution, and the failure it would cause is silent.
 fn objects_filter_zone_is_unambiguous(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+        // CR 601.2b: each disjunct is its OWN domain, so a zone-free disjunct
+        // means the battlefield (CR 110.1) and genuinely conflicts with a
+        // zone-bearing sibling. `None` participates in the comparison.
+        TargetFilter::Or { filters } => {
             if !filters.iter().all(objects_filter_zone_is_unambiguous) {
                 return false;
             }
@@ -2433,8 +2506,90 @@ fn objects_filter_zone_is_unambiguous(filter: &TargetFilter) -> bool {
                 Some(first) => zones.all(|zone| zone == first),
             }
         }
+        // An `And` is ONE domain intersected, not two: a zone-free conjunct adds
+        // a constraint ("creature") to whatever zone its sibling names, rather
+        // than contributing a second population. So `None` members are IGNORED
+        // and only two DISTINCT named zones conflict — and such a conjunction is
+        // empty anyway, since an object occupies one zone (CR 400.1).
+        //
+        // Comparing `None` here (as this arm used to, sharing the `Or` path)
+        // rejected EVERY conjunction that pairs a zone-bearing member with a
+        // zone-free constraint — the `And[<zone-bearing>, Typed{…}]` shape, of
+        // which `linked_exile_owned_filter`'s `And[ExiledBySource,
+        // Typed{Owned{You}}]` is the built example. That particular filter is
+        // reached through the craft head, which returns before this guard runs,
+        // so the false-reject is latent rather than card-visible today; it would
+        // bite the first such conjunction that arrives via the generic
+        // population grammar.
+        TargetFilter::And { filters } => {
+            if !filters.iter().all(objects_filter_zone_is_unambiguous) {
+                return false;
+            }
+            let mut named = filters.iter().filter_map(TargetFilter::extract_in_zone);
+            match named.next() {
+                None => true,
+                Some(first) => named.all(|zone| zone == first),
+            }
+        }
         TargetFilter::Not { filter } => objects_filter_zone_is_unambiguous(filter),
-        _ => true,
+        // A `Typed` leaf carries at most one `InZone`, so it names one domain.
+        TargetFilter::Typed(_) => true,
+        // Every remaining variant is a LEAF: it denotes at most one zone by
+        // construction, so it cannot be INTERNALLY ambiguous — ambiguity is a
+        // property of composites. Enumerated rather than defaulted so that a
+        // future variant denoting MULTIPLE zones has to be classified here; the
+        // old `_ => true` would have called it unambiguous with no compile
+        // error, which is the fail-open direction this guard exists to close.
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => true,
     }
 }
 
@@ -2565,8 +2720,9 @@ fn parse_objects_source(
     if !quantity_filter_has_meaningful_content(&filter) {
         return Err(oracle_err(input));
     }
-    // CR 400.1 + CR 109.2: both grammars, both extents — a folded cross-zone `Or`
-    // would be silently collapsed to one zone by `extract_in_zone`.
+    // CR 400.1 + CR 109.2: both grammars, both extents — a partially
+    // zone-constrained fold has no single correct zone list, so it would drop
+    // its unconstrained branch. See `objects_filter_zone_is_unambiguous`.
     if !objects_filter_zone_is_unambiguous(&filter) {
         return Err(oracle_err(input));
     }
@@ -2582,11 +2738,25 @@ fn parse_objects_source(
             }
         }
     }
-    // `type_text` is a leading slice of `input` (only trailing `.`/`,` trimmed)
-    // and `remainder` is a tail of `type_text`, so the consumed prefix length is
-    // the difference of their lengths — no pointer arithmetic needed.
-    let consumed = type_text.len() - remainder.len();
-    Ok((&input[consumed..], CardTypeSetSource::Objects { filter }))
+    // `type_text` is a leading slice of `input` (only trailing `.`/`,` trimmed).
+    // The consumed prefix is whatever `type_text` has in front of `remainder` —
+    // derived by STRIPPING the remainder rather than by subtracting lengths.
+    //
+    // The two grammars establish that relationship differently, and only one of
+    // them guarantees it. `Strict` returns a nom remainder, which is a genuine
+    // byte suffix. `Legacy` hand-builds its `(filter, remainder)` pair, and no
+    // signature or contract says the remainder is a suffix of what it was given.
+    // Under length subtraction a re-derived or trimmed `Legacy` remainder either
+    // panics on underflow or, worse, silently yields a wrong offset that
+    // over-consumes the population. `strip_suffix` fails CLOSED instead: no
+    // suffix relationship, no source.
+    let Some(consumed) = type_text.strip_suffix(remainder) else {
+        return Err(oracle_err(input));
+    };
+    Ok((
+        &input[consumed.len()..],
+        CardTypeSetSource::Objects { filter },
+    ))
 }
 
 /// CR 109.2 + CR 400.1 + CR 601.2a: the single-source population grammar — one

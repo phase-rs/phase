@@ -18314,9 +18314,35 @@ mod stage2_injector_tests {
                 // place). A merge that had gained or lost a producer could not leave two
                 // entries byte-identical AND at their coordinates while moving the other
                 // three by a figure the diff predicts exactly.
-                "game/effects/mod.rs:6664".to_string(),
-                "game/effects/mod.rs:6741".to_string(),
-                "game/effects/mod.rs:9982".to_string(),
+                //
+                // CR-CITATION ROUND (review follow-up), LOCAL not upstream — so the
+                // CI-vs-local diagnosis in the header does not apply, the shift
+                // originates in this same diff. `:6664/:6741/:9982 => :6670/:6747/:9988`,
+                // a uniform `+6`.
+                //
+                // A COMMENT-ONLY round, and the census caught it, which is the row
+                // working exactly as designed rather than a defect in the row.
+                // effects/mod.rs's entire delta is two comment hunks in
+                // `card_type_set_source_counts_population_matching`, both ABOVE all three
+                // producers: `@@ -2976,2 +2976,5 @@` (+3, the `TurnJournal` arm's
+                // citation corrected off CR 601.2a) and `@@ -2979 +2982,4 @@` (+3, the
+                // `AnyOf` arm's off CR 109.2). 3 + 3 = 6, with nothing below `:2985` —
+                // predicted and observed agree. Prose cannot mint a prompt, and the
+                // census agrees: the two asserts above this one fired GREEN on the run
+                // that caught this (total still 38, partition still 5/8/25) and the
+                // panic was on this third assert alone, which is what makes it a
+                // coordinate shift rather than a set change.
+                //
+                // Identity re-established rather than assumed: the three producer lines
+                // are byte-identical by sha256 at their new coordinates to the same
+                // producers at `:6664/:6741/:9982` — `9869a19f…`, `2bc316e3…`,
+                // `8df98486…`, the same digests this log recorded one entry above. The
+                // other two entries did not move (`scoped_library_search.rs:452` and
+                // `engine.rs:12773`, both re-read and sha256-confirmed in place); this
+                // round does not touch either file's producer region at all.
+                "game/effects/mod.rs:6670".to_string(),
+                "game/effects/mod.rs:6747".to_string(),
+                "game/effects/mod.rs:9988".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.

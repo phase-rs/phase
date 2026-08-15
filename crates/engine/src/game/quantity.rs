@@ -1355,7 +1355,26 @@ pub(crate) fn quantity_expr_characteristic_reads_at(
 /// Only the object filter and the journal's optional narrowing filter are live
 /// filter reads; the zone / linked-exile / tracked-set arms select by membership
 /// alone. `AnyOf` unions its members.
+///
+/// DEPTH-BOUNDED, arm-for-arm with [`target_filter_characteristic_reads_at`]:
+/// the budget is consumed at entry and exhaustion classifies
+/// [`CharacteristicKinds::ALL`]. `AnyOf` nests, and its arity invariant bounds
+/// WIDTH rather than DEPTH, so this walk needs the same budget its sibling
+/// carries — it previously passed `depth` through untouched while every filter
+/// walk it calls decremented, which made the nesting free.
+///
+/// `ALL` is the fail-SAFE exhaustion answer: it over-reports reads and forces
+/// conservative re-evaluation, where `EMPTY` would silently skip one.
+///
+/// The bound is defence in depth rather than the only guard — `serde_json`
+/// already caps deserialization nesting well below any plausible budget — but
+/// a walk in a bounded chain that does not itself decrement is the kind of
+/// inconsistency that stops being harmless the moment a caller passes a
+/// hand-built source.
 fn characteristic_source_reads_at(source: &CardTypeSetSource, depth: u32) -> CharacteristicKinds {
+    let Some(depth) = depth.checked_sub(1) else {
+        return CharacteristicKinds::ALL;
+    };
     match source {
         CardTypeSetSource::Objects { filter } => {
             target_filter_characteristic_reads_at(filter, depth)

@@ -20,7 +20,7 @@ use std::str::FromStr;
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
-use nom::combinator::{all_consuming, eof, map, map_opt, opt, peek, rest, value};
+use nom::combinator::{all_consuming, eof, map, map_opt, opt, peek, recognize, rest, value};
 use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
@@ -2906,25 +2906,57 @@ fn parse_suspended_card_clause(clause: &str) -> Option<QuantityRef> {
     })
 }
 
+/// CR 122.1: the counter-kind noun, spelled to match the CANONICAL head in
+/// `oracle_nom::quantity::parse_distinct_counter_kinds_among_tail`.
+///
+/// The plural sits on KIND, not only on COUNTER: the printed form is "different
+/// kinds of counters among …" (Perrie, the Pulverizer — Oracle text verified
+/// against Scryfall, not paraphrased). Composing `tag("kind of counter")` with a
+/// trailing `opt(tag("s"))`, as this guard used to, recognizes "kind of
+/// counters" — a form no card prints — and fails to recognize the one that is
+/// printed.
+///
+/// The trailing "s" of "counters" is left to the caller's shared `opt(tag("s"))`
+/// so every characteristic arm pluralizes through one place.
+fn parse_counter_kind_noun(input: &str) -> OracleResult<'_, &str> {
+    recognize((tag("kind"), opt(tag("s")), tag(" of counter"))).parse(input)
+}
+
 /// CR 105.1 + CR 205.2 + CR 205.3 + CR 122.1: the distinct-characteristic
 /// aggregation heads ("colors among …", "card types among …", …).
 ///
 /// A typed combinator over the already-enumerated characteristic vocabulary, not
-/// a string blocklist: each axis is one `alt` arm and the plural / rider /
-/// "among" separators are composed, so a new characteristic is one arm rather
-/// than a table of full phrases.
+/// a string blocklist: each axis is one `alt` arm and the "different" determiner,
+/// plural, rider and "among" separators are composed, so a new characteristic is
+/// one arm rather than a table of full phrases.
+///
+/// DUPLICATION, ACKNOWLEDGED: the canonical heads live in
+/// `oracle_nom::quantity`. This is a DETECTION-only restatement — it answers
+/// "does a head start here", where the canonical combinators also consume the
+/// population — and it has already drifted once, which is how the counter-kind
+/// plural came to be wrong. Extracting a shared head-only combinator is the real
+/// fix and is deliberately left as follow-up rather than done mid review cycle;
+/// until then, a vocabulary change here must be mirrored there.
+///
+/// Anchored at position 0 by design. Both production callers hand this a clause
+/// whose determiner is already gone — the "the number of " arm strips that
+/// prefix before calling, and the "for each " arm never carries one.
 fn parse_characteristic_head(input: &str) -> OracleResult<'_, ()> {
     value(
         (),
         (
+            // Shared determiner: "different subtypes among", "different kinds of
+            // counters among". Hoisted out of the arms so it cannot be baked into
+            // one noun and forgotten on the next.
+            opt(tag("different ")),
             alt((
                 // Longest-first: "colors" must win over "color".
                 tag("colors"),
                 tag("color"),
                 tag("card type"),
                 tag("permanent type"),
-                tag("different subtype"),
-                tag("kind of counter"),
+                tag("subtype"),
+                parse_counter_kind_noun,
             )),
             opt(tag("s")),
             // CR 205.3m: the subtype head's exclusion rider sits between the noun
@@ -3679,7 +3711,17 @@ mod tests {
             "card types among noncreature spells you've cast this turn",
             "different subtypes among spells you've cast this turn",
             "different subtypes other than creature types among spells you've cast this turn",
-            "kind of counter among spells you've cast this turn",
+            // The counter-kind head in its PRINTED form. This row read "kind of
+            // counter among …" — a spelling no card uses, which the old
+            // `tag("kind of counter") + opt("s")` composition happened to accept
+            // while rejecting the real one. The test agreed with the bug and so
+            // could not catch it; both are now spelled the way Perrie, the
+            // Pulverizer prints it (verified against Scryfall).
+            "different kinds of counters among spells you've cast this turn",
+            // Plural-tolerant siblings of the same head, so the arm cannot
+            // regress to matching exactly one hard-coded spelling.
+            "different kind of counter among spells you've cast this turn",
+            "kinds of counters among spells you've cast this turn",
         ] {
             assert_eq!(
                 parse_spell_history_clause(clause, CountScope::Controller),

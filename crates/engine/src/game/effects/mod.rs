@@ -2973,10 +2973,16 @@ fn card_type_set_source_counts_population_matching(
     use crate::types::ability::CardTypeSetSource;
     match source {
         CardTypeSetSource::Objects { filter } => filter_pred(filter),
-        // CR 601.2a: the journal's optional narrowing filter is a population
-        // selector like any other, so an anaphor inside it must be reported.
+        // The journal's optional narrowing filter is a population selector like
+        // any other, so an anaphor inside it must be reported. Uncited: this is
+        // an engine claim about where filters live, not a rule. (It cited
+        // CR 601.2a, which describes putting a spell on the stack as it is cast
+        // — the event the journal records, not its narrowing filter.)
         CardTypeSetSource::TurnJournal { filter, .. } => filter.as_ref().is_some_and(filter_pred),
-        // CR 109.2: a union reads every member's population.
+        // A union reaches every member's population. Uncited for the same reason
+        // as the union arm in `ability_rw::characteristic_source_read`: no CR
+        // rule defines set union of populations. (It cited CR 109.2, the
+        // battlefield-default rule for a bare type description.)
         CardTypeSetSource::AnyOf { sources } => sources
             .iter()
             .any(|member| card_type_set_source_counts_population_matching(member, filter_pred)),

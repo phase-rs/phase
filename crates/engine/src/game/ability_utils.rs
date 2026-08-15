@@ -4270,12 +4270,19 @@ fn filter_target_slot_filter(filter: &TargetFilter) -> Option<TargetFilter> {
     }
 }
 
-/// CR 109.2: The first target-slot filter reachable through a
-/// [`CardTypeSetSource`] population.
+/// The first target-slot filter reachable through a [`CardTypeSetSource`]
+/// population.
 ///
 /// Only the object-filter and journal-filter arms carry a `TargetFilter` that
 /// could name a target slot; the zone / linked-exile / tracked-set arms are
 /// fixed-vocabulary. `AnyOf` recurses so a union member's slot is not dropped.
+///
+/// Deliberately UNCITED. This is a structural query over the AST — which arms
+/// hold a filter — not a rule implementation. It previously cited CR 109.2,
+/// which says a bare type description means a permanent on the battlefield;
+/// that rule has nothing to say about target-slot extraction, and a citation
+/// that does not support its code is worse than none because it reads as
+/// evidence the behavior was checked against the rules.
 fn characteristic_source_target_slot_filter(source: &CardTypeSetSource) -> Option<TargetFilter> {
     match source {
         CardTypeSetSource::Objects { filter } => filter_target_slot_filter(filter),

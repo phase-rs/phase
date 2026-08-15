@@ -6120,7 +6120,9 @@ impl CardTypeSetSource {
     ///   action was journaled, because a resolved spell is no longer an object
     ///   (CR 400.7). Nothing re-reads a zone, so no transition can stale it.
     /// * `TrackedSet` — membership is by object id and is fixed when the set is
-    ///   published (CR 608.2c); a member moving zones changes neither the set
+    ///   published (CR 608.2i — an effect may look back at a previous action's
+    ///   objects, which need not still be where they were); a member moving
+    ///   zones changes neither the set
     ///   nor the card types its members have (CR 205.2a).
     pub fn population_zones(&self) -> Vec<crate::types::zones::Zone> {
         let mut out = Vec::new();

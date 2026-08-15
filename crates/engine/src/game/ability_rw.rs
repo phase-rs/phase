@@ -3650,18 +3650,39 @@ fn characteristic_source_read(source: &CardTypeSetSource) -> RwProfile {
         // CR 109.2: a live object census over the filter — the exact profile the
         // colour head declared before it was parameterized onto this axis.
         CardTypeSetSource::Objects { filter } => board_membership_read(filter),
-        // CR 400.1 + CR 607.2a + CR 608.2c: whole-zone / linked-exile /
-        // tracked-set membership reads, unextractable filter ⇒ fail-closed.
+        // Whole-zone / linked-exile / tracked-set membership reads, unextractable
+        // filter ⇒ fail-closed. One citation per population, none shared:
+        // CR 400.1 (zones partition where objects are) for `Zone`, CR 607.2a
+        // (linked abilities refer to the cards the linked action moved) for
+        // `ExiledBySource`, and CR 608.2i (an effect may look back at a previous
+        // action's objects, which need not still be where they were) for the
+        // "this way" tracked set.
+        //
+        // NOT CR 608.2c, which this comment used to cite for all three: that
+        // rule is about following a spell's instructions in the order written,
+        // which is why a "this way" reference HAS a referent at all — it says
+        // nothing about reading membership.
         CardTypeSetSource::Zone { .. }
         | CardTypeSetSource::ExiledBySource
         | CardTypeSetSource::TrackedSet { .. } => reads_zone_membership(),
-        // CR 601.2a: a turn journal is turn-scoped PLAYER state, not board state.
+        // CR 608.2i: the cast journal is read by looking BACK at actions already
+        // taken this turn — the recorded spells have left the stack (CR 400.7)
+        // and are read from their snapshots, not from the board. That is why
+        // this classifies as turn-scoped player state rather than a board read.
         // Mirrors `QuantityRef::SpellsCastThisTurn`'s own `JournalCast` read so
         // the two readings of the same population agree.
+        //
+        // NOT CR 601.2a, which this comment used to cite: 601.2a describes how a
+        // spell is PUT on the stack when cast. It defines the event the journal
+        // records; it does not describe reading the record afterwards.
         CardTypeSetSource::TurnJournal { journal, .. } => match journal {
             TurnJournalKind::SpellsCast => reads_player_of(StateKind::JournalCast),
         },
-        // CR 109.2: the union reads everything its members read. Arity >= 2 is
+        // The union reads everything its members read. Deliberately UNCITED: no
+        // CR rule defines set union of populations — "among <A> and <B>" is
+        // English, and each member carries its own citation above. (This arm
+        // cited CR 109.2, which is the battlefield-default rule for a bare type
+        // description and says nothing about unions.) Arity >= 2 is
         // guaranteed by `CardTypeSetSource::any_of` at construction and by
         // `deserialize_union_sources` on load, so this fold can never collapse to
         // the fail-open `RwProfile::empty()`; the assert documents the dependency
