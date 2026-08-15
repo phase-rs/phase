@@ -81,11 +81,13 @@ pub fn resolve(
     } else {
         ability.source_is_current(state)
     };
-    if ability.targets.is_empty()
-        && matches!(
-            target_filter,
-            TargetFilter::SelfRef | TargetFilter::None | TargetFilter::ParentTarget
-        )
+    let resolves_to_source = matches!(target_filter, TargetFilter::SelfRef)
+        || (ability.targets.is_empty()
+            && matches!(
+                target_filter,
+                TargetFilter::None | TargetFilter::ParentTarget
+            ));
+    if resolves_to_source
         && effective_targets == [crate::types::ability::TargetRef::Object(ability.source_id)]
         && !source_is_current
     {
@@ -875,6 +877,53 @@ mod tests {
         assert!(
             !state.players[0].library.contains(&obj_id),
             "the stale None fallback must not put the later object in the library"
+        );
+    }
+
+    /// CR 400.7: `SelfRef` always names the source even when an enclosing
+    /// chain propagated another target into this ability. A stale source must
+    /// therefore not move the later incarnation through that path either.
+    #[test]
+    fn test_put_on_top_stale_self_ref_ignores_propagated_targets() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let propagated_target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Propagated target".to_string(),
+            Zone::Battlefield,
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::SelfRef,
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
+            },
+            vec![TargetRef::Object(propagated_target)],
+            obj_id,
+            PlayerId(0),
+        );
+        ability.source_incarnation = Some(state.objects[&obj_id].incarnation);
+
+        let mut move_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, obj_id, Zone::Graveyard, &mut move_events);
+        crate::game::zones::move_to_zone(&mut state, obj_id, Zone::Battlefield, &mut move_events);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&obj_id].zone, Zone::Battlefield);
+        assert_eq!(state.objects[&propagated_target].zone, Zone::Battlefield);
+        assert!(
+            !state.players[0].library.contains(&obj_id),
+            "the stale SelfRef must not put the later object in the library"
         );
     }
 
