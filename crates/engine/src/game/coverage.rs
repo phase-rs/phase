@@ -18,9 +18,9 @@ use crate::parser::oracle_util::SELF_REF_TYPE_PHRASES;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, AggregateFunction, AttackScope, AttackSubject, CardTypeSetSource, ChoiceType,
-    CoinFlipResult, Comparator, ContinuousModification, ControllerRef, CountScope,
-    CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration,
-    EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
+    CoinFlipResult, CommanderOwnership, Comparator, ContinuousModification, ControllerRef,
+    CountScope, CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode,
+    Duration, EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
     ForEachCategoryAction, GameRestriction, LibraryPosition, ManaProduction, ObjectProperty,
     ObjectScope, PerpetualModification, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
     QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
@@ -1525,6 +1525,8 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             crate::types::ability::DevotionColors::ChosenColor => "devotion to chosen color".into(),
         },
         QuantityRef::DistinctCardTypes { source } => match source {
+            // Preserved surface form: the zone reading renders "card types in
+            // <zone>", not "card types among cards in <zone>".
             CardTypeSetSource::Zone { zone, scope } => {
                 format!(
                     "card types in {} {}",
@@ -1532,26 +1534,16 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                     fmt_zone_ref(zone)
                 )
             }
-            CardTypeSetSource::ExiledBySource => "card types among cards exiled with source".into(),
-            CardTypeSetSource::Objects { filter } => {
-                format!("card types among {}", fmt_target(filter))
+            CardTypeSetSource::ExiledBySource
+            | CardTypeSetSource::Objects { .. }
+            | CardTypeSetSource::TrackedSet { .. }
+            | CardTypeSetSource::TurnJournal { .. }
+            | CardTypeSetSource::AnyOf { .. } => {
+                format!(
+                    "card types among {}",
+                    fmt_characteristic_population_bounded(source)
+                )
             }
-            CardTypeSetSource::TrackedSet { caused_by } => match caused_by {
-                Some(cause) => {
-                    use crate::types::ability::ThisWayCause;
-                    let verb = match cause {
-                        ThisWayCause::Discarded => "discarded",
-                        ThisWayCause::Exiled => "exiled",
-                        ThisWayCause::Milled => "milled",
-                        ThisWayCause::Destroyed => "destroyed",
-                        ThisWayCause::Sacrificed => "sacrificed",
-                        ThisWayCause::Returned => "returned",
-                        ThisWayCause::Bounced => "bounced",
-                    };
-                    format!("card types among cards {verb} this way")
-                }
-                None => "card types among tracked cards".into(),
-            },
         },
         QuantityRef::DistinctSubtypes { source, exclude } => {
             let suffix = match exclude {
@@ -1560,14 +1552,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 }
                 crate::types::ability::SubtypeExclusion::None => "",
             };
-            let scope_desc = match source {
-                CardTypeSetSource::Zone { zone, scope } => {
-                    format!("cards in {} {}", fmt_count_scope(scope), fmt_zone_ref(zone))
-                }
-                CardTypeSetSource::ExiledBySource => "cards exiled with source".into(),
-                CardTypeSetSource::Objects { filter } => fmt_target(filter),
-                CardTypeSetSource::TrackedSet { .. } => "tracked cards".into(),
-            };
+            let scope_desc = fmt_characteristic_population_bounded(source);
             format!("subtypes{suffix} among {scope_desc}")
         }
         QuantityRef::CardsExiledBySource => "cards exiled with source".into(),
@@ -1604,8 +1589,11 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 fmt_controller(controller)
             )
         }
-        QuantityRef::DistinctColorsAmongPermanents { filter } => {
-            format!("# of colors among {}", fmt_target(filter))
+        QuantityRef::DistinctColorsAmong { source } => {
+            format!(
+                "# of colors among {}",
+                fmt_characteristic_population_bounded(source)
+            )
         }
         QuantityRef::DistinctCounterKindsAmong { filter } => {
             format!("# of counter kinds among {}", fmt_target(filter))
@@ -2280,6 +2268,71 @@ fn fmt_core_type(ct: &CoreType) -> &'static str {
         CoreType::Scheme => "scheme",
         CoreType::Conspiracy => "conspiracy",
     }
+}
+
+/// CR 109.2 + CR 400.1 + CR 601.2a: Human-readable rendering of the population a
+/// [`CardTypeSetSource`] names, shared by every distinct-characteristic count
+/// (card types CR 205.2, subtypes CR 205.3, colors CR 105.1) so a new population
+/// renders once rather than in three drifting copies.
+fn fmt_characteristic_population(source: &CardTypeSetSource) -> String {
+    match source {
+        CardTypeSetSource::Zone { zone, scope } => {
+            format!("cards in {} {}", fmt_count_scope(scope), fmt_zone_ref(zone))
+        }
+        CardTypeSetSource::ExiledBySource => "cards exiled with source".into(),
+        CardTypeSetSource::Objects { filter } => fmt_target(filter),
+        CardTypeSetSource::TrackedSet { caused_by } => match caused_by {
+            Some(cause) => {
+                use crate::types::ability::ThisWayCause;
+                let verb = match cause {
+                    ThisWayCause::Discarded => "discarded",
+                    ThisWayCause::Exiled => "exiled",
+                    ThisWayCause::Milled => "milled",
+                    ThisWayCause::Destroyed => "destroyed",
+                    ThisWayCause::Sacrificed => "sacrificed",
+                    ThisWayCause::Returned => "returned",
+                    ThisWayCause::Bounced => "bounced",
+                };
+                format!("cards {verb} this way")
+            }
+            None => "tracked cards".into(),
+        },
+        // CR 601.2a: the per-turn cast journal, not a live board census.
+        CardTypeSetSource::TurnJournal {
+            journal,
+            scope,
+            filter,
+        } => {
+            let base = match journal {
+                crate::types::ability::TurnJournalKind::SpellsCast => {
+                    format!("spells {} cast this turn", fmt_count_scope(scope))
+                }
+            };
+            match filter {
+                Some(filter) => format!("{base} matching {}", fmt_target(filter)),
+                None => base,
+            }
+        }
+        // CR 109.2: a set union renders as its members joined by "and", mirroring
+        // the Oracle surface form ("permanents you control and spells you've cast
+        // this turn").
+        // Rendered by the bounded walker in the caller, which flattens nested
+        // unions — set union is associative, so "A and B and C" is the same
+        // population however the tree was built, and matches the Oracle surface
+        // form more closely than a parenthesized nesting would.
+        CardTypeSetSource::AnyOf { .. } => String::new(),
+    }
+}
+
+/// Display form for a whole population, unions flattened through the single
+/// bounded walker. Display-only: a truncated walk renders fewer members, which
+/// is a cosmetic loss in a coverage report rather than a correctness one.
+fn fmt_characteristic_population_bounded(source: &CardTypeSetSource) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
+        parts.push(fmt_characteristic_population(leaf))
+    });
+    parts.join(" and ")
 }
 
 fn fmt_count_scope(scope: &CountScope) -> &'static str {
@@ -3979,6 +4032,23 @@ fn fmt_comparator(c: &Comparator) -> &'static str {
     }
 }
 
+/// CR 903.3 vs CR 903.3d: the single label authority for a commander-control
+/// gate, shared by ALL FOUR condition-vocabulary formatters
+/// (`AbilityCondition`, `TriggerCondition`, `StaticCondition`, and any future
+/// mirror).
+///
+/// The two arms are DIFFERENT predicates — CR 903.3 + CR 109.5 "your commander"
+/// is owned AND controlled, CR 903.3d "a commander" is controlled by any owner —
+/// so they must never share a label. Collapsing them prints a strictly weaker
+/// predicate than the card, and the parse-details / Alt-hover overlay is what
+/// bug triage reads. Centralized here so one mirror cannot drift from another.
+fn fmt_commander_ownership(ownership: &CommanderOwnership) -> &'static str {
+    match ownership {
+        CommanderOwnership::Own => "you control your commander",
+        CommanderOwnership::Any => "you control a commander",
+    }
+}
+
 /// Format an `AbilityCondition` as a human-readable string for the parse-details overlay.
 fn fmt_ability_condition(cond: &AbilityCondition) -> String {
     match cond {
@@ -4043,6 +4113,9 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         ),
         AbilityCondition::HasMaxSpeed => "has max speed".into(),
         AbilityCondition::IsMonarch => "is monarch".into(),
+        AbilityCondition::ControlsCommander { ownership } => {
+            fmt_commander_ownership(ownership).into()
+        }
         AbilityCondition::CompletedDungeon { specific } => match specific {
             None => "you've completed a dungeon".into(),
             Some(dungeon) => format!("you've completed {dungeon}"),
@@ -4222,7 +4295,7 @@ fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> Stri
         }
         TC::ManaSpentCondition { .. } => "mana spent condition".into(),
         TC::HadCounters { .. } => "had counters".into(),
-        TC::ControlsCommander { .. } => "you control a commander".into(),
+        TC::ControlsCommander { ownership } => fmt_commander_ownership(ownership).into(),
         TC::IsRenowned { .. } => "is renowned".into(),
         TC::HasCounters {
             minimum, maximum, ..
@@ -4409,7 +4482,7 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         },
         SC::IsRingBearer => "is the ring-bearer".into(),
         SC::RingLevelAtLeast { level } => format!("ring level ≥ {level}"),
-        SC::ControlsCommander { .. } => "you control a commander".into(),
+        SC::ControlsCommander { ownership } => fmt_commander_ownership(ownership).into(),
         SC::SourceIsTapped => "source is tapped".into(),
         SC::IsTapped { .. } => "is tapped".into(),
         SC::SourceIsSaddled => "source is saddled".into(),
@@ -7920,6 +7993,8 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::ManaColorSpent { .. } => ("ManaColorSpent", Handled),
         AbilityCondition::HasMaxSpeed => ("HasMaxSpeed", Handled),
         AbilityCondition::IsMonarch => ("IsMonarch", Handled),
+        // CR 903.3d: evaluated at resolution via `game::commander`.
+        AbilityCondition::ControlsCommander { .. } => ("ControlsCommander", Handled),
         // CR 309.7: evaluated at resolution via `dungeon::has_completed_dungeon`.
         AbilityCondition::CompletedDungeon { .. } => ("CompletedDungeon", Handled),
         AbilityCondition::IsInitiative => ("IsInitiative", Handled),
@@ -8147,9 +8222,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::ExiledCardPower { .. } => ("ExiledCardPower", Handled),
         QuantityRef::ZoneCardCount { .. } => ("ZoneCardCount", Handled),
         QuantityRef::BasicLandTypeCount { .. } => ("BasicLandTypeCount", Handled),
-        QuantityRef::DistinctColorsAmongPermanents { .. } => {
-            ("DistinctColorsAmongPermanents", Handled)
-        }
+        QuantityRef::DistinctColorsAmong { .. } => ("DistinctColorsAmong", Handled),
         QuantityRef::DistinctCounterKindsAmong { .. } => ("DistinctCounterKindsAmong", Handled),
         QuantityRef::VoteCount { .. } => ("VoteCount", Handled),
         QuantityRef::PreviousEffectAmount { .. } => ("PreviousEffectAmount", Handled),
@@ -8358,6 +8431,27 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::AnyPlayerAttackedYouLastTurn => ("AnyPlayerAttackedYouLastTurn", Handled),
         StaticCondition::OpponentPoisonAtLeast { .. } => ("OpponentPoisonAtLeast", Unhandled),
         StaticCondition::UnlessPay { .. } => ("UnlessPay", Handled),
+        // CR 903.3d: the RUNTIME does evaluate this static
+        // (`layers::evaluate_static_condition`, layers.rs:1875, delegating both
+        // ownership arms to the single `game::commander` authority), so the
+        // `Unhandled` tag below understates the resolver.
+        //
+        // It stays `Unhandled` DELIBERATELY, and must not be flipped as a rider on
+        // an unrelated change: the tag is currently the only thing holding two
+        // demonstrably MISPARSED Lieutenant cards out of the supported set. Of the
+        // seven `ControlsCommander` statics in the pool, Convergence of Dominion
+        // parses to a static with `modifications: []` (a no-op continuous effect)
+        // and Thunderfoot Baloth collapses "this creature gets +2/+2 and other
+        // creatures you control get +2/+2 and have trample" into ONE `SelfRef`
+        // static, dropping the "other creatures you control" clause and granting
+        // trample to the Baloth itself. Flipping the tag alone would advertise both
+        // as `supported: true, gap_count: 0`.
+        //
+        // Land the flip in its own change, AFTER an empty-`modifications` static
+        // and a dropped continuous-modification clause each register as real gaps.
+        // Nothing in the commander-gate work depends on this tag — Fight for the
+        // Throne's intervening-`if` is an `AbilityCondition`, classified `Handled`
+        // in `condition_feature` above.
         StaticCondition::ControlsCommander { .. } => ("ControlsCommander", Unhandled),
         // SourceIsEquipped resolved by layers::evaluate_condition (layers.rs:1057)
         StaticCondition::SourceIsEquipped => ("SourceIsEquipped", Handled),
@@ -12306,6 +12400,128 @@ mod tests {
         let mut missing = Vec::new();
         check_parse_warnings(&warnings, &mut missing);
         assert!(missing.is_empty());
+    }
+
+    /// CR 903.3d: the Lieutenant STATIC's `Unhandled` coverage tag is a
+    /// deliberate mask, not an oversight — this pins both halves so the flip
+    /// cannot be smuggled in as a rider on an unrelated change.
+    ///
+    /// The runtime DOES evaluate `StaticCondition::ControlsCommander`
+    /// (`layers::evaluate_static_condition`, layers.rs:1875), so on the
+    /// resolver axis alone the tag understates the engine. But the tag is also
+    /// the only thing keeping two demonstrably misparsed Lieutenant cards out
+    /// of the supported set, so it must stay until those misparses register as
+    /// real gaps.
+    ///
+    /// The second assertion is the evidence, on verbatim Oracle text: Thunderfoot
+    /// Baloth's "…this creature gets +2/+2 AND OTHER CREATURES YOU CONTROL get
+    /// +2/+2 and have trample" collapses into a single `SelfRef` static, so the
+    /// other-creatures clause is silently dropped and trample lands on the Baloth
+    /// itself — with no gap recorded anywhere.
+    ///
+    /// FLIP PROTOCOL: when the dropped-clause misparse (and Convergence of
+    /// Dominion's empty-`modifications` no-op static) each register as a gap, the
+    /// second assertion here goes red. THAT is the signal to flip the tag to
+    /// `Handled` and delete this test — not before.
+    #[test]
+    fn lieutenant_commander_static_tag_is_a_deliberate_mask() {
+        let (label, support) = static_condition_feature(&StaticCondition::ControlsCommander {
+            ownership: CommanderOwnership::Own,
+        });
+        assert_eq!(label, "ControlsCommander");
+        assert!(
+            matches!(support, FeatureSupport::Unhandled),
+            "the mask must stay until the two misparses register as gaps; see the \
+             FLIP PROTOCOL on this test"
+        );
+
+        let parsed = crate::parser::parse_oracle_text(
+            "Trample\nLieutenant — As long as you control your commander, this creature gets \
+             +2/+2 and other creatures you control get +2/+2 and have trample.",
+            "Thunderfoot Baloth",
+            &[],
+            &["Creature".to_string()],
+            &["Beast".to_string()],
+        );
+        // Reach-guard: the fixture only exercises the misparse if the parser
+        // really produced the OWNER-scoped commander gate.
+        let commander_statics: Vec<_> = parsed
+            .statics
+            .iter()
+            .filter(|s| {
+                matches!(
+                    &s.condition,
+                    Some(StaticCondition::ControlsCommander {
+                        ownership: CommanderOwnership::Own
+                    })
+                )
+            })
+            .collect();
+        assert!(
+            !commander_statics.is_empty(),
+            "the Lieutenant line must parse to an Own-scoped ControlsCommander static: {:#?}",
+            parsed.statics
+        );
+        assert!(
+            commander_statics
+                .iter()
+                .all(|s| matches!(s.affected, Some(TargetFilter::SelfRef))),
+            "MISPARSE STILL PRESENT (expected): the \"other creatures you control\" clause \
+             is dropped and the whole Lieutenant grant lands on SelfRef. When this goes \
+             red the parser was fixed — flip `static_condition_feature` to Handled and \
+             delete this test. Got {commander_statics:#?}"
+        );
+    }
+
+    /// CR 903.3 vs CR 903.3d: the parse-details label is what bug triage reads,
+    /// so the two ownership arms must never print the same string — in ANY of
+    /// the condition-vocabulary formatters.
+    #[test]
+    fn commander_ownership_labels_differ_in_every_formatter() {
+        for (ability_label, trigger_label, static_label) in [
+            (
+                fmt_ability_condition(&AbilityCondition::ControlsCommander {
+                    ownership: CommanderOwnership::Own,
+                }),
+                fmt_trigger_condition(
+                    &crate::types::ability::TriggerCondition::ControlsCommander {
+                        ownership: CommanderOwnership::Own,
+                    },
+                ),
+                fmt_static_condition(&StaticCondition::ControlsCommander {
+                    ownership: CommanderOwnership::Own,
+                }),
+            ),
+            (
+                fmt_ability_condition(&AbilityCondition::ControlsCommander {
+                    ownership: CommanderOwnership::Any,
+                }),
+                fmt_trigger_condition(
+                    &crate::types::ability::TriggerCondition::ControlsCommander {
+                        ownership: CommanderOwnership::Any,
+                    },
+                ),
+                fmt_static_condition(&StaticCondition::ControlsCommander {
+                    ownership: CommanderOwnership::Any,
+                }),
+            ),
+        ] {
+            assert_eq!(
+                ability_label, trigger_label,
+                "the three mirrors of ONE printed clause must render identically"
+            );
+            assert_eq!(ability_label, static_label);
+        }
+        assert_ne!(
+            fmt_static_condition(&StaticCondition::ControlsCommander {
+                ownership: CommanderOwnership::Own,
+            }),
+            fmt_static_condition(&StaticCondition::ControlsCommander {
+                ownership: CommanderOwnership::Any,
+            }),
+            "CR 903.3 \"your commander\" is strictly narrower than CR 903.3d \"a \
+             commander\"; collapsing them prints a weaker predicate than the card"
+        );
     }
 
     #[test]

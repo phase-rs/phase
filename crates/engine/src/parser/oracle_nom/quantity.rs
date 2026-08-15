@@ -29,7 +29,8 @@ use crate::types::ability::{
     AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, ControllerRef,
     CountScope, DamageChannel, DamageKindFilter, DevotionColors, FilterProp, ObjectProperty,
     ObjectScope, PlayerFilter, PlayerScope, PtStat, QuantityExpr, QuantityRef, RoundingMode,
-    SharedQuality, SubtypeExclusion, TargetFilter, ThisWayCause, TypeFilter, TypedFilter, ZoneRef,
+    SharedQuality, SubtypeExclusion, TargetFilter, ThisWayCause, TurnJournalKind, TypeFilter,
+    TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::Keyword;
@@ -931,25 +932,21 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_scry_look_count_ref,
         parse_the_number_of,
         parse_object_property_aggregate_ref,
-        parse_distinct_card_types_exiled_with_source,
         // Group mana-value aggregate parsers to reduce alt arity
         alt((
             parse_linked_exile_mana_value_ref,
             parse_greatest_commander_mana_value_ref,
             parse_commander_mana_value_ref,
         )),
+        // CR 110.4: "permanent type[s] among cards in <zone>" is a distinct head
+        // (it lowers to `ObjectCountDistinct`, not `DistinctCardTypes`) and must
+        // precede the card-type head so its leading token is not mis-committed.
+        parse_distinct_permanent_types_in_zone,
+        // CR 205.2a: one population grammar for every "card type[s] among …"
+        // reading. Nested with the distinct-by-quality head to keep the outer
+        // `alt` within nom's tuple arity (nom 8.0 max: 21 items).
         alt((
-            parse_distinct_card_types_in_zone,
-            parse_distinct_permanent_types_in_zone,
-        )),
-        // CR 608.2c + CR 205.2a: "card type[s] among cards <verb> this way" must
-        // precede the generic `among <objects>` arm so the chain-tracked-set,
-        // cause-filtered count wins on the "card type among cards" prefix. Nested
-        // with `parse_distinct_card_types_among_objects` to keep the outer `alt`
-        // within nom's tuple arity (nom 8.0 max: 21 items).
-        alt((
-            parse_distinct_card_types_among_tracked_set,
-            parse_distinct_card_types_among_objects,
+            parse_distinct_card_types_among,
             // CR 201.2 + CR 603.4: "different <power|mana value> among <type>"
             // distinct-by-quality count (nested here to stay within nom's
             // tuple arity).
@@ -1025,7 +1022,7 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // among ") + parse_type_phrase`) is shared with the "the number of
         // colors among ..." path; registering it here makes it reachable in the
         // bare-suffix context too.
-        parse_number_of_distinct_colors_among_permanents_tail,
+        parse_distinct_colors_among_tail,
         // CR 402.1: "the player with the {most|fewest} cards in hand" — the
         // cross-player hand-size extremum, the hand-zone peer of the life
         // extremum. Distinctive "the player with the " prefix; no ordering
@@ -1676,19 +1673,12 @@ fn parse_object_property_aggregate_ref(input: &str) -> OracleResult<'_, Quantity
 /// Parse the inner part after "the number of".
 fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
-        parse_distinct_card_types_exiled_with_source,
-        alt((
-            parse_distinct_card_types_in_zone,
-            parse_distinct_permanent_types_in_zone,
-        )),
-        // CR 608.2c + CR 205.2a: "card type[s] among cards <verb> this way" must
-        // precede the generic `among <objects>` arm (same ordering as
-        // `parse_quantity_ref`). Nested with `parse_distinct_card_types_among_objects`
-        // to stay within nom's top-level `alt` arity (nom 8.0 max: 21 items).
-        alt((
-            parse_distinct_card_types_among_tracked_set,
-            parse_distinct_card_types_among_objects,
-        )),
+        // CR 110.4: the permanent-type head lowers to `ObjectCountDistinct`, not
+        // `DistinctCardTypes`, so it must precede the card-type head.
+        parse_distinct_permanent_types_in_zone,
+        // CR 205.2a: one population grammar for every "card type[s] among …"
+        // reading (same ordering as `parse_quantity_ref`).
+        parse_distinct_card_types_among,
         // CR 205.3 + CR 500 + CR 604.3: counted CDA quantities that read live game
         // state — "different subtypes … among <source>" (Subgoyf) and "turns
         // you've taken this game" (Control Win Condition). Both must precede the
@@ -1760,7 +1750,7 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
             parse_number_of_times_you_chose_a_mode,
         )),
         parse_tokens_created_this_turn_tail,
-        parse_number_of_distinct_colors_among_permanents_tail,
+        parse_distinct_colors_among_tail,
         // CR 107.1 + CR 700.1: "[type] controlled by the player who controls
         // the fewest/most" — must precede `parse_number_of_controlled_type`,
         // whose " you control" suffix would otherwise not match but whose
@@ -1830,35 +1820,49 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
     .parse(input)
 }
 
-/// Parse "colors among [filter]" after "the number of".
-fn parse_number_of_distinct_colors_among_permanents_tail(
-    input: &str,
-) -> OracleResult<'_, QuantityRef> {
+/// CR 105.1 + CR 105.2: "colors among \<population\>" →
+/// [`QuantityRef::DistinctColorsAmong`].
+///
+/// Reached both from "the number of colors among …" and from the bare-suffix
+/// context a parent has already stripped "there are N " from (Puca's Eye).
+/// Parameterized onto the shared population grammar so First Family's union
+/// ("permanents you control and spells you've cast this turn") is expressible;
+/// `|A ∪ B| != |A| + |B|`, so the union must be inside the population, not
+/// above it.
+fn parse_distinct_colors_among_tail(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = tag("colors among ").parse(input)?;
     // CR 702.167c + CR 105.1: "the number of colors among the exiled cards used
     // to craft it" — distinct colors over the craft-material linked-exile pool
-    // (Sunbird Effigy P/T). Tried before the generic type-phrase filter so the
+    // (Sunbird Effigy P/T). Tried before the generic population grammar so the
     // craft noun phrase wins.
     if let Ok((craft_rest, filter)) = parse_craft_materials_filter(rest) {
         if matches!(craft_rest.trim(), "" | "." | ",") {
-            return Ok(("", QuantityRef::DistinctColorsAmongPermanents { filter }));
+            return Ok((
+                "",
+                QuantityRef::DistinctColorsAmong {
+                    source: CardTypeSetSource::Objects { filter },
+                },
+            ));
         }
     }
-    let (remainder, filter) = super::target::parse_type_phrase(rest)?;
-    if !matches!(remainder.trim(), "" | "." | ",")
-        || !quantity_filter_has_meaningful_content(&filter)
-    {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Fail,
-        )));
+    // CR 105.1: STRICT grammar. This head reads with
+    // `oracle_nom::target::parse_type_phrase` and must keep doing so. Switching
+    // to Legacy would silently accept anaphors ("those creatures"), turning
+    // General Tazri's honest `Unimplemented{where_x_binding}` into a confident
+    // count over a `TrackedSet(0)` sentinel that has no published set in an
+    // activated-ability context — an honest gap traded for a silent misparse.
+    let (remainder, source) =
+        parse_characteristic_set_source_list(rest, TypePhraseGrammar::Strict)?;
+    // UNCHANGED head guard: this head owns the whole clause.
+    if !matches!(remainder.trim(), "" | "." | ",") {
+        return Err(oracle_err(input));
     }
-    Ok(("", QuantityRef::DistinctColorsAmongPermanents { filter }))
+    Ok(("", QuantityRef::DistinctColorsAmong { source }))
 }
 
 /// CR 122.1: Parse the iteration source "kind of counter on/among <filter>" →
 /// `QuantityRef::DistinctCounterKindsAmong { filter }`. Counter-side analogue of
-/// `parse_number_of_distinct_colors_among_permanents_tail`. Used by Bribe
+/// `parse_distinct_colors_among_tail`. Used by Bribe
 /// Taker's "for each kind of counter on permanents you control" — the filter is
 /// any controlled-permanent type phrase, so the combinator covers the whole
 /// class, not one card. Both "on" and "among" surface forms are accepted.
@@ -2331,17 +2335,509 @@ fn parse_cards_in_zone_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     parse_zone_card_count(input)
 }
 
-fn parse_distinct_card_types_in_zone(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = tag("card type").parse(input)?;
-    let (rest, _) = opt(tag("s")).parse(rest)?;
-    let (rest, _) = tag(" among cards in ").parse(rest)?;
-    let (rest, (zone, scope)) = parse_scoped_zone_ref(rest)?;
+/// CR 109.2: Which of the two production type-phrase grammars an `Objects`
+/// source reads with.
+///
+/// NOT a stylistic choice, and NOT interchangeable. Measured differences:
+///
+/// | phrase | Legacy | Strict |
+/// |---|---|---|
+/// | `creatures and planeswalkers they control` | FOLDED into one `Or[..]`, consumed whole | `Typed{Creature}`, remainder `" and planeswalkers …"` |
+/// | `permanents you control and spells …` | not folded (the controller suffix intervenes) | same |
+/// | `those creatures` / `them` | EMPTY `TypedFilter` + the whole input (its infallible failure shape) | `Err` |
+///
+/// A characteristic head that switches grammars therefore changes which cards it
+/// accepts. Each head keeps the grammar it is wired to, expressed as a typed
+/// parameter rather than left to whichever import happened to be in scope.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TypePhraseGrammar {
+    /// [`crate::parser::oracle_nom::target::parse_type_phrase`] — `" or "`-only
+    /// type lists (`parse_type_list`), no ownership / token / combat-relation
+    /// grammar, fails with `Err`. The colours head reads with this.
+    Strict,
+    /// [`crate::parser::oracle_target::parse_type_phrase`] — folds
+    /// `" and "` / `" and/or "` into type unions (`TYPE_SEPARATORS`) and carries
+    /// ownership / token / combat-relation grammar. INFALLIBLE: on failure it
+    /// yields an EMPTY `TypedFilter` plus the whole input — NOT
+    /// `TargetFilter::Any`, which is why the emptiness guard in
+    /// [`parse_objects_source`], not the `Any` guard, is what declines an
+    /// unrecognized phrase. The card-type and subtype heads read with this.
+    Legacy,
+}
+
+/// CR 109.2 + CR 400.1: How far an `Objects` source must reach.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ObjectsSourceExtent {
+    /// Single-source reading: the type phrase must consume the whole "among …"
+    /// clause (modulo the grandfathered trailing `.`/`,` trim).
+    WholeClause,
+    /// Union member: the type phrase stops at the population conjunction; the
+    /// terminal anchor is supplied by the LIST, not by this arm.
+    UnionMember,
+}
+
+/// CR 109.2 + CR 400.1: Is this type phrase a POPULATION rather than a bare type?
+///
+/// A population is anchored to a controller ("permanents you control") or to a
+/// zone ("cards in your graveyard"). A bare type word ("creatures") names a
+/// TYPE, not a population.
+///
+/// Applied ONLY under [`TypePhraseGrammar::Strict`]. Measured: under `Legacy`,
+/// `TYPE_SEPARATORS` folds `" and "` into the type union before the controller
+/// suffix is read ("creatures and planeswalkers they control" →
+/// `Or[Typed{Creature,You}, Typed{Planeswalker,You}]`, consumed whole), so a
+/// bare-type-word conjunction never forms a list and the arity check is what
+/// declines it — this predicate has no reachable Legacy input. Under `Strict`,
+/// `parse_type_list` joins on `" or "` ONLY, so the same phrase WOULD split into
+/// two bogus sources; this is the guard that stops it. No current card exercises
+/// it, so it is a grammar-reachability guard, not a card-driven one.
+fn filter_is_population_anchored(filter: &TargetFilter) -> bool {
+    if filter.extract_in_zone().is_some() {
+        return true;
+    }
+    match filter {
+        TargetFilter::Typed(typed) => typed.controller.is_some(),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            !filters.is_empty() && filters.iter().all(filter_is_population_anchored)
+        }
+        TargetFilter::Not { filter } => filter_is_population_anchored(filter),
+        // Every remaining variant is a LEAF that is neither controller-anchored
+        // nor zone-anchored (the zone case already returned above). Enumerated
+        // explicitly rather than defaulted, so a future variant that IS a
+        // population anchor has to be classified here instead of being silently
+        // declined. Not merged with the zone-bearing leaves above: those exit
+        // through `extract_in_zone` and never reach this match.
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
+    }
+}
+
+/// CR 400.1 + CR 109.2: Does this `Objects` filter denote ONE population domain?
+///
+/// REASON UPDATED — the original one is obsolete. This guard was written because
+/// `visit_characteristic_source` derived a single zone via `extract_in_zone` and
+/// would silently drop the other leg of a cross-zone `Or`. That collapse is
+/// gone: the walk now enumerates every zone in
+/// [`CardTypeSetSource::population_zones`].
+///
+/// What remains, and what this still guards, is narrower and lives one level
+/// down. `population_zones` returns a FLAT zone list for the whole filter, so it
+/// cannot express "battlefield for this branch, graveyard for that one". A
+/// PARTIALLY zone-constrained `Or` — `Or[Typed{Creature}, Typed{Card,
+/// InZone(Graveyard)}]`, "creatures and cards in your graveyard" — yields
+/// `[Graveyard]`, which is non-empty, so the battlefield default never applies
+/// and the unconstrained disjunct's permanents are dropped. Refused, so the card
+/// surfaces as an honest gap instead of a confident undercount. Cross-zone
+/// populations ARE expressible as [`CardTypeSetSource::AnyOf`], where each
+/// member carries its own zone.
+///
+/// (`game::quantity::filter_candidate_universe` solves the same problem the
+/// other way, by recursing per branch so an unconstrained branch keeps its
+/// battlefield domain. Teaching `population_zones` that shape would retire this
+/// guard and widen coverage; it is deliberately NOT done here, because it
+/// changes which cards parse and belongs in its own change.)
+///
+/// A GRAMMAR-REACHABILITY guard, not a card-driven one, and deliberately not
+/// claimed to be more: measured, Legacy's `TYPE_SEPARATORS` fold of "creatures
+/// and cards in your graveyard" distributes the zone across BOTH members, so
+/// that particular phrase is zone-unambiguous by the time it reaches here. The
+/// guard exists because nothing in the type-phrase grammar GUARANTEES that
+/// distribution, and the failure it would cause is silent.
+pub(crate) fn objects_filter_zone_is_unambiguous(filter: &TargetFilter) -> bool {
+    match filter {
+        // CR 601.2b: each disjunct is its OWN domain, so a zone-free disjunct
+        // means the battlefield (CR 110.1) and genuinely conflicts with a
+        // zone-bearing sibling. `None` participates in the comparison.
+        TargetFilter::Or { filters } => {
+            if !filters.iter().all(objects_filter_zone_is_unambiguous) {
+                return false;
+            }
+            let mut zones = filters.iter().map(TargetFilter::extract_in_zone);
+            match zones.next() {
+                None => true,
+                Some(first) => zones.all(|zone| zone == first),
+            }
+        }
+        // An `And` is ONE domain intersected, not two: a zone-free conjunct adds
+        // a constraint ("creature") to whatever zone its sibling names, rather
+        // than contributing a second population. So `None` members are IGNORED
+        // and only two DISTINCT named zones conflict — and such a conjunction is
+        // empty anyway, since an object occupies one zone (CR 400.1).
+        //
+        // Comparing `None` here (as this arm used to, sharing the `Or` path)
+        // rejected EVERY conjunction that pairs a zone-bearing member with a
+        // zone-free constraint — the `And[<zone-bearing>, Typed{…}]` shape, of
+        // which `linked_exile_owned_filter`'s `And[ExiledBySource,
+        // Typed{Owned{You}}]` is the built example. That particular filter is
+        // reached through the craft head, which returns before this guard runs,
+        // so the false-reject is latent rather than card-visible today; it would
+        // bite the first such conjunction that arrives via the generic
+        // population grammar.
+        TargetFilter::And { filters } => {
+            if !filters.iter().all(objects_filter_zone_is_unambiguous) {
+                return false;
+            }
+            let mut named = filters.iter().filter_map(TargetFilter::extract_in_zone);
+            match named.next() {
+                None => true,
+                Some(first) => named.all(|zone| zone == first),
+            }
+        }
+        TargetFilter::Not { filter } => objects_filter_zone_is_unambiguous(filter),
+        // A `Typed` leaf carries at most one `InZone`, so it names one domain.
+        TargetFilter::Typed(_) => true,
+        // Every remaining variant is a LEAF: it denotes at most one zone by
+        // construction, so it cannot be INTERNALLY ambiguous — ambiguity is a
+        // property of composites. Enumerated rather than defaulted so that a
+        // future variant denoting MULTIPLE zones has to be classified here; the
+        // old `_ => true` would have called it unambiguous with no compile
+        // error, which is the fail-open direction this guard exists to close.
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => true,
+    }
+}
+
+/// CR 601.2a + CR 112.1: the per-turn cast journal as a population —
+/// "\[\<qualifier\> \]spell\[s\] you\['ve\] cast this turn".
+///
+/// The noun phrase is located by its VERB phrase (a typed separator, not a
+/// verbatim whole-clause match), then the qualifier is read by the shared
+/// spell-history filter grammar, so this arm and `QuantityRef::SpellsCastThisTurn`
+/// name the same population by the same rules rather than by two drifting
+/// readings. A qualifier that grammar rejects makes the arm DECLINE, which is
+/// what stops "permanents you control and spells" from being swallowed as a
+/// journal noun.
+fn parse_turn_journal_source(input: &str) -> OracleResult<'_, CardTypeSetSource> {
+    let (rest, noun) = alt((
+        terminated(
+            take_until::<_, _, OracleError<'_>>(" you've cast this turn"),
+            tag(" you've cast this turn"),
+        ),
+        terminated(
+            take_until::<_, _, OracleError<'_>>(" you cast this turn"),
+            tag(" you cast this turn"),
+        ),
+    ))
+    .parse(input)?;
+    // A bare spell noun is the unfiltered journal, mirroring
+    // `parse_spell_history_clause`'s bare-noun contract.
+    let filter = match noun.trim() {
+        "spell" | "spells" => None,
+        qualified => Some(
+            super::condition::parse_spell_history_filter(qualified)
+                .ok_or_else(|| oracle_err(input))?,
+        ),
+    };
     Ok((
         rest,
-        QuantityRef::DistinctCardTypes {
-            source: CardTypeSetSource::Zone { zone, scope },
+        CardTypeSetSource::TurnJournal {
+            journal: TurnJournalKind::SpellsCast,
+            // CR 109.4: "you've cast" is the ability controller's journal.
+            scope: CountScope::Controller,
+            filter,
         },
     ))
+}
+
+/// CR 400.1 + CR 607.2a + CR 608.2c: the three `cards …`-prefixed populations,
+/// nested under their shared prefix so it is matched once.
+fn parse_cards_prefixed_source(input: &str) -> OracleResult<'_, CardTypeSetSource> {
+    preceded(
+        tag("cards "),
+        alt((
+            map(
+                preceded(tag("in "), parse_scoped_zone_ref),
+                |(zone, scope)| CardTypeSetSource::Zone { zone, scope },
+            ),
+            value(
+                CardTypeSetSource::ExiledBySource,
+                preceded(tag("exiled with "), parse_exile_link_self_ref),
+            ),
+            parse_tracked_set_this_way_source,
+        )),
+    )
+    .parse(input)
+}
+
+/// CR 607.2a: the self-reference naming the exile link ("~", "it", "this X").
+fn parse_exile_link_self_ref(input: &str) -> OracleResult<'_, &str> {
+    alt((
+        tag("~"),
+        tag("it"),
+        preceded(
+            tag("this "),
+            take_while1(|c: char| c.is_ascii_alphabetic() || c == '-'),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 608.2c + CR 205.2a: "\<verb\> this way" → the cause-filtered chain tracked
+/// set. Called with the shared `cards ` prefix already consumed.
+fn parse_tracked_set_this_way_source(input: &str) -> OracleResult<'_, CardTypeSetSource> {
+    let (rest, cause) = alt((
+        value(ThisWayCause::Discarded, tag("discarded")),
+        value(ThisWayCause::Exiled, tag("exiled")),
+        value(ThisWayCause::Milled, tag("milled")),
+        value(ThisWayCause::Destroyed, tag("destroyed")),
+        value(ThisWayCause::Sacrificed, tag("sacrificed")),
+    ))
+    .parse(input)?;
+    let (rest, _) = tag(" this way").parse(rest)?;
+    Ok((
+        rest,
+        CardTypeSetSource::TrackedSet {
+            caused_by: Some(cause),
+        },
+    ))
+}
+
+/// CR 109.2: the `Objects` population arm — a type phrase read with the head's
+/// own grammar, to the head's own extent.
+fn parse_objects_source(
+    input: &str,
+    grammar: TypePhraseGrammar,
+    extent: ObjectsSourceExtent,
+) -> OracleResult<'_, CardTypeSetSource> {
+    // Grandfathered structural punctuation cleanup (not dispatch), preserved from
+    // the per-head combinators this arm replaces.
+    let type_text = input.trim_end_matches('.').trim_end_matches(',');
+    let (filter, remainder) = match grammar {
+        // `(filter, remainder)`, INFALLIBLE — never transpose with the Strict arm.
+        TypePhraseGrammar::Legacy => parse_type_phrase(type_text),
+        // `OracleResult` = `(remainder, filter)`.
+        TypePhraseGrammar::Strict => {
+            let (rem, filter) = super::target::parse_type_phrase(type_text)?;
+            (filter, rem)
+        }
+    };
+    // Retained from the per-head combinators this arm replaces.
+    if matches!(filter, TargetFilter::Any) {
+        return Err(oracle_err(input));
+    }
+    // BOTH grammars. The colours head already carried this guard; the card-type
+    // and subtype heads relied on their whole-clause remainder check instead,
+    // which is not available in `UnionMember` extent. It is load-bearing there:
+    // Legacy's infallible failure shape is an EMPTY `TypedFilter` plus the WHOLE
+    // input, so without this a union member would "match" while consuming
+    // nothing and contributing an empty population.
+    if !quantity_filter_has_meaningful_content(&filter) {
+        return Err(oracle_err(input));
+    }
+    // CR 400.1 + CR 109.2: both grammars, both extents — a partially
+    // zone-constrained fold has no single correct zone list, so it would drop
+    // its unconstrained branch. See `objects_filter_zone_is_unambiguous`.
+    if !objects_filter_zone_is_unambiguous(&filter) {
+        return Err(oracle_err(input));
+    }
+    match extent {
+        ObjectsSourceExtent::WholeClause => {
+            if !remainder.trim().is_empty() {
+                return Err(oracle_err(input));
+            }
+        }
+        ObjectsSourceExtent::UnionMember => {
+            if grammar == TypePhraseGrammar::Strict && !filter_is_population_anchored(&filter) {
+                return Err(oracle_err(input));
+            }
+        }
+    }
+    // `type_text` is a leading slice of `input` (only trailing `.`/`,` trimmed).
+    // The consumed prefix is whatever `type_text` has in front of `remainder` —
+    // derived by STRIPPING the remainder rather than by subtracting lengths.
+    //
+    // The two grammars establish that relationship differently, and only one of
+    // them guarantees it. `Strict` returns a nom remainder, which is a genuine
+    // byte suffix. `Legacy` hand-builds its `(filter, remainder)` pair, and no
+    // signature or contract says the remainder is a suffix of what it was given.
+    // Under length subtraction a re-derived or trimmed `Legacy` remainder either
+    // panics on underflow or, worse, silently yields a wrong offset that
+    // over-consumes the population. `strip_suffix` fails CLOSED instead: no
+    // suffix relationship, no source.
+    // Nothing here consumes input or decides a branch: both grammars have
+    // already run, and this only measures how much of `type_text` they took. A
+    // combinator cannot express the question, because the text was read by a
+    // foreign (Legacy) reader whose returned remainder is the only evidence of
+    // its own consumption.
+    // allow-noncombinator: structural offset derivation from an already-parsed remainder, not parsing dispatch.
+    let Some(consumed) = type_text.strip_suffix(remainder) else {
+        return Err(oracle_err(input));
+    };
+    Ok((
+        &input[consumed.len()..],
+        CardTypeSetSource::Objects { filter },
+    ))
+}
+
+/// CR 109.2 + CR 400.1 + CR 601.2a: the single-source population grammar — one
+/// arm per population, nested by prefix.
+///
+/// The journal arm is ordered BEFORE the objects arm so "noncreature spells
+/// you've cast this turn" is not mis-consumed as a type phrase.
+fn parse_source_arms(
+    input: &str,
+    grammar: TypePhraseGrammar,
+    extent: ObjectsSourceExtent,
+) -> OracleResult<'_, CardTypeSetSource> {
+    alt((
+        parse_cards_prefixed_source,
+        parse_turn_journal_source,
+        |i| parse_objects_source(i, grammar, extent),
+    ))
+    .parse(input)
+}
+
+/// CR 109.2: the population conjunction. Longest-first so `" and/or "` is not
+/// mis-split by `" and "`.
+fn parse_population_conjunction(input: &str) -> OracleResult<'_, ()> {
+    value((), alt((tag(" and/or "), tag(" and ")))).parse(input)
+}
+
+/// CR 608.2c: the end of an "among …" clause. A `peek`, so the remainder is left
+/// for the caller — a sentence-continuation `" and "` must stay parseable.
+fn parse_clause_terminal(input: &str) -> OracleResult<'_, ()> {
+    value((), peek(alt((eof, tag("."), tag(","))))).parse(input)
+}
+
+/// CR 109.2: the population grammar, in two tiers.
+///
+/// The UNION tier is tried first (longest match): two or more population members
+/// joined by `" and "` / `" and/or "`, anchored by a clause terminal. If it does
+/// not form, the single-source tier is byte-for-byte the grammar each head had
+/// before, including its partial-consumption behavior — which is what keeps a
+/// sentence-continuation `" and "` (the goyf family's "… and its toughness is
+/// equal to that number plus 1") returned to the caller instead of eaten.
+fn parse_characteristic_set_source_list(
+    input: &str,
+    grammar: TypePhraseGrammar,
+) -> OracleResult<'_, CardTypeSetSource> {
+    alt((
+        map_res(
+            terminated(
+                nom::combinator::verify(
+                    separated_list1(parse_population_conjunction, move |i| {
+                        parse_source_arms(i, grammar, ObjectsSourceExtent::UnionMember)
+                    }),
+                    |members: &Vec<CardTypeSetSource>| members.len() >= 2,
+                ),
+                parse_clause_terminal,
+            ),
+            |members| CardTypeSetSource::any_of(members).ok_or(()),
+        ),
+        move |i| parse_source_arms(i, grammar, ObjectsSourceExtent::WholeClause),
+    ))
+    .parse(input)
+}
+
+/// CR 205.2a: "card type\[s\] among \<population\>" →
+/// [`QuantityRef::DistinctCardTypes`].
+///
+/// One combinator over the shared population grammar, replacing the three
+/// per-population heads (`… among cards in <zone>`, `… among cards exiled with
+/// ~`, `… among <type phrase>`) that had drifted into a product form. Reads with
+/// [`TypePhraseGrammar::Legacy`], the grammar this head has always used.
+fn parse_distinct_card_types_among(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("card type").parse(input)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    let (rest, _) = tag(" among ").parse(rest)?;
+    let (rest, source) = parse_characteristic_set_source_list(rest, TypePhraseGrammar::Legacy)?;
+    Ok((rest, QuantityRef::DistinctCardTypes { source }))
 }
 
 fn zone_ref_to_zone(zone: ZoneRef) -> Zone {
@@ -2382,73 +2878,26 @@ fn parse_distinct_permanent_types_in_zone(input: &str) -> OracleResult<'_, Quant
     ))
 }
 
-fn parse_distinct_card_types_exiled_with_source(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = tag("card type").parse(input)?;
-    let (rest, _) = opt(tag("s")).parse(rest)?;
-    let (rest, _) = tag(" among cards exiled with ").parse(rest)?;
-    let (rest, _) = alt((
-        tag("~"),
-        tag("it"),
-        preceded(
-            tag("this "),
-            take_while1(|c: char| c.is_ascii_alphabetic() || c == '-'),
-        ),
-    ))
-    .parse(rest)?;
-    Ok((
-        rest,
-        QuantityRef::DistinctCardTypes {
-            source: CardTypeSetSource::ExiledBySource,
-        },
-    ))
-}
-
-fn parse_distinct_card_types_among_objects(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = tag("card type").parse(input)?;
-    let (rest, _) = opt(tag("s")).parse(rest)?;
-    let (rest, _) = tag(" among ").parse(rest)?;
-    let type_text = rest.trim_end_matches('.').trim_end_matches(',');
-    let (filter, remainder) = parse_type_phrase(type_text);
-    if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Fail,
-        )));
-    }
-    let consumed = remainder.as_ptr() as usize - input.as_ptr() as usize;
-    Ok((
-        &input[consumed..],
-        QuantityRef::DistinctCardTypes {
-            source: CardTypeSetSource::Objects { filter },
-        },
-    ))
-}
-
-/// CR 608.2c + CR 205.2a: "card type[s] among cards <verb> this way" -> distinct
-/// card types among the chain tracked set, cause-filtered to <verb> (Occult Epiphany #3307).
+/// CR 608.2c + CR 205.2a: "card type[s] among cards \<verb\> this way" → distinct
+/// card types among the chain tracked set, cause-filtered to \<verb\> (Occult
+/// Epiphany #3307).
+///
+/// DELIBERATELY NOT merged into [`parse_distinct_card_types_among`]. Its two
+/// external callers — `oracle_effect::token`'s "for each … this way" token
+/// context and `oracle_quantity`'s `TrackedSetSize` fallback chain — both
+/// deliberately restrict the source axis to the tracked set and both gate on
+/// whole consumption. Repointing this symbol at the merged combinator would
+/// silently give both call sites `Zone` / `Objects` / `TurnJournal` / `AnyOf`
+/// sources inside a "this way" context, changing what a token count means.
+/// Preserving the NAME is insufficient; the narrow CONTRACT is the point.
 pub(crate) fn parse_distinct_card_types_among_tracked_set(
     input: &str,
 ) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = tag("card type").parse(input)?;
     let (rest, _) = opt(tag("s")).parse(rest)?;
     let (rest, _) = tag(" among cards ").parse(rest)?;
-    let (rest, cause) = alt((
-        value(ThisWayCause::Discarded, tag("discarded")),
-        value(ThisWayCause::Exiled, tag("exiled")),
-        value(ThisWayCause::Milled, tag("milled")),
-        value(ThisWayCause::Destroyed, tag("destroyed")),
-        value(ThisWayCause::Sacrificed, tag("sacrificed")),
-    ))
-    .parse(rest)?;
-    let (rest, _) = tag(" this way").parse(rest)?;
-    Ok((
-        rest,
-        QuantityRef::DistinctCardTypes {
-            source: CardTypeSetSource::TrackedSet {
-                caused_by: Some(cause),
-            },
-        },
-    ))
+    let (rest, source) = parse_tracked_set_this_way_source(rest)?;
+    Ok((rest, QuantityRef::DistinctCardTypes { source }))
 }
 
 /// CR 205.3 + CR 604.3: "different subtype[s] [other than creature types] among
@@ -2471,37 +2920,10 @@ fn parse_distinct_subtypes_among(input: &str) -> OracleResult<'_, QuantityRef> {
     })
     .parse(rest)?;
     let (rest, _) = tag(" among ").parse(rest)?;
-    // CR 400.1: zone form ("cards in <zone>") vs CR 109.2: object form
-    // ("<type-phrase>"). Zone form is tried first so "cards in …" is not
-    // mis-consumed by the generic type-phrase reader.
-    let (rest, source) = alt((
-        map(
-            preceded(tag("cards in "), parse_scoped_zone_ref),
-            |(zone, scope)| CardTypeSetSource::Zone { zone, scope },
-        ),
-        parse_distinct_subtypes_objects_source,
-    ))
-    .parse(rest)?;
+    // CR 400.1 / CR 109.2 / CR 601.2a: the shared population grammar. Reads with
+    // `TypePhraseGrammar::Legacy`, the grammar this head has always used.
+    let (rest, source) = parse_characteristic_set_source_list(rest, TypePhraseGrammar::Legacy)?;
     Ok((rest, QuantityRef::DistinctSubtypes { source, exclude }))
-}
-
-/// CR 109.2: object-set source for [`parse_distinct_subtypes_among`] — mirrors
-/// [`parse_distinct_card_types_among_objects`]'s type-phrase consumption so
-/// "different subtypes among <objects>" shares one `Objects { filter }` reading.
-fn parse_distinct_subtypes_objects_source(input: &str) -> OracleResult<'_, CardTypeSetSource> {
-    let type_text = input.trim_end_matches('.').trim_end_matches(',');
-    let (filter, remainder) = parse_type_phrase(type_text);
-    if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Fail,
-        )));
-    }
-    // `type_text` is a leading slice of `input` (only trailing `.`/`,` trimmed) and
-    // `remainder` is a tail of `type_text`, so the consumed prefix length is the
-    // difference of their lengths — no pointer arithmetic needed.
-    let consumed = type_text.len() - remainder.len();
-    Ok((&input[consumed..], CardTypeSetSource::Objects { filter }))
 }
 
 /// CR 122.1: Parse "different kind[s] of counters {on|among} <filter>" after
@@ -3935,8 +4357,15 @@ fn parse_distinct_quality_among_objects(input: &str) -> OracleResult<'_, Quantit
     ))
 }
 
-// CR 105.1 + CR 109.1: "color among [object filter]" counts distinct colors
+// CR 105.1 + CR 105.2: "color among [object filter]" counts distinct colors
 // among matching objects, not the number of matching objects.
+//
+// DELIBERATELY still reads with the LEGACY type-phrase grammar, which is what
+// this for-each head has always used (Faeburrow Elder, Chromatic Orrery, Soul of
+// Ravnica, Sisay, Conqueror's Flail, …). It is a separate head from
+// `parse_distinct_colors_among_tail` and is not migrated onto the shared
+// population grammar here: no card spells a union or a journal after "for each
+// color among", so widening it would be an untested grammar change.
 fn parse_for_each_distinct_colors_among_permanents(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = tag("color among ").parse(input)?;
     let (filter, remainder) = parse_type_phrase(rest);
@@ -3949,7 +4378,12 @@ fn parse_for_each_distinct_colors_among_permanents(input: &str) -> OracleResult<
             nom::error::ErrorKind::Fail,
         )));
     }
-    Ok(("", QuantityRef::DistinctColorsAmongPermanents { filter }))
+    Ok((
+        "",
+        QuantityRef::DistinctColorsAmong {
+            source: CardTypeSetSource::Objects { filter },
+        },
+    ))
 }
 
 pub(crate) fn parse_for_each_clause_ref_with_context<'a>(
@@ -4076,7 +4510,9 @@ fn parse_for_each_clause_ref_with_they_controller(
             parse_object_name_word_count_for_each,
             parse_object_typeline_component_count_for_each,
             parse_mana_symbols_in_object_mana_cost_for_each,
-            parse_distinct_card_types_in_zone,
+            // CR 205.2a: "for each card type among <population>" — the same
+            // population grammar the "the number of …" head uses.
+            parse_distinct_card_types_among,
             parse_foretold_cards_owned_in_exile,
             parse_zone_card_count,
             parse_for_each_attached_to_source,
@@ -5814,6 +6250,318 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // CR 109.2 population grammar — union tier, per-head grammar pinning, and
+    // the guards that keep each hazard from becoming a silent misparse.
+    // -----------------------------------------------------------------------
+
+    /// Row 1/6 (parse shape). First Family: "the number of colors among
+    /// permanents you control and spells you've cast this turn" must be a set
+    /// UNION over a live census and the cast journal — the exact misparse this
+    /// change fixes (both slots used to bind `SpellsCastThisTurn`, a count of
+    /// SPELLS, dropping the colour aggregation and the permanent population).
+    #[test]
+    fn first_family_colors_among_permanents_and_cast_journal_is_a_union() {
+        let (rest, qty) = parse_quantity_ref(
+            "the number of colors among permanents you control and spells you've cast this turn",
+        )
+        .expect("First Family's where-X clause must parse");
+        assert_eq!(rest, "");
+        let QuantityRef::DistinctColorsAmong {
+            source: CardTypeSetSource::AnyOf { sources },
+        } = qty
+        else {
+            panic!("expected DistinctColorsAmong{{AnyOf}}, got {qty:?}");
+        };
+        assert_eq!(sources.len(), 2, "exactly two populations: {sources:?}");
+        match &sources[0] {
+            CardTypeSetSource::Objects {
+                filter: TargetFilter::Typed(tf),
+            } => {
+                assert_eq!(tf.type_filters, vec![TypeFilter::Permanent]);
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            other => panic!("member 0 must be permanents you control, got {other:?}"),
+        }
+        assert_eq!(
+            sources[1],
+            CardTypeSetSource::TurnJournal {
+                journal: TurnJournalKind::SpellsCast,
+                scope: CountScope::Controller,
+                filter: None,
+            },
+            "member 1 must be the unfiltered controller cast journal"
+        );
+    }
+
+    /// Row 6. Happily Ever After's conjunct-2 FRAGMENT (the card itself stays
+    /// `Unimplemented` — its serial-comma intervening-if is a separate, deferred
+    /// gap). Exercises the `and/or` separator and a battlefield-object ∪
+    /// graveyard-card member mix, neither of which First Family covers.
+    #[test]
+    fn card_types_among_permanents_and_or_graveyard_cards_forms_a_union() {
+        for phrase in [
+            "card types among permanents you control and/or cards in your graveyard",
+            "card types among permanents you control and cards in your graveyard",
+        ] {
+            let (rest, qty) =
+                parse_distinct_card_types_among(phrase).unwrap_or_else(|e| panic!("{phrase}: {e}"));
+            assert_eq!(rest, "", "{phrase}");
+            let QuantityRef::DistinctCardTypes {
+                source: CardTypeSetSource::AnyOf { sources },
+            } = qty
+            else {
+                panic!("{phrase}: expected AnyOf, got {qty:?}");
+            };
+            assert_eq!(sources.len(), 2, "{phrase}: {sources:?}");
+            assert!(
+                matches!(
+                    &sources[0],
+                    CardTypeSetSource::Objects {
+                        filter: TargetFilter::Typed(tf)
+                    } if tf.controller == Some(ControllerRef::You)
+                ),
+                "{phrase}: member 0 must be permanents you control, got {:?}",
+                sources[0]
+            );
+            assert_eq!(
+                sources[1],
+                CardTypeSetSource::Zone {
+                    zone: ZoneRef::Graveyard,
+                    scope: CountScope::Controller,
+                },
+                "{phrase}: member 1 must be your graveyard"
+            );
+        }
+    }
+
+    /// Row 15. The intra-type-phrase `" and "` must never be mis-split — and the
+    /// guard that declines it is DIFFERENT under each grammar, so both halves are
+    /// asserted and each fails only if ITS OWN guard is removed.
+    ///
+    /// Legacy: `TYPE_SEPARATORS` FOLDS the phrase into one `Or[..]` and consumes
+    /// it whole, so arity is 1 and `verify(len >= 2)` declines — population
+    /// anchoring never runs. Strict: `parse_type_list` joins on `" or "` only, so
+    /// member 0 would be a bare unanchored `Creature` and
+    /// `filter_is_population_anchored` is what declines.
+    #[test]
+    fn union_tier_never_splits_an_intra_type_phrase_and() {
+        const PHRASE: &str = "creatures and planeswalkers they control";
+
+        let legacy = parse_characteristic_set_source_list(PHRASE, TypePhraseGrammar::Legacy);
+        assert!(
+            !matches!(legacy, Ok((_, CardTypeSetSource::AnyOf { .. }))),
+            "Legacy folds the conjunction into one type union (arity 1), got {legacy:?}"
+        );
+
+        let strict = parse_characteristic_set_source_list(PHRASE, TypePhraseGrammar::Strict);
+        assert!(
+            !matches!(strict, Ok((_, CardTypeSetSource::AnyOf { .. }))),
+            "Strict must refuse an unanchored bare-type-word member, got {strict:?}"
+        );
+    }
+
+    /// Row 15, mechanism pin for the Strict half: a bare type word is NOT a
+    /// population, an anchored one is. Removing `filter_is_population_anchored`
+    /// flips the first assertion.
+    #[test]
+    fn population_anchoring_distinguishes_a_type_from_a_population() {
+        let bare = super::super::target::parse_type_phrase("creatures")
+            .expect("strict grammar parses a bare type word")
+            .1;
+        assert!(
+            !filter_is_population_anchored(&bare),
+            "a bare type word names a TYPE, not a population: {bare:?}"
+        );
+        let anchored = super::super::target::parse_type_phrase("creatures you control")
+            .expect("strict grammar parses a controller-anchored phrase")
+            .1;
+        assert!(
+            filter_is_population_anchored(&anchored),
+            "a controller suffix anchors the population: {anchored:?}"
+        );
+    }
+
+    /// Row 17. An anaphoric population ("colors among those creatures" — General
+    /// Tazri) must stay an HONEST GAP, never a confident count over an
+    /// unrebindable sentinel.
+    ///
+    /// MEASURED CORRECTION to the plan: neither `parse_type_phrase` carries the
+    /// anaphor grammar — that lives in `parse_target`, not in either type-phrase
+    /// reader. Strict `Err`s on "those creatures"; Legacy returns an EMPTY
+    /// `TypedFilter` plus the whole input. So both refuse, but by different
+    /// mechanisms, and Legacy's refusal is the weaker one (a silent empty filter
+    /// that only a downstream remainder or emptiness check catches). The second
+    /// half pins that measured asymmetry so a future "let's unify the grammars"
+    /// change has to confront it rather than assume equivalence.
+    #[test]
+    fn an_anaphoric_population_is_refused_by_every_characteristic_head() {
+        assert!(
+            parse_distinct_colors_among_tail("colors among those creatures").is_err(),
+            "the colours head must decline an anaphoric population (General Tazri)"
+        );
+        assert!(
+            parse_distinct_card_types_among("card types among those cards").is_err(),
+            "the card-type head must decline an anaphoric population too"
+        );
+
+        // Measured grammar asymmetry: Strict fails; Legacy silently yields an
+        // empty filter and consumes nothing.
+        assert!(
+            super::super::target::parse_type_phrase("those creatures").is_err(),
+            "Strict rejects an anaphor outright"
+        );
+        let (legacy_filter, legacy_rest) = parse_type_phrase("those creatures");
+        assert_eq!(
+            legacy_rest, "those creatures",
+            "Legacy's infallible failure consumes nothing"
+        );
+        assert!(
+            !quantity_filter_has_meaningful_content(&legacy_filter),
+            "Legacy's failure shape is an EMPTY TypedFilter, not TargetFilter::Any: {legacy_filter:?}"
+        );
+        assert!(
+            !matches!(legacy_filter, TargetFilter::Any),
+            "the historical `Any` guard does NOT catch Legacy's failure shape: {legacy_filter:?}"
+        );
+    }
+
+    /// Row 18. A folded CROSS-ZONE type union is refused rather than silently
+    /// single-zoned: `TargetFilter::extract_in_zone` returns the FIRST member's
+    /// zone for an `Or`, so the other leg would be scanned in the wrong zone and
+    /// dropped with no diagnostic.
+    ///
+    /// The sibling assertion is what keeps this from being over-broad: a
+    /// same-zone (here, zone-free) fold is unambiguous and still accepted, so
+    /// every current card is unaffected.
+    #[test]
+    fn objects_source_refuses_an_ambiguous_cross_zone_fold() {
+        let cross_zone = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Card).properties(vec![
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                ])),
+            ],
+        };
+        assert!(
+            !objects_filter_zone_is_unambiguous(&cross_zone),
+            "a battlefield ∪ graveyard fold has no single zone: {cross_zone:?}"
+        );
+
+        let same_zone = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::TargetPlayer),
+                ),
+                TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Planeswalker)
+                        .controller(ControllerRef::TargetPlayer),
+                ),
+            ],
+        };
+        assert!(
+            objects_filter_zone_is_unambiguous(&same_zone),
+            "the Blot Out family's fold is zone-unambiguous and must stay accepted"
+        );
+    }
+
+    /// Row 16. A trailing `" and "` that continues the SENTENCE is not a
+    /// population conjunction: the goyf family's toughness rider and the
+    /// delirium activation restriction must both still be returned to the caller.
+    #[test]
+    fn sentence_continuation_and_is_returned_to_the_caller() {
+        for (phrase, expected_rest) in [
+            (
+                "card types among cards in all graveyards and its toughness is equal to that number plus 1",
+                " and its toughness is equal to that number plus 1",
+            ),
+            (
+                "card types among cards in your graveyard and only as a sorcery",
+                " and only as a sorcery",
+            ),
+        ] {
+            let (rest, qty) =
+                parse_distinct_card_types_among(phrase).unwrap_or_else(|e| panic!("{phrase}: {e}"));
+            assert_eq!(rest, expected_rest, "{phrase}");
+            assert!(
+                matches!(
+                    qty,
+                    QuantityRef::DistinctCardTypes {
+                        source: CardTypeSetSource::Zone { .. }
+                    }
+                ),
+                "{phrase}: expected a single zone source, got {qty:?}"
+            );
+        }
+    }
+
+    /// Row 16, second half. An object population that does not consume its whole
+    /// clause is an ERROR, never a truncated source.
+    #[test]
+    fn card_type_head_refuses_a_truncated_object_population() {
+        assert!(
+            parse_distinct_card_types_among("card types among creatures you control blah").is_err(),
+            "an unconsumed tail must fail the head, not truncate the population"
+        );
+    }
+
+    /// Rows 4/5 (parse shape). The cast journal as a population, unfiltered
+    /// (April O'Neil) and narrowed (Hurkyl).
+    #[test]
+    fn card_types_among_the_cast_journal_parses_filtered_and_unfiltered() {
+        let (rest, qty) =
+            parse_distinct_card_types_among("card type among spells you've cast this turn")
+                .expect("April O'Neil's for-each source must parse");
+        assert_eq!(rest, "");
+        assert_eq!(
+            qty,
+            QuantityRef::DistinctCardTypes {
+                source: CardTypeSetSource::TurnJournal {
+                    journal: TurnJournalKind::SpellsCast,
+                    scope: CountScope::Controller,
+                    filter: None,
+                },
+            }
+        );
+
+        let (rest, qty) = parse_distinct_card_types_among(
+            "card type among noncreature spells you've cast this turn",
+        )
+        .expect("Hurkyl's narrowed journal source must parse");
+        assert_eq!(rest, "");
+        let QuantityRef::DistinctCardTypes {
+            source:
+                CardTypeSetSource::TurnJournal {
+                    journal: TurnJournalKind::SpellsCast,
+                    scope: CountScope::Controller,
+                    filter: Some(filter),
+                },
+        } = qty
+        else {
+            panic!("expected a FILTERED cast journal, got {qty:?}");
+        };
+        assert!(
+            !matches!(filter, TargetFilter::Any),
+            "the noncreature qualifier must survive as a real filter: {filter:?}"
+        );
+    }
+
+    /// The journal arm must DECLINE a noun its qualifier grammar does not
+    /// recognize, rather than swallowing the aggregation head that precedes it.
+    /// This is what stops the union tier's member-1 attempt from consuming
+    /// "permanents you control and spells" as a journal noun.
+    #[test]
+    fn turn_journal_arm_declines_an_unrecognized_qualifier() {
+        assert!(
+            parse_turn_journal_source("permanents you control and spells you've cast this turn")
+                .is_err(),
+            "an aggregation head is not a spell-history qualifier"
+        );
+    }
+
     #[test]
     fn type_count_on_battlefield_accepts_eof_tail() {
         let (rest, parsed) = parse_type_count_on_battlefield("other creatures on the battlefield")
@@ -6244,10 +6992,12 @@ mod tests {
                 .unwrap();
         assert_eq!(rest, "");
         match q {
-            QuantityRef::DistinctColorsAmongPermanents { filter } => {
+            QuantityRef::DistinctColorsAmong {
+                source: CardTypeSetSource::Objects { filter },
+            } => {
                 assert_eq!(filter, linked_exile_owned_filter())
             }
-            other => panic!("expected DistinctColorsAmongPermanents, got {other:?}"),
+            other => panic!("expected DistinctColorsAmong(Objects), got {other:?}"),
         }
     }
 
@@ -7775,14 +8525,16 @@ mod tests {
             parse_quantity_ref("the number of colors among permanents you control").unwrap();
         assert_eq!(rest, "");
         match q {
-            QuantityRef::DistinctColorsAmongPermanents { filter } => match filter {
+            QuantityRef::DistinctColorsAmong {
+                source: CardTypeSetSource::Objects { filter },
+            } => match filter {
                 TargetFilter::Typed(tf) => {
                     assert_eq!(tf.type_filters, vec![TypeFilter::Permanent]);
                     assert_eq!(tf.controller, Some(ControllerRef::You));
                 }
                 other => panic!("expected typed permanent filter, got {other:?}"),
             },
-            other => panic!("expected DistinctColorsAmongPermanents, got {other:?}"),
+            other => panic!("expected DistinctColorsAmong(Objects), got {other:?}"),
         }
     }
 
@@ -7791,14 +8543,16 @@ mod tests {
         let (rest, q) = parse_for_each_clause_ref("color among permanents you control").unwrap();
         assert_eq!(rest, "");
         match q {
-            QuantityRef::DistinctColorsAmongPermanents { filter } => match filter {
+            QuantityRef::DistinctColorsAmong {
+                source: CardTypeSetSource::Objects { filter },
+            } => match filter {
                 TargetFilter::Typed(tf) => {
                     assert_eq!(tf.type_filters, vec![TypeFilter::Permanent]);
                     assert_eq!(tf.controller, Some(ControllerRef::You));
                 }
                 other => panic!("expected typed permanent filter, got {other:?}"),
             },
-            other => panic!("expected DistinctColorsAmongPermanents, got {other:?}"),
+            other => panic!("expected DistinctColorsAmong(Objects), got {other:?}"),
         }
 
         assert!(

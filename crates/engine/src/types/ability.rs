@@ -1897,6 +1897,24 @@ pub enum ZoneRef {
     Hand,
 }
 
+impl ZoneRef {
+    /// CR 400.1: The game zone this reference denotes.
+    ///
+    /// The single authority for the `ZoneRef` → [`Zone`](crate::types::zones::Zone)
+    /// mapping. Exhaustive by construction: a new `ZoneRef` variant fails to
+    /// compile here rather than silently reading as "some other zone" at a call
+    /// site that pattern-matched only the four it knew about.
+    pub fn zone(&self) -> crate::types::zones::Zone {
+        use crate::types::zones::Zone;
+        match self {
+            ZoneRef::Graveyard => Zone::Graveyard,
+            ZoneRef::Exile => Zone::Exile,
+            ZoneRef::Library => Zone::Library,
+            ZoneRef::Hand => Zone::Hand,
+        }
+    }
+}
+
 /// CR 701.10d-f: What aspect to double (counters, life total, or mana pool).
 /// Used by `Effect::Double` per locked decision D-05.
 /// DoublePT/DoublePTAll handle CR 701.10a-c (power/toughness) separately.
@@ -2337,7 +2355,10 @@ pub enum ManaProduction {
     /// not colors (CR 105.1), so each of W/U/B/R/G contributes at most once.
     /// Used by Faeburrow Elder's "{T}: For each color among permanents you
     /// control, add one mana of that color." Mirrors the structure of
-    /// `QuantityRef::DistinctColorsAmongPermanents`.
+    /// [`QuantityRef::DistinctColorsAmong`], which is a DIFFERENT enum and
+    /// which is parameterized on [`CardTypeSetSource`] because a colour COUNT
+    /// can read a union or a non-object population (First Family). This mana
+    /// variant is deliberately NOT parameterized: no mana ability reads either.
     DistinctColorsAmongPermanents { filter: TargetFilter },
     /// CR 106.1 + CR 109.1: Produce N mana of one chosen color from the distinct
     /// colors present among permanents matching `filter`. Mox Amber class:
@@ -6025,7 +6046,36 @@ pub enum ObjectScope {
     BatchSource,
 }
 
-/// Source set for counting distinct card types.
+/// CR 601.2a: A per-turn action journal — a chronological record of a kind of
+/// action taken this turn, cleared at the turn boundary.
+///
+/// The parameterization axis for [`CardTypeSetSource::TurnJournal`]. Introduced
+/// already parameterized rather than as a bare `SpellsCastThisTurn` leaf so the
+/// journal axis cannot grow an X / X′ sibling cluster on
+/// `CardTypeSetSource` itself.
+///
+/// NEXT MEMBER, ALREADY IDENTIFIED: `PermanentsSacrificed` (Korvold, Gleeful
+/// Glutton — "for each card type among permanents you've sacrificed this turn").
+/// BLOCKER: `GameState` has no sacrifice journal. Verified absent — the only
+/// per-turn journals today are `spells_cast_this_turn_by_player` and its
+/// game-scoped mirror. Adding Korvold costs one variant here plus its state and
+/// write site; it costs NOTHING in `CardTypeSetSource`, whose shape absorbs it
+/// unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum TurnJournalKind {
+    /// CR 601.2a + CR 112.1: spells cast this turn, as recorded in
+    /// `GameState::spells_cast_this_turn_by_player` at `finalize_cast`.
+    SpellsCast,
+}
+
+/// Source set (population) whose members' characteristics are counted.
+///
+/// CR 109.2 + CR 400.1 + CR 601.2a: the population axis shared by every
+/// distinct-characteristic count — card types (CR 205.2), subtypes (CR 205.3),
+/// and colors (CR 105.1). The CHARACTERISTIC axis stays partitioned by CR
+/// section in `QuantityRef`; this axis names only "the set whose members are
+/// read".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum CardTypeSetSource {
@@ -6044,7 +6094,252 @@ pub enum CardTypeSetSource {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caused_by: Option<ThisWayCause>,
     },
+    /// CR 601.2a + CR 112.1: The members of a per-turn action journal for the
+    /// scoped players ("spells you've cast this turn").
+    ///
+    /// A resolved spell is no longer an object (CR 400.7), so characteristics
+    /// come from the snapshot captured when the action was journaled — not from
+    /// a live object scan. `scope` / `filter` mirror
+    /// `QuantityRef::SpellsCastThisTurn` so the two name the same population;
+    /// `filter: None` admits every member.
+    TurnJournal {
+        journal: TurnJournalKind,
+        scope: CountScope,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
+    },
+    /// CR 109.2: The union of two or more populations — "among \<A\> and \<B\>" /
+    /// "among \<A\> and/or \<B\>".
+    ///
+    /// Set union, not arithmetic sum: a member appearing in both contributes its
+    /// characteristics once (First Family). Contrast
+    /// `parse_greatest_among_conjunction`, which is allowed to decompose the same
+    /// surface form into `Max{[Aggregate, Aggregate]}` ONLY because max
+    /// distributes over union and a distinct-count does not. Named `AnyOf` to
+    /// match `FilterProp::AnyOf` / `TypeFilter::AnyOf` (set-union-of-alternatives),
+    /// not `Or` (reserved for boolean condition enums).
+    ///
+    /// INVARIANT: at least two members, carried by [`UnionSources`] rather than
+    /// asserted. A 0- or 1-member union is not a union, and an empty one is
+    /// actively unsound: `characteristic_source_read`'s fold would return
+    /// `RwProfile::empty()`, which is FAIL-OPEN for the CR 603.3b ordering gate,
+    /// and the resolver would return 0 with no diagnostic.
+    AnyOf { sources: UnionSources },
 }
+
+/// CR 109.2: the members of a [`CardTypeSetSource::AnyOf`], carrying the
+/// at-least-two invariant IN THE TYPE.
+///
+/// The `Vec` is private, so the only ways in are [`UnionSources::new`] and
+/// `Deserialize` — both of which reject a 0- or 1-member list. This replaces a
+/// public `Vec` field guarded by a `debug_assert!`: that assertion compiles out
+/// of release builds, and the field let any caller in the crate write
+/// `AnyOf { sources: vec![] }` directly, bypassing both the constructor and the
+/// serde check. Several already did. An invariant that arbitrary callers can
+/// step around is documentation, not an invariant.
+///
+/// Derefs to `[CardTypeSetSource]`, so every existing `sources.iter()` /
+/// `sources.len()` read is unchanged — the type is a construction gate, not a
+/// new collection API.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct UnionSources(Vec<CardTypeSetSource>);
+
+impl UnionSources {
+    /// The ONLY in-crate constructor. `None` when the arity invariant fails, so
+    /// a caller cannot get a degenerate union by ignoring an error.
+    ///
+    /// Callers that want the collapse-to-single behavior want
+    /// [`CardTypeSetSource::any_of`], which is written on top of this.
+    pub fn new(sources: Vec<CardTypeSetSource>) -> Option<Self> {
+        (sources.len() >= 2).then_some(Self(sources))
+    }
+
+    pub fn into_vec(self) -> Vec<CardTypeSetSource> {
+        self.0
+    }
+}
+
+impl std::ops::Deref for UnionSources {
+    type Target = [CardTypeSetSource];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<'a> IntoIterator for &'a UnionSources {
+    type Item = &'a CardTypeSetSource;
+    type IntoIter = std::slice::Iter<'a, CardTypeSetSource>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+/// CR 109.2: Enforce the arity invariant on load, so a saved game or
+/// hand-authored payload cannot smuggle a degenerate union past the constructor.
+impl<'de> Deserialize<'de> for UnionSources {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let sources = Vec::<CardTypeSetSource>::deserialize(deserializer)?;
+        let len = sources.len();
+        UnionSources::new(sources).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "CardTypeSetSource::AnyOf requires at least 2 sources, got {len}"
+            ))
+        })
+    }
+}
+
+impl CardTypeSetSource {
+    /// CR 109.2: Arity-checked [`CardTypeSetSource::AnyOf`] constructor — the
+    /// only way a union is built.
+    ///
+    /// A single member collapses to itself rather than forming a degenerate
+    /// union; an empty list has no population and yields `None`.
+    pub fn any_of(mut sources: Vec<CardTypeSetSource>) -> Option<CardTypeSetSource> {
+        match sources.len() {
+            0 => None,
+            1 => sources.pop(),
+            _ => UnionSources::new(sources).map(|sources| CardTypeSetSource::AnyOf { sources }),
+        }
+    }
+
+    /// CR 400.1 + CR 613.4a: Every zone this population reads.
+    ///
+    /// THE single authority for the population-zone axis. Both consumers ask
+    /// this and nothing else:
+    ///
+    /// * **Evaluation** — `game::quantity::visit_characteristic_source` walks
+    ///   exactly these zones to enumerate members.
+    /// * **Dependency tracking** — [`reads_zone`](Self::reads_zone), which
+    ///   `game::layers::characteristic_source_reads_zone` delegates to, dirties
+    ///   a dependent characteristic when an object crosses one of them.
+    ///
+    /// They MUST agree. When they did not, a layer or CDA could retain a stale
+    /// distinct-characteristic value across a zone transition: the evaluator
+    /// scanned exile for a craft population (`And[ExiledBySource, …]`, Sunbird
+    /// Effigy) while the classifier reported that same population as reading no
+    /// zone at all, so nothing ever re-evaluated it. Splitting the two answers
+    /// across two functions is what made that divergence possible; one function
+    /// with two callers is what prevents it.
+    ///
+    /// EMPTY means "no zone is explicitly named", which each consumer resolves
+    /// per [`TargetFilter::population_zones`]: the walk substitutes the
+    /// battlefield default (CR 110.1), the dependency check does not. Two
+    /// populations are empty as a POSITIVE claim rather than a fallback, and for
+    /// them the walk substitutes nothing because it never scans a zone at all:
+    ///
+    /// * `TurnJournal` — characteristics come from the snapshot taken when the
+    ///   action was journaled, because a resolved spell is no longer an object
+    ///   (CR 400.7). Nothing re-reads a zone, so no transition can stale it.
+    /// * `TrackedSet` — membership is by object id and is fixed when the set is
+    ///   published (CR 608.2i — an effect may look back at a previous action's
+    ///   objects, which need not still be where they were); a member moving
+    ///   zones changes neither the set
+    ///   nor the card types its members have (CR 205.2a).
+    pub fn population_zones(&self) -> Vec<crate::types::zones::Zone> {
+        self.population_zones_checked().0
+    }
+
+    /// [`population_zones`](Self::population_zones) plus whether the union walk
+    /// completed within its depth budget. Split out because the two consumers
+    /// need OPPOSITE things from a truncated walk: the evaluation walk can only
+    /// scan what it found, while [`reads_zone`](Self::reads_zone) must answer
+    /// `true` rather than miss an invalidation.
+    fn population_zones_checked(&self) -> (Vec<crate::types::zones::Zone>, bool) {
+        let mut out: Vec<crate::types::zones::Zone> = Vec::new();
+        let complete = self.try_for_each_member(UNION_DEPTH_BUDGET, &mut |leaf| {
+            for zone in leaf.leaf_population_zones() {
+                if !out.contains(&zone) {
+                    out.push(zone);
+                }
+            }
+        });
+        (out, complete)
+    }
+
+    /// The zones ONE non-union population reads. `AnyOf` is handled by
+    /// [`try_for_each_member`](Self::try_for_each_member), which is the only
+    /// caller and never hands a union here.
+    fn leaf_population_zones(&self) -> Vec<crate::types::zones::Zone> {
+        match self {
+            CardTypeSetSource::Zone { zone, .. } => vec![zone.zone()],
+            // CR 607.2a + CR 406.6: a linked-exile pool lives in exile.
+            CardTypeSetSource::ExiledBySource => vec![crate::types::zones::Zone::Exile],
+            CardTypeSetSource::Objects { filter } => filter.population_zones(),
+            // Not zone reads — see the doc comment on `population_zones`.
+            CardTypeSetSource::TrackedSet { .. } | CardTypeSetSource::TurnJournal { .. } => {
+                Vec::new()
+            }
+            // Unreachable through the walker; empty rather than a panic so a
+            // future direct caller degrades instead of crashing a game.
+            CardTypeSetSource::AnyOf { .. } => Vec::new(),
+        }
+    }
+
+    /// CR 613.4a: Does this population read `zone`?
+    ///
+    /// The dependency-tracking half of [`population_zones`](Self::population_zones),
+    /// kept as one call so a caller cannot accidentally ask a narrower question.
+    ///
+    /// A truncated union walk answers `true`: an over-report costs one redundant
+    /// layer recompute, an under-report strands a stale characteristic, and only
+    /// one of those is a correctness bug.
+    pub fn reads_zone(&self, zone: crate::types::zones::Zone) -> bool {
+        let (zones, complete) = self.population_zones_checked();
+        !complete || zones.contains(&zone)
+    }
+
+    /// CR 109.2: Visit every NON-union member of this population, depth-bounded.
+    ///
+    /// THE single bounded walker for the `AnyOf` axis. Every consumer that
+    /// recurses a `CardTypeSetSource` routes through this instead of writing its
+    /// own `AnyOf` arm, so the recursion is written once and bounded once.
+    ///
+    /// `AnyOf` nests without limit — its arity invariant bounds WIDTH, not
+    /// DEPTH — and a persisted or hand-authored payload can carry whatever
+    /// nesting it likes. Every consumer recursing independently meant every
+    /// consumer was a separate unbounded traversal.
+    ///
+    /// Returns `false` when the budget is exhausted before the walk completed,
+    /// and callers MUST treat that as "I did not see everything" and answer
+    /// conservatively — the same fail-safe contract
+    /// `target_filter_characteristic_reads_at` uses when it returns
+    /// `CharacteristicKinds::ALL`. The visitor still runs for everything reached
+    /// within budget, so a `false` return means incomplete, not empty.
+    ///
+    /// [`UNION_DEPTH_BUDGET`] is the depth every in-engine caller passes.
+    pub fn try_for_each_member(
+        &self,
+        depth: u32,
+        visit: &mut impl FnMut(&CardTypeSetSource),
+    ) -> bool {
+        let Some(depth) = depth.checked_sub(1) else {
+            return false;
+        };
+        match self {
+            CardTypeSetSource::AnyOf { sources } => {
+                let mut complete = true;
+                for member in sources {
+                    // Not short-circuited: a truncated branch must not stop the
+                    // siblings a caller can still legitimately see.
+                    complete &= member.try_for_each_member(depth, visit);
+                }
+                complete
+            }
+            leaf => {
+                visit(leaf);
+                true
+            }
+        }
+    }
+}
+
+/// CR 109.2: Depth budget for [`CardTypeSetSource::try_for_each_member`].
+///
+/// Sized so no real card comes close — printed unions are two or three members
+/// deep — while still bounding a hostile or corrupt payload. Mirrors the filter
+/// walkers' budgets rather than inventing a second convention.
+pub const UNION_DEPTH_BUDGET: u32 = 64;
 
 /// CR 205.3: Which subtypes are excluded when counting distinct subtypes.
 ///
@@ -6863,21 +7158,56 @@ pub enum QuantityRef {
     /// or in the command zone" pattern. The resolver selects the first matching commander
     /// (any one if multiple exist) and returns its mana value.
     CommanderManaValue { owner: ControllerRef },
-    /// CR 106.1 + CR 109.1: Number of distinct colors among permanents matching
-    /// a filter. "Gold", "multicolor", and "colorless" are not colors (CR 105.1),
-    /// so each of W/U/B/R/G is counted at most once. Used by Faeburrow Elder's
-    /// "+1/+1 for each color among permanents you control" CDA and its companion
-    /// mana ability. Composes with `ObjectCount`-style filter predicates and is
-    /// the dual to `ManaProduction::DistinctColorsAmongPermanents`.
-    DistinctColorsAmongPermanents { filter: TargetFilter },
+    /// CR 105.1 + CR 105.2: Number of distinct colors among the members of a
+    /// [`CardTypeSetSource`] population.
+    ///
+    /// There are exactly five colors (CR 105.1) and an object can be one or more
+    /// of them or none at all (CR 105.2) — "gold", "multicolor", and "colorless"
+    /// are not colors — so each of W/U/B/R/G is counted at most once and a
+    /// colorless member contributes nothing. Parameterized on the shared
+    /// population axis (rather than carrying a bare `TargetFilter`) so a union or
+    /// a non-object population is expressible: First Family's "the number of
+    /// colors among permanents you control **and spells you've cast this turn**"
+    /// is a set union over a live census and a cast journal, and `|A ∪ B|` is not
+    /// `|A| + |B|`. Faeburrow Elder's "+1/+1 for each color among permanents you
+    /// control" CDA is the single-source reading (`Objects { filter }`).
+    ///
+    /// Dual to `ManaProduction::DistinctColorsAmongPermanents`, which is a
+    /// DIFFERENT enum that happens to share the old variant name and is
+    /// deliberately left un-parameterized (no mana ability reads a union).
+    ///
+    /// SAVED-GAME MIGRATION: this variant was `DistinctColorsAmongPermanents
+    /// { filter: TargetFilter }`. Those nodes live in PERSISTED GAME STATE, not
+    /// only in regenerated card data — a battlefield token's continuous
+    /// modification, a mid-resolution stack object, an in-flight reconnect
+    /// payload, or an out-of-repo community scenario can all carry one. Both the
+    /// legacy tag (`#[serde(alias)]` on the variant, same precedent as
+    /// [`QuantityRef::ObjectCountDistinct`]) and the legacy payload key
+    /// (`#[serde(alias = "filter")]` + [`deserialize_distinct_colors_population`],
+    /// which lifts it to `Objects { filter }`) are accepted on load, so an old
+    /// snapshot rehydrates instead of failing with unknown-variant / missing-field.
+    /// Serialization is unmigrated-only: output always uses the new tag and key.
+    #[serde(alias = "DistinctColorsAmongPermanents")]
+    DistinctColorsAmong {
+        #[serde(
+            alias = "filter",
+            deserialize_with = "deserialize_distinct_colors_population"
+        )]
+        source: CardTypeSetSource,
+    },
     /// CR 122.1: distinct counter kinds among filter-matched permanents
     /// (controller-relative, CR 109.4). Counter-side dual of
-    /// `DistinctColorsAmongPermanents` — counts each distinct `CounterType`
+    /// [`QuantityRef::DistinctColorsAmong`] — counts each distinct `CounterType`
     /// appearing on at least one permanent matching `filter` exactly once.
     /// Used by Bribe Taker's "for each kind of counter on permanents you
     /// control" iteration source. Kept a separate variant from the color
-    /// dual because counters (CR 122.1) and colors (CR 105/106) are distinct
+    /// dual because counters (CR 122.1) and colors (CR 105) are distinct
     /// rule sections the engine resolves independently.
+    ///
+    /// ASYMMETRY, deliberate: unlike its colour dual this variant still carries a
+    /// bare `TargetFilter` rather than a `CardTypeSetSource`. No card demands a
+    /// non-object counter population, so folding it onto the shared axis is
+    /// deferred rather than speculative.
     DistinctCounterKindsAmong { filter: TargetFilter },
     /// CR 701.38 + CR 608.2c: Number of votes tallied for this choice index,
     /// summed from `state.last_vote_ballots`. Counts votes, not voters — a
@@ -14662,6 +14992,50 @@ fn default_distinct_names() -> Vec<SharedQuality> {
     vec![SharedQuality::Name]
 }
 
+/// Backward-compat loader for the legacy
+/// `QuantityRef::DistinctColorsAmongPermanents { filter }` payload, reached via
+/// the `#[serde(alias = "filter")]` on
+/// [`QuantityRef::DistinctColorsAmong`]'s `source` field.
+///
+/// The legacy shape named exactly one population — the objects matching
+/// `filter` — so it lifts to `CardTypeSetSource::Objects { filter }` with no
+/// semantic change (this is a serialization shim, not rules logic; the rule
+/// citations live on the variant it feeds). A saved game, an in-flight reconnect payload, or a
+/// community scenario captured before the population axis was lifted therefore
+/// still deserializes (Faeburrow Elder / Conqueror's Flail / Sunbird Effigy /
+/// Aurora Awakener / Puca's Eye / Elemental Spectacle class).
+///
+/// ORDERING, load-bearing: the current [`CardTypeSetSource`] reading is tried
+/// FIRST, so a current payload is never re-read as a legacy one. Both types are
+/// internally tagged on `"type"` and share exactly two tag names
+/// (`ExiledBySource`, `TrackedSet` — verified against the two enum
+/// declarations), which is the only place the two readings could collide; with
+/// the current reading first, that collision can only ever mis-read a LEGACY
+/// payload, and no legacy writer emitted either shape here. The two legacy
+/// producers were `parse_number_of_distinct_colors_among_permanents_tail`
+/// (craft materials → `And { [ExiledBySource, Typed] }`, or a `parse_type_phrase`
+/// object filter) and `parse_for_each_distinct_colors_among_permanents`
+/// (`parse_type_phrase` only), plus the mtgish-import converter (`Typed`) —
+/// none of which can yield a BARE `ExiledBySource` / `TrackedSet` filter.
+fn deserialize_distinct_colors_population<'de, D>(
+    deserializer: D,
+) -> Result<CardTypeSetSource, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Repr {
+        Current(CardTypeSetSource),
+        LegacyObjects(TargetFilter),
+    }
+
+    Ok(match Repr::deserialize(deserializer)? {
+        Repr::Current(source) => source,
+        Repr::LegacyObjects(filter) => CardTypeSetSource::Objects { filter },
+    })
+}
+
 /// Backward-compat default for the legacy
 /// `FilterProp::MostPrevalentCreatureTypeInLibrary` shape. Old saves had no
 /// `scope` field; it always meant `your` library.
@@ -15413,6 +15787,33 @@ impl TargetFilter {
         }
     }
 
+    /// CR 603.7c + CR 400.7: Returns true when this filter names ONE object that
+    /// is already BOUND — a specific permanent or an anaphor to one — rather than
+    /// a CLASS of objects re-matched against the live board on every check.
+    ///
+    /// Used where "how many times can an event matching this filter occur?" is
+    /// the question, e.g. CR 603.7b's one-shot delayed triggers: a bound object
+    /// dies, leaves, or enters exactly once per incarnation (a returning object
+    /// is a NEW object, CR 400.7 / CR 603.7c), whereas a class filter ("a
+    /// creature") can match an unbounded number of later occurrences.
+    ///
+    /// Deliberately NARROWER than the parser's `is_single_object_ref`: that
+    /// helper also admits `TriggeringSource`, which is re-resolved from whichever
+    /// event is being examined and is therefore NOT bound in advance, and it has
+    /// no reason to admit `SpecificObject` / `ParentTargetSlot`. `TrackedSet`
+    /// and `LastCreated` are excluded for the same reason as a class filter —
+    /// they can name several objects, so several occurrences.
+    pub fn names_bound_single_object(&self) -> bool {
+        matches!(
+            self,
+            TargetFilter::SelfRef
+                | TargetFilter::SpecificObject { .. }
+                | TargetFilter::AttachedTo
+                | TargetFilter::ParentTarget
+                | TargetFilter::ParentTargetSlot { .. }
+        )
+    }
+
     /// CR 115.1: Returns true for filters that are NOT player-chosen targets —
     /// context references (triggering event participants per CR 603.7c),
     /// parent target anaphora, and self-references resolve automatically
@@ -15599,6 +16000,43 @@ impl TargetFilter {
             }
             _ => {}
         }
+    }
+
+    /// CR 400.1: Every zone this filter EXPLICITLY constrains its population to.
+    ///
+    /// The union of both zone readers, and never narrower than either. They
+    /// disagree on `StackSpell` / `StackAbility`: [`extract_in_zone`](Self::extract_in_zone)
+    /// reports `Stack`, while `collect_zones` has no arm for them and reports
+    /// nothing. A population walk that switched from the former to the latter
+    /// would stop scanning the stack, so the single-zone answer is unioned in
+    /// rather than assumed redundant. Deliberately fixed HERE rather than by
+    /// adding the arm to `collect_zones`: that function has ~15 callers asking
+    /// the narrower "what is written here" question, and widening it under them
+    /// is a change none of them requested.
+    ///
+    /// EMPTY IS MEANINGFUL, and is why no battlefield default is applied here.
+    /// A filter with no written zone constraint denotes permanents (CR 110.1),
+    /// but the two consumers of this list need opposite things from that fact:
+    ///
+    /// * a population WALK must scan the battlefield, so it substitutes the
+    ///   default itself (`game::quantity::visit_characteristic_source`);
+    /// * a zone-transition DEPENDENCY must not claim to read the battlefield,
+    ///   because battlefield moves are already escalated unconditionally by
+    ///   `mark_layers_full` — reporting it here would add a redundant full
+    ///   recompute to every battlefield move, and would break this function's
+    ///   agreement with its `target_filter_reads_zone` siblings, none of which
+    ///   report a defaulted zone.
+    ///
+    /// Order is deterministic (`extract_zones` order, then the single-zone
+    /// answer) so a walk's yield order does not depend on traversal incidentals.
+    pub fn population_zones(&self) -> Vec<crate::types::zones::Zone> {
+        let mut zones = self.extract_zones();
+        if let Some(single) = self.extract_in_zone() {
+            if !zones.contains(&single) {
+                zones.push(single);
+            }
+        }
+        zones
     }
 }
 
@@ -20464,6 +20902,34 @@ pub enum AbilityCondition {
     HasCityBlessing,
     /// CR 702.195b: True when the ability controller has the enduring story designation.
     HasEnduringStory,
+    /// CR 903.3d + CR 608.2a: Resolution-time commander-control gate — "if you
+    /// control your commander" / "if you control a commander". CR 903.3d is the
+    /// authorizing rule: "If an effect refers to controlling a commander, it
+    /// refers to a permanent on the battlefield that is a commander."
+    /// CR 608.2a is the resolution-time half: an intervening-`if` condition is
+    /// re-checked as the ability resolves and the ability does nothing if it is
+    /// then false.
+    ///
+    /// The effect-resolution mirror of `StaticCondition::ControlsCommander`
+    /// (layers), `TriggerCondition::ControlsCommander` (intervening-if on a
+    /// printed trigger) and `ParsedCondition::ControlsCommander`
+    /// (activation/casting restrictions), carrying the same `ownership` axis.
+    ///
+    /// CR 903.3 + CR 109.5: `Own` ("your commander") requires the evaluating
+    /// player to both OWN and control it — CR 903.3 makes the designation an
+    /// attribute of the *card*, so a stolen commander remains its owner's, not
+    /// yours. `Any` ("a commander") is controller-only, any owner.
+    ///
+    /// CR 109.5: "you" is the resolving ability's controller; for a delayed
+    /// triggered ability that is the player who controlled the creating spell as
+    /// it resolved (CR 603.7d), which `Effect::CreateDelayedTrigger` already
+    /// stamps onto the delayed `ResolvedAbility`.
+    ///
+    /// Evaluated live at resolution against the single `game::commander`
+    /// authority — the same helpers the three sibling mirrors use — so the four
+    /// readings of one printed clause cannot drift, and the CR 702.26b
+    /// phased-out exclusion applies uniformly.
+    ControlsCommander { ownership: CommanderOwnership },
     /// CR 701.9a + CR 608.2c: True when the card discarded by the directly
     /// preceding discard instruction matches `filter`. The resolver reads the
     /// discard operation's captured hand-time result, never current-zone state
@@ -20760,6 +21226,14 @@ impl AbilityCondition {
             | AbilityCondition::IsInitiative
             | AbilityCondition::HasCityBlessing
             | AbilityCondition::HasEnduringStory
+            // CR 903.3d: a commander-control gate is a plain game-state predicate
+            // about the resolving ability's controller. It says nothing about
+            // whether an antecedent optional effect was performed, so a token
+            // minted under this gate is unconditionally live and the referent
+            // re-link must NOT fold the gate away as a reflexive "if you do".
+            // Same classification, for the same reason, as `IsMonarch` and
+            // `CompletedDungeon` below.
+            | AbilityCondition::ControlsCommander { .. }
             | AbilityCondition::DiscardedCardMatchesFilter { .. }
             | AbilityCondition::IsRingBearer
             | AbilityCondition::HasObjectTarget
@@ -26276,6 +26750,413 @@ mod tests {
     use super::*;
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
+
+    /// Row 14, degenerate `AnyOf` cases. CR 109.2: a 0- or 1-member union is not
+    /// a union, and an EMPTY one is actively unsound — `characteristic_source_read`
+    /// would fold it to `RwProfile::empty()`, which is FAIL-OPEN for the CR 603.3b
+    /// same-event ordering gate, and the resolver would return 0 with no
+    /// diagnostic. Both boundaries are closed: construction and deserialization.
+    #[test]
+    fn any_of_arity_invariant_is_enforced_at_both_boundaries() {
+        let member = || CardTypeSetSource::Zone {
+            zone: ZoneRef::Graveyard,
+            scope: CountScope::Controller,
+        };
+
+        // Construction: empty yields nothing; a single member COLLAPSES to
+        // itself rather than forming a degenerate union.
+        assert_eq!(CardTypeSetSource::any_of(vec![]), None);
+        assert_eq!(CardTypeSetSource::any_of(vec![member()]), Some(member()));
+        assert!(matches!(
+            CardTypeSetSource::any_of(vec![member(), CardTypeSetSource::ExiledBySource]),
+            Some(CardTypeSetSource::AnyOf { ref sources }) if sources.len() == 2
+        ));
+
+        // Deserialization: a hand-authored or saved-game payload cannot smuggle
+        // a degenerate union past the constructor.
+        for payload in [
+            r#"{"type":"AnyOf","sources":[]}"#,
+            r#"{"type":"AnyOf","sources":[{"type":"ExiledBySource"}]}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<CardTypeSetSource>(payload).is_err(),
+                "a degenerate union must be rejected on load: {payload}"
+            );
+        }
+        assert!(
+            serde_json::from_str::<CardTypeSetSource>(
+                r#"{"type":"AnyOf","sources":[{"type":"ExiledBySource"},{"type":"ExiledBySource"}]}"#
+            )
+            .is_ok(),
+            "a two-member union must still load"
+        );
+    }
+
+    /// CR 109.2: the arity invariant is carried by the TYPE, so it holds in
+    /// release builds and against callers that never touch `any_of`.
+    ///
+    /// The previous form — a public `Vec` field plus a `debug_assert!` — was
+    /// unenforceable twice over: the assert compiled out of release, and any
+    /// in-crate caller could write the struct literal directly. Several did.
+    #[test]
+    fn union_sources_arity_is_unconstructible_below_two() {
+        let member = || CardTypeSetSource::ExiledBySource;
+
+        // Construction: the ONLY in-crate way in rejects both degenerate arities.
+        assert!(UnionSources::new(vec![]).is_none());
+        assert!(UnionSources::new(vec![member()]).is_none());
+        assert!(UnionSources::new(vec![member(), member()]).is_some());
+
+        // `any_of` keeps its collapse-to-single behavior on top of that gate.
+        assert_eq!(CardTypeSetSource::any_of(vec![]), None);
+        assert_eq!(CardTypeSetSource::any_of(vec![member()]), Some(member()));
+
+        // Deserialization: a saved game or hand-authored payload is rejected
+        // with a message naming the arity, not a generic length error.
+        for payload in [
+            r#"{"type":"AnyOf","sources":[]}"#,
+            r#"{"type":"AnyOf","sources":[{"type":"ExiledBySource"}]}"#,
+        ] {
+            let err = serde_json::from_str::<CardTypeSetSource>(payload)
+                .expect_err("a degenerate union must be rejected on load");
+            assert!(
+                err.to_string().contains("at least 2"),
+                "the error should name the invariant, got {err}"
+            );
+        }
+
+        // Round-trip: the wire shape is unchanged by the newtype, so saved games
+        // written before it still load.
+        let json =
+            r#"{"type":"AnyOf","sources":[{"type":"ExiledBySource"},{"type":"ExiledBySource"}]}"#;
+        let loaded: CardTypeSetSource =
+            serde_json::from_str(json).expect("a two-member union must still load");
+        assert_eq!(
+            serde_json::to_string(&loaded).expect("serialize"),
+            json,
+            "the newtype must be serde-transparent"
+        );
+    }
+
+    /// CR 109.2: the single bounded walker unrolls unions, visits every leaf
+    /// once, and reports truncation instead of recursing without limit.
+    #[test]
+    fn try_for_each_member_unrolls_unions_and_bounds_depth() {
+        let leaf = |n: u32| CardTypeSetSource::TrackedSet {
+            caused_by: (n > 0).then_some(ThisWayCause::Discarded),
+        };
+        let union = CardTypeSetSource::any_of(vec![
+            leaf(0),
+            CardTypeSetSource::any_of(vec![leaf(1), CardTypeSetSource::ExiledBySource])
+                .expect("two-member union"),
+        ])
+        .expect("two-member union");
+
+        // Every leaf, exactly once, with nested unions flattened.
+        let mut seen = Vec::new();
+        assert!(union.try_for_each_member(UNION_DEPTH_BUDGET, &mut |m| seen.push(m.clone())));
+        assert_eq!(
+            seen,
+            vec![leaf(0), leaf(1), CardTypeSetSource::ExiledBySource],
+            "unions unroll in declaration order and yield only non-union members"
+        );
+
+        // A non-union source is its own single member.
+        let mut single = Vec::new();
+        assert!(CardTypeSetSource::ExiledBySource
+            .try_for_each_member(UNION_DEPTH_BUDGET, &mut |m| single.push(m.clone())));
+        assert_eq!(single, vec![CardTypeSetSource::ExiledBySource]);
+
+        // Exhaustion reports FALSE rather than recursing, and still visits what
+        // it reached — "incomplete", not "empty".
+        let mut partial = Vec::new();
+        assert!(
+            !union.try_for_each_member(1, &mut |m| partial.push(m.clone())),
+            "a budget too small for the nesting must report truncation"
+        );
+        assert!(
+            partial.len() < seen.len(),
+            "a truncated walk sees strictly fewer members"
+        );
+        // Depth 0 cannot even visit a leaf.
+        assert!(!CardTypeSetSource::ExiledBySource.try_for_each_member(0, &mut |_| {}));
+    }
+
+    /// CR 400.1: the population-zone authority reports EVERY zone a population
+    /// reads, per variant. The craft row is the one that was silently wrong:
+    /// evaluation scanned exile for `And[ExiledBySource, Owned{You}]` while the
+    /// dependency classifier reported that population as reading no zone, so no
+    /// exile transition ever dirtied a characteristic derived from it.
+    #[test]
+    fn population_zones_reports_every_zone_each_population_reads() {
+        // Craft linked-exile (Sunbird Effigy), in both the shapes that reach it:
+        // the dedicated variant and the filter the craft parser actually builds.
+        assert_eq!(
+            CardTypeSetSource::ExiledBySource.population_zones(),
+            vec![Zone::Exile]
+        );
+        let craft = CardTypeSetSource::Objects {
+            filter: TargetFilter::And {
+                filters: vec![
+                    TargetFilter::ExiledBySource,
+                    TargetFilter::Typed(TypedFilter::default().properties(vec![
+                        FilterProp::Owned {
+                            controller: ControllerRef::You,
+                        },
+                    ])),
+                ],
+            },
+        };
+        assert_eq!(craft.population_zones(), vec![Zone::Exile]);
+        assert!(craft.reads_zone(Zone::Exile), "the craft regression");
+        assert!(!craft.reads_zone(Zone::Graveyard));
+
+        // An explicit single-zone constraint, and the ZoneRef mapping.
+        for (zone_ref, zone) in [
+            (ZoneRef::Graveyard, Zone::Graveyard),
+            (ZoneRef::Exile, Zone::Exile),
+            (ZoneRef::Library, Zone::Library),
+            (ZoneRef::Hand, Zone::Hand),
+        ] {
+            let source = CardTypeSetSource::Zone {
+                zone: zone_ref,
+                scope: CountScope::Controller,
+            };
+            assert_eq!(source.population_zones(), vec![zone]);
+            assert!(source.reads_zone(zone));
+            assert!(!source.reads_zone(Zone::Stack));
+        }
+
+        // A snapshot population is NOT a zone read (CR 400.7 / CR 608.2c), and
+        // that is asserted rather than left implicit.
+        for snapshot in [
+            CardTypeSetSource::TrackedSet { caused_by: None },
+            CardTypeSetSource::TurnJournal {
+                journal: TurnJournalKind::SpellsCast,
+                scope: CountScope::Controller,
+                filter: None,
+            },
+        ] {
+            assert!(snapshot.population_zones().is_empty());
+            for zone in [Zone::Battlefield, Zone::Exile, Zone::Graveyard] {
+                assert!(!snapshot.reads_zone(zone));
+            }
+        }
+    }
+
+    /// CR 400.1: a multi-zone `InAnyZone` population enumerates EVERY zone.
+    /// `extract_in_zone` collapses it to one, which is what made the evaluator
+    /// undercount every zone after the first.
+    #[test]
+    fn population_zones_preserves_multi_zone_unions_that_extract_in_zone_collapses() {
+        let multi =
+            TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::InAnyZone {
+                    zones: vec![Zone::Graveyard, Zone::Hand, Zone::Library],
+                }]),
+            );
+        // The collapse this replaces: one zone out of three.
+        assert_eq!(multi.extract_in_zone(), None);
+        let source = CardTypeSetSource::Objects {
+            filter: multi.clone(),
+        };
+        assert_eq!(
+            source.population_zones(),
+            vec![Zone::Graveyard, Zone::Hand, Zone::Library]
+        );
+        for zone in [Zone::Graveyard, Zone::Hand, Zone::Library] {
+            assert!(source.reads_zone(zone), "{zone:?} is in the union");
+        }
+        for zone in [Zone::Battlefield, Zone::Exile, Zone::Stack] {
+            assert!(!source.reads_zone(zone), "{zone:?} is not in the union");
+        }
+    }
+
+    /// The population-zone list must never be NARROWER than `extract_in_zone`.
+    /// `collect_zones` has no `StackSpell` arm, so a walk that read only
+    /// `extract_zones` would stop scanning the stack — the union is what keeps
+    /// Secret Arcade's "permanent spells you control" shape reachable.
+    #[test]
+    fn population_zones_is_never_narrower_than_either_zone_reader() {
+        for filter in [
+            TargetFilter::StackSpell,
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::StackSpell,
+                    TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+                ],
+            },
+        ] {
+            assert!(
+                filter.extract_zones().is_empty(),
+                "precondition: collect_zones has no stack arm"
+            );
+            assert_eq!(filter.extract_in_zone(), Some(Zone::Stack));
+            assert_eq!(filter.population_zones(), vec![Zone::Stack]);
+        }
+    }
+
+    /// CR 110.1 + CR 611.3a: an unconstrained filter denotes permanents, but the
+    /// battlefield default is deliberately NOT reported here. Battlefield moves
+    /// are escalated unconditionally by `mark_layers_full`, so claiming the read
+    /// would add a redundant full recompute to every one of them; the population
+    /// WALK substitutes the default itself. This asymmetry is the whole reason
+    /// `population_zones` returns an empty vec instead of `[Battlefield]`.
+    #[test]
+    fn population_zones_leaves_the_battlefield_default_to_the_walk() {
+        let source = CardTypeSetSource::Objects {
+            filter: TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+        };
+        assert!(source.population_zones().is_empty());
+        assert!(!source.reads_zone(Zone::Battlefield));
+    }
+
+    /// CR 109.2: a union reads the union of its members' zones, deduplicated —
+    /// First Family's shape, plus a nested union to pin the recursion.
+    #[test]
+    fn population_zones_unions_member_zones_without_duplicates() {
+        let graveyard = CardTypeSetSource::Zone {
+            zone: ZoneRef::Graveyard,
+            scope: CountScope::Controller,
+        };
+        let union = CardTypeSetSource::any_of(vec![
+            graveyard.clone(),
+            CardTypeSetSource::ExiledBySource,
+            // Same zone twice — the dedup is what makes this a set union.
+            graveyard.clone(),
+            CardTypeSetSource::any_of(vec![
+                CardTypeSetSource::Zone {
+                    zone: ZoneRef::Hand,
+                    scope: CountScope::Controller,
+                },
+                CardTypeSetSource::TurnJournal {
+                    journal: TurnJournalKind::SpellsCast,
+                    scope: CountScope::Controller,
+                    filter: None,
+                },
+            ])
+            .expect("two-member union"),
+        ])
+        .expect("multi-member union");
+        assert_eq!(
+            union.population_zones(),
+            vec![Zone::Graveyard, Zone::Exile, Zone::Hand]
+        );
+    }
+
+    /// SAVED-GAME MIGRATION, unit arm. The pre-lift shape
+    /// `{"type":"DistinctColorsAmongPermanents","filter":…}` must rehydrate as
+    /// the single-population reading. Both halves of the rename are load-bearing:
+    /// without the variant alias the tag is an unknown variant, and even with it
+    /// the renamed-and-retyped key would fail as a missing `source` field.
+    ///
+    /// The input is a VERBATIM node lifted out of the persisted 4p board in
+    /// `crates/engine/tests/fixtures/dina_noff_turn5_4p.json.gz`, so it is the
+    /// exact byte shape live snapshots carry rather than a hand-written
+    /// paraphrase.
+    #[test]
+    fn legacy_distinct_colors_among_permanents_payload_lifts_to_an_object_population() {
+        let expected = QuantityRef::DistinctColorsAmong {
+            source: CardTypeSetSource::Objects {
+                filter: TargetFilter::Typed(
+                    TypedFilter::permanent().controller(ControllerRef::You),
+                ),
+            },
+        };
+
+        let legacy = r#"{"filter":{"controller":"You","properties":[],"type":"Typed","type_filters":["Permanent"]},"type":"DistinctColorsAmongPermanents"}"#;
+        assert_eq!(
+            serde_json::from_str::<QuantityRef>(legacy)
+                .expect("a pre-lift persisted node must still deserialize"),
+            expected,
+            "the legacy tag + `filter` key must lift to `Objects {{ filter }}`",
+        );
+
+        // Reach-guard: the same payload under the CURRENT tag is still legacy on
+        // the key axis, and the current tag + key is unaffected.
+        let legacy_tag_only = r#"{"filter":{"controller":"You","properties":[],"type":"Typed","type_filters":["Permanent"]},"type":"DistinctColorsAmong"}"#;
+        assert_eq!(
+            serde_json::from_str::<QuantityRef>(legacy_tag_only)
+                .expect("the legacy key must be accepted under the current tag too"),
+            expected,
+        );
+
+        // Migration is load-only: a rehydrated node re-serializes in the CURRENT
+        // shape, so a save written by this build never re-emits the old names.
+        let round = serde_json::to_string(&expected).expect("serializes");
+        assert!(
+            round.contains(r#""type":"DistinctColorsAmong""#) && round.contains(r#""source""#),
+            "serialization must emit the current tag and key: {round}",
+        );
+        assert!(
+            !round.contains("DistinctColorsAmongPermanents"),
+            "serialization must not re-emit the legacy tag: {round}",
+        );
+        assert_eq!(
+            serde_json::from_str::<QuantityRef>(&round).expect("round-trips"),
+            expected,
+        );
+
+        // NON-VACUITY: neither acceptance above comes from a tolerant decoder.
+        // `QuantityRef` has no `#[serde(other)]` fallback, so a near-miss tag is
+        // still an unknown-variant error — the alias is what admits the legacy
+        // one. And the population key stays REQUIRED: aliasing it did not turn
+        // it into a silent default, so a payload carrying neither key errors
+        // instead of decoding as an empty population.
+        assert!(
+            serde_json::from_str::<QuantityRef>(
+                r#"{"filter":{"type":"Typed"},"type":"DistinctColorsAmongPermanentsX"}"#
+            )
+            .is_err(),
+            "an unaliased tag must still be rejected, or the row measures nothing",
+        );
+        assert!(
+            serde_json::from_str::<QuantityRef>(r#"{"type":"DistinctColorsAmong"}"#).is_err(),
+            "the population key must stay required under both tags",
+        );
+        assert!(
+            serde_json::from_str::<QuantityRef>(r#"{"type":"DistinctColorsAmongPermanents"}"#)
+                .is_err(),
+            "the population key must stay required under both tags",
+        );
+    }
+
+    /// The legacy lift must never capture a CURRENT payload. `TargetFilter` and
+    /// `CardTypeSetSource` are both internally tagged on `"type"` and share
+    /// exactly two tag names (`ExiledBySource`, `TrackedSet`), so those are the
+    /// only shapes where the two readings could collide — the shim tries the
+    /// current reading first, and this row pins that ordering. `Objects` and the
+    /// `AnyOf` union (First Family) are covered as the non-colliding controls.
+    #[test]
+    fn current_distinct_colors_population_payloads_are_never_read_as_legacy() {
+        let objects = CardTypeSetSource::Objects {
+            filter: TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+        };
+        for source in [
+            CardTypeSetSource::ExiledBySource,
+            CardTypeSetSource::TrackedSet { caused_by: None },
+            objects.clone(),
+            CardTypeSetSource::any_of(vec![
+                objects,
+                CardTypeSetSource::TurnJournal {
+                    journal: TurnJournalKind::SpellsCast,
+                    scope: CountScope::Controller,
+                    filter: None,
+                },
+            ])
+            .expect("two-member union"),
+        ] {
+            let node = QuantityRef::DistinctColorsAmong {
+                source: source.clone(),
+            };
+            let json = serde_json::to_string(&node).expect("serializes");
+            assert_eq!(
+                serde_json::from_str::<QuantityRef>(&json).expect("round-trips"),
+                node,
+                "the current reading must win for {json}",
+            );
+        }
+    }
 
     #[test]
     fn first_optional_effect_gate_does_not_latch_a_later_independent_gate() {

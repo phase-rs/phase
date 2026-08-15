@@ -7,10 +7,11 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCostOrigin,
     BounceSelection, CardTypeSetSource, CastManaSpentMetric, ChosenAttribute, CommanderOwnership,
     ControllerRef, CopyRetargetPermission, DamageKindFilter, DelayedTriggerCondition, Effect,
-    ModalChoice, ObjectScope, OriginConstraint, PlayerFilter, PtValue, QuantityExpr, QuantityRef,
-    RenownSubject, ResolvedAbility, SacrificeCost, TargetFilter, TargetRef, TributeOutcome,
-    TriggerCondition, TriggerConstraint, TriggerDefinition, TriggerDefinitionOccurrenceRef,
-    TriggerDefinitionRef, TriggerEntry, TriggerGrantProducerKey, TypeFilter, TypedFilter,
+    FilterProp, ModalChoice, ObjectScope, OriginConstraint, PlayerFilter, PlayerScope, PtValue,
+    QuantityExpr, QuantityRef, RenownSubject, ResolvedAbility, SacrificeCost, StaticCondition,
+    TargetFilter, TargetRef, TributeOutcome, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry,
+    TriggerGrantProducerKey, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -8866,16 +8867,655 @@ fn expand_multi_fire_damage_occurrences(
     }
 }
 
+/// CR 603.4 + CR 608.2c: does this delayed body still carry work that the
+/// resolution-time reading performs when the gate is FALSE — work the fire-time
+/// hoist would silently DELETE?
+///
+/// This is the carve-out for [`delayed_intervening_if`], and it is deliberately
+/// narrower than the "any `sub_ability`" test it replaces. The two cases the old
+/// blanket conflated are NOT the same:
+///
+/// * `else_ability` ("…, if X, A. Otherwise, B.") is not an intervening-`if` in
+///   the CR 603.4 sense at all — the ability has printed work on the false path,
+///   so it MUST still trigger and resolve its else branch. Always declines.
+/// * An UNCONDITIONAL `SequentialSibling` sub is the second clause of the ONE
+///   gated sentence ("…, if you control your commander, draw a card and create a
+///   token"). CR 603.4 gates the whole ability, so that clause must not happen
+///   either — yet `resolve_ability_chain` (`effects/mod.rs`, the
+///   `sub_link == SequentialSibling && condition.is_none()` escape) resolves it
+///   even when the parent gate is false. Declining the hoist here is what LEAVES
+///   that violation in place, so this class must hoist.
+///
+/// The three sub shapes that genuinely survive a false parent gate mirror
+/// `resolve_ability_chain`'s own escape hatches one-for-one — literally, by
+/// calling the SAME predicate (`effects::sub_outlives_false_parent_gate`) rather
+/// than restating it, so the pair cannot drift:
+///
+/// 1. a reflexive / performed gate (`condition_depends_on_effect_performed`,
+///    CR 603.12 — Council's Deliberation's `OptionalEffectPerformed` rider, the
+///    only conditioned delayed body with a sub in the card pool today). Its truth
+///    is only knowable at resolution; hoisting the parent gate is CONSERVATIVELY
+///    declined so that in-pool shape keeps byte-identical behaviour;
+/// 2. an INDEPENDENT per-event gate (CR 615.5
+///    `PostReplacementDamageSourceMatchesFilter`, Comeuppance's mutually-exclusive
+///    riders), which resolves on its own predicate regardless of the parent's;
+/// 3. a `SiblingCondition::ReplicatedOrBranch` on a `SequentialSibling` link
+///    (CR 702.1c keyword-list replication, Kathril / Mutable Pupa), an
+///    independent OR-branch gated on its own keyword.
+///
+/// Inspects the DIRECT sub only, because that is the whole of what
+/// `resolve_chain_body`'s condition-false path inspects: it resolves
+/// `else_ability` if present, else the direct `sub_ability` when
+/// `sub_outlives_false_parent_gate` (or the unconditional-`SequentialSibling`
+/// escape) accepts it, and otherwise RETURNS — nothing deeper in the chain runs.
+/// A grandchild's `else_ability` or CR 603.12 reflexive gate is therefore reached
+/// only THROUGH a direct sub that already qualified, so recursing past the direct
+/// sub would decline the hoist for chains whose resolution does nothing at all,
+/// leaving CR 603.4's fire-time half unenforced for that shape. Pinned by
+/// `two_deep_chain_mirrors_the_resolvers_direct_sub_test`.
+fn delayed_body_outlives_a_false_gate(ability: &ResolvedAbility) -> bool {
+    if ability.else_ability.is_some() {
+        return true;
+    }
+    let Some(sub) = ability.sub_ability.as_deref() else {
+        return false;
+    };
+    crate::game::effects::sub_outlives_false_parent_gate(sub)
+}
+
+/// CR 603.4: does this gate read a binding that the FIRE-TIME leg of the hoist
+/// resolves DIFFERENTLY from the resolution-time leg it is supposed to mirror?
+///
+/// The two legs of the CR 603.4 pair must be the same predicate over the same
+/// values. They are not the same *evaluator*: the fire-time leg runs
+/// `check_trigger_condition_with_source`, whose `QuantityContext`
+/// (`quantity::resolve_quantity_for_trigger_check`) is built from the delayed
+/// ability's controller, its CR 400.7 source context and the matched event — it
+/// has NO access to the delayed ability's snapshotted `targets` and no
+/// resolution-scoped player. So a gate that reads one of those resolves against
+/// the wrong object or player at fire time and would gate the ability off the
+/// stack (and, for a consumed one-shot, delete it) on a value the resolution-time
+/// reader would never have computed.
+///
+/// Rather than let the two legs disagree, such a gate DECLINES the hoist and
+/// keeps today's resolution-only reading — the same conservative treatment the
+/// two bridges already give every other resolution-context predicate.
+///
+/// Only `QuantityCheck` carries a `QuantityExpr` (and hence a scope or filter)
+/// among the arms `ability_condition_to_static_condition` can bridge — the
+/// others (`IsYourTurn`, `CompletedDungeon`, `SourceAttachedToCreature`,
+/// `ControlsCommander`) are payload-free. `And`/`Or` do not bridge today; they
+/// recurse here anyway so adding them to the bridge cannot silently bypass this.
+fn gate_binding_diverges_at_fire_time(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+            quantity_expr_binding_diverges(lhs) || quantity_expr_binding_diverges(rhs)
+        }
+        AbilityCondition::Not { condition } => gate_binding_diverges_at_fire_time(condition),
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().any(gate_binding_diverges_at_fire_time)
+        }
+        _ => false,
+    }
+}
+
+/// CR 603.4: the `QuantityExpr` half of [`gate_binding_diverges_at_fire_time`].
+/// Exhaustive over `QuantityExpr` so a new arithmetic wrapper cannot hide a
+/// divergent leaf; the leaf test is [`quantity_ref_binding_diverges`].
+fn quantity_expr_binding_diverges(expr: &QuantityExpr) -> bool {
+    match expr {
+        QuantityExpr::Ref { qty } => quantity_ref_binding_diverges(qty),
+        QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => quantity_expr_binding_diverges(inner),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().any(quantity_expr_binding_diverges)
+        }
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_binding_diverges(left) || quantity_expr_binding_diverges(right)
+        }
+        QuantityExpr::Fixed { .. } => false,
+    }
+}
+
+/// CR 115.1 + CR 608.2c: an object-axis scope the fire-time `QuantityContext`
+/// cannot bind the way the resolving ability does.
+///
+/// FAIL-CLOSED, and exhaustive so a new scope must be adjudicated: only the
+/// three referents `quantity::resolve_quantity_for_trigger_check` is actually
+/// handed — the CR 400.7 source context and the matched event's source/target —
+/// are known to read the same on both legs. Everything else is a
+/// RESOLUTION-scoped referent: `Target` reads `ability.targets`, `Recipient` is
+/// passed as `None`, and the `CostPaidObject` / anaphor / per-resolution-local
+/// family resolves through `ResolvedAbility` fields and `effect_context_object`,
+/// none of which exist at detection time. Declining costs nothing but the
+/// fire-time half of CR 603.4 for shapes no card in the pool has; guessing wrong
+/// deletes a real ability.
+fn object_scope_unbound_at_fire_time(scope: ObjectScope) -> bool {
+    match scope {
+        ObjectScope::Source | ObjectScope::EventSource | ObjectScope::EventTarget => false,
+        ObjectScope::Target
+        | ObjectScope::Recipient
+        | ObjectScope::CostPaidObject
+        | ObjectScope::Anaphoric
+        | ObjectScope::Demonstrative
+        | ObjectScope::OtherRevealedCard
+        | ObjectScope::AmassedArmy
+        | ObjectScope::OwnedLinkedExileCard
+        | ObjectScope::BatchSource => true,
+    }
+}
+
+/// CR 115.10 + CR 608.2c: the player-axis counterpart, same fail-closed rule.
+///
+/// `ScopedPlayer` is the per-iteration player of the RESOLVING ability, but the
+/// fire-time context derives its `scoped_player` from the triggering event
+/// (`extract_player_from_event`); `Target`, `RecipientController` and
+/// `ParentObjectTargetController` all read `ability.targets` or the layer
+/// recipient. The rest are derived from the controller (CR 109.5), the attacking
+/// source (CR 508.5) or the source's own persisted choice (CR 613.1), all of
+/// which the fire-time check has. `AnyTurn` is duration-timing-only and never
+/// reaches a quantity, but is adjudicated here rather than wildcarded.
+fn player_scope_unbound_at_fire_time(scope: &PlayerScope) -> bool {
+    match scope {
+        PlayerScope::ScopedPlayer
+        | PlayerScope::Target
+        | PlayerScope::RecipientController
+        | PlayerScope::ParentObjectTargetController => true,
+        PlayerScope::AllPlayers { exclude, .. } => exclude
+            .as_deref()
+            .is_some_and(player_scope_unbound_at_fire_time),
+        PlayerScope::Controller
+        | PlayerScope::Opponent { .. }
+        | PlayerScope::DefendingPlayer
+        | PlayerScope::SourceChosenPlayer
+        // CR 109.4: a concrete `PlayerId` already SNAPSHOTTED at resolution — a
+        // literal, so there is nothing left to bind and both legs read the same
+        // value. Same argument as `WhenLeavesPlay`'s already-resolved `ObjectId`.
+        // Like `AnyTurn` it is duration-timing-only and never reaches a quantity,
+        // but is adjudicated here rather than wildcarded.
+        | PlayerScope::SpecificPlayer { .. }
+        | PlayerScope::AnyTurn => false,
+    }
+}
+
+/// CR 603.4: the leaf test of [`gate_binding_diverges_at_fire_time`].
+///
+/// Two independent reasons a leaf diverges:
+///
+/// * it is scoped to an object or player the fire-time context cannot bind
+///   (`object_scope_unbound_at_fire_time` / `player_scope_unbound_at_fire_time`);
+/// * it counts a POPULATION whose filter the trigger-side bridge REWRITES.
+///   `oracle_trigger::static_condition_to_trigger_condition` substitutes
+///   `FilterProp::Another` → `FilterProp::OtherThanTriggerObject` on the
+///   fire-time leg only (CR 603.4, Valakut's ruling), while
+///   `effects::evaluate_condition` keeps the source-exclusion reading — so the
+///   same printed "two or more OTHER creatures" counts a different population on
+///   each leg. Declining is the conservative half of that pair; the alternative
+///   (substituting on both legs) would change the resolution-time reading of
+///   every non-delayed consumer of the same condition.
+///
+/// * it reads a RESOLUTION-SCOPED tally that only exists while the ability is
+///   resolving. The fire-time leg calls `resolve_quantity_for_trigger_check`,
+///   which resolves with `targets = &[]`, `chosen_x = None`, `ability = None`
+///   and no resolution-local ledger, so a payload-free leaf can diverge just as
+///   badly as a scoped one (CR 608.2c: the chain tallies are established BY the
+///   resolution). `TrackedSetSize` and friends read the most recent tracked set
+///   at READ time — at fire time that is whatever an unrelated earlier
+///   resolution left behind.
+///
+/// EXHAUSTIVE and wildcard-free (matching `object_scope_unbound_at_fire_time` /
+/// `quantity_expr_binding_diverges`), so a new `QuantityRef` must be adjudicated
+/// here rather than silently defaulting to "cannot diverge" — the earlier
+/// `_ => false` tail rested on exactly that claim and it was false for the
+/// resolution-scoped payload-free family below. When in doubt the answer is
+/// `true`: declining costs only the fire-time half of CR 603.4 for that shape,
+/// while a wrong `false` deletes a real ability off the stack.
+fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
+    match qty {
+        QuantityRef::CountersOn { scope, .. }
+        | QuantityRef::Power { scope }
+        | QuantityRef::Intensity { scope }
+        | QuantityRef::Toughness { scope }
+        | QuantityRef::ObjectManaValue { scope }
+        | QuantityRef::ObjectColorCount { scope }
+        | QuantityRef::ObjectNameWordCount { scope }
+        | QuantityRef::ObjectTypelineComponentCount { scope }
+        | QuantityRef::ManaSymbolsInManaCost { scope, .. } => {
+            object_scope_unbound_at_fire_time(*scope)
+        }
+        QuantityRef::HandSize { player, .. }
+        | QuantityRef::LifeTotal { player }
+        | QuantityRef::GraveyardSize { player, .. }
+        | QuantityRef::LifeLostThisTurn { player }
+        | QuantityRef::LifeGainedThisTurn { player }
+        | QuantityRef::PartySize { player }
+        | QuantityRef::Speed { player }
+        | QuantityRef::CardsDrawnThisTurn { player }
+        | QuantityRef::CardsDiscardedThisTurn { player }
+        | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player } => {
+            player_scope_unbound_at_fire_time(player)
+        }
+        QuantityRef::SacrificedThisTurn { player, filter }
+        | QuantityRef::TokensCreatedThisTurn { player, filter }
+        | QuantityRef::BattlefieldEntriesThisTurn { player, filter } => {
+            player_scope_unbound_at_fire_time(player) || filter_binding_diverges(filter)
+        }
+        QuantityRef::LandsPlayedThisTurn { player, .. }
+        | QuantityRef::PlayerActionsThisTurn { player, .. } => {
+            player_scope_unbound_at_fire_time(player)
+        }
+        QuantityRef::ObjectCount { filter }
+        | QuantityRef::ObjectCountDistinct { filter, .. }
+        | QuantityRef::ObjectCountBySharedQuality { filter, .. }
+        | QuantityRef::CountersOnObjects { filter, .. }
+        | QuantityRef::Aggregate { filter, .. }
+        | QuantityRef::EnteredThisTurn { filter }
+        | QuantityRef::DistinctCounterKindsAmong { filter }
+        | QuantityRef::ControlledByEachPlayer { filter, .. }
+        | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
+        | QuantityRef::CounterAddedThisTurn {
+            target: filter,
+            ..
+        } => filter_binding_diverges(filter),
+        QuantityRef::DamageDealtThisTurn { source, target, .. } => {
+            filter_binding_diverges(source) || filter_binding_diverges(target)
+        }
+        // Same filter axis, optional: a `None` filter names no population to
+        // re-scope, so only the `Some` arm can diverge.
+        QuantityRef::ZoneCardCount { filter, .. }
+        | QuantityRef::SpellsCastThisTurn { filter, .. }
+        | QuantityRef::SpellsCastThisGame { filter, .. }
+        | QuantityRef::AttackedThisTurn { filter, .. } => {
+            filter.as_ref().is_some_and(filter_binding_diverges)
+        }
+        // CR 205.2a + CR 205.3 + CR 105.1: the distinct-characteristic family
+        // carries its population as a `CardTypeSetSource` rather than a bare
+        // filter. The COLOURS head joins its two siblings here rather than the
+        // bare-filter arm above: it was lifted onto the shared population axis in
+        // this change, so `DistinctColorsAmongPermanents { filter }` no longer
+        // exists to sit alongside `ObjectCount`.
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => {
+            card_type_set_source_binding_diverges(source)
+        }
+        // CR 601.2h: `AbilityTarget` is a target-slot read that
+        // `quantity::resolve_event_scoped_ref` explicitly answers `None` for at
+        // fire time; `SelfObject` reads `ctx.source` and `TriggeringSpell` is
+        // resolved from the matched event itself, so both bind identically on
+        // both legs — except through a `FromSource` metric, which carries its own
+        // population filter.
+        QuantityRef::ManaSpentToCast { scope, metric } => {
+            *scope == crate::types::ability::CastManaObjectScope::AbilityTarget
+                || match metric {
+                    CastManaSpentMetric::FromSource { source_filter } => {
+                        filter_binding_diverges(source_filter)
+                    }
+                    CastManaSpentMetric::Total
+                    | CastManaSpentMetric::DistinctColors
+                    | CastManaSpentMetric::OfColor { .. } => false,
+                }
+        }
+        // ---- RESOLUTION-SCOPED, payload-free or target-bound: always diverges ----
+        //
+        // CR 115.1: reads the resolving ability's declared targets, which the
+        // fire-time resolver is handed as `&[]`.
+        QuantityRef::TargetControllerCounter { .. }
+        | QuantityRef::TargetObjectManaValue { .. }
+        | QuantityRef::TargetZoneCardCount { .. }
+        // CR 107.3a: `X` comes from the resolving ability's `chosen_x`, which is
+        // `None` at fire time.
+        | QuantityRef::Variable { .. }
+        // CR 608.2c: chain-local tracked sets and per-resolution tallies. Each is
+        // established BY a resolution; at fire time these read whatever an
+        // unrelated earlier resolution left in the ledger (or nothing at all).
+        | QuantityRef::TrackedSetSize
+        | QuantityRef::FilteredTrackedSetSize { .. }
+        | QuantityRef::TrackedSetAggregate { .. }
+        | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::TimesCostPaidThisResolution
+        // CR 608.2c: the secret-number ledger is populated BY the
+        // resolution that ran the choice (Wheel of Misfortune, Menacing Ogre) and
+        // is cleared per resolution — players who chose no number THIS resolution
+        // are excluded from the aggregate entirely. At fire time the ledger holds
+        // an unrelated resolution's numbers or none, so the two legs cannot agree.
+        // The `player` payload is irrelevant to that verdict: the ledger itself is
+        // resolution-scoped whichever player the scope selects.
+        | QuantityRef::PlayerChosenNumber { .. }
+        // CR 701.38: the vote tally is published by the resolution that ran the
+        // vote block.
+        | QuantityRef::VoteCount { .. }
+        // CR 106.4: a mana pool the resolution's own costs and mana abilities
+        // fill and empty; the fire-time reading is a different moment's pool.
+        | QuantityRef::UnspentMana { .. }
+        // CR 607.2a + CR 406.6: the source's linked-exile set, read through the
+        // resolving ability's materialized candidate set
+        // (`quantity::materialized_linked_exile_candidates`, which reads
+        // `ability.targets`).
+        | QuantityRef::CardsExiledBySource
+        | QuantityRef::ExiledCardPower { .. }
+        // CR 603.7c + CR 608.2c: the event-context family resolves through
+        // `state.current_trigger_event(s)` and the resolution-local
+        // amount/die/substitution cascade (`resolve_ref`'s `EventContextAmount`
+        // arm), none of which is populated at DETECTION time — the detection-time
+        // event override is consumed only by `ObjectCount`'s
+        // `OtherThanTriggerObject` exclusion.
+        | QuantityRef::EventContextAmount
+        | QuantityRef::EventContextPlayerCount { .. }
+        | QuantityRef::EventContextSourceCostX
+        | QuantityRef::EventContextSourceModesChosen
+        | QuantityRef::AttachmentsOnLeavingObject { .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
+        | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount => true,
+        // ---- Reads that bind IDENTICALLY on both legs ----
+        //
+        // Global or format-level state (CR 103.4, CR 500, CR 117.1), a
+        // controller-keyed per-turn/per-game accumulator (CR 109.5 — the
+        // fire-time leg is handed the delayed ability's own controller), or a
+        // read of the CR 400.7 source object the fire-time context carries
+        // (`ctx.source`, the same object `ObjectScope::Source` is adjudicated
+        // non-divergent for above).
+        QuantityRef::LifeAboveStarting
+        | QuantityRef::StartingLifeTotal
+        | QuantityRef::TriggeringDiscoverValue
+        | QuantityRef::PlayerCount { .. }
+        | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::SelfManaValue
+        | QuantityRef::Devotion { .. }
+        | QuantityRef::BasicLandTypeCount { .. }
+        | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::BendTypesThisTurn
+        | QuantityRef::TurnsTaken
+        | QuantityRef::ChosenNumber
+        | QuantityRef::DescendedThisTurn
+        | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::DungeonsCompleted
+        | QuantityRef::CostXPaid
+        | QuantityRef::KickerCount
+        | QuantityRef::AdditionalCostPaymentCount
+        | QuantityRef::AdditionalCostPaymentCountFor { .. }
+        | QuantityRef::ConvokedCreatureCount
+        | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderManaValue { .. } => false,
+    }
+}
+
+/// CR 603.4: the `CardTypeSetSource` half of [`quantity_ref_binding_diverges`].
+/// Exhaustive for the same reason: each source names a different population, and
+/// two of them are resolution-scoped.
+fn card_type_set_source_binding_diverges(source: &CardTypeSetSource) -> bool {
+    let mut diverges = false;
+    let complete =
+        source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
+            if diverges {
+                return;
+            }
+            diverges = match leaf {
+                // CR 400.1: a zone census keyed by `CountScope` (controller /
+                // opponents / all) — the fire-time leg has the controller and
+                // reads the same zones.
+                CardTypeSetSource::Zone { .. } => false,
+                CardTypeSetSource::Objects { filter } => filter_binding_diverges(filter),
+                // CR 601.2a: the journal's optional narrowing filter is the only
+                // re-scopable part; the journal itself is per-player history that
+                // binds the same on both legs.
+                CardTypeSetSource::TurnJournal { filter, .. } => {
+                    filter.as_ref().is_some_and(filter_binding_diverges)
+                }
+                // CR 607.2a + CR 608.2i: the same two resolution-scoped
+                // populations `CardsExiledBySource` / `TrackedSetSize` are
+                // declined for.
+                CardTypeSetSource::ExiledBySource | CardTypeSetSource::TrackedSet { .. } => true,
+                // Unrolled by the walker; never reaches this arm.
+                CardTypeSetSource::AnyOf { .. } => false,
+            };
+        });
+    // CR 603.4: a truncated walk DECLINES the hoist. Declining costs a delayed
+    // trigger its fire-time shortcut; wrongly allowing it re-scopes a population
+    // against the wrong binding, which is a rules error.
+    diverges || !complete
+}
+
+/// CR 603.4: the filter half of [`quantity_ref_binding_diverges`]. Recurses
+/// through exactly the shapes `oracle_trigger::substitute_another_in_filter`
+/// rewrites — `Typed` property lists plus the `And`/`Or`/`Not` combinators — so
+/// the decline covers precisely the population the fire-time leg would have
+/// re-scoped, no more and no less.
+fn filter_binding_diverges(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf
+            .properties
+            .iter()
+            .any(|prop| matches!(prop, FilterProp::Another)),
+        TargetFilter::Not { filter } => filter_binding_diverges(filter),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_binding_diverges)
+        }
+        // CR 115.1 + CR 115.10: resolution-scoped anaphora read `ability.targets`
+        // / the per-iteration player, neither of which the fire-time context has
+        // — the population-level counterpart of `ObjectScope::Target`.
+        TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::ScopedPlayer => true,
+        _ => false,
+    }
+}
+
+/// CR 400.1 + CR 603.4: does the STATIC intermediate of the hoist LOSE the zone
+/// axis on its way to the fire-time leg?
+///
+/// `conditions::ability_condition_to_static_condition` folds the
+/// `ObjectCount{filter} >= 1` shape into `StaticCondition::IsPresent`, and
+/// `oracle_trigger::static_condition_to_trigger_condition` lowers the AFFIRMATIVE
+/// `IsPresent` to `TriggerCondition::ControlsType`, whose evaluator
+/// (`check_trigger_condition_with_source`) scans `state.battlefield` and nothing
+/// else. The resolution-time leg counts in the FILTER'S OWN zone
+/// (`quantity::object_count_matching_ids`, via `TargetFilter::extract_in_zone`).
+/// For a filter that names a non-battlefield zone ("if you have a creature card
+/// in your graveyard") those are two DIFFERENT predicates — TRUE at resolution,
+/// FALSE at fire time — so the hoist would gate the ability off the stack and,
+/// for a consumed one-shot, delete it outright. The zone axis is invisible to
+/// [`gate_binding_diverges_at_fire_time`], which screens the object, player and
+/// `FilterProp::Another` axes of the SAME leaf but not this one, so it is
+/// adjudicated here, on the intermediate that actually loses the information.
+///
+/// Only the affirmative arm is affected: the NEGATED `IsPresent` bridge already
+/// lowers to `QuantityComparison { ObjectCount(f) EQ 0 }`, which resolves through
+/// the same zone-aware `QuantityRef::ObjectCount` reader on both legs.
+/// `And`/`Or` recurse because the trigger-side bridge maps them member-wise; no
+/// `AbilityCondition` reaches them today (`ability_condition_to_static_condition`
+/// declines `And`/`Or`), so the recursion is future-proofing, not live behaviour.
+///
+/// Declining is the conservative half of the pair, exactly like
+/// `gate_binding_diverges_at_fire_time`: the gate keeps today's resolution-only
+/// reading rather than being evaluated as a different predicate.
+fn static_gate_bridge_loses_zone(condition: &StaticCondition) -> bool {
+    match condition {
+        StaticCondition::IsPresent { filter: Some(f) } => f
+            .extract_in_zone()
+            .is_some_and(|zone| zone != crate::types::zones::Zone::Battlefield),
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
+            conditions.iter().any(static_gate_bridge_loses_zone)
+        }
+        _ => false,
+    }
+}
+
+/// CR 603.4: recover the intervening-`if` of a DELAYED triggered ability as a
+/// trigger-level `TriggerCondition`.
+///
+/// A printed "When [event], if [condition], [effect]" trigger carries its gate
+/// on `TriggerDefinition.condition`, so both halves of CR 603.4 apply to it: the
+/// collection gate refuses to put the ability on the stack, and
+/// `stack.rs`'s recheck removes it if the gate flipped. A DELAYED triggered
+/// ability parses the very same sentence shape into
+/// `Effect::CreateDelayedTrigger`, but the gate lands on the delayed BODY as an
+/// `AbilityCondition`, which only the resolution-time reader
+/// (`effects::evaluate_condition`) ever consults. That is half of CR 603.4: the
+/// ability would still be put onto the stack, be respondable, and count as a
+/// triggered ability put onto the stack, when per CR 603.4 it must never have
+/// triggered at all.
+///
+/// Rather than add a fifth condition-vocabulary mirror, this composes the two
+/// EXISTING single-authority bridges —
+/// `conditions::ability_condition_to_static_condition` then
+/// `oracle_trigger::static_condition_to_trigger_condition`. Both legs decline
+/// every resolution-context predicate (`WhenYouDo`, `EffectOutcome`,
+/// `HasObjectTarget`, `CoinFlipOutcome`, the casting-context family, …), so only
+/// gates that are genuine game-state intervening-`if`s reach the fire-time
+/// check; anything else keeps today's resolution-only behaviour unchanged.
+///
+/// CR 603.4 governs only an `if` that IMMEDIATELY FOLLOWS the trigger event and
+/// gates the WHOLE ability, so a body that still has work to do on the
+/// condition-false path is NOT hoisted — see
+/// [`delayed_body_outlives_a_false_gate`], which is deliberately NARROWER than
+/// "has any sub-ability".
+///
+/// The hoisted gate must also be one the two legs read IDENTICALLY, or the pair
+/// CR 603.4 requires would be two different predicates — see
+/// [`gate_binding_diverges_at_fire_time`] for the object/player/population axes
+/// of the leaf, and [`static_gate_bridge_loses_zone`] for the zone axis the
+/// `IsPresent` intermediate drops.
+///
+/// CR 400.7: there is deliberately NO guard here for a delayed ability carrying
+/// no `trigger_source` context, and the absence is load-bearing rather than an
+/// oversight. The worry it would answer is real in shape — a source-relative gate
+/// with no context would read nothing, evaluate false for want of a reading
+/// rather than on the game state, and (via [`false_gate_consumes_one_shot`])
+/// DELETE a one-shot outright. It cannot happen, because matching runs BEFORE
+/// gating and already requires that context: `delayed_trigger_event_with_index`
+/// opens its `WhenNextEvent` arm with `let source_context = source_context?;`, so
+/// a contextless one-shot never matches an event, never reaches this gate, and is
+/// never discarded. The condition is checked at most where a reading exists.
+///
+/// A guard here would therefore be unreachable code that also declines the hoist
+/// for gates whose fire-time reading is perfectly well-defined without a source
+/// (the controller-scoped `QuantityCheck` populations pinned by
+/// `non_battlefield_presence_gate_declines_the_fire_time_hoist` and its
+/// siblings) — buying nothing and costing CR 603.4's fire-time half.
+fn delayed_intervening_if(ability: &ResolvedAbility) -> Option<TriggerCondition> {
+    if delayed_body_outlives_a_false_gate(ability) {
+        return None;
+    }
+    let condition = ability.condition.as_ref()?;
+    if gate_binding_diverges_at_fire_time(condition) {
+        return None;
+    }
+    let static_condition =
+        crate::parser::oracle_effect::conditions::ability_condition_to_static_condition(condition)?;
+    if static_gate_bridge_loses_zone(&static_condition) {
+        return None;
+    }
+    crate::parser::oracle_trigger::static_condition_to_trigger_condition(&static_condition)
+}
+
+/// CR 603.4 + CR 603.7b: when the hoisted intervening-`if` was FALSE, is this
+/// ONE-SHOT delayed ability CONSUMED by the occurrence it just declined?
+///
+/// CR 603.4 says a false gate means the ability "does nothing" — it never
+/// triggered. CR 603.7b says a delayed triggered ability "will trigger only
+/// once — the next time its trigger event occurs — unless it has a stated
+/// duration, such as 'this turn.'" The two only agree on DROPPING the ability
+/// when its stated trigger event can occur at most once:
+///
+/// * a PHASE-NAMED time ("at the beginning of the next end step"). That named
+///   time has now come and gone; a false gate there must not let the ability lie
+///   in wait for the FOLLOWING end step;
+/// * a zone change of ONE ALREADY-BOUND object ("when THAT creature dies" —
+///   `TargetFilter::names_bound_single_object`). The bound object departs once
+///   per incarnation, and an object that returns is a NEW object (CR 400.7 /
+///   CR 603.7c), so a retained ability could never match it anyway;
+/// * EVERY `WhenNextEvent`, whatever its `DelayedTriggerLifetime` — because this
+///   variant IS CR 603.7b's once-only half. The rule's two outcomes are modelled
+///   as two SIBLING conditions, not as a lifetime: `WheneverEvent` is the
+///   "unless it has a stated duration" carve-out (multi-fire, purged by
+///   `WheneverEventExpiry`), and `WhenNextEvent` is documented on its own
+///   declaration as the "one-shot variant of `WheneverEvent`". A stated-duration
+///   ability that must keep watching is therefore a `WheneverEvent` and CANNOT
+///   reach this function: `effects::delayed_trigger` computes
+///   `one_shot = !matches!(condition, WheneverEvent { .. })` and the only caller
+///   gates on `delayed.one_shot`. The lifetime then bounds only how long the
+///   single shot WAITS — `ThisTurn` to cleanup, `Persistent` open-ended
+///   (The Pandorica), `Reflexive` to its creation batch (CR 603.12).
+///
+/// Do NOT re-derive that from the wording "next": the discriminator is WotC's
+/// "When" / "Whenever" templating, and the parser already keys on exactly that.
+/// The distinction is load-bearing and easy to get backwards, so it is worth
+/// naming the case that proves it. `parse_dealt_damage_this_way_dies_trigger`
+/// (`oracle_effect/mod.rs`) parses "[subject] dealt damage this way dies
+/// [this turn]" — a BROAD filter with no "next" anywhere — and is reached from
+/// two call sites that lower it differently, on the templating alone:
+///   - the `"whenever "` site → `WheneverEvent` (multi-fire). Ghired's
+///     Belligerence and Reckless Blaze, both of which spread damage over many
+///     creatures, so many deaths can qualify;
+///   - the `"when "` site → `WhenNextEvent { ThisTurn }` (one-shot). Skeletonize,
+///     whose damage goes to a SINGLE target creature, so at most one death can
+///     ever qualify — one occurrence, correctly consumed.
+///
+/// Those are the only three cards in the pool with that wording, and the split is
+/// exact for all three. So "broad filter" alone never implies multi-fire here,
+/// and this arm does not need to inspect the filter: the routing decision was
+/// already made, correctly, one layer up.
+///
+/// Exhaustive on purpose: a new `DelayedTriggerCondition` must decide whether its
+/// stated event is a single occurrence before it can be discarded on a false gate.
+fn false_gate_consumes_one_shot(condition: &DelayedTriggerCondition) -> bool {
+    match condition {
+        DelayedTriggerCondition::AtNextPhase { .. }
+        | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
+        // A concrete `ObjectId`: the same single-occurrence argument as a
+        // bound-single-object filter, already resolved to one object.
+        | DelayedTriggerCondition::WhenLeavesPlay { .. } => true,
+        DelayedTriggerCondition::WhenDies { filter }
+        | DelayedTriggerCondition::WhenLeavesPlayFiltered { filter }
+        | DelayedTriggerCondition::WhenEntersBattlefield { filter }
+        | DelayedTriggerCondition::WhenDiesOrExiled { filter } => {
+            filter.names_bound_single_object()
+        }
+        // CR 603.4 + CR 603.7b (+ CR 603.12 for `Reflexive`): this variant IS the
+        // one-shot half of the CR 603.7b split — its own doc calls it the
+        // "one-shot variant of `WheneverEvent`" — so the matched event has spent
+        // its single occurrence whatever lifetime it carries. Retaining it would
+        // silently rewrite "when X, if C" into "when X for which C holds", letting
+        // a later X fire an ability CR 603.4 already resolved as doing nothing.
+        // A trigger that must keep watching is a `WheneverEvent` and cannot reach
+        // here at all — see the doc above.
+        DelayedTriggerCondition::WhenNextEvent { .. } => true,
+        // Never one-shot (`effects::delayed_trigger` computes `one_shot` as
+        // "not `WheneverEvent`"), so this arm is unreachable from the caller;
+        // spelled out rather than wildcarded to keep the match exhaustive.
+        DelayedTriggerCondition::WheneverEvent { .. } => false,
+    }
+}
+
 fn delayed_trigger_to_context(
     state: &GameState,
     trigger: DelayedTrigger,
     trigger_event: GameEvent,
 ) -> PendingTriggerContext {
+    // CR 603.4 (second half): carry the hoisted intervening-`if` onto the stack
+    // entry so `stack.rs`'s resolution recheck applies to a delayed triggered
+    // ability exactly as it does to a printed one. `delayed_intervening_if` is
+    // the SAME authority the collection gate below used, so the two halves of
+    // the CR 603.4 pair cannot read different predicates.
+    let condition = delayed_intervening_if(&trigger.ability);
     PendingTriggerContext::delayed(
         PendingTrigger {
             source_id: trigger.source_id,
             controller: trigger.controller,
-            condition: None,
+            condition,
             ability: trigger.ability,
             timestamp: state.turn_number,
             target_constraints: Vec::new(),
@@ -8919,7 +9559,11 @@ fn collect_matching_delayed_triggers(
     // `WhenNextEvent` would do). The phase-only path keeps the historical
     // narrower coin-flip discard gate because it filters non-phase matches out of
     // the candidate batch.
-    let mut to_discard: Vec<usize> = Vec::new();
+    //
+    // Each entry pairs the index with the terminal disposition to record for it,
+    // so a discarded reflexive (CR 603.12) and a CR 603.4 intervening-`if`
+    // failure stay distinguishable in the lifecycle ledger.
+    let mut to_discard: Vec<(usize, super::lifecycle::DelayedTerminalDisposition)> = Vec::new();
 
     for (idx, delayed) in state.delayed_triggers.iter().enumerate() {
         if let Some((event_index, trigger_event)) = delayed_trigger_event_with_index(
@@ -8932,6 +9576,44 @@ fn collect_matching_delayed_triggers(
         ) {
             if !scope.accepts(&trigger_event) {
                 continue;
+            }
+            // CR 603.4 (first half): "When the trigger event occurs, the ability
+            // checks whether the stated condition is true. The ability triggers
+            // only if it is; otherwise it does nothing." The delayed body's
+            // intervening-`if` was previously consulted ONLY at resolution, so a
+            // failing gate still put a respondable ability on the stack — and a
+            // player could then make the gate true in response (getting a
+            // commander onto the battlefield for Fight for the Throne), which
+            // CR 603.4 forbids outright.
+            //
+            // `check_trigger_condition_with_source` is the same fire-time
+            // evaluator printed triggers use, given the delayed ability's own
+            // CR 400.7 source context and the matched event.
+            if let Some(condition) = delayed_intervening_if(&delayed.ability) {
+                if !check_trigger_condition_with_source(
+                    state,
+                    &condition,
+                    delayed.controller,
+                    delayed.ability.trigger_source.as_ref(),
+                    Some(&trigger_event),
+                ) {
+                    // CR 603.4 + CR 603.7b: the ability did not trigger. It is
+                    // removed without firing, tagged `InterveningIfFalse`, ONLY
+                    // when its stated event was a single occurrence that this
+                    // check has now consumed — see
+                    // `false_gate_consumes_one_shot`. Everything else (a
+                    // multi-fire "whenever … this turn", and a one-shot watching
+                    // a BROAD event filter) stays installed and gets its gate
+                    // re-checked on the next occurrence, per CR 603.7b's
+                    // stated-duration clause.
+                    if delayed.one_shot && false_gate_consumes_one_shot(&delayed.condition) {
+                        to_discard.push((
+                            idx,
+                            super::lifecycle::DelayedTerminalDisposition::InterveningIfFalse,
+                        ));
+                    }
+                    continue;
+                }
             }
             if delayed.one_shot {
                 to_remove.push((idx, event_index, trigger_event));
@@ -8972,7 +9654,10 @@ fn collect_matching_delayed_triggers(
                 )
             }
         } {
-            to_discard.push(idx);
+            to_discard.push((
+                idx,
+                super::lifecycle::DelayedTerminalDisposition::ReflexiveUnmatched,
+            ));
         }
     }
 
@@ -8996,31 +9681,34 @@ fn collect_matching_delayed_triggers(
         }
     }
 
-    // Remove fired one-shot triggers AND discarded non-matching reflexive triggers
+    // Remove fired one-shot triggers AND every one-shot dropped without firing
     // from `delayed_triggers` in a single descending-index pass so every index
-    // stays valid. Fired one-shots are collected into `to_fire`; discarded
-    // reflexives (CR 603.12) are dropped without firing. The two index sets are
-    // disjoint — a trigger either matched (fire) or resolved-without-match
-    // (discard), never both.
+    // stays valid. Fired one-shots are collected into `to_fire`; the unfired set
+    // is dropped with its own recorded disposition — `ReflexiveUnmatched` for a
+    // CR 603.12 reflexive that never matched, `InterveningIfFalse` for a
+    // CR 603.4 gate that was false when the trigger event occurred. The two
+    // index sets are disjoint — a trigger either fired, or was dropped
+    // unfired, never both.
     let mut fired_events: std::collections::HashMap<usize, (usize, GameEvent)> = to_remove
         .iter()
         .map(|(idx, event_index, event)| (*idx, (*event_index, event.clone())))
         .collect();
+    let mut unfired_dispositions: std::collections::HashMap<
+        usize,
+        super::lifecycle::DelayedTerminalDisposition,
+    > = to_discard.iter().copied().collect();
     let mut combined: Vec<usize> = to_remove
         .iter()
         .map(|(idx, _, _)| *idx)
-        .chain(to_discard.iter().copied())
+        .chain(to_discard.iter().map(|(idx, _)| *idx))
         .collect();
     combined.sort_unstable();
     for idx in combined.into_iter().rev() {
         let trigger = state.delayed_triggers.remove(idx);
         if let Some((event_index, trigger_event)) = fired_events.remove(&idx) {
             to_fire.push((trigger, event_index, trigger_event, true));
-        } else {
-            super::lifecycle::record_delayed_terminal(
-                trigger.provenance.firing(),
-                super::lifecycle::DelayedTerminalDisposition::ReflexiveUnmatched,
-            );
+        } else if let Some(disposition) = unfired_dispositions.remove(&idx) {
+            super::lifecycle::record_delayed_terminal(trigger.provenance.firing(), disposition);
         }
     }
 
@@ -11589,6 +12277,37 @@ fn quantity_expr_refs_cost_paid_object(expr: &QuantityExpr) -> bool {
     }
 }
 
+/// Does a [`CardTypeSetSource`] population route a filter that references the
+/// cost-paid object? Only the object filter and the journal's optional
+/// narrowing filter can; `AnyOf` recurses so a union member's reference is not
+/// dropped.
+///
+/// Uncited: a structural query over which arms hold a `TargetFilter`, not a rule
+/// implementation. (It cited CR 109.2, the battlefield-default rule for a bare
+/// type description, which does not speak to filter routing.)
+fn characteristic_source_references_cost_paid_object(source: &CardTypeSetSource) -> bool {
+    let mut found = false;
+    let complete =
+        source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
+            if found {
+                return;
+            }
+            found = match leaf {
+                CardTypeSetSource::Objects { filter } => filter.references_cost_paid_object(),
+                CardTypeSetSource::TurnJournal { filter, .. } => filter
+                    .as_ref()
+                    .is_some_and(TargetFilter::references_cost_paid_object),
+                CardTypeSetSource::Zone { .. }
+                | CardTypeSetSource::ExiledBySource
+                | CardTypeSetSource::TrackedSet { .. }
+                | CardTypeSetSource::AnyOf { .. } => false,
+            };
+        });
+    // A truncated walk claims the reference: this gate exists to stop a
+    // cost-paid-object read from escaping, so exhaustion must not let one past.
+    found || !complete
+}
+
 /// CR 400.7d + CR 608.2k: True when this `QuantityRef` reads the cost-paid
 /// object, by either of the two structural axes a ref can carry it on:
 ///
@@ -11629,7 +12348,6 @@ fn quantity_ref_refs_cost_paid_object(qty: &QuantityRef) -> bool {
         | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
         | QuantityRef::CounterAddedThisTurn { target: filter, .. }
         | QuantityRef::TokensCreatedThisTurn { filter, .. }
-        | QuantityRef::DistinctColorsAmongPermanents { filter }
         | QuantityRef::DistinctCounterKindsAmong { filter } => filter.references_cost_paid_object(),
 
         // Filter-bearing refs (boxed `TargetFilter`): recurse (auto-deref).
@@ -11652,21 +12370,13 @@ fn quantity_ref_refs_cost_paid_object(qty: &QuantityRef) -> bool {
             source.references_cost_paid_object() || target.references_cost_paid_object()
         }
 
-        // Card-type counting embeds a `TargetFilter` through its source enum.
-        QuantityRef::DistinctCardTypes { source } => match source {
-            CardTypeSetSource::Objects { filter } => filter.references_cost_paid_object(),
-            CardTypeSetSource::Zone { .. }
-            | CardTypeSetSource::ExiledBySource
-            | CardTypeSetSource::TrackedSet { .. } => false,
-        },
-
-        // Subtype counting embeds a `TargetFilter` through its source enum too.
-        QuantityRef::DistinctSubtypes { source, .. } => match source {
-            CardTypeSetSource::Objects { filter } => filter.references_cost_paid_object(),
-            CardTypeSetSource::Zone { .. }
-            | CardTypeSetSource::ExiledBySource
-            | CardTypeSetSource::TrackedSet { .. } => false,
-        },
+        // Card-type / subtype / colour counting all embed their `TargetFilter`s
+        // through the shared population enum.
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => {
+            characteristic_source_references_cost_paid_object(source)
+        }
 
         // Mana-spent metering embeds a `TargetFilter` through its metric enum.
         QuantityRef::ManaSpentToCast { metric, .. } => match metric {
@@ -17611,6 +18321,92 @@ pub mod tests {
         );
     }
 
+    /// The shared characteristic-source branch, which the three distinct-count
+    /// heads all route through. Sibling to the two tests above, which cover the
+    /// per-`QuantityRef` arms but never reach this population axis.
+    ///
+    /// Each filter-BEARING arm is exercised, plus the recursion and the
+    /// fixed-vocabulary arms that must stay false — a gate that answered `true`
+    /// for everything would pass a positive-only test.
+    #[test]
+    fn cost_paid_object_gate_covers_every_characteristic_source_arm() {
+        use crate::types::ability::{CardTypeSetSource, CountScope, TurnJournalKind, ZoneRef};
+
+        let objects = |filter| CardTypeSetSource::Objects { filter };
+        let journal = |filter| CardTypeSetSource::TurnJournal {
+            journal: TurnJournalKind::SpellsCast,
+            scope: CountScope::Controller,
+            filter,
+        };
+
+        // Every head shares one population axis, so detection must not depend on
+        // which characteristic is being counted.
+        for qty in [
+            QuantityRef::DistinctColorsAmong {
+                source: objects(TargetFilter::CostPaidObject),
+            },
+            QuantityRef::DistinctCardTypes {
+                source: objects(TargetFilter::CostPaidObject),
+            },
+        ] {
+            assert!(
+                quantity_ref_refs_cost_paid_object(&qty),
+                "an Objects population over the cost-paid object must be detected: {qty:?}"
+            );
+        }
+
+        // The journal's optional narrowing filter is the second filter-bearing
+        // arm, and `None` there must not be mistaken for a reference.
+        assert!(
+            quantity_ref_refs_cost_paid_object(&QuantityRef::DistinctCardTypes {
+                source: journal(Some(TargetFilter::CostPaidObject)),
+            }),
+            "a cost-paid-object reference in the journal's narrowing filter must be detected"
+        );
+        assert!(
+            !quantity_ref_refs_cost_paid_object(&QuantityRef::DistinctCardTypes {
+                source: journal(None),
+            }),
+            "an unfiltered journal references nothing"
+        );
+
+        // `AnyOf` recursion: a reference in ANY member is a reference, including
+        // one nested a union deep, and a union of clean members stays false.
+        let clean = CardTypeSetSource::Zone {
+            zone: ZoneRef::Graveyard,
+            scope: CountScope::Controller,
+        };
+        let nested = CardTypeSetSource::any_of(vec![
+            clean.clone(),
+            CardTypeSetSource::any_of(vec![
+                CardTypeSetSource::ExiledBySource,
+                objects(TargetFilter::CostPaidObject),
+            ])
+            .expect("two-member union"),
+        ])
+        .expect("two-member union");
+        assert!(
+            quantity_ref_refs_cost_paid_object(&QuantityRef::DistinctSubtypes {
+                source: nested,
+                exclude: Default::default(),
+            }),
+            "a reference nested inside a union of unions must be detected"
+        );
+
+        // Fixed-vocabulary arms carry no filter and must stay false — this is
+        // what stops the gate from degenerating into "always true".
+        for source in [
+            clean,
+            CardTypeSetSource::ExiledBySource,
+            CardTypeSetSource::TrackedSet { caused_by: None },
+        ] {
+            assert!(
+                !characteristic_source_references_cost_paid_object(&source),
+                "a fixed-vocabulary population routes no filter: {source:?}"
+            );
+        }
+    }
+
     /// CR 400.7d end-to-end: `build_triggered_ability` propagates the emerge
     /// `cast_cost_paid_object` snapshot onto a sub-ability whose magnitude reads
     /// "the number of counters on the sacrificed creature"
@@ -18198,6 +18994,1514 @@ pub mod tests {
         assert_eq!(
             state.players[0].life, 21,
             "GainLife delayed trigger resolved"
+        );
+    }
+
+    /// CR 603.4 (fire-time half) for a DELAYED triggered ability.
+    ///
+    /// Stages Fight for the Throne's shape — a one-shot `WhenDies` delayed
+    /// ability whose body carries the intervening-`if` "if you control your
+    /// commander" — and drives the production collection entry point
+    /// (`check_delayed_triggers`) on the death event.
+    ///
+    /// REVERT-TO-RED: with the fire-time hoist removed, `state.stack.len()` is
+    /// `1` in the no-commander half, because the ability was put onto the stack
+    /// and only skipped later, at resolution. That is precisely the CR 603.4
+    /// violation — the ability is respondable, counts as a triggered ability put
+    /// onto the stack, and a player could make the gate TRUE in response.
+    ///
+    /// The commander half is the reachability proof: the very same fixture with
+    /// a commander staged DOES reach the stack, so the empty-stack assertion
+    /// below cannot be passing because the delayed trigger never matched.
+    ///
+    /// The two `DelayedSubject` halves pin the CR 603.7b survival split that
+    /// `false_gate_consumes_one_shot` decides — see the assertions below.
+    #[test]
+    fn delayed_intervening_if_gates_the_ability_off_the_stack_at_fire_time() {
+        /// Which shape of "when [it] dies" the fixture installs.
+        #[derive(Clone, Copy)]
+        enum DelayedSubject {
+            /// "when A creature dies this turn" — a CLASS filter that can match
+            /// again later in the turn.
+            BroadFilter,
+            /// "when THAT creature dies" — one already-bound object.
+            BoundObject,
+        }
+
+        fn run(stage_commander: bool, subject: DelayedSubject) -> (usize, usize) {
+            let mut state = setup();
+            let controller = PlayerId(0);
+            state.active_player = controller;
+            state.priority_player = controller;
+
+            let source = create_object(
+                &mut state,
+                CardId(0x0603_0401),
+                controller,
+                "Fight for the Throne".to_string(),
+                Zone::Battlefield,
+            );
+            if stage_commander {
+                // CR 903.3 + CR 903.3d: owned AND controlled, on the battlefield.
+                let commander = make_creature(&mut state, controller, "Your Commander", 2, 2);
+                state
+                    .objects
+                    .get_mut(&commander)
+                    .expect("staged commander")
+                    .is_commander = true;
+            }
+            let victim = make_creature(&mut state, PlayerId(1), "Doomed Squire", 1, 1);
+
+            let mut ability =
+                ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+            // The intervening-`if` as the parser lowers it onto the delayed BODY.
+            ability.condition = Some(AbilityCondition::ControlsCommander {
+                ownership: CommanderOwnership::Own,
+            });
+            let filter = match subject {
+                DelayedSubject::BroadFilter => TargetFilter::Any,
+                DelayedSubject::BoundObject => TargetFilter::SpecificObject { id: victim },
+            };
+            assert_eq!(
+                filter.names_bound_single_object(),
+                matches!(subject, DelayedSubject::BoundObject),
+                "reach-guard: the fixture's filter must land on the side of \
+                 `names_bound_single_object` the case under test intends, or both halves \
+                 take the same retention branch"
+            );
+            state.delayed_triggers.push(DelayedTrigger {
+                condition: DelayedTriggerCondition::WhenDies { filter },
+                ability: Box::new(ability),
+                controller,
+                source_id: source,
+                one_shot: true,
+                provenance: DelayedInstallIdentity::LegacyDelayed,
+            });
+
+            let death = zone_changed_event(
+                victim,
+                Zone::Battlefield,
+                Zone::Graveyard,
+                vec![CoreType::Creature],
+                Vec::new(),
+            );
+            check_delayed_triggers(&mut state, &[death]);
+            (state.stack.len(), state.delayed_triggers.len())
+        }
+
+        let (gated_stack, gated_remaining) = run(false, DelayedSubject::BroadFilter);
+        assert_eq!(
+            gated_stack, 0,
+            "CR 603.4: with the intervening-if FALSE when the trigger event occurs, the \
+             delayed ability must never be put onto the stack. A 1 here is the shipped \
+             defect — a respondable ability that CR 603.4 says never triggered"
+        );
+        assert_eq!(
+            gated_remaining, 1,
+            "CR 603.4 + CR 603.7b: the ability DID NOT TRIGGER, and a broad-filter form \
+             has a stated duration, so it must keep watching for a later qualifying \
+             death. A 0 here is the defect where the first non-qualifying death silently \
+             destroys the ability for the rest of the turn"
+        );
+
+        let (fired_stack, fired_remaining) = run(true, DelayedSubject::BroadFilter);
+        assert_eq!(
+            fired_stack, 1,
+            "reachability proof: with an owned-and-controlled commander the SAME fixture \
+             puts the delayed ability on the stack, so the gated assertion above is not \
+             passing because the trigger never matched"
+        );
+        assert_eq!(
+            fired_remaining, 0,
+            "the fired one-shot is removed from delayed_triggers as before"
+        );
+
+        let (bound_gated_stack, bound_gated_remaining) = run(false, DelayedSubject::BoundObject);
+        assert_eq!(
+            bound_gated_stack, 0,
+            "CR 603.4: the bound-object form is gated off the stack on a false gate too"
+        );
+        assert_eq!(
+            bound_gated_remaining, 0,
+            "CR 603.7b + CR 400.7: the ONE bound object has now died, and an object that \
+             returns is a new object, so nothing is left for this ability to watch — it \
+             is consumed. A 1 here would leak a permanently inert delayed trigger"
+        );
+
+        let (bound_fired_stack, bound_fired_remaining) = run(true, DelayedSubject::BoundObject);
+        assert_eq!(
+            bound_fired_stack, 1,
+            "reachability proof for the bound-object half: the same fixture with the gate \
+             TRUE reaches the stack, so the retention assertion above is about the gate"
+        );
+        assert_eq!(
+            bound_fired_remaining, 0,
+            "the fired one-shot is removed from delayed_triggers as before"
+        );
+    }
+
+    /// CR 603.7b for the PHASE-NAMED one-shot class — the case the discard was
+    /// always sound for. "At the beginning of the next end step, if [gate], …"
+    /// names ONE specific later time; when that time arrives with the gate false
+    /// the ability did nothing (CR 603.4) AND has nothing left to wait for, so it
+    /// must not lie in wait for the FOLLOWING end step.
+    ///
+    /// REVERT-TO-RED: drop the `AtNextPhase` arm from
+    /// `false_gate_consumes_one_shot` and `remaining` below is `1` — a delayed
+    /// ability that outlives its own named deadline.
+    ///
+    /// The gate-true half is the reachability proof that this fixture's delayed
+    /// trigger genuinely matches the end-step event.
+    #[test]
+    fn phase_named_one_shot_is_consumed_by_a_false_intervening_if() {
+        fn run(stage_commander: bool) -> (usize, usize) {
+            let mut state = setup();
+            let controller = PlayerId(0);
+            state.active_player = controller;
+            state.priority_player = controller;
+
+            let source = create_object(
+                &mut state,
+                CardId(0x0603_0406),
+                controller,
+                "End Step Rider".to_string(),
+                Zone::Battlefield,
+            );
+            if stage_commander {
+                let commander = make_creature(&mut state, controller, "Your Commander", 2, 2);
+                state
+                    .objects
+                    .get_mut(&commander)
+                    .expect("staged commander")
+                    .is_commander = true;
+            }
+
+            let mut ability =
+                ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+            ability.condition = Some(AbilityCondition::ControlsCommander {
+                ownership: CommanderOwnership::Own,
+            });
+            state.delayed_triggers.push(DelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                ability: Box::new(ability),
+                controller,
+                source_id: source,
+                one_shot: true,
+                provenance: DelayedInstallIdentity::LegacyDelayed,
+            });
+
+            check_delayed_triggers(&mut state, &[GameEvent::PhaseChanged { phase: Phase::End }]);
+            (state.stack.len(), state.delayed_triggers.len())
+        }
+
+        let (gated_stack, gated_remaining) = run(false);
+        assert_eq!(
+            gated_stack, 0,
+            "CR 603.4: the ability must never be put onto the stack with the gate false"
+        );
+        assert_eq!(
+            gated_remaining, 0,
+            "CR 603.7b: \"at the beginning of the NEXT end step\" names one specific later \
+             time, which has now passed — the ability is consumed, not left waiting"
+        );
+
+        let (fired_stack, fired_remaining) = run(true);
+        assert_eq!(
+            fired_stack, 1,
+            "reachability proof: with the gate TRUE the same fixture reaches the stack, so \
+             the consumption above is not a never-matched trigger"
+        );
+        assert_eq!(
+            fired_remaining, 0,
+            "the fired one-shot is removed as before"
+        );
+    }
+
+    /// CR 603.4 + CR 603.7b for the `WhenNextEvent` one-shot class, driven through
+    /// the production `check_delayed_triggers` path over TWO separate event
+    /// batches.
+    ///
+    /// "When you next [event] this turn, if [gate], …" names ONE occurrence. When
+    /// that occurrence arrives with the gate false the ability "does nothing"
+    /// (CR 603.4) and its single shot is spent (CR 603.7b) — making the gate true
+    /// afterwards must NOT let a second matching event resurrect it. Retaining it
+    /// would silently rewrite the ability into "when you next [event] for which
+    /// [gate] holds".
+    ///
+    /// REVERT-TO-RED: restore `is_reflexive_lifetime(condition)` on the
+    /// `WhenNextEvent` arm of `false_gate_consumes_one_shot` and this
+    /// non-reflexive `ThisTurn` trigger survives batch one, so `after_first`
+    /// is `1` and the second batch puts the ability on the stack.
+    #[test]
+    fn when_next_event_one_shot_is_consumed_by_a_false_intervening_if() {
+        use crate::types::ability::DelayedTriggerLifetime;
+        use crate::types::triggers::TriggerMode;
+
+        /// Installs "when you next play a land this turn, if you control your
+        /// commander, you become the monarch" and returns the land whose play is
+        /// the matching event.
+        fn install(state: &mut GameState) -> ObjectId {
+            let controller = PlayerId(0);
+            state.active_player = controller;
+            state.priority_player = controller;
+
+            let source = create_object(
+                state,
+                CardId(0x0603_0407),
+                controller,
+                "Next Land Rider".to_string(),
+                Zone::Battlefield,
+            );
+            let land = create_object(
+                state,
+                CardId(0x0603_0408),
+                controller,
+                "Played Land".to_string(),
+                Zone::Battlefield,
+            );
+
+            // CR 305.1 + CR 603.2: scope the delayed event to the controller's
+            // own land drop, exactly as the parser's `WhenNextEvent` builders do.
+            let mut trigger_def = TriggerDefinition::new(TriggerMode::LandPlayed);
+            trigger_def.valid_target = Some(TargetFilter::Controller);
+
+            let mut ability =
+                ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+            ability.condition = Some(AbilityCondition::ControlsCommander {
+                ownership: CommanderOwnership::Own,
+            });
+            // `WhenNextEvent` matching requires the delayed ability's CR 400.7
+            // source context; without it `delayed_trigger_event_with_index`
+            // returns `None` and the fixture would prove nothing.
+            let source_object = state.objects.get(&source).expect("installed source");
+            ability.trigger_source = Some(trigger_source_context_for_latch(state, source_object));
+
+            state.delayed_triggers.push(DelayedTrigger {
+                condition: DelayedTriggerCondition::WhenNextEvent {
+                    trigger: Box::new(trigger_def),
+                    or_trigger: None,
+                    lifetime: DelayedTriggerLifetime::ThisTurn,
+                },
+                ability: Box::new(ability),
+                controller,
+                source_id: source,
+                one_shot: true,
+                provenance: DelayedInstallIdentity::LegacyDelayed,
+            });
+
+            land
+        }
+
+        fn stage_commander(state: &mut GameState) {
+            // CR 903.3 + CR 903.3d: owned AND controlled, on the battlefield.
+            let commander = make_creature(state, PlayerId(0), "Your Commander", 2, 2);
+            state
+                .objects
+                .get_mut(&commander)
+                .expect("staged commander")
+                .is_commander = true;
+        }
+
+        fn land_played(land: ObjectId) -> GameEvent {
+            GameEvent::LandPlayed {
+                object_id: land,
+                player_id: PlayerId(0),
+                from_zone: Zone::Hand,
+            }
+        }
+
+        // Reachability proof: the same fixture with the gate TRUE on the first
+        // matching event does reach the stack, so the assertions below are about
+        // the gate and not about a trigger that never matched `LandPlayed`.
+        let mut reachable = setup();
+        let reachable_land = install(&mut reachable);
+        stage_commander(&mut reachable);
+        check_delayed_triggers(&mut reachable, &[land_played(reachable_land)]);
+        assert_eq!(
+            reachable.stack.len(),
+            1,
+            "reachability proof: with the gate TRUE the first land drop fires the delayed ability"
+        );
+
+        let mut state = setup();
+        let land = install(&mut state);
+
+        // Batch one: the ability's single named occurrence, gate FALSE.
+        check_delayed_triggers(&mut state, &[land_played(land)]);
+        assert_eq!(
+            state.stack.len(),
+            0,
+            "CR 603.4: a false intervening-`if` means the ability never triggers, so it must \
+             not be put onto the stack"
+        );
+        let after_first = state.delayed_triggers.len();
+        assert_eq!(
+            after_first, 0,
+            "CR 603.7b: \"when you NEXT play a land this turn\" names ONE occurrence, and that \
+             occurrence has now happened — the one-shot is consumed, not left installed"
+        );
+
+        // Batch two: the gate is now TRUE and another land is played. A consumed
+        // one-shot must stay consumed; a retained one would fire here.
+        stage_commander(&mut state);
+        check_delayed_triggers(&mut state, &[land_played(land)]);
+        assert_eq!(
+            state.stack.len(),
+            0,
+            "CR 603.4 + CR 603.7b: the ability already spent its single occurrence with the \
+             gate false; making the gate true afterwards must not let a LATER land drop fire it"
+        );
+    }
+
+    /// The OTHER half of CR 603.7b, and the discriminating counterpart to the
+    /// test above: a STATED-DURATION delayed ability whose first matching event
+    /// fails the intervening-`if` must SURVIVE and still fire on a later matching
+    /// event in the same turn.
+    ///
+    /// CR 603.7b caps a delayed ability at one trigger "unless it has a stated
+    /// duration, such as 'this turn.'" The engine models that carve-out as
+    /// `DelayedTriggerCondition::WheneverEvent` (multi-fire), the sibling of the
+    /// one-shot `WhenNextEvent` — so the protection is structural, and this test
+    /// pins the structure rather than trusting it: `effects::delayed_trigger`
+    /// computes `one_shot = !matches!(condition, WheneverEvent { .. })`, and the
+    /// discard in `check_delayed_triggers` is gated on `delayed.one_shot`, so a
+    /// false gate here must decline the fire WITHOUT consuming the ability.
+    ///
+    /// Two matching events, gate false then true, is what makes this
+    /// discriminating: a one-event fixture would pass even if the ability were
+    /// wrongly discarded, because both readings put nothing on the stack the
+    /// first time.
+    ///
+    /// REVERT-TO-RED, and the exact recipe matters here: `WheneverEvent` is
+    /// protected TWICE over, so neither half alone reds this test. Flipping only
+    /// `false_gate_consumes_one_shot`'s `WheneverEvent` arm to `true` changes
+    /// nothing, because the caller never consults it for a multi-fire trigger;
+    /// dropping only the caller's `delayed.one_shot &&` conjunct changes nothing,
+    /// because the arm still answers `false`. Do BOTH — flip the arm to `true`
+    /// AND drop the conjunct — and `after_first` becomes `0` and the second event
+    /// fires nothing (measured, not asserted from reading).
+    ///
+    /// That redundancy is the finding, not a weakness of the fixture: this test
+    /// pins the CONJUNCTION that is the actual guarantee, so it stays red for any
+    /// change that removes the protection outright rather than merely moving it
+    /// between the two layers.
+    #[test]
+    fn stated_duration_multi_fire_survives_a_false_intervening_if() {
+        use crate::types::triggers::TriggerMode;
+
+        /// Installs "whenever you play a land this turn, if you control your
+        /// commander, you become the monarch" — the stated-duration shape.
+        /// Deliberately the same fixture as the one-shot test above, differing
+        /// ONLY in the condition sibling, so the two tests isolate exactly the
+        /// `WhenNextEvent` / `WheneverEvent` distinction and nothing else.
+        fn install(state: &mut GameState) -> ObjectId {
+            let controller = PlayerId(0);
+            state.active_player = controller;
+            state.priority_player = controller;
+
+            let source = create_object(
+                state,
+                CardId(0x0603_0409),
+                controller,
+                "Stated Duration Rider".to_string(),
+                Zone::Battlefield,
+            );
+            let land = create_object(
+                state,
+                CardId(0x0603_040a),
+                controller,
+                "Played Land".to_string(),
+                Zone::Battlefield,
+            );
+
+            // CR 305.1 + CR 603.2: scope the delayed event to the controller's
+            // own land drop, exactly as the one-shot fixture above does.
+            let mut trigger_def = TriggerDefinition::new(TriggerMode::LandPlayed);
+            trigger_def.valid_target = Some(TargetFilter::Controller);
+
+            let mut ability =
+                ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+            ability.condition = Some(AbilityCondition::ControlsCommander {
+                ownership: CommanderOwnership::Own,
+            });
+            let source_object = state.objects.get(&source).expect("installed source");
+            ability.trigger_source = Some(trigger_source_context_for_latch(state, source_object));
+
+            state.delayed_triggers.push(DelayedTrigger {
+                condition: DelayedTriggerCondition::WheneverEvent {
+                    trigger: Box::new(trigger_def),
+                    expiry: crate::types::ability::WheneverEventExpiry::EndOfTurn,
+                },
+                ability: Box::new(ability),
+                controller,
+                source_id: source,
+                // CR 603.7b: the stated duration is what makes this multi-fire.
+                // Mirrors `effects::delayed_trigger`'s own computation
+                // (`one_shot = !matches!(condition, WheneverEvent { .. })`).
+                one_shot: false,
+                provenance: DelayedInstallIdentity::LegacyDelayed,
+            });
+
+            land
+        }
+
+        fn stage_commander(state: &mut GameState) {
+            // CR 903.3 + CR 903.3d: owned AND controlled, on the battlefield.
+            let commander = make_creature(state, PlayerId(0), "Your Commander", 2, 2);
+            state
+                .objects
+                .get_mut(&commander)
+                .expect("staged commander")
+                .is_commander = true;
+        }
+
+        fn land_played(land: ObjectId) -> GameEvent {
+            GameEvent::LandPlayed {
+                object_id: land,
+                player_id: PlayerId(0),
+                from_zone: Zone::Hand,
+            }
+        }
+
+        let mut state = setup();
+        let land = install(&mut state);
+
+        // Batch one: a matching event with the gate FALSE (no commander staged).
+        check_delayed_triggers(&mut state, &[land_played(land)]);
+        assert_eq!(
+            state.stack.len(),
+            0,
+            "CR 603.4: a false intervening-`if` means the ability does not trigger on this \
+             occurrence"
+        );
+        let after_first = state.delayed_triggers.len();
+        assert_eq!(
+            after_first, 1,
+            "CR 603.7b: a STATED-DURATION delayed ability is not capped at one trigger, so a \
+             false gate must decline the occurrence WITHOUT consuming the ability"
+        );
+
+        // Batch two: make the gate TRUE, then a second matching event. The
+        // ability must still be installed and must now fire.
+        stage_commander(&mut state);
+        check_delayed_triggers(&mut state, &[land_played(land)]);
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "CR 603.7b + CR 603.4: the ability survived the declined occurrence and its gate is \
+             re-checked on the next one, which now passes"
+        );
+
+        // CR 603.4 (second half) + CR 608.2a: passing the FIRE-TIME gate must not
+        // disarm the RESOLUTION-TIME one. The hoist is a pair, not a move: the
+        // same gate has to ride onto the stack entry so `stack.rs`'s
+        // `bind_resolution_scope` re-checks it, which is what denies the ability
+        // if the condition stops holding between triggering and resolution (a
+        // commander leaving the battlefield in response). An entry carrying
+        // `condition: None` would resolve unconditionally — the very bug this PR
+        // fixes, reintroduced one layer later.
+        let entry = state.stack.last().expect("the fired delayed ability");
+        assert!(
+            matches!(
+                &entry.kind,
+                StackEntryKind::TriggeredAbility {
+                    condition: Some(_),
+                    ..
+                }
+            ),
+            "CR 603.4: the hoisted intervening-`if` must also be carried onto the stack entry \
+             for the resolution-time recheck, got {:?}",
+            entry.kind
+        );
+    }
+
+    /// HOSTILE fixture for the CR 603.4 hoist's carve-out.
+    ///
+    /// "…, if X, A. Otherwise, B." is NOT an intervening-`if` in the CR 603.4
+    /// sense — the ability has work to do when the gate is false, so it MUST
+    /// still be put onto the stack and resolve its `else_ability`.
+    /// `delayed_body_outlives_a_false_gate` declines every body carrying an
+    /// `else_ability` for exactly this reason.
+    ///
+    /// REVERT-TO-RED: drop the `else_ability` arm from
+    /// `delayed_body_outlives_a_false_gate` and the gate hoists, the ability
+    /// never reaches the stack, and the Otherwise branch is silently deleted —
+    /// life stays 20 and the stack stays empty.
+    #[test]
+    fn delayed_body_with_an_otherwise_branch_is_never_gated_off_the_stack() {
+        let mut state = setup();
+        let controller = PlayerId(0);
+        state.active_player = controller;
+        state.priority_player = controller;
+        state.players[0].life = 20;
+
+        let source = create_object(
+            &mut state,
+            CardId(0x0603_0402),
+            controller,
+            "Otherwise Rider".to_string(),
+            Zone::Battlefield,
+        );
+        let victim = make_creature(&mut state, PlayerId(1), "Doomed Squire", 1, 1);
+
+        // Gate is FALSE (no commander anywhere), so the Otherwise branch is the
+        // one that must run.
+        let mut ability = ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+        ability.condition = Some(AbilityCondition::ControlsCommander {
+            ownership: CommanderOwnership::Own,
+        });
+        ability.else_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            controller,
+        )));
+        state.delayed_triggers.push(DelayedTrigger {
+            condition: DelayedTriggerCondition::WhenDies {
+                filter: TargetFilter::Any,
+            },
+            ability: Box::new(ability),
+            controller,
+            source_id: source,
+            one_shot: true,
+            provenance: DelayedInstallIdentity::LegacyDelayed,
+        });
+
+        let death = zone_changed_event(
+            victim,
+            Zone::Battlefield,
+            Zone::Graveyard,
+            vec![CoreType::Creature],
+            Vec::new(),
+        );
+        check_delayed_triggers(&mut state, &[death]);
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "a body with an Otherwise branch must still reach the stack even though its \
+             own condition is false"
+        );
+
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+        assert_eq!(
+            state.players[0].life, 21,
+            "CR 608.2c: the Otherwise branch must resolve. 20 here means the CR 603.4 \
+             hoist swallowed a non-intervening-if gate and deleted the else branch"
+        );
+        assert_eq!(
+            state.monarch, None,
+            "the gated primary effect must still not happen"
+        );
+    }
+
+    /// CR 603.4 for a CHAINED delayed body — the case the old blanket
+    /// `sub_ability.is_some()` guard silently got wrong.
+    ///
+    /// "When [event], if [gate], A and B" lowers B as an UNCONDITIONAL
+    /// `SequentialSibling` sub of the gated body. CR 603.4's `if` gates the WHOLE
+    /// ability, so with the gate false NEITHER clause may happen. Under the old
+    /// guard the hoist was skipped AND `resolve_ability_chain`'s
+    /// `SequentialSibling && condition.is_none()` escape resolved B anyway — the
+    /// ability went on the stack and B happened with the gate false.
+    ///
+    /// REVERT-TO-RED: restore `|| ability.sub_ability.is_some()` in
+    /// `delayed_body_outlives_a_false_gate` and the gated half below reports
+    /// `stack == 1` and life 21 — B resolved through a false CR 603.4 gate.
+    ///
+    /// The commander half is the reachability proof AND the non-deletion proof:
+    /// the same fixture with the gate TRUE runs both clauses.
+    #[test]
+    fn delayed_body_with_an_unconditional_sequential_sub_is_gated_as_one_ability() {
+        fn run(stage_commander: bool) -> (usize, i32, Option<PlayerId>) {
+            let mut state = setup();
+            let controller = PlayerId(0);
+            state.active_player = controller;
+            state.priority_player = controller;
+            state.players[0].life = 20;
+
+            let source = create_object(
+                &mut state,
+                CardId(0x0603_0403),
+                controller,
+                "Chained Rider".to_string(),
+                Zone::Battlefield,
+            );
+            if stage_commander {
+                let commander = make_creature(&mut state, controller, "Your Commander", 2, 2);
+                state
+                    .objects
+                    .get_mut(&commander)
+                    .expect("staged commander")
+                    .is_commander = true;
+            }
+            let victim = make_creature(&mut state, PlayerId(1), "Doomed Squire", 1, 1);
+
+            let mut ability =
+                ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+            ability.condition = Some(AbilityCondition::ControlsCommander {
+                ownership: CommanderOwnership::Own,
+            });
+            // "…and gain 1 life" — the second clause of the ONE gated sentence.
+            let mut sub = ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                controller,
+            );
+            sub.sub_link = crate::types::ability::SubAbilityLink::SequentialSibling;
+            assert!(
+                sub.condition.is_none(),
+                "reach-guard: the sub must be UNCONDITIONAL, or it takes a different \
+                 resolve_ability_chain branch than the one under test"
+            );
+            ability.sub_ability = Some(Box::new(sub));
+
+            state.delayed_triggers.push(DelayedTrigger {
+                condition: DelayedTriggerCondition::WhenDies {
+                    filter: TargetFilter::Any,
+                },
+                ability: Box::new(ability),
+                controller,
+                source_id: source,
+                one_shot: true,
+                provenance: DelayedInstallIdentity::LegacyDelayed,
+            });
+
+            let death = zone_changed_event(
+                victim,
+                Zone::Battlefield,
+                Zone::Graveyard,
+                vec![CoreType::Creature],
+                Vec::new(),
+            );
+            check_delayed_triggers(&mut state, &[death]);
+            let stack_len = state.stack.len();
+            if stack_len == 1 {
+                let mut events = Vec::new();
+                crate::game::stack::resolve_top(&mut state, &mut events);
+            }
+            (stack_len, state.players[0].life, state.monarch)
+        }
+
+        let (gated_stack, gated_life, gated_monarch) = run(false);
+        assert_eq!(
+            gated_stack, 0,
+            "CR 603.4: the intervening-if gates the WHOLE ability, chain and all"
+        );
+        assert_eq!(
+            gated_life, 20,
+            "CR 603.4: the chained second clause must NOT happen through a false gate. \
+             21 means the unconditional SequentialSibling escaped the gate"
+        );
+        assert_eq!(
+            gated_monarch, None,
+            "the gated primary effect must not happen"
+        );
+
+        let (fired_stack, fired_life, fired_monarch) = run(true);
+        assert_eq!(
+            fired_stack, 1,
+            "reachability proof: with the gate TRUE the same fixture reaches the stack"
+        );
+        assert_eq!(
+            fired_monarch,
+            Some(PlayerId(0)),
+            "the gated primary effect resolves when the gate is true"
+        );
+        assert_eq!(
+            fired_life, 21,
+            "non-deletion proof: the chained clause still resolves when the gate is true, \
+             so the gated assertion above is not passing because the chain was dropped"
+        );
+    }
+
+    /// CR 603.4: the two legs of the hoist must be the SAME predicate over the
+    /// SAME values. A gate whose quantity reads a binding only the
+    /// resolution-time leg has — the delayed ability's snapshotted `targets`
+    /// (`ObjectScope::Target`), the per-iteration player
+    /// (`PlayerScope::ScopedPlayer`), or a population the trigger bridge
+    /// re-scopes (`FilterProp::Another` → `OtherThanTriggerObject`) — must
+    /// DECLINE the hoist rather than gate the ability off the stack on a value
+    /// the resolver would never have computed.
+    ///
+    /// Each case is a MINIMAL PAIR: the two halves differ only in the scope or
+    /// the one filter property. The `hoisted` half proves a `QuantityCheck` gate
+    /// really does bridge and really is evaluated at fire time (so the declined
+    /// half's `stack == 1` is the decline, not a non-bridging condition); the
+    /// `declined` half proves the divergent reading never reaches the gate.
+    ///
+    /// REVERT-TO-RED: drop the `gate_binding_diverges_at_fire_time` call from
+    /// `delayed_intervening_if` and every `declined` half below reports
+    /// `stack == 0` — the ability deleted off the stack on a fire-time reading
+    /// (empty targets / event-derived player / trigger-object exclusion) that the
+    /// resolution-time reader does not share.
+    #[test]
+    fn divergent_gate_bindings_decline_the_fire_time_hoist() {
+        fn run(condition: AbilityCondition) -> usize {
+            let mut state = setup();
+            let controller = PlayerId(0);
+            state.active_player = controller;
+            state.priority_player = controller;
+
+            let source = create_object(
+                &mut state,
+                CardId(0x0603_0407),
+                controller,
+                "Divergent Rider".to_string(),
+                Zone::Battlefield,
+            );
+            let victim = make_creature(&mut state, PlayerId(1), "Doomed Squire", 1, 1);
+
+            let mut ability =
+                ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+            ability.condition = Some(condition);
+            state.delayed_triggers.push(DelayedTrigger {
+                condition: DelayedTriggerCondition::WhenDies {
+                    filter: TargetFilter::Any,
+                },
+                ability: Box::new(ability),
+                controller,
+                source_id: source,
+                one_shot: true,
+                provenance: DelayedInstallIdentity::LegacyDelayed,
+            });
+
+            let death = zone_changed_event(
+                victim,
+                Zone::Battlefield,
+                Zone::Graveyard,
+                vec![CoreType::Creature],
+                Vec::new(),
+            );
+            check_delayed_triggers(&mut state, &[death]);
+            state.stack.len()
+        }
+
+        let counters_on = |scope| AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::CountersOn {
+                    scope,
+                    counter_type: Some(crate::types::counter::CounterType::Plus1Plus1),
+                },
+            },
+            comparator: crate::types::ability::Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 3 },
+        };
+        // No object in the fixture carries a +1/+1 counter, so BOTH readings are
+        // false — the halves differ only in whether the gate is consulted at all.
+        assert_eq!(
+            run(counters_on(ObjectScope::Source)),
+            0,
+            "CR 603.4: a Source-scoped counter gate binds identically on both legs, so it \
+             hoists and gates the ability off the stack"
+        );
+        assert_eq!(
+            run(counters_on(ObjectScope::Target)),
+            1,
+            "CR 115.1: `ObjectScope::Target` reads the delayed ability's snapshotted \
+             targets, which the fire-time context does not carry. 0 here means the hoist \
+             gated the ability off the stack on an empty-targets reading"
+        );
+
+        let life_total = |player| AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal { player },
+            },
+            comparator: crate::types::ability::Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 100 },
+        };
+        assert_eq!(
+            run(life_total(PlayerScope::Controller)),
+            0,
+            "reach-guard: the same comparison scoped to the controller DOES hoist (nobody \
+             has 100 life), so the declined half below is the scope and nothing else"
+        );
+        assert_eq!(
+            run(life_total(PlayerScope::ScopedPlayer)),
+            1,
+            "CR 115.10: `ScopedPlayer` is the RESOLVING ability's per-iteration player; \
+             the fire-time context derives its scoped player from the event instead"
+        );
+
+        let controls_creature = |props: Vec<FilterProp>| AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .controller(ControllerRef::You)
+                            .properties(props),
+                    ),
+                },
+            },
+            comparator: crate::types::ability::Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        };
+        assert_eq!(
+            run(controls_creature(vec![])),
+            0,
+            "reach-guard: the unqualified population gate hoists (the controller controls \
+             no creature), so the declined half below is the `Another` prop alone"
+        );
+        assert_eq!(
+            run(controls_creature(vec![FilterProp::Another])),
+            1,
+            "CR 603.4: `oracle_trigger` rewrites `Another` to `OtherThanTriggerObject` on \
+             the fire-time leg only, so the two legs would count DIFFERENT populations"
+        );
+    }
+
+    /// CR 400.1 + CR 603.4: the ZONE axis of the same two-legs-must-agree rule.
+    ///
+    /// `ObjectCount{filter} >= 1` folds into `StaticCondition::IsPresent`, whose
+    /// affirmative trigger-side bridge is `TriggerCondition::ControlsType` — a
+    /// BATTLEFIELD-ONLY scan. The resolution leg counts in the FILTER'S OWN zone.
+    /// A gate on a graveyard population therefore reads TRUE at resolution and
+    /// FALSE at fire time, and hoisting it would gate the ability off the stack
+    /// (deleting a consumed one-shot) on a predicate the resolver never computes.
+    ///
+    /// MINIMAL PAIR: the two halves differ only in the `InZone { Graveyard }`
+    /// property. The battlefield half is the reach-guard — it proves an
+    /// `ObjectCount >= 1` gate really does bridge and really is evaluated at fire
+    /// time, so the graveyard half's `stack == 1` is the decline and nothing else.
+    ///
+    /// REVERT-TO-RED: drop the `static_gate_bridge_loses_zone` call from
+    /// `delayed_intervening_if` and the graveyard half reports `stack == 0` (and
+    /// `monarch == None`) — the ability deleted at fire time on a battlefield scan
+    /// of a graveyard population.
+    #[test]
+    fn non_battlefield_presence_gate_declines_the_fire_time_hoist() {
+        fn run(props: Vec<FilterProp>) -> (usize, Option<PlayerId>) {
+            let mut state = setup();
+            let controller = PlayerId(0);
+            state.active_player = controller;
+            state.priority_player = controller;
+
+            let source = create_object(
+                &mut state,
+                CardId(0x0603_0409),
+                controller,
+                "Graveyard Rider".to_string(),
+                Zone::Battlefield,
+            );
+            // The counted population lives in the GRAVEYARD, never on the
+            // battlefield: the controller controls no creature there, so a
+            // battlefield scan of this filter is false either way.
+            let buried = create_object(
+                &mut state,
+                CardId(0x0603_040A),
+                controller,
+                "Buried Squire".to_string(),
+                Zone::Graveyard,
+            );
+            {
+                let obj = state.objects.get_mut(&buried).expect("staged card");
+                obj.card_types.core_types.push(CoreType::Creature);
+                obj.base_card_types = obj.card_types.clone();
+            }
+            let victim = make_creature(&mut state, PlayerId(1), "Doomed Squire", 1, 1);
+
+            let mut ability =
+                ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+            ability.condition = Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::creature()
+                                .controller(ControllerRef::You)
+                                .properties(props),
+                        ),
+                    },
+                },
+                comparator: crate::types::ability::Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            });
+            state.delayed_triggers.push(DelayedTrigger {
+                condition: DelayedTriggerCondition::WhenDies {
+                    filter: TargetFilter::SpecificObject { id: victim },
+                },
+                ability: Box::new(ability),
+                controller,
+                source_id: source,
+                one_shot: true,
+                provenance: DelayedInstallIdentity::LegacyDelayed,
+            });
+
+            let death = zone_changed_event(
+                victim,
+                Zone::Battlefield,
+                Zone::Graveyard,
+                vec![CoreType::Creature],
+                Vec::new(),
+            );
+            check_delayed_triggers(&mut state, &[death]);
+            let stack_len = state.stack.len();
+            if stack_len == 1 {
+                let mut events = Vec::new();
+                crate::game::stack::resolve_top(&mut state, &mut events);
+            }
+            (stack_len, state.monarch)
+        }
+
+        let (battlefield_stack, battlefield_monarch) = run(vec![]);
+        assert_eq!(
+            battlefield_stack, 0,
+            "reach-guard: a battlefield-scoped `ObjectCount >= 1` gate bridges and IS \
+             evaluated at fire time — the controller controls no creature, so CR 603.4 \
+             keeps the ability off the stack"
+        );
+        assert_eq!(
+            battlefield_monarch, None,
+            "nothing resolved on the battlefield-scoped half"
+        );
+
+        let (graveyard_stack, graveyard_monarch) = run(vec![FilterProp::InZone {
+            zone: Zone::Graveyard,
+        }]);
+        assert_eq!(
+            graveyard_stack, 1,
+            "CR 400.1 + CR 603.4: the affirmative `IsPresent` bridge is battlefield-only, \
+             so a graveyard population would read FALSE at fire time while the resolver \
+             reads TRUE. The hoist must decline and the ability must reach the stack"
+        );
+        assert_eq!(
+            graveyard_monarch,
+            Some(PlayerId(0)),
+            "divergence proof: the RESOLUTION-time leg reads the same gate as TRUE (one \
+             creature card in the controller's graveyard), so a fire-time deletion would \
+             have destroyed an ability that was supposed to resolve"
+        );
+    }
+
+    /// CR 608.2c + CR 603.4: a RESOLUTION-SCOPED quantity leaf carries no scope,
+    /// player or filter payload, yet the fire-time leg cannot reproduce it — the
+    /// resolver is called with no resolving ability, no targets and no chain
+    /// ledger, so `TrackedSetSize` reads whatever an unrelated earlier resolution
+    /// left behind (here: nothing).
+    ///
+    /// MINIMAL PAIR against another PAYLOAD-FREE leaf whose reading is identical
+    /// on both legs (`TurnsTaken`), so the decline below cannot be explained by
+    /// "payload-free gates never hoist".
+    ///
+    /// REVERT-TO-RED: restore the `_ => false` tail of
+    /// `quantity_ref_binding_diverges` and the tracked-set half reports
+    /// `stack == 0` with `delayed_triggers` emptied — the one-shot deleted by
+    /// `false_gate_consumes_one_shot` on a value the resolver never computed.
+    #[test]
+    fn resolution_scoped_quantity_gate_declines_the_fire_time_hoist() {
+        // Unit pins for the two adjudications the production pair below drives.
+        assert!(
+            quantity_ref_binding_diverges(&QuantityRef::TrackedSetSize),
+            "CR 608.2c: the chain tracked set exists only during a resolution"
+        );
+        assert!(
+            !quantity_ref_binding_diverges(&QuantityRef::TurnsTaken),
+            "CR 500: turns taken is global state both legs read identically"
+        );
+
+        fn run(qty: QuantityRef, threshold: i32) -> (usize, usize) {
+            let mut state = setup();
+            let controller = PlayerId(0);
+            state.active_player = controller;
+            state.priority_player = controller;
+
+            let source = create_object(
+                &mut state,
+                CardId(0x0603_040B),
+                controller,
+                "Tracked Rider".to_string(),
+                Zone::Battlefield,
+            );
+            let victim = make_creature(&mut state, PlayerId(1), "Doomed Squire", 1, 1);
+
+            let mut ability =
+                ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+            ability.condition = Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref { qty },
+                comparator: crate::types::ability::Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: threshold },
+            });
+            state.delayed_triggers.push(DelayedTrigger {
+                // A bound single object, so a false gate would CONSUME the
+                // one-shot (`false_gate_consumes_one_shot`) rather than leave it
+                // installed — the deletion half of the defect.
+                condition: DelayedTriggerCondition::WhenDies {
+                    filter: TargetFilter::SpecificObject { id: victim },
+                },
+                ability: Box::new(ability),
+                controller,
+                source_id: source,
+                one_shot: true,
+                provenance: DelayedInstallIdentity::LegacyDelayed,
+            });
+
+            let death = zone_changed_event(
+                victim,
+                Zone::Battlefield,
+                Zone::Graveyard,
+                vec![CoreType::Creature],
+                Vec::new(),
+            );
+            check_delayed_triggers(&mut state, &[death]);
+            (state.stack.len(), state.delayed_triggers.len())
+        }
+
+        // `TurnsTaken >= 100` is false on both legs — the reach-guard that a
+        // payload-free `QuantityCheck` gate does hoist and does gate at fire time.
+        let (turns_stack, turns_remaining) = run(QuantityRef::TurnsTaken, 100);
+        assert_eq!(
+            turns_stack, 0,
+            "reach-guard: a payload-free gate whose reading is leg-independent hoists, so \
+             the declined half below is the RESOLUTION scope and nothing else"
+        );
+        assert_eq!(
+            turns_remaining, 0,
+            "CR 603.7b: the bound-object one-shot is consumed by its own event"
+        );
+
+        let (tracked_stack, tracked_remaining) = run(QuantityRef::TrackedSetSize, 1);
+        assert_eq!(
+            tracked_stack, 1,
+            "CR 608.2c: `TrackedSetSize` is published BY a resolution; the fire-time leg \
+             reads a foreign (here empty) ledger, so the gate must keep its \
+             resolution-only reading and the ability must reach the stack"
+        );
+        assert_eq!(
+            tracked_remaining, 0,
+            "the ability FIRED (it is off the delayed list because it went on the stack), \
+             not because a false gate deleted it — see the stack assertion above"
+        );
+    }
+
+    /// CR 603.4 + CR 608.2c: `delayed_body_outlives_a_false_gate` inspects the
+    /// DIRECT sub only, because that is all `resolve_chain_body`'s
+    /// condition-false path inspects. A 2-deep chain whose direct sub does NOT
+    /// qualify resolves nothing at all, so the hoist must still apply even though
+    /// a GRANDCHILD carries an `else_ability`.
+    ///
+    /// REVERT-TO-RED: restore the `|| delayed_body_outlives_a_false_gate(sub)`
+    /// recursion and the gated half below reports `stack == 1` — an ability put
+    /// onto the stack (respondable, and CR 603.4 says it never triggered) to
+    /// resolve exactly nothing.
+    ///
+    /// The resolver-mirror assertion drives `effects::resolve_ability_chain`
+    /// directly on the SAME body with the SAME false gate and proves it performs
+    /// no work, so the hoist deletes nothing.
+    #[test]
+    fn two_deep_chain_mirrors_the_resolvers_direct_sub_test() {
+        /// "…, if [gate], become the monarch" whose direct sub is an ORDINARY
+        /// conditional continuation and whose GRANDCHILD carries an
+        /// `else_ability` (life gain) that only runs if the chain gets that far.
+        fn body(source: ObjectId, controller: PlayerId) -> ResolvedAbility {
+            let mut grandchild =
+                ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+            grandchild.condition = Some(AbilityCondition::ControlsCommander {
+                ownership: CommanderOwnership::Own,
+            });
+            grandchild.else_ability = Some(Box::new(ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                controller,
+            )));
+
+            let mut sub = ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+            // NOT one of the surviving classes: an ordinary game-state gate on a
+            // continuation link, so `resolve_chain_body` stops here when the
+            // parent gate is false.
+            sub.condition = Some(AbilityCondition::IsYourTurn);
+            sub.sub_link = crate::types::ability::SubAbilityLink::ContinuationStep;
+            sub.sub_ability = Some(Box::new(grandchild));
+
+            let mut ability =
+                ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+            ability.condition = Some(AbilityCondition::ControlsCommander {
+                ownership: CommanderOwnership::Own,
+            });
+            ability.sub_ability = Some(Box::new(sub));
+            ability
+        }
+
+        fn run(stage_commander: bool) -> (usize, i32, Option<PlayerId>) {
+            let mut state = setup();
+            let controller = PlayerId(0);
+            state.active_player = controller;
+            state.priority_player = controller;
+            state.players[0].life = 20;
+
+            let source = create_object(
+                &mut state,
+                CardId(0x0603_040C),
+                controller,
+                "Two Deep Rider".to_string(),
+                Zone::Battlefield,
+            );
+            if stage_commander {
+                let commander = make_creature(&mut state, controller, "Your Commander", 2, 2);
+                state
+                    .objects
+                    .get_mut(&commander)
+                    .expect("staged commander")
+                    .is_commander = true;
+            }
+            let victim = make_creature(&mut state, PlayerId(1), "Doomed Squire", 1, 1);
+
+            let ability = body(source, controller);
+            // Reach-guard: the shape under test is a 2-deep chain whose DIRECT sub
+            // is not one of the surviving classes but whose grandchild is.
+            let direct = ability.sub_ability.as_deref().expect("staged direct sub");
+            assert!(
+                !crate::game::effects::sub_outlives_false_parent_gate(direct),
+                "the direct sub must NOT qualify, or the hoist declines for the shallow \
+                 reason and the 2-deep case is never exercised"
+            );
+            assert!(
+                direct
+                    .sub_ability
+                    .as_deref()
+                    .is_some_and(|grandchild| grandchild.else_ability.is_some()),
+                "the GRANDCHILD must carry the surviving shape the old recursion tripped on"
+            );
+
+            state.delayed_triggers.push(DelayedTrigger {
+                condition: DelayedTriggerCondition::WhenDies {
+                    filter: TargetFilter::Any,
+                },
+                ability: Box::new(ability),
+                controller,
+                source_id: source,
+                one_shot: true,
+                provenance: DelayedInstallIdentity::LegacyDelayed,
+            });
+
+            let death = zone_changed_event(
+                victim,
+                Zone::Battlefield,
+                Zone::Graveyard,
+                vec![CoreType::Creature],
+                Vec::new(),
+            );
+            check_delayed_triggers(&mut state, &[death]);
+            let stack_len = state.stack.len();
+            if stack_len == 1 {
+                let mut events = Vec::new();
+                crate::game::stack::resolve_top(&mut state, &mut events);
+            }
+            (stack_len, state.players[0].life, state.monarch)
+        }
+
+        let (gated_stack, gated_life, gated_monarch) = run(false);
+        assert_eq!(
+            gated_stack, 0,
+            "CR 603.4: with the gate false the resolver would run NOTHING (the direct sub \
+             does not survive), so the fire-time half must gate the ability off the stack"
+        );
+        assert_eq!(gated_life, 20, "no chain work happened");
+        assert_eq!(gated_monarch, None, "no chain work happened");
+
+        // Resolver mirror: the same body, the same false gate, resolved directly.
+        // Nothing runs — which is exactly why hoisting deletes nothing.
+        let mut state = setup();
+        let controller = PlayerId(0);
+        state.active_player = controller;
+        state.priority_player = controller;
+        state.players[0].life = 20;
+        let source = create_object(
+            &mut state,
+            CardId(0x0603_040D),
+            controller,
+            "Two Deep Rider".to_string(),
+            Zone::Battlefield,
+        );
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(
+            &mut state,
+            &body(source, controller),
+            &mut events,
+            0,
+        )
+        .expect("chain resolution");
+        assert_eq!(
+            state.players[0].life, 20,
+            "CR 608.2c: `resolve_chain_body` stops at the non-surviving DIRECT sub, so the \
+             grandchild's else branch never runs — 21 here would mean the hoist above \
+             deleted printed work"
+        );
+        assert_eq!(
+            state.monarch, None,
+            "the gated primary effect and the gated grandchild both stay unperformed"
+        );
+
+        let (fired_stack, _fired_life, fired_monarch) = run(true);
+        assert_eq!(
+            fired_stack, 1,
+            "reachability proof: the SAME fixture with the gate TRUE reaches the stack"
+        );
+        assert_eq!(
+            fired_monarch,
+            Some(PlayerId(0)),
+            "and resolves its gated effect"
+        );
+    }
+
+    /// CR 603.4 + CR 702.1c: `delayed_body_outlives_a_false_gate` and
+    /// `resolve_chain_body` must decline / run on EXACTLY the same sub shapes.
+    /// The `ReplicatedOrBranch` marker only means "independent OR-branch" on a
+    /// `SequentialSibling` link — that is the conjunct
+    /// `effects::sub_outlives_false_parent_gate` now carries for BOTH consumers.
+    ///
+    /// REVERT-TO-RED: drop the `sub_link == SequentialSibling` conjunct from
+    /// `sub_outlives_false_parent_gate` and the `ContinuationStep` half below
+    /// reports `stack == 1` — the hoist declined for a sub the resolver would
+    /// never have run through a false gate, leaving CR 603.4 unenforced.
+    #[test]
+    fn replicated_or_branch_carve_out_requires_a_sequential_sibling_link() {
+        fn run(sub_link: crate::types::ability::SubAbilityLink) -> usize {
+            let mut state = setup();
+            let controller = PlayerId(0);
+            state.active_player = controller;
+            state.priority_player = controller;
+
+            let source = create_object(
+                &mut state,
+                CardId(0x0603_0408),
+                controller,
+                "Replicated Rider".to_string(),
+                Zone::Battlefield,
+            );
+            let victim = make_creature(&mut state, PlayerId(1), "Doomed Squire", 1, 1);
+
+            let mut ability =
+                ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+            // Gate FALSE: no commander is staged anywhere.
+            ability.condition = Some(AbilityCondition::ControlsCommander {
+                ownership: CommanderOwnership::Own,
+            });
+            let mut sub = ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                controller,
+            );
+            sub.sibling_condition = crate::types::ability::SiblingCondition::ReplicatedOrBranch;
+            sub.sub_link = sub_link;
+            // Reach-guard: the sub must carry the replication marker, or both
+            // halves take the plain no-sub branch and the pair proves nothing.
+            assert_eq!(
+                sub.sibling_condition,
+                crate::types::ability::SiblingCondition::ReplicatedOrBranch
+            );
+            ability.sub_ability = Some(Box::new(sub));
+
+            state.delayed_triggers.push(DelayedTrigger {
+                condition: DelayedTriggerCondition::WhenDies {
+                    filter: TargetFilter::Any,
+                },
+                ability: Box::new(ability),
+                controller,
+                source_id: source,
+                one_shot: true,
+                provenance: DelayedInstallIdentity::LegacyDelayed,
+            });
+
+            let death = zone_changed_event(
+                victim,
+                Zone::Battlefield,
+                Zone::Graveyard,
+                vec![CoreType::Creature],
+                Vec::new(),
+            );
+            check_delayed_triggers(&mut state, &[death]);
+            state.stack.len()
+        }
+
+        assert_eq!(
+            run(crate::types::ability::SubAbilityLink::SequentialSibling),
+            1,
+            "CR 702.1c: a replicated OR-branch on a SequentialSibling link is exactly what \
+             `resolve_chain_body` still runs through a false parent gate, so the hoist \
+             must decline and the ability must still reach the stack"
+        );
+        assert_eq!(
+            run(crate::types::ability::SubAbilityLink::ContinuationStep),
+            0,
+            "CR 603.4: on a ContinuationStep link the resolver would NOT have run the sub \
+             either, so nothing survives the false gate and the whole ability must be \
+             gated off the stack"
+        );
+    }
+
+    /// CR 603.4 + CR 903.3d for the NEGATED commander gate ("if you don't
+    /// control your commander").
+    ///
+    /// The hoist composes two bridges, and only the FIRST had a negated
+    /// commander arm: `ability_condition_to_static_condition` produced
+    /// `Not{ControlsCommander}` while
+    /// `static_condition_to_trigger_condition`'s `Not` sub-match fell through to
+    /// `_ => None`, so `delayed_intervening_if` returned `None` and the negated
+    /// gate kept only the resolution-time half of CR 603.4.
+    ///
+    /// REVERT-TO-RED: remove the `StaticCondition::ControlsCommander` arm from
+    /// that `Not` sub-match (`oracle_trigger.rs`) and the no-commander half below
+    /// reports `stack == 1` — the ability was put onto the stack instead of
+    /// having never triggered.
+    #[test]
+    fn negated_delayed_intervening_if_gates_at_fire_time_too() {
+        fn run(stage_commander: bool) -> usize {
+            let mut state = setup();
+            let controller = PlayerId(0);
+            state.active_player = controller;
+            state.priority_player = controller;
+
+            let source = create_object(
+                &mut state,
+                CardId(0x0603_0405),
+                controller,
+                "Negated Rider".to_string(),
+                Zone::Battlefield,
+            );
+            if stage_commander {
+                let commander = make_creature(&mut state, controller, "Your Commander", 2, 2);
+                state
+                    .objects
+                    .get_mut(&commander)
+                    .expect("staged commander")
+                    .is_commander = true;
+            }
+            let victim = make_creature(&mut state, PlayerId(1), "Doomed Squire", 1, 1);
+
+            let mut ability =
+                ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+            ability.condition = Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::ControlsCommander {
+                    ownership: CommanderOwnership::Own,
+                }),
+            });
+            state.delayed_triggers.push(DelayedTrigger {
+                condition: DelayedTriggerCondition::WhenDies {
+                    filter: TargetFilter::Any,
+                },
+                ability: Box::new(ability),
+                controller,
+                source_id: source,
+                one_shot: true,
+                provenance: DelayedInstallIdentity::LegacyDelayed,
+            });
+
+            let death = zone_changed_event(
+                victim,
+                Zone::Battlefield,
+                Zone::Graveyard,
+                vec![CoreType::Creature],
+                Vec::new(),
+            );
+            check_delayed_triggers(&mut state, &[death]);
+            state.stack.len()
+        }
+
+        assert_eq!(
+            run(true),
+            0,
+            "CR 603.4: with a commander on the battlefield the NEGATED gate is false at \
+             fire time, so the ability must never be put onto the stack"
+        );
+        assert_eq!(
+            run(false),
+            1,
+            "reachability proof: with no commander the negated gate is TRUE and the same \
+             fixture reaches the stack"
+        );
+    }
+
+    /// HOSTILE fixture for the narrowed carve-out's OTHER arm (CR 603.12).
+    ///
+    /// A sub whose own gate is a performed/reflexive one ("…, if you do, …" —
+    /// Council's Deliberation's shape, the only conditioned delayed body with a
+    /// sub in the pool today) is re-evaluated on its own at resolution, so
+    /// `delayed_body_outlives_a_false_gate` conservatively declines the CR 603.4
+    /// hoist and this class keeps byte-identical behaviour: the ability still
+    /// reaches the stack even with the parent gate false.
+    ///
+    /// REVERT-TO-RED: drop the `condition_survives_false_parent_gate` arm and the
+    /// hoist fires, the stack stays empty, and the in-pool reflexive shape changes
+    /// behaviour as a side effect of a commander-gate fix.
+    #[test]
+    fn delayed_body_with_a_reflexive_sub_is_never_gated_off_the_stack() {
+        let mut state = setup();
+        let controller = PlayerId(0);
+        state.active_player = controller;
+        state.priority_player = controller;
+
+        let source = create_object(
+            &mut state,
+            CardId(0x0603_0404),
+            controller,
+            "Reflexive Rider".to_string(),
+            Zone::Battlefield,
+        );
+        let victim = make_creature(&mut state, PlayerId(1), "Doomed Squire", 1, 1);
+
+        let mut ability = ResolvedAbility::new(Effect::BecomeMonarch, vec![], source, controller);
+        ability.condition = Some(AbilityCondition::ControlsCommander {
+            ownership: CommanderOwnership::Own,
+        });
+        let mut sub = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            controller,
+        );
+        sub.condition = Some(AbilityCondition::effect_performed());
+        // Reach-guard: the carve-out is keyed on this classification, not on the
+        // mere presence of a sub.
+        assert!(
+            crate::game::effects::condition_survives_false_parent_gate(
+                sub.condition.as_ref().expect("staged reflexive gate")
+            ),
+            "the fixture must carry a gate the shared authority classifies as \
+             surviving a false parent gate"
+        );
+        ability.sub_ability = Some(Box::new(sub));
+
+        state.delayed_triggers.push(DelayedTrigger {
+            condition: DelayedTriggerCondition::WhenDies {
+                filter: TargetFilter::Any,
+            },
+            ability: Box::new(ability),
+            controller,
+            source_id: source,
+            one_shot: true,
+            provenance: DelayedInstallIdentity::LegacyDelayed,
+        });
+
+        let death = zone_changed_event(
+            victim,
+            Zone::Battlefield,
+            Zone::Graveyard,
+            vec![CoreType::Creature],
+            Vec::new(),
+        );
+        check_delayed_triggers(&mut state, &[death]);
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "a body whose sub carries a CR 603.12 performed gate keeps its resolution-time \
+             reading and must still reach the stack"
         );
     }
 

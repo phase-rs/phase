@@ -386,9 +386,14 @@ pub(crate) enum ContinuationAst {
         chosen_destination: Zone,
         rest_destination: Zone,
     },
-    /// "Put those cards on top ..." after a search/dig/choice producer.
+    /// "Put those cards/the chosen cards on top ..." after a search/dig/choice
+    /// producer.
     /// Count is supplied by the already-selected target set.
     PutChosenCardsAtLibraryPosition { position: LibraryPosition },
+    /// CR 701.23a + CR 608.2c: "exile the rest" after a multi-zone search.
+    /// The searched player's cards in the searched zones, excluding the cards
+    /// selected by the SearchLibrary choice, are moved to exile.
+    ExileSearchRemainder,
     /// CR 702.170c-d: "It/that card/they become plotted" after an exile effect.
     BecomesPlotted,
     /// CR 702.143d: "It/that card/they become foretold" after an exile effect.

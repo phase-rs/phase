@@ -29,8 +29,8 @@
 use engine::game::effects::reveal_until;
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::ability::{
-    ControllerRef, Effect, QuantityExpr, QuantityRef, ResolvedAbility, RevealUntilDisposition,
-    TargetFilter, TypedFilter,
+    CardTypeSetSource, ControllerRef, Effect, QuantityExpr, QuantityRef, ResolvedAbility,
+    RevealUntilDisposition, TargetFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -43,8 +43,12 @@ use engine::types::zones::{EtbTapState, Zone};
 /// "the number of colors among permanents you control" — the Aurora/Sanar count.
 fn distinct_colors_count() -> QuantityExpr {
     QuantityExpr::Ref {
-        qty: QuantityRef::DistinctColorsAmongPermanents {
-            filter: TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+        qty: QuantityRef::DistinctColorsAmong {
+            source: CardTypeSetSource::Objects {
+                filter: TargetFilter::Typed(
+                    TypedFilter::permanent().controller(ControllerRef::You),
+                ),
+            },
         },
     }
 }
