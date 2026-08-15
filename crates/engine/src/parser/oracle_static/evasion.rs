@@ -2415,8 +2415,8 @@ pub(crate) fn parse_subject_combat_rule_static(text: &str) -> Option<StaticDefin
         ))
         .parse(rest)
         {
-            // CR 201.5: `it`, `this creature`, `this permanent`, and `~` name
-            // the static's source. The restriction is therefore attacker-side:
+            // `it`, `this creature`, `this permanent`, and `~` name the static's
+            // source. The restriction is therefore attacker-side:
             // the source can't be blocked by the parsed subject filter.
             Ok((after, Some(TargetFilter::SelfRef))) => (after, None, true),
             Ok((after, Some(object))) => (after, Some(object), false),

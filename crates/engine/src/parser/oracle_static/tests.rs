@@ -33068,7 +33068,7 @@ fn shapes_without_an_object_keep_their_existing_lowering() {
     );
 }
 
-/// CR 201.5 + CR 509.1b: when the OBJECT is the source, the subject is the
+/// CR 509.1b: when the OBJECT is the source, the subject is the
 /// blocker filter and the static must lower to the attacker-side
 /// `CantBeBlockedBy` dual on the source. This reaches the shared self-reference
 /// grammar for every source spelling rather than relying on the old

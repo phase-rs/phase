@@ -13857,7 +13857,7 @@ mod tests {
         );
     }
 
-    /// CR 201.5 + CR 509.1b: source-pronoun block objects are attacker-side
+    /// CR 509.1b: source-pronoun block objects are attacker-side
     /// evasion restrictions. This drives the parser-produced static through the
     /// production pair and declaration validators: a Coward cannot block the
     /// source, but can still block another attacker and a non-Coward can block
