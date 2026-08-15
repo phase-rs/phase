@@ -7123,8 +7123,9 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             // rows, whose `control` is always `None` per CR 110.1 @ :614).
             // `*row_control` is a `Copy` read out of the `&'static` table row.
             let mut control: Option<ControlClausePossessor> = *row_control;
-            // CR 614.1c (:3062) + CR 508.4 (:2312) + CR 708.3 (:5723) + CR
-            // 110.2a (:618) + CR 122.1 (:1178): battlefield-entry riders, the control
+            // CR 122.6 (:1208): putting counters on an object includes giving
+            // counters to it as it enters the battlefield. Battlefield-entry
+            // riders, the control
             // clause and the "with … counter(s)" clause are INDEPENDENT entry
             // conditions printed in any order ("under your control face down and
             // tapped", "tapped and with two stun counters on it"). Consume them
@@ -10852,7 +10853,8 @@ pub(crate) fn parse_with_counters_suffix_spanned(
         .unwrap_or((Vec::new(), None))
 }
 
-/// CR 122.1 + CR 614.1c: the body of a `"with …"` enter-with-counters rider —
+/// CR 122.6: the body of a `"with …"` rider that gives counters as an object
+/// enters the battlefield —
 /// the `"with "` token followed by ONE OR MORE counter clauses conjoined by
 /// `" and "`. The conjoined form is printed and load-bearing:
 ///   * "return target permanent card from your graveyard to the battlefield
@@ -10889,7 +10891,7 @@ fn parse_enter_counters_clause_body(
     .parse(input)
 }
 
-/// CR 614.1c: the enter-with-counters rider in LEADING position, tolerating the
+/// CR 122.6: the enter-with-counters rider in LEADING position, tolerating the
 /// same optional `" and"` / `","` connector that [`parse_one_battlefield_rider`]
 /// accepts — the two are sibling entry conditions printed in any order ("to the
 /// battlefield tapped and with two stun counters on it"), so they must agree on
@@ -10911,8 +10913,8 @@ fn parse_leading_enter_counters_clause(
     .parse(input)
 }
 
-/// CR 122.1 + CR 614.1c: Combinator body for "[N|a|an] [additional ]<type>
-/// counter(s) on it". Used by `parse_with_counters_suffix` AND by the exile-
+/// Combinator body for "[N|a|an] [additional ]<type> counter(s) on it". Used by
+/// `parse_with_counters_suffix` AND by the exile-
 /// anaphor counter clause in `oracle_replacement.rs` so both paths share the
 /// same grammar.
 ///
