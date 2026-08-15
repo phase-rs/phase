@@ -252,7 +252,6 @@ pub fn type_line_is_land(type_line: &str) -> bool {
         .split_whitespace()
         .any(|word| word.eq_ignore_ascii_case("land"))
 }
-}
 
 /// A pack of cards, newtype wrapper over Vec<DraftCardInstance>.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
