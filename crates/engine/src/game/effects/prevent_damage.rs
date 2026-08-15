@@ -184,12 +184,18 @@ fn untargeted_damage_filter(
         // object-only `valid_card` slot would silently drop the player ("you")
         // leg, so it must yield `Some` here (and `typed_recipient_valid_card_filter`
         // returns `None` for it) — the shield's controller is the recipient player.
-        TargetFilter::ControllerAndControlledPermanents { permanent_type } => {
-            Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
-                player: DamageTargetPlayerScope::Controller,
-                permanent_type: *permanent_type,
-            })
-        }
+        //
+        // CR 109.1: the "other" article is carried straight through (The
+        // Wanderer's "you and OTHER permanents you control" must not prevent
+        // damage dealt to The Wanderer itself).
+        TargetFilter::ControllerAndControlledPermanents {
+            permanent_type,
+            source_scope,
+        } => Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
+            player: DamageTargetPlayerScope::Controller,
+            permanent_type: *permanent_type,
+            source_scope: *source_scope,
+        }),
         // CR 608.2c + CR 611.2c + CR 615.11 (issue #6682): a tracked-set
         // recipient ("those permanents"/"those creatures" — Mutational
         // Advantage's clause-derived population, Energy Arc's target-derived

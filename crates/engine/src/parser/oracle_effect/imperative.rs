@@ -24,6 +24,8 @@ use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
 use crate::parser::oracle_nom::enters_under::{bind_control_clause, name_entry_control_antecedent};
+use crate::parser::oracle_nom::filter as nom_filter;
+use crate::parser::oracle_nom::filter::ControlledPermanentsConjunct;
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::parser::oracle_nom::quantity as nom_quantity;
 use crate::parser::oracle_nom::target as nom_target;
@@ -6357,15 +6359,22 @@ fn parse_prevent_effect(text: &str, parent_target_available: bool) -> Effect {
         } else {
             TargetFilter::Any
         }
-    } else if let Some(permanent_type) = parse_compound_you_and_permanents(text, &lower) {
-        // CR 615 + CR 614.1a: "to you and [<type>] permanents you control" — a
-        // compound player+permanent recipient (Comeuppance's "you and
-        // planeswalkers you control"; Channel Harm's "you and permanents you
-        // control"). Checked BEFORE the bare "to you" scan (which this phrase
-        // also contains) so the permanent leg is not dropped. Lowered to the
-        // dedicated `DamageTargetFilter::PlayerOrPermanentsControlledBy` at
-        // shield creation — never to a bare `Or` that would leak to `valid_card`.
-        TargetFilter::ControllerAndControlledPermanents { permanent_type }
+    } else if let Some(conjunct) = parse_compound_you_and_permanents(text, &lower) {
+        // CR 615 + CR 614.1a: "to you and [other] [<type>] permanents you
+        // control" — a compound player+permanent recipient (Comeuppance's "you
+        // and planeswalkers you control"; Channel Harm's "you and permanents you
+        // control"; The Wanderer's "you and OTHER permanents you control").
+        // Checked BEFORE the bare "to you" scan (which this phrase also contains)
+        // so the permanent leg is not dropped. Lowered to the dedicated
+        // `DamageTargetFilter::PlayerOrPermanentsControlledBy` at shield creation
+        // — never to a bare `Or` that would leak to `valid_card`.
+        //
+        // CR 109.1: `source_scope` carries the "other" article through so the
+        // shield does not claim damage dealt to its own source.
+        TargetFilter::ControllerAndControlledPermanents {
+            permanent_type: conjunct.permanent_type,
+            source_scope: conjunct.source_scope,
+        }
     } else if nom_primitives::scan_contains(rest, "to you")
         || nom_primitives::scan_contains(rest, "to its controller")
     {
@@ -6425,33 +6434,23 @@ fn parse_prevent_that_would_deal_source_filter(text: &str, lower: &str) -> Optio
     }
 }
 
-/// CR 615 + CR 614.1a: Recognize the compound damage recipient "you and
-/// [`<type>`] permanents you control". Returns the permanent-leg type
-/// restriction — `Some(Some(Planeswalker))` for Comeuppance's "you and
-/// planeswalkers you control", `Some(None)` for Channel Harm's bare "you and
-/// permanents you control", and `None` when the phrase is absent. Nom
-/// combinators only — the plural type word is a single `alt()` axis.
-fn parse_compound_you_and_permanents(text: &str, lower: &str) -> Option<Option<CoreType>> {
+/// CR 615 + CR 614.1a + CR 109.1: Recognize the compound damage recipient "you
+/// and \[other\] [`<type>`] permanents you control". Returns the parsed conjunct
+/// — the permanent-leg type restriction plus the CR 109.1 self-exclusion article
+/// — or `None` when the phrase is absent.
+///
+/// The noun phrase itself is NOT re-spelled here: it delegates to
+/// [`nom_filter::parse_controlled_permanents_conjunct`], the single authority
+/// shared with the replacement surface's `parse_damage_target_phrase`. That is
+/// what keeps "artifacts/enchantments/lands you control" and the "other" article
+/// available on both surfaces instead of drifting apart.
+fn parse_compound_you_and_permanents(
+    text: &str,
+    lower: &str,
+) -> Option<ControlledPermanentsConjunct> {
     let region = TextPair::new(text, lower).strip_after("to you and ")?;
-    let (_, permanent_type) = you_and_controlled_permanent_type(region.lower).ok()?;
-    Some(permanent_type)
-}
-
-/// CR 614.1a: "`<plural-type>` you control" tail of the compound recipient. Maps
-/// the plural permanent-type word to its `CoreType` restriction; bare
-/// "permanents" carries no restriction (`None`).
-fn you_and_controlled_permanent_type(input: &str) -> OracleResult<'_, Option<CoreType>> {
-    let (input, permanent_type) = alt((
-        value(Some(CoreType::Planeswalker), tag("planeswalkers")),
-        value(Some(CoreType::Creature), tag("creatures")),
-        value(Some(CoreType::Artifact), tag("artifacts")),
-        value(Some(CoreType::Enchantment), tag("enchantments")),
-        value(Some(CoreType::Land), tag("lands")),
-        value(None, tag("permanents")),
-    ))
-    .parse(input)?;
-    let (input, _) = tag(" you control").parse(input)?;
-    Ok((input, permanent_type))
+    let (_, conjunct) = nom_filter::parse_controlled_permanents_conjunct(region.lower).ok()?;
+    Some(conjunct)
 }
 
 /// CR 615.1 + CR 609.7b: Optional trailing "by [source-filter]" on
@@ -21441,6 +21440,7 @@ mod tests {
     /// restriction (Channel Harm).
     #[test]
     fn prevent_compound_recipient_you_and_controlled_permanents() {
+        use crate::types::ability::ControlledPermanentsScope;
         use crate::types::card_type::CoreType;
 
         let planeswalker_text =
@@ -21452,7 +21452,8 @@ mod tests {
         assert_eq!(
             target,
             TargetFilter::ControllerAndControlledPermanents {
-                permanent_type: Some(CoreType::Planeswalker)
+                permanent_type: Some(CoreType::Planeswalker),
+                source_scope: ControlledPermanentsScope::IncludingSource,
             }
         );
 
@@ -21465,8 +21466,37 @@ mod tests {
         assert_eq!(
             target,
             TargetFilter::ControllerAndControlledPermanents {
-                permanent_type: None
+                permanent_type: None,
+                source_scope: ControlledPermanentsScope::IncludingSource,
             }
+        );
+
+        // CR 109.1: the "other" article must reach the recipient rather than being
+        // dropped, and the permanent leg must not collapse to a bare `Controller`.
+        // Before the shared conjunct authority this phrase matched NO compound arm
+        // at all on this surface (the old copy had no "other" prefix), so the whole
+        // permanent leg was silently lost.
+        //
+        // HONESTY NOTE: the text is The Wanderer's VERBATIM first line, but the
+        // CARD does not reach this parser — a printed static "Prevent all …" line
+        // is claimed earlier by `oracle_replacement::parse_damage_prevention_
+        // replacement`, which still collapses the victim to `Player { Controller }`
+        // and drops the permanent leg. That is a separate, pre-existing gap on the
+        // static-replacement surface and is NOT fixed here; this assertion pins the
+        // `Effect::PreventDamage` surface's own behavior for the same phrase.
+        let wanderer_text =
+            "Prevent all noncombat damage that would be dealt to you and other permanents you control.";
+        let Effect::PreventDamage { target, .. } = parse_prevent_effect(wanderer_text, false)
+        else {
+            panic!("expected PreventDamage");
+        };
+        assert_eq!(
+            target,
+            TargetFilter::ControllerAndControlledPermanents {
+                permanent_type: None,
+                source_scope: ControlledPermanentsScope::ExcludingSource,
+            },
+            "The Wanderer must exclude itself from its own noncombat-damage shield"
         );
     }
 

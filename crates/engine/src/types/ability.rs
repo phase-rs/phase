@@ -1339,10 +1339,11 @@ pub enum PreventionAmount {
     AllBut(u32),
 }
 
-/// CR 614.9: Recipient of a one-shot damage-redirection effect — the
+/// CR 614.9: Recipient of a damage-redirection effect — the
 /// battle/creature/planeswalker/player the replaced damage is dealt to instead.
-/// Resolved to a concrete object/player at effect-resolution time (see
-/// `effects::create_damage_replacement::resolve`).
+/// Each variant is a distinct IDENTITY SOURCE for that recipient, resolved
+/// against live game state at damage-apply time by
+/// `effects::create_damage_replacement::resolve_redirect_recipient`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DamageRedirectTarget {
@@ -1355,6 +1356,15 @@ pub enum DamageRedirectTarget {
     /// "...to target creature instead" — an object chosen as a target of the
     /// creating ability (Soltari Guerrillas).
     ChosenObjectTarget,
+    /// CR 303.4b + CR 301.5a: "...to enchanted creature instead" / "...to
+    /// equipped creature instead" — the permanent this replacement's source is
+    /// attached to (Pariah, Pariah's Shield, With Great Power . . .).
+    ///
+    /// Resolved LIVE from the source's `attached_to` at apply time, never latched
+    /// at install: if the attachment moves, the redirect follows it; if it falls
+    /// off, CR 614.9 makes the redirection do nothing and the damage stays on its
+    /// original recipient.
+    AttachedToSource,
 }
 
 /// Shield type for one-shot replacement effects that expire at cleanup.
@@ -1373,14 +1383,55 @@ pub enum ShieldKind {
     /// a continuous static `damage_modification` (Furnace of Rath), which keeps
     /// `ShieldKind::None` and re-applies to every damage event.
     DamageReplacementOneShot,
-    /// CR 614.9: One-shot redirection shield — replaces all or part of a damage
-    /// event's recipient with `recipient`. `All` covers "the next time ... would
-    /// deal damage"; `Next(n)` covers "the next N damage ... is dealt to ..."
-    /// redirections. Consumed on use, expires at cleanup.
+    /// CR 614.9: Redirection shield — replaces all or part of a damage event's
+    /// recipient with `recipient`. `All` covers "the next time ... would deal
+    /// damage"; `Next(n)` covers "the next N damage ... is dealt to ..."
+    /// redirections. Expires at cleanup.
+    ///
+    /// `lifetime` is the CR 614.5-vs-CR 611.2a axis: whether the shield spends a
+    /// single opportunity (Desperate Gambit, the en-Kor cycle) or applies
+    /// continuously to every matching event in its window (Heroic Sacrifice,
+    /// Gideon's Sacrifice). See [`RedirectionLifetime`].
     Redirection {
         recipient: DamageRedirectTarget,
         amount: PreventionAmount,
+        #[serde(default)]
+        lifetime: RedirectionLifetime,
     },
+}
+
+/// CR 614.5 vs CR 611.2a: how many damage events one `ShieldKind::Redirection`
+/// applies to.
+///
+/// This is a genuine grammar-borne axis, NOT derivable from the shield's other
+/// fields: "the next time … would deal damage … instead" and "until end of turn,
+/// all damage … is dealt to X instead" both carry `PreventionAmount::All`, yet
+/// the first is spent by one event and the second is not.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum RedirectionLifetime {
+    /// CR 614.5: "a replacement effect gets only one opportunity to affect an
+    /// event" — this shield is consumed after the single event it applies to
+    /// (whether or not the redirection itself did anything, per CR 614.9).
+    /// "The next time …" / "the next N damage …" (Desperate Gambit, Soltari
+    /// Guerrillas, Jade Monolith, the en-Kor cycle).
+    #[default]
+    OneOpportunity,
+    /// CR 611.2a: a continuous effect created by a resolving spell or ability
+    /// with a stated duration — it re-applies to EVERY matching damage event
+    /// until the shield is pruned at cleanup (CR 514.2). "Until end of turn, all
+    /// damage that would be dealt to you and creatures you control is dealt to
+    /// the chosen creature instead" (Heroic Sacrifice, Gideon's Sacrifice,
+    /// Saving Grace).
+    Continuous,
+}
+
+impl RedirectionLifetime {
+    /// True for the CR 614.5 single-opportunity lifetime (the serde default, so
+    /// this doubles as the `skip_serializing_if` predicate).
+    pub fn is_one_opportunity(&self) -> bool {
+        matches!(self, RedirectionLifetime::OneOpportunity)
+    }
 }
 
 impl ShieldKind {
@@ -5317,9 +5368,13 @@ pub enum TargetFilter {
     /// dropped) — `typed_recipient_valid_card_filter` returns `None` for it and
     /// `untargeted_damage_filter` always yields `Some`. `permanent_type` restricts
     /// the permanent leg (`Some(Planeswalker)` for Comeuppance; `None` = any
-    /// permanent you control).
+    /// permanent you control), and `source_scope` carries the "OTHER" article
+    /// (The Wanderer's "you and other permanents you control") so the permanent
+    /// leg can exclude the ability's own source.
     ControllerAndControlledPermanents {
         permanent_type: Option<CoreType>,
+        #[serde(default)]
+        source_scope: ControlledPermanentsScope,
     },
     /// CR 102.2 + CR 102.3 + CR 601.2c: A player reference to an opponent of the
     /// ability's controller, used as the announcing player (`target_chooser`) for
@@ -13263,6 +13318,18 @@ pub enum Effect {
         /// Soltari) or implicit ("you" — Beacon).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         recipient_object_filter: Option<TargetFilter>,
+        /// CR 614.5 vs CR 611.2a: whether the created redirection shield spends a
+        /// single opportunity or applies continuously until cleanup. Carried from
+        /// the Oracle grammar — "the next time / the next N damage" is
+        /// `OneOpportunity`, "\[until end of turn,\] all damage that would be
+        /// dealt … is dealt to `<recipient>` instead" is `Continuous` — because
+        /// the two forms are indistinguishable from the shield's other fields.
+        /// Meaningless for the `modification` form, which is always one-shot.
+        #[serde(
+            default,
+            skip_serializing_if = "RedirectionLifetime::is_one_opportunity"
+        )]
+        redirect_lifetime: RedirectionLifetime,
     },
     /// CR 614.1a + CR 614.6 + CR 514.2 + CR 121.1: install a one-shot, this-turn
     /// "the next time you would draw a card this turn, [effect] instead" draw
@@ -23428,6 +23495,42 @@ pub enum DamageTargetPlayerScope {
     Specific(PlayerId),
 }
 
+/// CR 109.1 (cited as identity foundation — the CR has no dedicated "another"
+/// entry; mirrors the citation on [`FilterProp::Another`]): whether the
+/// controlled-permanents leg of a compound "`<player>` and \[other\] `<plural
+/// type>` you control" recipient includes the object the ability is printed on.
+///
+/// This is the typed home of the "OTHER" article that the phrase grammar reads.
+/// It is a genuine rules axis, not a cosmetic one: Palisade Giant, Ancient
+/// Adamantoise and The Wanderer say "other permanents you control", so their own
+/// shield must NOT claim damage dealt to the shield host, while Comeuppance,
+/// Channel Harm, Blessed Sanctuary and Heroic Sacrifice say "permanents/creatures
+/// you control" with no exclusion.
+///
+/// CR 614.5 ("a replacement effect gets only one opportunity to affect an
+/// event") makes the distinction invisible for a LONE self-recipient shield, but
+/// not once a second applicable replacement exists: under CR 616.1 the affected
+/// player is offered every applicable replacement, and offering a self-no-op
+/// burns the CR 614.5 opportunity on the wrong shield.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ControlledPermanentsScope {
+    /// "…and permanents you control" — no exclusion stated; every permanent the
+    /// scoped player controls, including the ability's own source.
+    #[default]
+    IncludingSource,
+    /// "…and OTHER permanents you control" — the object this ability is printed
+    /// on is excluded from the permanent leg.
+    ExcludingSource,
+}
+
+impl ControlledPermanentsScope {
+    /// True when the permanent leg excludes the ability's own source object.
+    pub fn excludes_source(self) -> bool {
+        matches!(self, ControlledPermanentsScope::ExcludingSource)
+    }
+}
+
 /// CR 614.1a: Restricts which damage targets a replacement applies to.
 /// Dedicated enum because `TargetRef` can be `Player` (not handled by `matches_target_filter`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -23445,9 +23548,15 @@ pub enum DamageTargetFilter {
     /// planeswalkers you control"), `None` for the unrestricted "you/that player
     /// and permanents they control" (Channel Harm, the opponent-redirect cycle).
     /// The player leg is always matched regardless of this restriction.
+    ///
+    /// CR 109.1: `source_scope` carries the "OTHER" article — Palisade Giant's
+    /// "you and OTHER permanents you control" excludes the shield host itself
+    /// from the permanent leg. See [`ControlledPermanentsScope`].
     PlayerOrPermanentsControlledBy {
         player: DamageTargetPlayerScope,
         permanent_type: Option<CoreType>,
+        #[serde(default)]
+        source_scope: ControlledPermanentsScope,
     },
 }
 
@@ -23958,14 +24067,21 @@ impl ReplacementDefinition {
         self
     }
 
-    /// CR 614.9: Mark this replacement as a one-shot redirection shield that
-    /// re-targets the damage recipient. Consumed on use, expires at cleanup.
+    /// CR 614.9: Mark this replacement as a redirection shield that re-targets
+    /// the damage recipient. Expires at cleanup; `lifetime` decides whether it is
+    /// also consumed by its first event (CR 614.5) or re-applies to every
+    /// matching event in its window (CR 611.2a).
     pub fn redirection_shield(
         mut self,
         recipient: DamageRedirectTarget,
         amount: PreventionAmount,
+        lifetime: RedirectionLifetime,
     ) -> Self {
-        self.shield_kind = ShieldKind::Redirection { recipient, amount };
+        self.shield_kind = ShieldKind::Redirection {
+            recipient,
+            amount,
+            lifetime,
+        };
         self
     }
 

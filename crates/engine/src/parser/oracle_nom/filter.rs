@@ -17,9 +17,10 @@ use super::primitives::{
 };
 use super::quantity::{parse_quantity_expr_number, parse_quantity_ref};
 use crate::types::ability::{
-    AggregateFunction, Comparator, ControllerRef, FilterProp, ObjectProperty, PtStat, PtValueScope,
-    QuantityExpr,
+    AggregateFunction, Comparator, ControlledPermanentsScope, ControllerRef, FilterProp,
+    ObjectProperty, PtStat, PtValueScope, QuantityExpr,
 };
+use crate::types::card_type::CoreType;
 #[cfg(test)]
 use crate::types::counter::CounterType;
 use crate::types::counter::{parse_counter_type, CounterMatch};
@@ -501,9 +502,121 @@ pub fn parse_color_property(input: &str) -> OracleResult<'_, FilterProp> {
     .parse(input)
 }
 
+/// CR 614.1a + CR 109.1: the parsed "\[other\] `<plural-type>` you control" tail
+/// of a compound damage recipient. A named struct rather than a tuple so both
+/// axes are explicit at every call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlledPermanentsConjunct {
+    /// CR 614.1a: restriction on the permanent leg — `None` for bare
+    /// "permanents", `Some(ct)` for a plural type word.
+    pub permanent_type: Option<CoreType>,
+    /// CR 109.1: whether the leading "other" article excluded the ability's own
+    /// source object.
+    pub source_scope: ControlledPermanentsScope,
+}
+
+/// CR 614.1a + CR 109.1: SINGLE AUTHORITY for the "\[other\] `<plural-type>` you
+/// control" noun phrase that follows "…to you and " in a compound damage
+/// recipient.
+///
+/// Both damage surfaces compose this one combinator rather than re-spelling the
+/// noun list:
+/// * `oracle_effect::imperative::parse_compound_you_and_permanents` →
+///   `TargetFilter::ControllerAndControlledPermanents` (the `Effect::PreventDamage`
+///   half: Comeuppance, Channel Harm, Blessed Sanctuary, Safe Passage, The
+///   Wanderer).
+/// * `oracle_replacement::parse_damage_target_phrase` →
+///   `DamageTargetFilter::PlayerOrPermanentsControlledBy` (the replacement half:
+///   Palisade Giant, Ancient Adamantoise, Heroic Sacrifice, Gideon's Sacrifice).
+///
+/// They previously kept two hand-rolled copies that had already drifted apart in
+/// both directions — one knew six nouns but not "other", the other knew "other"
+/// but only three nouns. One combinator, one noun `alt()`, one article `opt()`.
+///
+/// Composed one axis per combinator: the optional CR 109.1 "other" article, the
+/// plural type noun, and the fixed " you control" suffix.
+pub fn parse_controlled_permanents_conjunct(
+    input: &str,
+) -> OracleResult<'_, ControlledPermanentsConjunct> {
+    let (input, other) = opt(tag("other ")).parse(input)?;
+    let (input, permanent_type) = alt((
+        value(Some(CoreType::Planeswalker), tag("planeswalkers")),
+        value(Some(CoreType::Creature), tag("creatures")),
+        value(Some(CoreType::Artifact), tag("artifacts")),
+        value(Some(CoreType::Enchantment), tag("enchantments")),
+        value(Some(CoreType::Land), tag("lands")),
+        value(None, tag("permanents")),
+    ))
+    .parse(input)?;
+    let (input, _) = tag(" you control").parse(input)?;
+    Ok((
+        input,
+        ControlledPermanentsConjunct {
+            permanent_type,
+            source_scope: match other {
+                Some(_) => ControlledPermanentsScope::ExcludingSource,
+                None => ControlledPermanentsScope::IncludingSource,
+            },
+        },
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CR 614.1a + CR 109.1: the single authority must cover every plural noun
+    /// BOTH former copies knew, and must carry the "other" article rather than
+    /// discarding it.
+    #[test]
+    fn controlled_permanents_conjunct_covers_every_noun_and_the_other_article() {
+        for (phrase, expected_type) in [
+            ("permanents you control", None),
+            ("creatures you control", Some(CoreType::Creature)),
+            ("planeswalkers you control", Some(CoreType::Planeswalker)),
+            ("artifacts you control", Some(CoreType::Artifact)),
+            ("enchantments you control", Some(CoreType::Enchantment)),
+            ("lands you control", Some(CoreType::Land)),
+        ] {
+            let (rest, plain) = parse_controlled_permanents_conjunct(phrase)
+                .unwrap_or_else(|_| panic!("{phrase} must parse"));
+            assert!(rest.is_empty(), "{phrase} must be fully consumed");
+            assert_eq!(plain.permanent_type, expected_type);
+            assert_eq!(
+                plain.source_scope,
+                ControlledPermanentsScope::IncludingSource,
+                "no \"other\" article means the source is included"
+            );
+
+            let othered = format!("other {phrase}");
+            let (rest, excluded) = parse_controlled_permanents_conjunct(&othered)
+                .unwrap_or_else(|_| panic!("{othered} must parse"));
+            assert!(rest.is_empty());
+            assert_eq!(excluded.permanent_type, expected_type);
+            assert_eq!(
+                excluded.source_scope,
+                ControlledPermanentsScope::ExcludingSource,
+                "the \"other\" article must reach the caller, not be opt()-discarded"
+            );
+        }
+    }
+
+    /// Hostile: the combinator must not claim a phrase whose controller clause is
+    /// absent or inverted, and must leave the remainder untouched on failure.
+    #[test]
+    fn controlled_permanents_conjunct_fails_closed_off_grammar() {
+        for phrase in [
+            "permanents an opponent controls",
+            "creatures",
+            "other stuff you control",
+            "creature you control",
+        ] {
+            assert!(
+                parse_controlled_permanents_conjunct(phrase).is_err(),
+                "{phrase} must not be claimed by the conjunct authority"
+            );
+        }
+    }
 
     #[test]
     fn test_parse_zone_filter_battlefield() {
