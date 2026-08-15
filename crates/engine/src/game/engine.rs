@@ -18279,9 +18279,13 @@ mod stage2_injector_tests {
                 // added to `compute_options`' sibling classifier in this file,
                 // which sits above all three producers. Nothing added raises a
                 // `WaitingFor`; the census set is still exactly 5.
-                "game/effects/mod.rs:6656".to_string(),
-                "game/effects/mod.rs:6733".to_string(),
-                "game/effects/mod.rs:9974".to_string(),
+                // Doomsday selected-search publication: `:6656/:6733/:9974 ⇒
+                // :6663/:6740/:9981`, uniform +7 from the typed tracked-set
+                // membership detector and its CR annotation. The producers
+                // remain byte-identical and the census set remains exactly 5.
+                "game/effects/mod.rs:6663".to_string(),
+                "game/effects/mod.rs:6740".to_string(),
+                "game/effects/mod.rs:9981".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
