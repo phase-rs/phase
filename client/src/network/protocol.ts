@@ -80,6 +80,10 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * of silently corrupting state.
  *
  * Bumps to date:
+ *  22 — LegalActionsWire.viewerInteraction carries attachmentViews: the engine's
+ *       membership list for each host's attachment fan. It parses on a v21 peer
+ *       as an empty map, so the loss is silent — a guest paired with a v21 host
+ *       would simply find every attachment fan gone.
  *  21 — LegalActionsWire.viewerInteraction carries the loop-shortcut preview,
  *       and the state snapshot carries WaitingFor::LoopShortcut.declaration.
  *       Both are optional and parse on a v20 peer; the loss is silent, so the
@@ -116,7 +120,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 21 as const;
+export const WIRE_PROTOCOL_VERSION = 22 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | { type: "guest_deck"; deckData: unknown; displayName?: string; reservationToken?: string }

@@ -29167,3 +29167,197 @@ fn event_source_lift_rewrites_inline_modal_tap_mode_roots() {
         }
     ));
 }
+
+// CR 120.1 + CR 120.2a + CR 120.2b + CR 120.6 + CR 120.10: the passive-voice
+// damage-received axis grid. These test the parameterized combinator's AXES
+// (voice × channel × kind × amount), not any single card's replay — the four
+// former `tag()` cells are kept as explicit regression guards below. The amount
+// axis is exercised as a REFUSAL: the combinator parses a threshold, but the
+// consumer arm declines to emit one because whole-event aggregation is not yet
+// modeled, so the tests below pin `Unknown` rather than a shape.
+
+#[test]
+fn dealt_damage_axes_noncombat_total() {
+    // CR 120.2b: noncombat damage is dealt as an effect of a spell or ability.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt noncombat damage, create that many Treasure tokens.",
+        "Some Card",
+    );
+    assert_eq!(def.mode, TriggerMode::DamageReceived);
+    assert_eq!(def.damage_kind, DamageKindFilter::NoncombatOnly);
+    assert_eq!(def.damage_amount, None);
+    assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn dealt_damage_axes_amount_threshold_is_refused() {
+    // CR 120.4b + CR 120.4d: simultaneous damage is one event, so a received-
+    // damage threshold reads the event total. Innocent Bystander is this cell's
+    // entire population and its ruling requires "3 or more damage all at once",
+    // which the per-`(source, amount)` matcher cannot express. The arm refuses
+    // rather than emit a def that would silently under-fire on two 2-damage
+    // sources. Asserting `Unknown` — not a shape — is what makes this test able
+    // to fail if the refusal is ever dropped.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt 3 or more damage, investigate.",
+        "Some Card",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "amount-bearing received-damage triggers must stay honestly unsupported \
+         until the aggregation axis is modeled, got {:?}",
+        def.mode
+    );
+}
+
+#[test]
+fn dealt_damage_axes_amount_exactly_is_refused() {
+    // Same refusal on the tail's second comparator branch (`parse_exactly`):
+    // "exactly 2" is likewise a whole-event quantity.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt exactly 2 damage, draw a card.",
+        "Some Card",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "exactly-N received-damage triggers must stay honestly unsupported, got {:?}",
+        def.mode
+    );
+}
+
+#[test]
+fn dealt_damage_axes_plural_noncombat() {
+    // The plural voice parses, and the consumer arm does NOT set `batched` —
+    // that is the caller's `"one or more "` scan, pinned by the sibling test.
+    let def = parse_trigger_line(
+        "Whenever creatures you control are dealt noncombat damage, draw a card.",
+        "Some Card",
+    );
+    assert_eq!(def.mode, TriggerMode::DamageReceived);
+    assert_eq!(def.damage_kind, DamageKindFilter::NoncombatOnly);
+    assert!(
+        !def.batched,
+        "no SimpleEvent arm may set `batched`; only the caller's \"one or more \" scan does"
+    );
+}
+
+#[test]
+fn dealt_damage_axes_plural_one_or_more_noncombat() {
+    // CR 603.2c: the caller stamps `batched` from the subject phrase. This shape
+    // is newly reachable via the parameterization, so its batching is pinned as
+    // known-and-accepted. It pins ONLY the flag — a `"that many"` resolution on a
+    // batched damage trigger would resolve to a subject headcount, which is a
+    // deferred, currently card-less hazard.
+    let def = parse_trigger_line(
+        "Whenever one or more creatures you control are dealt noncombat damage, draw a card.",
+        "Some Card",
+    );
+    assert_eq!(def.mode, TriggerMode::DamageReceived);
+    assert_eq!(def.damage_kind, DamageKindFilter::NoncombatOnly);
+    assert!(def.batched);
+}
+
+#[test]
+fn dealt_damage_axes_excess_noncombat_unchanged() {
+    // CR 120.10: regression guard — a previously-covered excess cell is identical.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt excess noncombat damage, draw a card.",
+        "Some Card",
+    );
+    assert_eq!(def.mode, TriggerMode::ExcessDamageAll);
+    assert_eq!(def.damage_kind, DamageKindFilter::NoncombatOnly);
+    assert_eq!(def.damage_amount, None);
+}
+
+#[test]
+fn dealt_damage_axes_combat_unchanged() {
+    // CR 510 + CR 120.2a: regression guard for the combat cell.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt combat damage, draw a card.",
+        "Some Card",
+    );
+    assert_eq!(def.mode, TriggerMode::DamageReceived);
+    assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+}
+
+#[test]
+fn dealt_damage_axes_bare_unchanged() {
+    // Regression guard for the bare cell.
+    let def = parse_trigger_line("Whenever ~ is dealt damage, draw a card.", "Some Card");
+    assert_eq!(def.mode, TriggerMode::DamageReceived);
+    assert_eq!(def.damage_kind, DamageKindFilter::Any);
+}
+
+#[test]
+fn dealt_damage_excess_with_threshold_is_rejected() {
+    // CR 120.10: `ExcessDamageAll`'s matcher never reads `damage_amount`, so a
+    // threshold on the excess channel would be silently dropped. The combinator
+    // refuses instead, keeping the line honestly unsupported.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt excess 3 or more damage, draw a card.",
+        "Some Card",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "excess + threshold must be refused at parse time, got {:?}",
+        def.mode
+    );
+
+    // Paired positive reach-guard: the excess channel itself is live, so the
+    // negative above cannot pass vacuously via a dead combinator.
+    let reachable = parse_trigger_line(
+        "Whenever ~ is dealt excess damage, draw a card.",
+        "Some Card",
+    );
+    assert_eq!(reachable.mode, TriggerMode::ExcessDamageAll);
+}
+
+#[test]
+fn dealt_damage_newly_opened_cell_rejects_unmodeled_tail() {
+    // CR 603.2: an ability triggers when a game event matches ITS trigger event.
+    // Pain Magnification's "by a single source" is a per-source aggregation
+    // constraint the engine cannot represent, so on this NEWLY-OPENED cell the
+    // arm refuses the def rather than asserting a different (over-firing)
+    // trigger event. Verbatim Oracle text.
+    let def = parse_trigger_line(
+        "Whenever an opponent is dealt 3 or more damage by a single source, that player discards a card.",
+        "Pain Magnification",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "an unmodeled trailing restriction on a newly-opened cell must be refused, got {:?}",
+        def.mode
+    );
+
+    // Paired positive reach-guard — WITHOUT it the assertion above could pass
+    // vacuously, from the arm reaching no newly-opened cell at all. The control
+    // must therefore be a cell that is newly opened AND still emits: the
+    // noncombat/total cell, which no former `tag()` arm covered. It cannot be
+    // Innocent Bystander's `N or more` cell, which the amount guard now refuses
+    // for unmodelable whole-event aggregation (see `..._amount_threshold_is_refused`).
+    // Verbatim Oracle text.
+    let reachable = parse_trigger_line(
+        "Whenever Smaug is dealt noncombat damage, create that many Treasure tokens.",
+        "Smaug the Impenetrable",
+    );
+    assert_eq!(reachable.mode, TriggerMode::DamageReceived);
+    assert_eq!(reachable.damage_kind, DamageKindFilter::NoncombatOnly);
+}
+
+#[test]
+fn dealt_damage_previously_covered_cell_keeps_trailing_tail() {
+    // The honesty guard is AXIS-SCOPED, not blanket: a cell the former `tag()`
+    // arms already covered keeps its pre-existing behavior byte-identically.
+    // Chandra's Phoenix's dropped source restriction is a KNOWN PRE-EXISTING
+    // gap that predates the parameterization — recorded, not endorsed. Widening
+    // the guard to a blanket remainder check would regress this card (and,
+    // invisibly to coverage, Glyph of Life), so this test is the narrowness
+    // sentinel. Verbatim Oracle text.
+    let def = parse_trigger_line(
+        "Whenever an opponent is dealt damage by a red instant or sorcery spell you control or by a red planeswalker you control, return this card from your graveyard to your hand.",
+        "Chandra's Phoenix",
+    );
+    assert_eq!(def.mode, TriggerMode::DamageReceived);
+    assert_eq!(def.damage_kind, DamageKindFilter::Any);
+    assert_eq!(def.damage_amount, None);
+}

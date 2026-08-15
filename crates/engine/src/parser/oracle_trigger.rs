@@ -51,9 +51,9 @@ use crate::types::ability::{
     AdditionalCostOrigin, AdditionalCostPaymentSource, AggregateFunction, AttachmentKind,
     AttackersDeclaredCountSubject, CardSelectionMode, CastManaObjectScope, CastManaSpentMetric,
     CastVariantPaid, CoinFlipResult, Comparator, ControllerRef, CountScope, CounterTriggerFilter,
-    DamageKindFilter, DestinationConstraint, DieResultFilter, Effect, EffectScope, FilterProp,
-    ManaAbilityProducedFilter, ObjectScope, OriginConstraint, ParsedCondition, PlayerFilter,
-    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
+    DamageChannel, DamageKindFilter, DestinationConstraint, DieResultFilter, Effect, EffectScope,
+    FilterProp, ManaAbilityProducedFilter, ObjectScope, OriginConstraint, ParsedCondition,
+    PlayerFilter, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
     SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality, StaticCondition,
     SubAbilityLink, TapCreaturesRequirement, TapStateChange, TargetFilter, TriggerCondition,
     TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
@@ -11779,12 +11779,26 @@ fn try_parse_event(
         /// on the stack — "becomes the target of an ability [you control]". Loki,
         /// God of Mischief.
         BecomesTargetAbility,
-        DealtCombatDamage,
-        DealtDamage,
-        /// CR 120.10 + CR 120.2b: Excess noncombat damage received by the subject.
-        DealtExcessNoncombatDamage,
-        /// CR 120.10: Excess damage (combat or noncombat) received by the subject.
-        DealtExcessDamage,
+        /// CR 120.1 + CR 120.2a + CR 120.2b + CR 120.6 + CR 120.10: Passive-voice
+        /// damage-received event, decomposed into its independent grammatical axes
+        /// instead of one variant per cell of their product. Replaces the former
+        /// `DealtDamage` / `DealtCombatDamage` / `DealtExcessDamage` /
+        /// `DealtExcessNoncombatDamage` sibling cluster, which enumerated 8 of the 24
+        /// grammatical cells and left the rest unreachable — notably
+        /// "is dealt noncombat damage" and "is dealt N or more damage".
+        DealtDamage {
+            /// CR 120.6 (total damage marked) vs CR 120.10 (excess beyond lethal).
+            /// Selects the trigger mode: `Total` => `DamageReceived`,
+            /// `Excess` => `ExcessDamageAll`.
+            channel: DamageChannel,
+            /// CR 510 + CR 120.2a: combat damage, dealt in the combat damage step.
+            /// CR 120.2b: noncombat damage, dealt as an effect of a spell or ability.
+            /// `Any` matches either.
+            kind: DamageKindFilter,
+            /// CR 603.2 + CR 120.1: optional per-event threshold ("3 or more",
+            /// "exactly N"). `None` for the unquantified majority.
+            amount: Option<(Comparator, u32)>,
+        },
         BecomesTapped,
         TappedForMana,
         BecomesUntapped,
@@ -11831,6 +11845,50 @@ fn try_parse_event(
             )));
         }
         Ok((rest, SimpleEvent::BecomesUnattached(Some(filter))))
+    }
+    /// CR 120.1 + CR 120.2a + CR 120.2b + CR 120.6 + CR 120.10 + CR 510 + CR 603.2:
+    /// Passive-voice damage-received trigger event —
+    /// `"is|are dealt [excess ][combat |noncombat ][N or more ]damage"`.
+    ///
+    /// Composes the grammar's four independent axes rather than enumerating their
+    /// product (CLAUDE.md: "Compose nom combinators, don't enumerate permutations"):
+    ///   voice   — `"is dealt "` / `"are dealt "` (singular vs plural subject)
+    ///   channel — optional `"excess "` → `DamageChannel::{Total, Excess}`
+    ///   kind    — optional `"combat "` / `"noncombat "` → `DamageKindFilter`
+    ///   amount  — optional `"N or more "` / `"exactly N "` → `Option<(Comparator, u32)>`
+    ///
+    /// The kind/amount/head-noun tail is delegated to `parse_damage_predicate_tail`,
+    /// the SAME combinator the active-voice (`"deals damage"`) grammar uses, so a
+    /// future kind or comparator lands in both voices at once and the two cannot
+    /// drift.
+    ///
+    /// CR 120.10: an `Excess` channel carrying an explicit `amount` is rejected.
+    /// `DamageChannel::Excess` routes to `TriggerMode::ExcessDamageAll`, whose
+    /// matcher `match_excess_damage_all` gates on the event's `excess` field and
+    /// never reads `trigger.damage_amount` — the sibling `match_excess_damage`
+    /// documents the same deliberate omission for `TriggerMode::ExcessDamage`, and
+    /// `match_excess_damage_all`'s own doc cross-references it. Emitting a threshold
+    /// here would therefore silently drop it, so this combinator fails instead and
+    /// the line stays honestly `Effect::Unimplemented`. No printed card composes the two.
+    fn parse_dealt_damage_event(input: &str) -> OracleResult<'_, SimpleEvent> {
+        let (rest, _) = alt((tag("is dealt "), tag("are dealt "))).parse(input)?;
+        let (rest, channel) = opt(value(DamageChannel::Excess, tag("excess "))).parse(rest)?;
+        let (rest, (kind, amount)) = parse_damage_predicate_tail(rest)?;
+        let channel = channel.unwrap_or(DamageChannel::Total);
+        if matches!(channel, DamageChannel::Excess) && amount.is_some() {
+            return Err(nom::Err::Error(OracleError::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+        Ok((
+            rest,
+            SimpleEvent::DealtDamage {
+                channel,
+                kind,
+                amount,
+            },
+        ))
     }
     fn parse_simple_event(input: &str) -> OracleResult<'_, SimpleEvent> {
         alt((
@@ -11880,36 +11938,12 @@ fn try_parse_event(
                 SimpleEvent::BecomesTargetSpell { qualifier: None },
                 tag("becomes the target of a spell"),
             ),
-            // CR 120.10 + CR 120.2b: Excess noncombat damage — precede generic damage arms.
-            value(
-                SimpleEvent::DealtExcessNoncombatDamage,
-                tag("is dealt excess noncombat damage"),
-            ),
-            value(
-                SimpleEvent::DealtExcessNoncombatDamage,
-                tag("are dealt excess noncombat damage"),
-            ),
-            // CR 120.10: Excess damage without combat/noncombat qualifier.
-            value(
-                SimpleEvent::DealtExcessDamage,
-                tag("is dealt excess damage"),
-            ),
-            value(
-                SimpleEvent::DealtExcessDamage,
-                tag("are dealt excess damage"),
-            ),
-            value(
-                SimpleEvent::DealtCombatDamage,
-                tag("is dealt combat damage"),
-            ),
-            // CR 120.2: Plural form for batched "are dealt combat damage" triggers.
-            value(
-                SimpleEvent::DealtCombatDamage,
-                tag("are dealt combat damage"),
-            ),
-            value(SimpleEvent::DealtDamage, tag("is dealt damage")),
-            // CR 120.2: Plural form for batched "are dealt damage" triggers.
-            value(SimpleEvent::DealtDamage, tag("are dealt damage")),
+            // CR 120.1 + CR 120.2a + CR 120.2b + CR 120.10: all passive-voice damage
+            // events (both voices × total/excess × any/combat/noncombat × optional
+            // threshold) in one combinator. Ordering among the former arms is now
+            // structural — `opt("excess ")` is consumed before the kind adjective — so no
+            // hand-maintained "precede the generic arms" comment is required.
+            parse_dealt_damage_event,
             value(SimpleEvent::BecomesTapped, tag("becomes tapped")),
             // CR 701.26: Plural form for batched "one or more ... become tapped" triggers.
             value(SimpleEvent::BecomesTapped, tag("become tapped")),
@@ -12098,24 +12132,75 @@ fn try_parse_event(
                     kind: None,
                 });
             }
-            SimpleEvent::DealtCombatDamage => {
-                def.mode = TriggerMode::DamageReceived;
-                def.damage_kind = DamageKindFilter::CombatOnly;
-                set_trigger_subject(&mut def, subject);
-            }
-            // CR 120.10: Any source deals excess damage to permanents matching `subject`.
-            SimpleEvent::DealtExcessDamage => {
-                def.mode = TriggerMode::ExcessDamageAll;
-                set_trigger_subject(&mut def, subject);
-            }
-            // CR 120.10 + CR 120.2b: Noncombat excess damage to `subject`.
-            SimpleEvent::DealtExcessNoncombatDamage => {
-                def.mode = TriggerMode::ExcessDamageAll;
-                def.damage_kind = DamageKindFilter::NoncombatOnly;
-                set_trigger_subject(&mut def, subject);
-            }
-            SimpleEvent::DealtDamage => {
-                def.mode = TriggerMode::DamageReceived;
+            // CR 120.1 + CR 120.2a + CR 120.2b + CR 120.6 + CR 120.10: the channel axis
+            // selects the runtime mode (total damage => `DamageReceived`, excess damage
+            // => `ExcessDamageAll`); the kind and amount axes are carried straight onto
+            // the typed `TriggerDefinition` fields the matchers already read
+            // (`match_damage_received` honors both `damage_kind` and `damage_amount`).
+            //
+            // `batched` is NOT set here, and must not be: no `SimpleEvent` arm touches
+            // it. The caller `parse_trigger_condition` sets it from a `"one or more "`
+            // scan over the subject phrase. CR 603.2c — a batched trigger populates
+            // `current_trigger_match_count`, which outranks the triggering event's own
+            // amount in the `EventContextAmount` cascade (`game/quantity.rs`) and holds
+            // a SUBJECT HEADCOUNT, not a damage amount.
+            SimpleEvent::DealtDamage {
+                channel,
+                kind,
+                amount,
+            } => {
+                // CR 603.2: an ability triggers when a game event matches ITS trigger
+                // event. The four triples below are exactly the cells the former eight
+                // `tag()` arms already reached; on those, a trailing restriction has
+                // been dropped since long before this change (Chandra's Phoenix's
+                // source clause, Glyph of Life's "by an attacking creature"), and
+                // re-adjudicating them is a separate defect class with its own
+                // population and its own coverage delta. For every OTHER cell this
+                // parameterization newly opens, this arm is the sole cause of the
+                // resulting def, so it must refuse a def it cannot fully model: an
+                // unconsumed tail is an unmodeled restriction ("by a single source"
+                // — Pain Magnification), and emitting `DamageReceived` anyway would
+                // assert a DIFFERENT trigger event and over-fire. Falling through to
+                // `TriggerMode::Unknown` keeps the line honestly unsupported. Mirrors
+                // the F1 guard on `SimpleEvent::BecomesTargetAbility` above, which is
+                // likewise scoped to the seam that owns the tail rather than applied
+                // to shared siblings.
+                let previously_covered = matches!(
+                    (channel, kind, amount),
+                    (DamageChannel::Total, DamageKindFilter::Any, None)
+                        | (DamageChannel::Total, DamageKindFilter::CombatOnly, None)
+                        | (DamageChannel::Excess, DamageKindFilter::Any, None)
+                        | (DamageChannel::Excess, DamageKindFilter::NoncombatOnly, None)
+                );
+                if !previously_covered && !remaining.trim().is_empty() {
+                    return None;
+                }
+                // CR 120.4b + CR 120.4d: damage dealt simultaneously is dealt in a
+                // SINGLE damage event, so a received-damage amount threshold is a
+                // property of the whole event, not of one source's share. Innocent
+                // Bystander ("is dealt 3 or more damage") is the entire population
+                // of this cell and its ruling is explicit — it "triggers only if
+                // it's dealt 3 or more damage all at once" — so two sources each
+                // dealing 2 simultaneously must fire it, and Boros Reckoner's
+                // ruling confirms the same event model ("triggers once and one
+                // target is dealt that much damage"). `match_damage_*` applies
+                // `damage_amount` per `(source, amount)` pair and would under-fire
+                // both. Aggregation is an axis this arm cannot model, so — exactly
+                // as with an unconsumed tail above — it refuses the def rather than
+                // emit a silently-wrong one. Ordered AFTER the tail guard so that
+                // guard still owns the refusal for tail-bearing lines (Pain
+                // Magnification), each guard keeping its own falsifying test. Every
+                // cell the eight former `tag()` arms reached carried no amount, so
+                // this refusal cannot regress a previously supported line.
+                if amount.is_some() {
+                    return None;
+                }
+                def.mode = match channel {
+                    DamageChannel::Total => TriggerMode::DamageReceived,
+                    DamageChannel::Excess => TriggerMode::ExcessDamageAll,
+                };
+                def.damage_kind = kind;
+                def.damage_amount = amount;
                 set_trigger_subject(&mut def, subject);
             }
             SimpleEvent::BecomesTapped => {

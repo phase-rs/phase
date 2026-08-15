@@ -111,9 +111,18 @@ export type InteractionAttachmentFanChild = { objectId: number, submission: Inte
 
 export type InteractionAttachmentFan = { hostId: number, children: Array<InteractionAttachmentFanChild>, };
 
+export type InteractionAttachmentViewCard = { objectId: number, submission: InteractionSubmission | null, };
+
+export type InteractionAttachmentView = { hostId: number, cards: Array<InteractionAttachmentViewCard>, };
+
 export type InteractionAvailability = { "type": "progressAvailable", "data": { witness: InteractionSubmission, } } | { "type": "inputRequired" } | { "type": "escapeOnly", "data": { reason: InteractionReasonCode, } } | { "type": "waiting" } | { "type": "terminal", "data": { outcome: InteractionOutcomeCode, } } | { "type": "unsupported", "data": { reason: InteractionReasonCode, } } | { "type": "stuck", "data": { reason: InteractionReasonCode, } };
 
-export type ViewerInteraction = { waitingForKind: InteractionWaitingForKind, authorizedSubmitters: Array<number>, canSubmit: boolean, autoPassRecommended: boolean, opportunities: Array<InteractionOpportunity>, attachmentFans: Record<number, InteractionAttachmentFan>, availability: InteractionAvailability, };
+export type ViewerInteraction = { waitingForKind: InteractionWaitingForKind, authorizedSubmitters: Array<number>, canSubmit: boolean, autoPassRecommended: boolean, opportunities: Array<InteractionOpportunity>, attachmentFans: Record<number, InteractionAttachmentFan>, 
+/**
+ * What is attached to each visible object, keyed by that object. Published
+ * on every projection, including the ones that carry no opportunity at all.
+ */
+attachmentViews: Record<number, InteractionAttachmentView>, availability: InteractionAvailability, };
 
 export type AmountAssignment = { choiceId: InteractionChoiceId, amount: number, };
 

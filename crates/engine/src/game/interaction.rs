@@ -37,17 +37,17 @@ use crate::types::identifiers::ObjectId;
 use crate::types::interaction::{
     ActiveInteractionSlot, AggregateComparator, AmountAssignment, ConfirmSemantics,
     InteractionActionCode, InteractionActionId, InteractionAggregateFunction,
-    InteractionAttachmentFan, InteractionAttachmentFanChild, InteractionAvailability,
-    InteractionChoice, InteractionChoiceId, InteractionChoiceStatus,
-    InteractionDamageAssignmentMode, InteractionGroupConstraint, InteractionId,
-    InteractionIntentCode, InteractionManaAbilityActivationScope, InteractionManaColor,
-    InteractionManaComparator, InteractionManaRestriction, InteractionManaSpecialAction,
-    InteractionManaSpellCostCriterion, InteractionManaZoneSpendPolarity, InteractionObjectProperty,
-    InteractionOpportunity, InteractionOpportunityResponse, InteractionOutcomeCode,
-    InteractionPresentationSurface, InteractionPreview, InteractionPreviewRequest,
-    InteractionPreviewStatus, InteractionProgress, InteractionReasonCode,
-    InteractionRelationConstraint, InteractionRelationSourceConstraint, InteractionResponse,
-    InteractionResponseSpec, InteractionRoleCode, InteractionSessionId,
+    InteractionAttachmentFan, InteractionAttachmentFanChild, InteractionAttachmentView,
+    InteractionAttachmentViewCard, InteractionAvailability, InteractionChoice, InteractionChoiceId,
+    InteractionChoiceStatus, InteractionDamageAssignmentMode, InteractionGroupConstraint,
+    InteractionId, InteractionIntentCode, InteractionManaAbilityActivationScope,
+    InteractionManaColor, InteractionManaComparator, InteractionManaRestriction,
+    InteractionManaSpecialAction, InteractionManaSpellCostCriterion,
+    InteractionManaZoneSpendPolarity, InteractionObjectProperty, InteractionOpportunity,
+    InteractionOpportunityResponse, InteractionOutcomeCode, InteractionPresentationSurface,
+    InteractionPreview, InteractionPreviewRequest, InteractionPreviewStatus, InteractionProgress,
+    InteractionReasonCode, InteractionRelationConstraint, InteractionRelationSourceConstraint,
+    InteractionResponse, InteractionResponseSpec, InteractionRoleCode, InteractionSessionId,
     InteractionShortcutCountSpec, InteractionShortcutDecision, InteractionShortcutPoint,
     InteractionShortcutPointKind, InteractionShortcutPreview, InteractionShortcutPreviewEntry,
     InteractionShortcutPreviewFamily, InteractionShortcutReply, InteractionShortcutResponseCode,
@@ -7420,71 +7420,92 @@ pub fn derive_viewer_interaction(
     viewer: PlayerId,
 ) -> ViewerInteraction {
     debug_assert_interaction_consistency(authoritative_state);
+    // Membership follows visibility, so it is built before any authorization,
+    // session or bounding gate and carried by every projection below. Overflow
+    // is a value here, not a silently emptied map: the finalizer is the only
+    // place allowed to decide what an unbounded projection becomes.
+    let attachment_views = attachment_views_for_viewer(filtered_state);
     let authorized_submitters = turn_control::authorized_submitters(authoritative_state);
     let can_submit = authorized_submitters.contains(&viewer);
     let kind = waiting_for_kind(&authoritative_state.waiting_for);
     if kind.terminal {
-        return ViewerInteraction {
-            waiting_for_kind: kind,
-            authorized_submitters: Vec::new(),
-            can_submit: false,
-            auto_pass_recommended: false,
-            opportunities: Vec::new(),
-            attachment_fans: BTreeMap::new(),
-            availability: InteractionAvailability::Terminal {
-                outcome: InteractionOutcomeCode::Terminal,
+        return finalize_viewer_interaction(
+            ViewerInteraction {
+                waiting_for_kind: kind,
+                authorized_submitters: Vec::new(),
+                can_submit: false,
+                auto_pass_recommended: false,
+                opportunities: Vec::new(),
+                attachment_fans: BTreeMap::new(),
+                attachment_views: BTreeMap::new(),
+                availability: InteractionAvailability::Terminal {
+                    outcome: InteractionOutcomeCode::Terminal,
+                },
             },
-        };
+            attachment_views.clone(),
+        );
     }
     if !can_submit {
-        return ViewerInteraction {
-            waiting_for_kind: kind,
-            authorized_submitters: authorized_submitters
-                .into_iter()
-                .map(|player| player.0)
-                .collect(),
-            can_submit: false,
-            auto_pass_recommended: false,
-            opportunities: Vec::new(),
-            attachment_fans: BTreeMap::new(),
-            availability: InteractionAvailability::Waiting,
-        };
+        return finalize_viewer_interaction(
+            ViewerInteraction {
+                waiting_for_kind: kind,
+                authorized_submitters: authorized_submitters
+                    .into_iter()
+                    .map(|player| player.0)
+                    .collect(),
+                can_submit: false,
+                auto_pass_recommended: false,
+                opportunities: Vec::new(),
+                attachment_fans: BTreeMap::new(),
+                attachment_views: BTreeMap::new(),
+                availability: InteractionAvailability::Waiting,
+            },
+            attachment_views.clone(),
+        );
     }
     if authoritative_state
         .interaction_session_id
         .as_ref()
         .is_none_or(|session| !interaction_session_is_valid(session))
     {
-        return ViewerInteraction {
-            waiting_for_kind: kind,
-            authorized_submitters: authorized_submitters
-                .into_iter()
-                .map(|player| player.0)
-                .collect(),
-            can_submit: true,
-            auto_pass_recommended: false,
-            opportunities: Vec::new(),
-            attachment_fans: BTreeMap::new(),
-            availability: InteractionAvailability::Unsupported {
-                reason: InteractionReasonCode::AuthorityUnbound,
+        return finalize_viewer_interaction(
+            ViewerInteraction {
+                waiting_for_kind: kind,
+                authorized_submitters: authorized_submitters
+                    .into_iter()
+                    .map(|player| player.0)
+                    .collect(),
+                can_submit: true,
+                auto_pass_recommended: false,
+                opportunities: Vec::new(),
+                attachment_fans: BTreeMap::new(),
+                attachment_views: BTreeMap::new(),
+                availability: InteractionAvailability::Unsupported {
+                    reason: InteractionReasonCode::AuthorityUnbound,
+                },
             },
-        };
+            attachment_views.clone(),
+        );
     }
     if !interaction_serial_is_valid(&authoritative_state.next_interaction_serial) {
-        return ViewerInteraction {
-            waiting_for_kind: kind,
-            authorized_submitters: authorized_submitters
-                .into_iter()
-                .map(|player| player.0)
-                .collect(),
-            can_submit: true,
-            auto_pass_recommended: false,
-            opportunities: Vec::new(),
-            attachment_fans: BTreeMap::new(),
-            availability: InteractionAvailability::Unsupported {
-                reason: InteractionReasonCode::InvalidAuthorityState,
+        return finalize_viewer_interaction(
+            ViewerInteraction {
+                waiting_for_kind: kind,
+                authorized_submitters: authorized_submitters
+                    .into_iter()
+                    .map(|player| player.0)
+                    .collect(),
+                can_submit: true,
+                auto_pass_recommended: false,
+                opportunities: Vec::new(),
+                attachment_fans: BTreeMap::new(),
+                attachment_views: BTreeMap::new(),
+                availability: InteractionAvailability::Unsupported {
+                    reason: InteractionReasonCode::InvalidAuthorityState,
+                },
             },
-        };
+            attachment_views.clone(),
+        );
     }
 
     let slots: Vec<_> = authoritative_state
@@ -7498,20 +7519,24 @@ pub fn derive_viewer_interaction(
         })
         .collect();
     if slots.len() > MAX_INTERACTION_LIST_LEN {
-        return ViewerInteraction {
-            waiting_for_kind: kind,
-            authorized_submitters: authorized_submitters
-                .into_iter()
-                .map(|player| player.0)
-                .collect(),
-            can_submit: true,
-            auto_pass_recommended: false,
-            opportunities: Vec::new(),
-            attachment_fans: BTreeMap::new(),
-            availability: InteractionAvailability::Unsupported {
-                reason: InteractionReasonCode::PayloadTooLarge,
+        return finalize_viewer_interaction(
+            ViewerInteraction {
+                waiting_for_kind: kind,
+                authorized_submitters: authorized_submitters
+                    .into_iter()
+                    .map(|player| player.0)
+                    .collect(),
+                can_submit: true,
+                auto_pass_recommended: false,
+                opportunities: Vec::new(),
+                attachment_fans: BTreeMap::new(),
+                attachment_views: BTreeMap::new(),
+                availability: InteractionAvailability::Unsupported {
+                    reason: InteractionReasonCode::PayloadTooLarge,
+                },
             },
-        };
+            attachment_views.clone(),
+        );
     }
     let mut opportunities = Vec::with_capacity(slots.len());
     let mut attachment_fans = BTreeMap::new();
@@ -7554,27 +7579,61 @@ pub fn derive_viewer_interaction(
     let availability = first_progress
         .or(first_fallback)
         .unwrap_or(default_availability);
-    let mut view = ViewerInteraction {
-        waiting_for_kind: kind,
-        authorized_submitters: authorized_submitters
-            .into_iter()
-            .map(|player| player.0)
-            .collect(),
-        can_submit: true,
-        auto_pass_recommended: matches!(
-            authoritative_state.waiting_for,
-            WaitingFor::Priority { .. }
-        ) && authoritative_state.auto_pass.contains_key(&viewer),
-        opportunities,
-        attachment_fans,
-        availability,
-    };
-    if bound_outbound_view(&view).is_err() {
+    let attachment_views = attachment_views.map(|mut views| {
+        bind_attachment_view_submissions(&mut views, &attachment_fans);
+        views
+    });
+    finalize_viewer_interaction(
+        ViewerInteraction {
+            waiting_for_kind: kind,
+            authorized_submitters: authorized_submitters
+                .into_iter()
+                .map(|player| player.0)
+                .collect(),
+            can_submit: true,
+            auto_pass_recommended: matches!(
+                authoritative_state.waiting_for,
+                WaitingFor::Priority { .. }
+            ) && authoritative_state.auto_pass.contains_key(&viewer),
+            opportunities,
+            attachment_fans,
+            attachment_views: BTreeMap::new(),
+            availability,
+        },
+        attachment_views,
+    )
+}
+
+/// The single exit of [`derive_viewer_interaction`]: every projection the engine
+/// hands outward — terminal, unauthorized, unbound-authority, invalid-serial,
+/// oversized-slot and the derived one alike — leaves through here, so one
+/// aggregate budget governs the whole payload. Membership is built before the
+/// authorization and session gates, so an early return carries just as much of
+/// it as the derived path does; charging it only on the derived path would leave
+/// the other five able to serialize an unbounded attachment tree.
+///
+/// Failing the budget fails closed: the unbounded lists are dropped and the
+/// availability states why, rather than shipping a truncated payload that reads
+/// as an authoritative "nothing is attached".
+///
+/// `attachment_views` arrives as the projection or as the reason it could not be
+/// produced within the bound, and is installed here rather than by the caller.
+/// A membership map that overflowed inside its own derivation is therefore just
+/// as visible to this gate as one that overflows the aggregate: both reach the
+/// same fail-closed answer, and neither can leave as a plausible empty map.
+fn finalize_viewer_interaction(
+    mut view: ViewerInteraction,
+    attachment_views: Result<BTreeMap<u64, InteractionAttachmentView>, InteractionReasonCode>,
+) -> ViewerInteraction {
+    let bounded = attachment_views.and_then(|views| {
+        view.attachment_views = views;
+        bound_outbound_view(&view)
+    });
+    if let Err(reason) = bounded {
         view.opportunities.clear();
         view.attachment_fans.clear();
-        view.availability = InteractionAvailability::Unsupported {
-            reason: InteractionReasonCode::PayloadTooLarge,
-        };
+        view.attachment_views.clear();
+        view.availability = InteractionAvailability::Unsupported { reason };
     }
     view
 }
@@ -7750,6 +7809,152 @@ fn attachment_fan_submission(
         interaction_id: interaction_id.clone(),
         response,
     })
+}
+
+/// Publish what is attached to every object the viewer can see.
+///
+/// Membership is a board fact — an attached permanent is an object in play
+/// (CR 301.5 / CR 303.4), not a property of the current prompt — so this reads
+/// the filtered projection alone and runs on every path, including the ones
+/// that carry no opportunity: an opponent's turn, an open prompt, a finished
+/// game. Publishing it only where picks exist would make an Aura disappear from
+/// the one surface that shows it as soon as a sibling Equipment became
+/// clickable.
+///
+/// Both directions of every relationship must agree, the same guard
+/// [`attachment_fans_for_object_choices`] applies, so authority-only or stale
+/// back-links cannot reach a consumer.
+///
+/// Overflow is returned, never absorbed. Dropping an oversized host or emptying
+/// an oversized map here would hand the caller a bounded, plausible projection
+/// that states the opposite of the truth — "nothing is attached" — and the
+/// budget gate downstream would have nothing left to object to. The reason code
+/// travels instead, and [`finalize_viewer_interaction`] decides what the viewer
+/// is told.
+fn attachment_views_for_viewer(
+    filtered_state: &GameState,
+) -> Result<BTreeMap<u64, InteractionAttachmentView>, InteractionReasonCode> {
+    let mut views = BTreeMap::new();
+    // Cards materialized so far, across every host. Charged BEFORE each subtree
+    // is built rather than measured after, so an over-budget projection is
+    // refused while it is still small.
+    //
+    // Every card the derivation emits is charged again by
+    // `bound_outbound_view`, alongside the map, the fans and the opportunities —
+    // so this running total can only ever be a LOWER bound on what the finalizer
+    // charges. That direction is what makes the early refusal safe: it can never
+    // reject a projection the finalizer would have accepted, and the finalizer
+    // stays the single authority on the answer the viewer is given.
+    let mut charged = 0usize;
+    for host_id in filtered_state.objects.keys().copied() {
+        let mut cards = Vec::new();
+        collect_attachment_subtree(filtered_state, host_id, charged, &mut cards)?;
+        if cards.is_empty() {
+            continue;
+        }
+        charged += cards.len();
+        views.insert(
+            host_id.0,
+            InteractionAttachmentView {
+                host_id: host_id.0,
+                cards: cards
+                    .into_iter()
+                    .map(|object_id| InteractionAttachmentViewCard {
+                        object_id: object_id.0,
+                        submission: None,
+                    })
+                    .collect(),
+            },
+        );
+    }
+    // Implied by the card charge — no view is inserted empty, so the map can
+    // never be longer than the cards already counted — but stated where the map
+    // is built so its own list bound does not have to be inferred.
+    if views.len() > MAX_INTERACTION_LIST_LEN {
+        return Err(InteractionReasonCode::PayloadTooLarge);
+    }
+    Ok(views)
+}
+
+/// Depth-first pre-order, so a nested attachment follows the card it hangs on
+/// and consumers can lay the subtree out without re-deriving its shape.
+///
+/// Iterative, with the frontier on the heap. The walk descends one level per
+/// nested attachment, and an attachment chain is only bounded by how many
+/// objects the game can grow, so recursion would put a game-controlled quantity
+/// on the call stack.
+///
+/// `already_charged` is what earlier hosts have spent, and the walk stops the
+/// moment this subtree carries the running total past the aggregate. An
+/// over-budget projection therefore costs one card more than the budget rather
+/// than its full size: the point of deriving membership is to publish it, and a
+/// projection that can no longer be published is not worth materializing.
+///
+/// The running total is compared by addition rather than by handing the walk a
+/// remaining allowance, so the bound cannot be expressed as a subtraction that
+/// underflows if the caller's accounting ever slips.
+fn collect_attachment_subtree(
+    filtered_state: &GameState,
+    host_id: ObjectId,
+    already_charged: usize,
+    out: &mut Vec<ObjectId>,
+) -> Result<(), InteractionReasonCode> {
+    // Seeded with the host: an attachment cycle would otherwise walk forever,
+    // and no host may appear as a card beneath itself.
+    let mut seen = HashSet::from([host_id]);
+    let mut frontier = vec![host_id];
+    while let Some(current) = frontier.pop() {
+        if current != host_id {
+            out.push(current);
+            if already_charged + out.len() > MAX_INTERACTION_LIST_LEN {
+                return Err(InteractionReasonCode::PayloadTooLarge);
+            }
+        }
+        let Some(object) = filtered_state.objects.get(&current) else {
+            continue;
+        };
+        // Pushed in reverse so the frontier pops them in the order the host
+        // lists them, which is what keeps the output in pre-order.
+        for child_id in object.attachments.iter().rev() {
+            let Some(child) = filtered_state.objects.get(child_id) else {
+                continue;
+            };
+            if !matches!(child.attached_to, Some(AttachTarget::Object(id)) if id == current) {
+                continue;
+            }
+            if !seen.insert(*child_id) {
+                continue;
+            }
+            frontier.push(*child_id);
+        }
+    }
+    Ok(())
+}
+
+/// Bind the published picks onto the membership the engine already owns.
+///
+/// The fans are keyed by the child's DIRECT host, so a card published beneath a
+/// nested attachment must still reach the view of the outermost host it hangs
+/// under. Object ids are unique, so a flat index is exact: it cannot move a
+/// pick onto a different card, and every host that legitimately lists the card
+/// gets the same submission.
+fn bind_attachment_view_submissions(
+    views: &mut BTreeMap<u64, InteractionAttachmentView>,
+    fans: &BTreeMap<u64, InteractionAttachmentFan>,
+) {
+    if fans.is_empty() {
+        return;
+    }
+    let submissions: HashMap<u64, &InteractionSubmission> = fans
+        .values()
+        .flat_map(|fan| fan.children.iter())
+        .map(|child| (child.object_id, &child.submission))
+        .collect();
+    for view in views.values_mut() {
+        for card in &mut view.cards {
+            card.submission = submissions.get(&card.object_id).map(|s| (*s).clone());
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8061,6 +8266,17 @@ fn bound_outbound_view(view: &ViewerInteraction) -> Result<(), InteractionReason
         for child in &fan.children {
             budget.string(child.submission.interaction_id.as_str())?;
             bound_outbound_response(&child.submission.response, &mut budget)?;
+        }
+    }
+    budget.list(view.attachment_views.len())?;
+    for attachment_view in view.attachment_views.values() {
+        budget.list(attachment_view.cards.len())?;
+        for card in &attachment_view.cards {
+            let Some(submission) = &card.submission else {
+                continue;
+            };
+            budget.string(submission.interaction_id.as_str())?;
+            bound_outbound_response(&submission.response, &mut budget)?;
         }
     }
     if let InteractionAvailability::ProgressAvailable { witness } = &view.availability {
@@ -9732,5 +9948,83 @@ mod tests {
                  `Record<UnboundedFamily, _>`, so a divergence is a silent lookup miss"
             );
         }
+    }
+
+    /// The derivation itself, not the projection it feeds.
+    ///
+    /// `attachment_views_for_viewer` is the authority that decides whether the
+    /// membership can be published at all, and the public rows in
+    /// `interaction_contract` cannot see the difference this change makes: the
+    /// aggregate bound in `bound_outbound_view` already refused this payload, so
+    /// the ANSWER was fail-closed before and after. What changes is that the
+    /// refusal now happens while the projection is small.
+    ///
+    /// A chain of exactly `MAX_INTERACTION_LIST_LEN` links is the worst case and
+    /// the only one that discriminates: it is the LONGEST chain in which no
+    /// single host's subtree exceeds the per-view cap, so the per-host check
+    /// never fires and a derivation that measures afterwards runs to completion.
+    /// One link longer and the outermost view trips that cap on its own.
+    ///
+    /// REVERT-PROBE, RUN: drop the running charge in `collect_attachment_subtree`
+    /// and restore the post-walk `cards.len()` check ⇒ this returns `Ok` with
+    /// 49 995 000 card entries across 9 999 views (23.2 s, 7.4 GB resident on the
+    /// machine this was measured on) instead of `Err`.
+    #[test]
+    fn the_membership_derivation_refuses_a_worst_case_chain_before_building_it() {
+        use crate::game::game_object::GameObject;
+        use crate::types::identifiers::CardId;
+
+        let mut state = GameState::new_two_player(42);
+        let owner = PlayerId(0);
+        let mut previous: Option<ObjectId> = None;
+        for index in 0..=MAX_INTERACTION_LIST_LEN {
+            let id = ObjectId(index as u64 + 1);
+            let mut object = GameObject::new(
+                id,
+                CardId(index as u64 + 1),
+                owner,
+                format!("Chain Link {index}"),
+                Zone::Battlefield,
+            );
+            if let Some(host_id) = previous {
+                object.attached_to = Some(AttachTarget::Object(host_id));
+                state
+                    .objects
+                    .get_mut(&host_id)
+                    .expect("the host was inserted on the previous iteration")
+                    .attachments
+                    .push(id);
+            }
+            state.objects.insert(id, object);
+            state.battlefield.push_back(id);
+            previous = Some(id);
+        }
+
+        // Reach guard: the fixture really is one chain of the intended length,
+        // and every view in it would sit inside the per-view cap on its own —
+        // without this, an over-long fixture would fail for the wrong reason.
+        assert_eq!(state.objects.len(), MAX_INTERACTION_LIST_LEN + 1);
+        assert!(
+            state
+                .objects
+                .values()
+                .all(|object| object.attachments.len() <= 1),
+            "a chain, not a fan: no host may carry two attachments"
+        );
+
+        // Compared by discriminant, and reported by SIZE rather than by value:
+        // the `Ok` this row exists to reject holds 49 995 000 entries, and a
+        // failure that prints them is a failure nobody can read.
+        let derived = attachment_views_for_viewer(&state);
+        assert!(
+            matches!(derived, Err(InteractionReasonCode::PayloadTooLarge)),
+            "the derivation must refuse the payload itself rather than hand it to \
+             the finalizer to reject — got {} views totalling {} cards",
+            derived.as_ref().map_or(0, BTreeMap::len),
+            derived.as_ref().map_or(0, |views| views
+                .values()
+                .map(|view| view.cards.len())
+                .sum::<usize>()),
+        );
     }
 }

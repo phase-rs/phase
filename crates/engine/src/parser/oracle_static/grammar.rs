@@ -11,11 +11,32 @@ use nom::combinator::{all_consuming, map_res, not, opt, peek, recognize};
 use nom::sequence::{delimited, pair, terminated};
 
 /// Lower a parsed rule-static predicate into the runtime static mode.
+///
+/// `block_object` is the CR 509.1b OBJECT axis of a blocking prohibition —
+/// "<subject> can't block **<object>**" — the blocker-side mirror of the
+/// attack side's `attack_defended` defender scope (CR 508.1b). It is
+/// meaningful only for [`RuleStaticPredicate::CantBlock`]; every other
+/// predicate passes `None`.
 pub(crate) fn lower_rule_static(
     predicate: RuleStaticPredicate,
+    block_object: Option<TargetFilter>,
     affected: TargetFilter,
     description: &str,
 ) -> StaticDefinition {
+    // CR 509.1b: a filtered object narrows the blanket prohibition to a subset
+    // of attackers. `BlockRestriction` is a whitelist ("can block only
+    // attackers matching filter"), so "can't block X" is exactly "can block
+    // only things that are NOT X" — the same construction the compound
+    // "can't attack you or block <object>" template already lowers to.
+    if let (RuleStaticPredicate::CantBlock, Some(object)) = (predicate, block_object) {
+        return StaticDefinition::new(StaticMode::BlockRestriction {
+            filter: TargetFilter::Not {
+                filter: Box::new(object),
+            },
+        })
+        .affected(affected)
+        .description(description.to_string());
+    }
     match predicate {
         RuleStaticPredicate::CantUntap => StaticDefinition::new(StaticMode::CantUntap)
             .affected(affected)
@@ -758,7 +779,7 @@ pub(crate) fn parse_enchanted_equipped_predicate(
         || nom_primitives::scan_contains(&pred_lower, "don\u{2019}t untap during")
     {
         if let Some(predicate) = parse_rule_static_predicate(predicate) {
-            let mut def = lower_rule_static(predicate, affected.clone(), description);
+            let mut def = lower_rule_static(predicate, None, affected.clone(), description);
             if matches!(predicate, RuleStaticPredicate::CantUntap) {
                 if let Some((_, after_cond)) = pred_tp.split_around(" as long as ") {
                     let condition_text = after_cond.original.trim().trim_end_matches('.');
