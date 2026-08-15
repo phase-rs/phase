@@ -70,7 +70,7 @@ pub fn resolve(
         crate::game::targeting::resolved_targets(ability, &target_filter, state)
     };
 
-    // CR 400.7 + CR 113.7a: A source-resolving empty SelfRef/ParentTarget must
+    // CR 400.7 + CR 113.7a: A source-resolving empty SelfRef/None/ParentTarget must
     // not follow a later object that reuses the source ID. This stays after
     // `resolved_targets`: an empty ParentTarget can instead resolve a real
     // event-context referent, which must not be mistaken for the source
@@ -84,7 +84,7 @@ pub fn resolve(
     if ability.targets.is_empty()
         && matches!(
             target_filter,
-            TargetFilter::SelfRef | TargetFilter::ParentTarget
+            TargetFilter::SelfRef | TargetFilter::None | TargetFilter::ParentTarget
         )
         && effective_targets == [crate::types::ability::TargetRef::Object(ability.source_id)]
         && !source_is_current
@@ -838,6 +838,44 @@ mod tests {
 
         assert!(!state.players[1].graveyard.contains(&obj_id));
         assert_eq!(state.players[1].library[0], obj_id);
+    }
+
+    /// CR 400.7: `None` uses the same empty-target source fallback as
+    /// `ParentTarget`; a stale activation cannot move a later incarnation.
+    #[test]
+    fn test_put_on_top_none_fallback_does_not_follow_new_source_incarnation() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::None,
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
+            },
+            vec![],
+            obj_id,
+            PlayerId(0),
+        );
+        ability.source_incarnation = Some(state.objects[&obj_id].incarnation);
+
+        let mut move_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, obj_id, Zone::Graveyard, &mut move_events);
+        crate::game::zones::move_to_zone(&mut state, obj_id, Zone::Battlefield, &mut move_events);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&obj_id].zone, Zone::Battlefield);
+        assert!(
+            !state.players[0].library.contains(&obj_id),
+            "the stale None fallback must not put the later object in the library"
+        );
     }
 
     /// End-to-end Avenging Angel-class pipeline test.
