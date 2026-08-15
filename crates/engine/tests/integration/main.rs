@@ -962,6 +962,7 @@ mod serpent_society_ward_poison_cost;
 mod serras_emissary_chosen_card_type_protection;
 mod shorten_efficacy;
 mod sin_spiras_punishment_repeat;
+mod skitterfang_reflexive_without_counter;
 mod skullwinder_chosen_opponent;
 mod slaughter_the_strong_total_power_4380;
 mod slitherwisp_flash_spell_cast_trigger;

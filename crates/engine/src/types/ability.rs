@@ -20707,12 +20707,13 @@ pub enum AbilityCondition {
     /// process") and any cross-sentence flip-result gate.
     CoinFlipOutcome { result: CoinFlipResult },
     /// CR 603.12: "When you do" — reflexive trigger that fires based on whether the
-    /// parent's trigger event actually occurred. For a non-cost parent (e.g. a
-    /// `BecomeCopy` reflexive or a copy/exile replacement sub-ability) the "do"
-    /// always occurred, so this is unconditionally true. For a cost-payment parent
-    /// (`Effect::PayCost`), an unpayable or declined cost is not an occurrence, so
-    /// the reflexive sub-ability is skipped — `evaluate_condition` gates on
-    /// `cost_payment_failed_flag` for that case (mirrors `IfYouDo`).
+    /// parent's trigger event actually occurred. A mandatory non-cost parent (e.g.
+    /// a `BecomeCopy` reflexive or a copy/exile replacement sub-ability) always
+    /// occurred, while an optional non-cost parent must actually be performed.
+    /// For a cost-payment parent (`Effect::PayCost`), an unpayable or declined cost
+    /// is not an occurrence, so the reflexive sub-ability is skipped —
+    /// `evaluate_condition` gates on `cost_payment_failed_flag` for that case
+    /// (mirrors `IfYouDo`).
     WhenYouDo,
     /// CR 601.2a + CR 707.10: "if [this spell] was cast from [zone]" — sub_ability
     /// executes only if the spell was cast. `zone: None` = cast from any origin;
