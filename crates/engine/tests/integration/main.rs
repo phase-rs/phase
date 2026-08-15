@@ -967,6 +967,7 @@ mod skullwinder_chosen_opponent;
 mod slaughter_the_strong_total_power_4380;
 mod slitherwisp_flash_spell_cast_trigger;
 mod sliver_static_grants;
+mod smaug_noncombat_damage_treasure;
 mod snow_mana_production;
 mod sothera_supervoid_edict_reanimate;
 mod spark_double_as_enters;

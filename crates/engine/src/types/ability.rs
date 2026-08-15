@@ -22719,7 +22719,7 @@ pub struct TriggerDefinition {
     /// matcher requires the `DamageDealt` event's `amount` to satisfy
     /// `amount cmp n`. `None` means no amount restriction. Applies to all
     /// damage-event trigger modes (`DamageDone`, `DamageDoneOnce`, `DamageAll`,
-    /// `DamageDealtOnce`); ignored by other modes.
+    /// `DamageDealtOnce`, `DamageReceived`); ignored by other modes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub damage_amount: Option<(Comparator, u32)>,
     /// CR 119.3: Per-event life-change-amount constraint for life triggers
