@@ -2452,16 +2452,22 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     // separate question, deliberately not answered here.
     //
     // REACHABILITY — read this block as defence in depth, NOT as documentation
-    // of a live path. No production route through the public API is known that
-    // reaches it with a non-empty queue: nothing in this file calls
-    // `collect_triggers_into_deferred`; the drain at the end of
-    // `process_phase_triggers` sits in that function's shared body, so it
-    // applies to every phase/step arm that calls it; and every
-    // `WaitingFor::Priority` settlement drains through the post-action pipeline.
-    // The one cleanup path that pauses and resumes — discard to maximum hand
-    // size — never re-enters this function (its resume runs
-    // `finish_cleanup_discard` and then the pipeline), so its CR 514.3a
-    // settlement comes from the pipeline, not from here.
+    // of a live path. No production route through the public API was FOUND that
+    // reaches it with a non-empty queue. The two structural reasons, which need
+    // no census: the drain at the end of `process_phase_triggers` sits in that
+    // function's shared body rather than in any one arm, so it runs for whatever
+    // phase/step arm reaches it; and the pipeline's drain likewise sits in
+    // `engine_priority::run_post_action_pipeline_from`'s body, so it runs for
+    // settlements routed through it. The one cleanup path that pauses and
+    // resumes — discard to maximum hand size — never re-enters this function
+    // (its resume runs `finish_cleanup_discard` and then the pipeline), so its
+    // CR 514.3a settlement comes from the pipeline, not from here.
+    //
+    // The remaining input, "who parks a batch during cleanup", rests on an
+    // identifier search for `collect_triggers_into_deferred` that returns no hit
+    // in this file. That instrument cannot see a macro-generated or
+    // trait-dispatched call, so treat it as "none found", not "none exists" —
+    // which is the second reason the block stays.
     //
     // It is kept regardless: CR 514.3a is a real obligation at this exact
     // instant, the block is inert when the queue is empty (the gate refuses, it
@@ -2822,10 +2828,13 @@ fn process_phase_triggers(
     // already does at the sibling (`WaitingFor::Priority`) boundary, using the
     // same authority and the same gate.
     //
-    // This is load-bearing, not belt-and-braces: several production
-    // `auto_advance` consumers never run the post-action pipeline at all
-    // (`engine::start_game` and `engine::start_game_skip_mulligan` return an
-    // `ActionResult` directly), so on those paths this is the ONLY drain.
+    // This is load-bearing, not belt-and-braces: `engine::start_game` and
+    // `engine::start_game_skip_mulligan` drive `turns::auto_advance` and return
+    // an `ActionResult` without going through the post-action pipeline, so on
+    // those paths the pipeline's drain does not run and a parked batch would
+    // survive the boundary if this drain were removed. (Stated structurally
+    // rather than as "the only drain on those paths": that would be a universal
+    // over drain sites, and no search performed here could bound them.)
     // Regression: `parked_queue_drains_at_first_upkeep_from_start_game`.
     //
     // `drain_deferred_trigger_queue` (not the post-announcement variant) is

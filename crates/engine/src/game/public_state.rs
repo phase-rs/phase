@@ -85,10 +85,16 @@ pub fn sync_waiting_for(state: &mut GameState, waiting_for: &WaitingFor) {
     // CR 703.1: a turn-based action happens automatically when its own step
     // begins or ends, so a prompt that is a player's answer to one is answerable
     // only during that step. Installing one outside that step produces a
-    // decision no seat can
-    // legally submit and the game cannot leave. `debug_assert!` because after the
-    // CR 603.3 drain in `turns::process_phase_triggers` no producer can construct
-    // this pairing — an executable invariant, not production validation.
+    // decision no seat can legally submit and the game cannot leave.
+    //
+    // `debug_assert!` rather than production validation because the CR 603.3
+    // drain in `turns::process_phase_triggers` is meant to have settled the
+    // queue before any boundary is reached, so a hit here is an engine bug to be
+    // fixed at its producer, not a runtime condition to handle. Read that as an
+    // intent this check enforces, NOT as a proof that no producer can construct
+    // the pairing — the paragraph below says outright that the producer
+    // population was never enumerated, which is precisely why the check has to
+    // be executable rather than argued.
     //
     // This is an ACTION-BOUNDARY check, not a producer check: a large number of
     // sites in `crates/engine/src/` assign `state.waiting_for` directly, and this
@@ -590,7 +596,7 @@ mod tests {
     ///
     /// * `CombatTaxPayment { context: Attacking }`, `ExertChoice`, `EnlistChoice`
     ///   — CR 508.1g optional attack costs (CR 701.43d exert, CR 702.154b
-    ///     enlist): a sub-step of the declaration, not the declaration.
+    ///   enlist): a sub-step of the declaration, not the declaration.
     /// * `MeldAttackTargetChoice`, `EntryAttackTargetChoice` — CR 508.4 "put
     ///   onto the battlefield attacking", a resolution-time choice that CR 508.4d
     ///   explicitly contemplates during declare blockers, combat damage, and end
