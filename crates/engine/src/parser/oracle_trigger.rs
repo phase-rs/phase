@@ -47,17 +47,17 @@ use super::oracle_util::{
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::ManaProduction;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
-    AdditionalCostOrigin, AdditionalCostPaymentSource, AggregateFunction, AttachmentKind,
-    AttackersDeclaredCountSubject, CardSelectionMode, CastManaObjectScope, CastManaSpentMetric,
-    CastVariantPaid, CoinFlipResult, Comparator, ControllerRef, CountScope, CounterTriggerFilter,
-    DamageChannel, DamageKindFilter, DestinationConstraint, DieResultFilter, Effect, EffectScope,
-    FilterProp, ManaAbilityProducedFilter, ObjectScope, OriginConstraint, ParsedCondition,
-    PlayerFilter, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
-    SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality, StaticCondition,
-    SubAbilityLink, TapCreaturesRequirement, TapStateChange, TargetFilter, TriggerCondition,
-    TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
-    ZoneChangeClause,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AdditionalCostOrigin,
+    AdditionalCostPaymentSource, AggregateFunction, AttachmentKind, AttackersDeclaredCountSubject,
+    CardSelectionMode, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, CoinFlipResult,
+    Comparator, ControllerRef, CountScope, CounterTriggerFilter, DamageAmountScope,
+    DamageAmountThreshold, DamageChannel, DamageKindFilter, DestinationConstraint, DieResultFilter,
+    Effect, EffectScope, FilterProp, ManaAbilityProducedFilter, ObjectScope, OriginConstraint,
+    ParsedCondition, PlayerFilter, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef,
+    RenownSubject, SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality,
+    StaticCondition, SubAbilityLink, TapCreaturesRequirement, TapStateChange, TargetFilter,
+    TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier, ZoneChangeClause,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
@@ -11275,7 +11275,7 @@ fn try_parse_event(
     //   "deal[s] [combat|noncombat] [N or more] damage [to <recipient>]".
     // Composed from three independent axes:
     //   * damage-kind adjective   → `DamageKindFilter::{CombatOnly, NoncombatOnly}`
-    //   * "N or more" quantifier  → `damage_amount = Some((GE, N))`
+    //   * "N or more" quantifier  → `damage_amount = Some({GE, N, PerSource})`
     //   * recipient "to <…>"      → `valid_target` via `parse_damage_to_qualifier`
     // Singular ("deals") and plural ("deal", for &-names) collapse into one
     // verb alternative. Unlocks Deus of Calamity ("~ deals 6 or more damage to
@@ -11291,7 +11291,18 @@ fn try_parse_event(
             let mut def = make_base();
             def.mode = TriggerMode::DamageDone;
             def.damage_kind = kind;
-            def.damage_amount = amount;
+            // CR 120.9: the SOURCE-led grammar names the damaging source, so its
+            // threshold reads that source's share and never aggregates across
+            // simultaneous sources. Deus of Calamity's ruling is explicit ("6
+            // damage to an opponent at one time … won't keep track of
+            // accumulated damage"). Constructed explicitly rather than relying
+            // on `DamageAmountScope`'s `#[default]`, so the pole this grammar
+            // means is written at the site and is pinned by a test.
+            def.damage_amount = amount.map(|(comparator, threshold)| DamageAmountThreshold {
+                comparator,
+                threshold,
+                scope: DamageAmountScope::PerSource,
+            });
             def.valid_source = Some(subject.clone());
             // CR 120.1 + CR 208.1 + CR 603.4: Taii Wakeen's damage==recipient-P/T
             // shape ("to <object> equal to that <object>'s toughness/power") is
@@ -11795,9 +11806,16 @@ fn try_parse_event(
             /// CR 120.2b: noncombat damage, dealt as an effect of a spell or ability.
             /// `Any` matches either.
             kind: DamageKindFilter,
-            /// CR 603.2 + CR 120.1: optional per-event threshold ("3 or more",
-            /// "exactly N"). `None` for the unquantified majority.
-            amount: Option<(Comparator, u32)>,
+            /// CR 603.2 + CR 120.1 + CR 120.4b: optional amount threshold
+            /// ("3 or more", "exactly N") together with the aggregation domain
+            /// it is evaluated over. `None` for the unquantified majority.
+            ///
+            /// The received-damage grammar's default, absent a source tail, is
+            /// `DamageAmountScope::WholeEvent` (CR 120.4b: damage is dealt in
+            /// one simultaneous event and triggers fire at that granularity),
+            /// so the threshold is NOT per-event for this voice — the scope
+            /// axis names which domain applies.
+            amount: Option<DamageAmountThreshold>,
         },
         BecomesTapped,
         TappedForMana,
@@ -11846,16 +11864,40 @@ fn try_parse_event(
         }
         Ok((rest, SimpleEvent::BecomesUnattached(Some(filter))))
     }
-    /// CR 120.1 + CR 120.2a + CR 120.2b + CR 120.6 + CR 120.10 + CR 510 + CR 603.2:
-    /// Passive-voice damage-received trigger event —
-    /// `"is|are dealt [excess ][combat |noncombat ][N or more ]damage"`.
+    /// CR 120.4b + CR 120.9: the source-scoping tail on the received-damage
+    /// grammar — `"…by a single source"` (Pain Magnification). It narrows the
+    /// threshold's aggregation domain from the whole simultaneous damage event
+    /// (the grammar's default, CR 120.4b) to one source's share.
     ///
-    /// Composes the grammar's four independent axes rather than enumerating their
+    /// A single `tag()` on one axis; the leading `opt(space1)` lets the caller
+    /// apply it directly to the remainder left by `parse_damage_predicate_tail`
+    /// whether or not that remainder kept its separating space.
+    fn parse_single_source_scope(input: &str) -> OracleResult<'_, DamageAmountScope> {
+        value(
+            DamageAmountScope::PerSource,
+            preceded(opt(space1), tag("by a single source")),
+        )
+        .parse(input)
+    }
+    /// CR 120.1 + CR 120.2a + CR 120.2b + CR 120.4b + CR 120.10 + CR 510 + CR 603.2:
+    /// Passive-voice damage-received trigger event —
+    /// `"is|are dealt [excess ][combat |noncombat ][N or more ]damage[ by a single source]"`.
+    ///
+    /// Composes the grammar's five independent axes rather than enumerating their
     /// product (CLAUDE.md: "Compose nom combinators, don't enumerate permutations"):
     ///   voice   — `"is dealt "` / `"are dealt "` (singular vs plural subject)
     ///   channel — optional `"excess "` → `DamageChannel::{Total, Excess}`
     ///   kind    — optional `"combat "` / `"noncombat "` → `DamageKindFilter`
-    ///   amount  — optional `"N or more "` / `"exactly N "` → `Option<(Comparator, u32)>`
+    ///   amount  — optional `"N or more "` / `"exactly N "` → `Option<DamageAmountThreshold>`
+    ///   scope   — optional `"by a single source"` → `DamageAmountScope`
+    ///
+    /// POLARITY NOTE. The *type* default is `PerSource`, which is serde
+    /// back-compat for every card that predates the axis. The *received-damage
+    /// grammar's* default, absent a tail, is `WholeEvent` (CR 120.4b). These are
+    /// deliberately different: the type default governs deserialization of data
+    /// written before the axis existed, while the grammar default governs what
+    /// the printed English means. `try_parse_source_deals_damage_trigger` never
+    /// calls this combinator, so the source-led grammar keeps `PerSource`.
     ///
     /// The kind/amount/head-noun tail is delegated to `parse_damage_predicate_tail`,
     /// the SAME combinator the active-voice (`"deals damage"`) grammar uses, so a
@@ -11881,6 +11923,31 @@ fn try_parse_event(
                 nom::error::ErrorKind::Verify,
             )));
         }
+        // CR 120.4b: the received-damage grammar's unscoped default reads the
+        // whole simultaneous damage event. "…by a single source" narrows that
+        // domain to one source's share. (CR 120.9 is adjacent, not governing:
+        // it fixes what an EFFECT's "the damage dealt" reads, not how a
+        // threshold is scoped.)
+        //
+        // The restriction is carried on `DamageAmountThreshold`, which exists
+        // only when an amount is present — so with no amount there is nowhere
+        // for the scope to live. Do not consume the tail at all in that case:
+        // leaving it unconsumed hands it to the arm's existing unconsumed-tail
+        // guard, which already refuses it in every newly-opened cell AND
+        // preserves the four `previously_covered` cells byte-identically
+        // (Chandra's Phoenix, Glyph of Life). Consuming it unconditionally
+        // would emit `DamageReceived` with the restriction silently dropped in
+        // every newly-opened cell that has no threshold to carry the scope.
+        let (rest, scope) = if amount.is_some() {
+            opt(parse_single_source_scope).parse(rest)?
+        } else {
+            (rest, None)
+        };
+        let amount = amount.map(|(comparator, threshold)| DamageAmountThreshold {
+            comparator,
+            threshold,
+            scope: scope.unwrap_or(DamageAmountScope::WholeEvent),
+        });
         Ok((
             rest,
             SimpleEvent::DealtDamage {
@@ -12132,11 +12199,19 @@ fn try_parse_event(
                     kind: None,
                 });
             }
-            // CR 120.1 + CR 120.2a + CR 120.2b + CR 120.6 + CR 120.10: the channel axis
-            // selects the runtime mode (total damage => `DamageReceived`, excess damage
-            // => `ExcessDamageAll`); the kind and amount axes are carried straight onto
-            // the typed `TriggerDefinition` fields the matchers already read
+            // CR 120.1 + CR 120.2a + CR 120.2b + CR 120.4b + CR 120.10: the channel axis
+            // selects the runtime mode (total damage => `DamageReceived`; excess damage
+            // => `ExcessDamageAll`, which is the sense CR 120.10 governs here); the
+            // kind, amount, and scope axes are carried straight onto the typed
+            // `TriggerDefinition` fields the matchers already read
             // (`match_damage_received` honors both `damage_kind` and `damage_amount`).
+            //
+            // CR 120.4b governs the amount axis: damage dealt simultaneously is dealt
+            // in ONE damage event and damage triggers fire at that granularity, so an
+            // unscoped received-damage threshold reads the whole event's summed amount
+            // for a recipient. `parse_dealt_damage_event` records which domain applies
+            // in `DamageAmountThreshold.scope`; `game/triggers.rs` is the only place
+            // that reads it.
             //
             // `batched` is NOT set here, and must not be: no `SimpleEvent` arm touches
             // it. The caller `parse_trigger_condition` sets it from a `"one or more "`
@@ -12173,26 +12248,6 @@ fn try_parse_event(
                         | (DamageChannel::Excess, DamageKindFilter::NoncombatOnly, None)
                 );
                 if !previously_covered && !remaining.trim().is_empty() {
-                    return None;
-                }
-                // CR 120.4b + CR 120.4d: damage dealt simultaneously is dealt in a
-                // SINGLE damage event, so a received-damage amount threshold is a
-                // property of the whole event, not of one source's share. Innocent
-                // Bystander ("is dealt 3 or more damage") is the entire population
-                // of this cell and its ruling is explicit — it "triggers only if
-                // it's dealt 3 or more damage all at once" — so two sources each
-                // dealing 2 simultaneously must fire it, and Boros Reckoner's
-                // ruling confirms the same event model ("triggers once and one
-                // target is dealt that much damage"). `match_damage_*` applies
-                // `damage_amount` per `(source, amount)` pair and would under-fire
-                // both. Aggregation is an axis this arm cannot model, so — exactly
-                // as with an unconsumed tail above — it refuses the def rather than
-                // emit a silently-wrong one. Ordered AFTER the tail guard so that
-                // guard still owns the refusal for tail-bearing lines (Pain
-                // Magnification), each guard keeping its own falsifying test. Every
-                // cell the eight former `tag()` arms reached carried no amount, so
-                // this refusal cannot regress a previously supported line.
-                if amount.is_some() {
                     return None;
                 }
                 def.mode = match channel {
@@ -12830,6 +12885,18 @@ fn try_parse_source_deals_damage_trigger(lower: &str) -> Option<(TriggerMode, Tr
 
     // Shared predicate tail: optional kind, optional "N or more", "damage".
     let (after_damage, (damage_kind, threshold)) = parse_damage_predicate_tail(rest).ok()?;
+    // CR 120.9: this grammar is SOURCE-led — it names the damaging source, so
+    // its threshold reads only that source's share and never aggregates across
+    // simultaneous sources (Dragonborn Champion must not fire on two 3-damage
+    // sources; Ghyrson Starn's "exactly 1" would break entirely under an
+    // aggregate reading). Built once here so all five recipient-axis exits
+    // below share one explicit construction rather than five copies of it, and
+    // so no exit can silently fall back on `DamageAmountScope`'s `#[default]`.
+    let threshold = threshold.map(|(comparator, threshold)| DamageAmountThreshold {
+        comparator,
+        threshold,
+        scope: DamageAmountScope::PerSource,
+    });
 
     let mut def = make_base();
     def.mode = TriggerMode::DamageDone;

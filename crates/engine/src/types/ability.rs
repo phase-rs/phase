@@ -4063,6 +4063,110 @@ fn is_total_damage_channel(channel: &DamageChannel) -> bool {
     matches!(channel, DamageChannel::Total)
 }
 
+/// CR 120.4 + CR 120.4b: the aggregation domain a damage-amount threshold is
+/// evaluated over. CR 120.4 processes damage in one four-part sequence over a
+/// single damage event, and the worked examples printed under CR 120.4d state
+/// that event as one bracketed entry that can span two sources — two unblocked
+/// 5/5 creatures give "[10 damage is dealt to the defending player]" — so
+/// simultaneous damage to one recipient is summed within the event. CR 120.4b
+/// then puts damage triggers at that granularity ("Abilities that trigger when
+/// damage is dealt trigger now"). A threshold with no source scoping therefore
+/// reads that whole event; a threshold whose grammar names a single source
+/// reads only that source's share.
+///
+/// Typed rather than a `bool`: the two poles are named rules concepts, and a
+/// third domain (per-source-per-recipient, should a card ever need it) is a leaf
+/// addition here rather than a second flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum DamageAmountScope {
+    /// The threshold reads ONE source's share. The source-led grammar is
+    /// per-source by construction — authority is the Deus of Calamity ruling
+    /// ("6 damage to an opponent at one time… won't keep track of accumulated
+    /// damage") plus the siblings that make the aggregate reading untenable
+    /// (Dragonborn Champion would fire on two 3-damage sources; Ghyrson Starn's
+    /// "exactly 1" would break entirely). CR 120.9 is consistent but adjacent —
+    /// it governs what an EFFECT's "the damage dealt" means, not how a
+    /// threshold is scoped. "…by a single source" (Pain Magnification) selects
+    /// this pole explicitly on the received-damage grammar.
+    #[default]
+    PerSource,
+    /// CR 120.4 + CR 120.4b: damage is processed in one four-part sequence, so
+    /// simultaneous damage is dealt in ONE event and the threshold reads the
+    /// summed amount that event dealt to the recipient. The worked example
+    /// printed under CR 120.4d states the event as a list spanning more than
+    /// one source — "[3 damage is dealt to the 2/2 creature, 2 damage is dealt
+    /// to the 3/3 creature]" — and CR 120.4b puts damage triggers at that
+    /// granularity ("Abilities that trigger when damage is dealt trigger now").
+    /// Innocent Bystander — "3 or more damage all at once."
+    ///
+    /// NOT CR 120.10: that rule is the excess-damage computation (damage
+    /// "greater than lethal damage" on a creature/planeswalker/battle), which
+    /// is what `DamageChannel::Excess` cites two types up in this same file.
+    /// It says nothing about how a threshold is scoped.
+    WholeEvent,
+}
+
+/// Serde guard: the `PerSource` default scope is elided from serialized output,
+/// so every card that predates the scope axis serializes byte-identically.
+/// Modeled on `is_total_damage_channel` above.
+fn is_per_source_damage_scope(scope: &DamageAmountScope) -> bool {
+    matches!(scope, DamageAmountScope::PerSource)
+}
+
+/// CR 603.2 + CR 120.1 + CR 120.4b: an amount threshold on a damage trigger,
+/// together with the domain it is evaluated over.
+///
+/// The scope is folded INTO the threshold rather than sitting beside it on
+/// `TriggerDefinition` so that "a scope with no amount to scope" is
+/// unrepresentable: a source restriction is only meaningful relative to an
+/// amount comparison, and the parser therefore has no correlation guard to get
+/// wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DamageAmountThreshold {
+    pub comparator: Comparator,
+    pub threshold: u32,
+    #[serde(default, skip_serializing_if = "is_per_source_damage_scope")]
+    pub scope: DamageAmountScope,
+}
+
+/// CR 603.2 + CR 120.1: Compatibility deserializer for `damage_amount`, which
+/// changed from the legacy tuple `["GE", 6]` to the object form
+/// `{"comparator":"GE","threshold":6}` when the scope axis was folded in.
+/// Accepts BOTH shapes, so data serialized before the migration reloads as a
+/// `PerSource` threshold (byte-identical behavior) instead of failing to
+/// deserialize. Modeled on `deserialize_damage_channel_compat` above.
+///
+/// This is not a speculative shim — three live consumers read the legacy shape:
+/// browser IndexedDB saved games (`client/src/services/gamePersistence.ts`,
+/// `saveGame` :147 / `loadGame` :181), the phase-server session store
+/// (`crates/phase-server/src/persistence.rs:488` deserializing a
+/// `PersistedSession` whose `state` is a `PersistedGameState`,
+/// `crates/server-core/src/persist.rs:23`), and the in-repo shared card fixture
+/// `crates/engine/tests/fixtures/integration_cards.json.gz`, which already
+/// carries legacy `["GE",5]` / `["EQ",1]` arrays.
+fn deserialize_damage_amount_compat<'de, D>(
+    d: D,
+) -> Result<Option<DamageAmountThreshold>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    let raw = serde_json::Value::deserialize(d)?;
+    if raw.is_null() {
+        return Ok(None);
+    }
+    if let serde_json::Value::Array(_) = raw {
+        let (comparator, threshold): (Comparator, u32) =
+            serde_json::from_value(raw).map_err(serde::de::Error::custom)?;
+        return Ok(Some(DamageAmountThreshold {
+            comparator,
+            threshold,
+            scope: DamageAmountScope::PerSource,
+        }));
+    }
+    serde_json::from_value(raw).map_err(serde::de::Error::custom)
+}
+
 /// CR 120.2a: Back-compat serde default for `PlayerFilter::OpponentDealtDamage`'s
 /// `kind` field. Legacy data serialized before the field existed encoded the
 /// former `OpponentDealtCombatDamage` variant (combat-only semantics), so an
@@ -23135,14 +23239,26 @@ pub struct TriggerDefinition {
     /// CR 701.22a + CR 603.2: Optional completed-scry bottom-count predicate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scry_bottom_count: Option<(Comparator, u32)>,
-    /// CR 603.2 + CR 120.1: Per-event damage-amount threshold for damage triggers
-    /// ("…deals 5 or more damage to a player"). When `Some((cmp, n))`, the
-    /// matcher requires the `DamageDealt` event's `amount` to satisfy
-    /// `amount cmp n`. `None` means no amount restriction. Applies to all
-    /// damage-event trigger modes (`DamageDone`, `DamageDoneOnce`, `DamageAll`,
-    /// `DamageDealtOnce`, `DamageReceived`); ignored by other modes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub damage_amount: Option<(Comparator, u32)>,
+    /// CR 603.2 + CR 120.1 + CR 120.4b: damage-amount threshold for damage
+    /// triggers ("…deals 5 or more damage to a player"), together with the
+    /// aggregation domain it is evaluated over. When `Some(t)`, the matcher
+    /// requires the damage amount to satisfy `amount t.comparator t.threshold`.
+    /// `None` means no amount restriction. Applies to all damage-event trigger
+    /// modes (`DamageDone`, `DamageDoneOnce`, `DamageAll`, `DamageDealtOnce`,
+    /// `DamageReceived`); ignored by other modes.
+    ///
+    /// `scope` selects what "the amount" means: `PerSource` (the default, and
+    /// the behavior every card had before the axis existed) evaluates each
+    /// `DamageDealt` event on its own, while `WholeEvent` (CR 120.4b) sums the
+    /// simultaneous batch dealt to one recipient before comparing. Only the
+    /// received-damage grammar can produce `WholeEvent`; the source-led
+    /// grammar is per-source by construction (see `DamageAmountScope`).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_damage_amount_compat"
+    )]
+    pub damage_amount: Option<DamageAmountThreshold>,
     /// CR 119.3: Per-event life-change-amount constraint for life triggers
     /// ("Whenever [a player] loses exactly N life" / "…loses N or more life").
     /// When `Some((cmp, n))`, the matcher requires the `LifeChanged` event's
@@ -30701,6 +30817,69 @@ mod modal_ability_tests {
 
         assert!(def.modal.is_some());
         assert_eq!(def.mode_abilities.len(), 2);
+    }
+
+    /// V13 / H8 — CR 603.2 + CR 120.4b: `damage_amount` changed from the legacy
+    /// tuple `["GE", 6]` to an object carrying the scope axis. Both shapes must
+    /// deserialize, and the `PerSource` default must stay elided so every card
+    /// that predates the axis serializes byte-identically.
+    ///
+    /// Revert-failing: drop the array arm from `deserialize_damage_amount_compat`
+    /// and the legacy half fails to deserialize.
+    #[test]
+    fn damage_amount_threshold_serde_accepts_legacy_array_and_elides_default_scope() {
+        let mut def = TriggerDefinition::new(TriggerMode::DamageDone);
+        def.damage_amount = Some(DamageAmountThreshold {
+            comparator: Comparator::GE,
+            threshold: 6,
+            scope: DamageAmountScope::PerSource,
+        });
+
+        // The default scope is elided: the new shape carries only the two
+        // legacy fields for every pre-existing card.
+        let value = serde_json::to_value(&def).expect("serializes");
+        assert_eq!(
+            value["damage_amount"],
+            serde_json::json!({ "comparator": "GE", "threshold": 6 }),
+            "PerSource must be elided from serialized output"
+        );
+
+        // Legacy array shape (5 cards on disk, plus the shared card fixture)
+        // reloads as an explicit PerSource threshold.
+        let mut legacy = value.clone();
+        legacy["damage_amount"] = serde_json::json!(["GE", 6]);
+        let from_legacy: TriggerDefinition =
+            serde_json::from_value(legacy).expect("legacy array deserializes");
+        assert_eq!(from_legacy.damage_amount, def.damage_amount);
+
+        // New object shape round-trips the non-default pole.
+        let mut whole_event = def.clone();
+        whole_event.damage_amount = Some(DamageAmountThreshold {
+            comparator: Comparator::GE,
+            threshold: 3,
+            scope: DamageAmountScope::WholeEvent,
+        });
+        let round_tripped: TriggerDefinition =
+            serde_json::from_str(&serde_json::to_string(&whole_event).expect("serializes"))
+                .expect("object shape deserializes");
+        assert_eq!(round_tripped.damage_amount, whole_event.damage_amount);
+        assert_eq!(
+            round_tripped
+                .damage_amount
+                .expect("threshold present")
+                .scope,
+            DamageAmountScope::WholeEvent
+        );
+
+        // An absent field stays None (the unquantified majority).
+        let mut absent = value;
+        absent
+            .as_object_mut()
+            .expect("object")
+            .remove("damage_amount");
+        let from_absent: TriggerDefinition =
+            serde_json::from_value(absent).expect("absent field deserializes");
+        assert_eq!(from_absent.damage_amount, None);
     }
 
     /// CR 118.1 (cost-payment unification Phase 4, risk R2): a saved
