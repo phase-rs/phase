@@ -1201,6 +1201,9 @@ fn fmt_duration(d: &Duration) -> String {
         }
         Duration::UntilHostLeavesPlay => "while on battlefield".to_string(),
         Duration::UntilSourceExilesAnotherCard => "until source exiles another card".to_string(),
+        Duration::UntilOpponentBecomesMonarch => {
+            "until an opponent becomes the monarch".to_string()
+        }
         Duration::UntilNextStepOf { step, player } => {
             format!(
                 "until next {} ({})",

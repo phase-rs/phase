@@ -1743,6 +1743,14 @@ pub(crate) fn apply_zone_delivery_tail(
                 Some(Duration::UntilHostLeavesPlay) => {
                     Some(ExileLinkKind::UntilSourceLeaves { return_zone: from })
                 }
+                Some(Duration::UntilOpponentBecomesMonarch) => {
+                    state.objects.get(&source_id).map(|source| {
+                        ExileLinkKind::UntilOpponentBecomesMonarch {
+                            return_zone: from,
+                            controller: source.controller,
+                        }
+                    })
+                }
                 _ if matches!(exile_tracking, ZoneDeliveryExileTracking::TrackBySource) => {
                     Some(ExileLinkKind::TrackedBySource)
                 }

@@ -6,7 +6,7 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{ExileLinkKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -77,8 +77,22 @@ fn board(player_count: u8) -> Board {
     );
     assert_eq!(
         outcome.state().delayed_triggers.len(),
-        1,
-        "reach-guard: the monarch-bounded return must be installed"
+        0,
+        "reach-guard: the event-bounded return must not use a delayed trigger"
+    );
+    assert!(
+        outcome.state().exile_links.iter().any(|link| {
+            link.exiled_id == target
+                && link.source_id == jailer
+                && matches!(
+                    link.kind,
+                    ExileLinkKind::UntilOpponentBecomesMonarch {
+                        return_zone: Zone::Battlefield,
+                        controller: P0,
+                    }
+                )
+        }),
+        "reach-guard: the immediate exile must install a monarch-bounded link"
     );
 
     Board {
@@ -108,13 +122,30 @@ fn pass_to(runner: &mut GameRunner, player: PlayerId) {
     panic!("priority did not reach {player:?}");
 }
 
-fn crown_opponent(runner: &mut GameRunner, spell: ObjectId, opponent: PlayerId) {
+fn crown_opponent(runner: &mut GameRunner, spell: ObjectId, opponent: PlayerId, target: ObjectId) {
     pass_to(runner, P0);
-    let outcome = runner.cast(spell).target_player(opponent).resolve();
+    let mut committed = runner.cast(spell).target_player(opponent).commit();
+    for _ in 0..4 {
+        if committed.state().monarch == Some(opponent) {
+            break;
+        }
+        committed
+            .act(GameAction::PassPriority)
+            .expect("each player must be able to pass priority");
+    }
     assert_eq!(
-        outcome.state().monarch,
+        committed.state().monarch,
         Some(opponent),
         "reach-guard: the opponent crown spell must create a monarch-change event"
+    );
+    assert_eq!(
+        committed.state().objects[&target].zone,
+        Zone::Battlefield,
+        "CR 610.3: the event-bounded return must complete in the same action pipeline"
+    );
+    assert!(
+        committed.state().stack.is_empty(),
+        "CR 610.3: the return must not wait behind a triggered-ability stack boundary"
     );
 }
 
@@ -129,7 +160,7 @@ fn opponent_becoming_monarch_returns_exiled_creature() {
         ..
     } = board(2);
 
-    crown_opponent(&mut runner, opponent_crown, P1);
+    crown_opponent(&mut runner, opponent_crown, P1, target);
 
     assert_eq!(
         runner.state().objects[&target].zone,
@@ -159,9 +190,9 @@ fn controller_becoming_monarch_does_not_return_exiled_creature() {
         "the target must remain exiled when only the controller becomes monarch"
     );
     assert_eq!(
-        runner.state().delayed_triggers.len(),
+        runner.state().exile_links.len(),
         1,
-        "the unmatched persistent trigger must remain installed"
+        "the unmatched monarch-bounded exile link must remain installed"
     );
 }
 
@@ -183,7 +214,7 @@ fn palace_jailer_in_graveyard_does_not_change_the_delayed_return() {
     assert_eq!(runner.state().objects[&jailer].zone, Zone::Graveyard);
     assert_eq!(runner.state().objects[&target].zone, Zone::Exile);
 
-    crown_opponent(&mut runner, opponent_crown, P1);
+    crown_opponent(&mut runner, opponent_crown, P1, target);
     assert_eq!(runner.state().objects[&target].zone, Zone::Battlefield);
 }
 
@@ -205,7 +236,7 @@ fn monarch_bounded_return_survives_a_turn_boundary() {
         "reach-guard: the scenario must cross a cleanup into a later turn"
     );
     assert_eq!(runner.state().objects[&target].zone, Zone::Exile);
-    assert_eq!(runner.state().delayed_triggers.len(), 1);
+    assert_eq!(runner.state().exile_links.len(), 1);
 
     pass_to(&mut runner, P1);
     runner.cast(p1_crown).resolve();
@@ -224,7 +255,7 @@ fn any_opponent_becoming_monarch_returns_the_selected_creature() {
         ..
     } = board(3);
 
-    crown_opponent(&mut runner, opponent_crown, P2);
+    crown_opponent(&mut runner, opponent_crown, P2, target);
     assert_eq!(runner.state().objects[&target].zone, Zone::Battlefield);
 }
 
@@ -247,7 +278,7 @@ fn target_leaving_exile_before_monarch_change_is_not_moved_again() {
         .resolve();
     assert_eq!(runner.state().objects[&target].zone, Zone::Battlefield);
 
-    crown_opponent(&mut runner, opponent_crown, P1);
+    crown_opponent(&mut runner, opponent_crown, P1, target);
     assert_eq!(
         runner.state().objects[&target].zone,
         Zone::Battlefield,

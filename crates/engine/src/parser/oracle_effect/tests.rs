@@ -19045,8 +19045,8 @@ fn delayed_trigger_in_effect_chain() {
     ));
 }
 
-/// CR 603.7 + CR 610.3 + CR 725.1: Palace Jailer must exile immediately and
-/// retain a persistent delayed return keyed to an opponent becoming monarch.
+/// CR 610.3 + CR 725.1: Palace Jailer must exile immediately and retain the
+/// event-bounded return metadata needed by the immediate exile-link pipeline.
 #[test]
 fn palace_jailer_monarch_bounded_exile_preserves_return_provenance() {
     let clause = parse_effect_clause(
@@ -19063,48 +19063,15 @@ fn palace_jailer_monarch_bounded_exile_preserves_return_provenance() {
             ..
         }
     ));
-
-    let delayed = clause
-        .sub_ability
-        .as_deref()
-        .expect("monarch-bounded exile must install a delayed return");
-    let Effect::CreateDelayedTrigger {
-        condition:
-            DelayedTriggerCondition::WhenNextEvent {
-                trigger,
-                or_trigger: None,
-                lifetime: DelayedTriggerLifetime::Persistent,
-            },
-        effect: return_effect,
-        uses_tracked_set: false,
-    } = delayed.effect.as_ref()
-    else {
-        panic!(
-            "expected a persistent monarch delayed trigger, got {:?}",
-            delayed.effect
-        );
-    };
-    assert_eq!(trigger.mode, TriggerMode::BecomeMonarch);
-    assert!(matches!(
-        trigger.valid_target,
-        Some(TargetFilter::Typed(TypedFilter {
-            controller: Some(ControllerRef::Opponent),
-            ..
-        }))
-    ));
-
-    let Effect::ChangeZone {
-        origin: Some(Zone::Exile),
-        destination: Zone::Battlefield,
-        target: TargetFilter::ParentTarget,
-        ..
-    } = return_effect.effect.as_ref()
-    else {
-        panic!(
-            "expected an exile-guarded ParentTarget return, got {:?}",
-            return_effect.effect
-        );
-    };
+    assert_eq!(
+        clause.duration,
+        Some(Duration::UntilOpponentBecomesMonarch),
+        "the event-bounded return must be represented on the immediate exile"
+    );
+    assert!(
+        clause.sub_ability.is_none(),
+        "CR 610.3 return must not be a triggered-ability sub-chain"
+    );
 }
 
 #[test]

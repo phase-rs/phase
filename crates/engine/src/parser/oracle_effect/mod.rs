@@ -25178,47 +25178,7 @@ fn try_parse_exile_until_opponent_becomes_monarch_clause(
         return None;
     }
 
-    let return_effect = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::ChangeZone {
-            origin: Some(Zone::Exile),
-            destination: Zone::Battlefield,
-            target: TargetFilter::ParentTarget,
-            owner_library: false,
-            enter_transformed: false,
-            enters_under: None,
-            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-            enters_attacking: false,
-            up_to: false,
-            enter_with_counters: vec![],
-            conditional_enter_with_counters: vec![],
-            face_down_profile: None,
-            enters_modified_if: None,
-        },
-    );
-    let delayed_return = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::CreateDelayedTrigger {
-            condition: DelayedTriggerCondition::WhenNextEvent {
-                trigger: Box::new(
-                    TriggerDefinition::new(TriggerMode::BecomeMonarch).valid_target(
-                        TargetFilter::Typed(
-                            TypedFilter::default().controller(ControllerRef::Opponent),
-                        ),
-                    ),
-                ),
-                or_trigger: None,
-                lifetime: DelayedTriggerLifetime::Persistent,
-            },
-            effect: Box::new(return_effect),
-            uses_tracked_set: false,
-        },
-    );
-    if let Some(existing) = clause.sub_ability.as_mut() {
-        append_to_deepest_sub_ability(existing, Some(Box::new(delayed_return)));
-    } else {
-        clause.sub_ability = Some(Box::new(delayed_return));
-    }
+    clause.duration = Some(Duration::UntilOpponentBecomesMonarch);
     Some(clause)
 }
 
