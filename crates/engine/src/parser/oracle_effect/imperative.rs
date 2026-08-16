@@ -20153,6 +20153,7 @@ mod tests {
     fn copy_stack_ability_target_accepts_all_combined_spellings() {
         for phrase in [
             "target activated ability, triggered ability you control",
+            "target triggered ability, activated ability you control",
             "target triggered ability or activated ability you control",
             "target activated ability or triggered ability you control",
         ] {

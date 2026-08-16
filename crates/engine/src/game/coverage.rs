@@ -567,10 +567,9 @@ fn fmt_target(filter: &TargetFilter) -> String {
         // new combination became reachable — the trailing kind-only catch-alls
         // swallowed controller-bearing filters and rendered them without the
         // "you control" scope.
-        TargetFilter::StackAbility { tag: Some(tag), .. } => format!("{tag:?} ability on stack"),
         TargetFilter::StackAbility {
             controller,
-            tag: None,
+            tag,
             kind,
         } => {
             let kind_word = match kind {
@@ -578,12 +577,13 @@ fn fmt_target(filter: &TargetFilter) -> String {
                 Some(StackAbilityKind::Triggered) => "triggered ability",
                 Some(StackAbilityKind::Activated) => "activated ability",
             };
-            match controller {
-                None => format!("{kind_word} on stack"),
-                Some(ControllerRef::You) => format!("{kind_word} you control on stack"),
-                Some(ControllerRef::Opponent) => format!("{kind_word} opponent controls on stack"),
-                Some(other) => format!("{kind_word} scoped to {other:?} on stack"),
-            }
+            let tag_prefix = tag
+                .as_ref()
+                .map_or_else(String::new, |tag| format!("{tag:?} "));
+            let controller_suffix = controller.as_ref().map_or_else(String::new, |controller| {
+                format!(" {}", fmt_controller(controller))
+            });
+            format!("{tag_prefix}{kind_word}{controller_suffix} on stack")
         }
         TargetFilter::StackSpell => "spell on stack".into(),
         TargetFilter::AttachedTo => "attached permanent".into(),
@@ -11539,7 +11539,18 @@ mod tests {
         );
         assert_eq!(
             stack_ability(Some(ControllerRef::TargetPlayer), None),
-            "ability scoped to TargetPlayer on stack"
+            "ability target player controls on stack"
+        );
+
+        // Tags may coexist with either narrowing axis. The formatter must not
+        // let the tag-specific form hide its controller or ability kind.
+        assert_eq!(
+            super::fmt_target(&TargetFilter::StackAbility {
+                controller: Some(ControllerRef::TargetPlayer),
+                tag: Some(crate::types::ability::AbilityTag::Backup),
+                kind: Some(StackAbilityKind::Triggered),
+            }),
+            "Backup triggered ability target player controls on stack"
         );
     }
 

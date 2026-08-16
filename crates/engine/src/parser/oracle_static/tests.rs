@@ -6373,6 +6373,21 @@ fn it_targets_ability_kind_delegates_to_axis() {
         "a narrowing spelling must reach the shared kind axis"
     );
 
+    // The shared axis must also consume both comma-separated kind orders; if
+    // it left the second phrase in the remainder, this nested condition would
+    // be dropped and the cost reduction could become unconditional.
+    assert_eq!(
+        stack_object_filter(
+            "This spell costs {7} less to cast if it targets a triggered ability, activated ability that targets a creature you control with power 7 or greater.",
+        ),
+        TargetFilter::StackAbility {
+            controller: None,
+            tag: None,
+            kind: None,
+        },
+        "the reverse comma order must fully consume as the combined kind axis"
+    );
+
     // The BARE article form names no kind. It must still PARSE (the delegated
     // arm cannot match it) and must stay kindless. If the local literal were
     // deleted in favour of the delegation, this whole static would vanish.
