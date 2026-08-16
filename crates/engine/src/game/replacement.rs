@@ -1862,9 +1862,9 @@ enum PreventionShieldRoute {
 /// mapping here lands in the residual arm and FAILS CLOSED rather than silently
 /// degrading a CR 614.9 redirection into a CR 615 prevention (damage deleted
 /// rather than moved) — the exact defect the anchored redirection spine exists
-/// to eliminate. `durable_redirect_route_is_total_over_parser_recipients` drives
-/// this function with the parser's own accepted phrasings, so the residual arm
-/// cannot become reachable without a test failure in every build profile.
+/// to eliminate. The parser-facing regression below covers the currently
+/// supported phrasings; this match remains the release-mode fail-closed boundary
+/// for any future parser expansion.
 fn durable_redirect_route_for_filter(filter: &TargetFilter) -> PreventionShieldRoute {
     match filter {
         // "...is dealt to ~ instead" — the shield host itself.
@@ -1979,6 +1979,21 @@ fn redirect_damage_event(
         });
     }
 
+    // CR 615.7: a finite shield must deplete by each point it prevents. A
+    // `Continuous` redirection has no depletion lifecycle, so this otherwise
+    // representable pair would redirect `Next(n)` from every event forever in
+    // release builds. Refuse the malformed replacement before resolving a
+    // recipient or mutating its shield: leave the proposed damage untouched.
+    if matches!(redirect_amount, PreventionAmount::Next(_)) && !consume_after_redirect {
+        return ApplyResult::Modified(ProposedEvent::Damage {
+            source_id,
+            target,
+            amount: damage_amount,
+            is_combat,
+            applied,
+        });
+    }
+
     let chosen = redirect_chosen_object_for_rid(state, rid);
     let new_recipient = super::effects::create_damage_replacement::resolve_redirect_recipient(
         state, recipient, rid.source, chosen,
@@ -2026,18 +2041,9 @@ fn redirect_damage_event(
             unreachable!("PreventionAmount::AllBut is never assigned to a ShieldKind::Redirection")
         }
         PreventionAmount::Next(n) => {
-            // CR 614.5: "the next N damage" is one-opportunity grammar, and the
-            // depletion bookkeeping below runs only under `consume_after_redirect`.
-            // A `Continuous` shield would therefore never spend `n` and would
-            // redirect up to N damage from EVERY event in its window. No parser
-            // path produces that pairing (the durable Prevention gate always
-            // passes `All`), but the type permits it and the failure is silent —
-            // so it is asserted rather than assumed, mirroring the `AllBut` arm.
-            debug_assert!(
-                consume_after_redirect,
-                "CR 614.5: PreventionAmount::Next must not pair with \
-                 RedirectionLifetime::Continuous — the amount would never deplete"
-            );
+            // The invalid continuous pair returned above. A remaining `Next(n)`
+            // is therefore a one-opportunity shield and must deplete by the
+            // redirected amount (CR 615.7).
             let redirected_amount = damage_amount.min(n);
             let remaining_amount = damage_amount.saturating_sub(redirected_amount);
             if consume_after_redirect {
@@ -10260,20 +10266,18 @@ mod tests {
         ReplacementDefinition::new(event)
     }
 
-    /// CR 614.9: the durable-redirection recipient mapping is TOTAL over every
-    /// filter the parser's `parse_durable_redirect_recipient_filter` can emit.
+    /// CR 614.9: the durable-redirection recipient mapping covers the supported
+    /// parser recipient phrasings.
     /// An unmapped recipient makes the shield fail closed (the damage is dealt
     /// as proposed instead of being moved), which is safe but silently drops the
     /// card's whole ability — so the mapping must never have a hole.
     ///
-    /// The cases are driven through the REAL grammar rather than a hand-written
-    /// list of `TargetFilter`s: a recipient phrasing added to
-    /// `parse_durable_redirect_recipient_filter` without a matching arm in
-    /// `durable_redirect_route_for_filter` fails here, in every build profile.
-    /// The previous hard-coded version could not catch that — it restated the
-    /// mapping's own arms back to it.
+    /// The cases exercise the real grammar rather than constructing
+    /// `TargetFilter`s directly. Keep this table synchronized with parser
+    /// additions; the runtime residual arm remains the release-mode safety
+    /// boundary if a new parser recipient is not yet mapped here.
     #[test]
-    fn durable_redirect_route_is_total_over_parser_recipients() {
+    fn durable_redirect_route_maps_supported_parser_recipients() {
         use crate::parser::oracle_replacement::parse_durable_redirect_recipient_filter;
 
         // Every recipient phrasing the "... is dealt to <recipient> instead"
@@ -10315,6 +10319,78 @@ mod tests {
             durable_redirect_route_for_filter(&TargetFilter::Any),
             PreventionShieldRoute::Unmapped,
             "an unmapped recipient must fail closed, not degrade into a CR 615 prevention"
+        );
+    }
+
+    #[test]
+    fn continuous_next_redirection_fails_closed_without_spending_the_shield() {
+        // CR 615.7: a finite "next N damage" shield depletes by each point it
+        // prevents. Pairing it with a continuous redirection has no valid
+        // depletion lifecycle, so the runtime must leave the damage untouched
+        // rather than redirecting N damage from every later event.
+        let mut state = GameState::new_two_player(42);
+        let mut source = GameObject::new(
+            ObjectId(10),
+            CardId(1),
+            PlayerId(1),
+            "Damage source".to_string(),
+            Zone::Battlefield,
+        );
+        source.card_types.core_types = vec![CoreType::Creature];
+        let mut chosen = GameObject::new(
+            ObjectId(20),
+            CardId(2),
+            PlayerId(0),
+            "Chosen recipient".to_string(),
+            Zone::Battlefield,
+        );
+        chosen.card_types.core_types = vec![CoreType::Creature];
+        state.objects.insert(ObjectId(10), source);
+        state.objects.insert(ObjectId(20), chosen);
+        state.battlefield.push_back(ObjectId(10));
+        state.battlefield.push_back(ObjectId(20));
+        state.pending_damage_replacements.push(
+            ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                .redirection_shield(
+                    DamageRedirectTarget::ChosenObjectTarget,
+                    PreventionAmount::Next(2),
+                    RedirectionLifetime::Continuous,
+                )
+                .redirect_target(TargetFilter::SpecificObject { id: ObjectId(20) }),
+        );
+
+        let mut events = Vec::new();
+        let result = replace_event(
+            &mut state,
+            ProposedEvent::Damage {
+                source_id: ObjectId(10),
+                target: TargetRef::Player(PlayerId(0)),
+                amount: 3,
+                is_combat: false,
+                applied: HashSet::new(),
+            },
+            &mut events,
+        );
+
+        assert!(matches!(
+            result,
+            ReplacementResult::Execute(ProposedEvent::Damage {
+                target: TargetRef::Player(PlayerId(0)),
+                amount: 3,
+                ..
+            })
+        ));
+        assert!(matches!(
+            state.pending_damage_replacements[0].shield_kind,
+            ShieldKind::Redirection {
+                amount: PreventionAmount::Next(2),
+                lifetime: RedirectionLifetime::Continuous,
+                ..
+            }
+        ));
+        assert!(
+            !state.pending_damage_replacements[0].is_consumed,
+            "rejecting the malformed pair must not consume or mutate its shield"
         );
     }
 
