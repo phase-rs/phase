@@ -12591,8 +12591,10 @@ fn apply_retarget(
 
     // CR 115.7a: "each target can be changed only to another legal target." The
     // `legal_new_targets` pool checked above is flat, so for a multi-slot node it
-    // cannot tell slot 0's legal set from slot 1's. Re-check positionally against
-    // the node's own per-slot filters before mutating the stack. Applies to both
+    // cannot tell slot 0's legal set from slot 1's. Re-check each CHANGED
+    // position against its own slot filter before mutating the stack; CR 115.7d
+    // exempts unchanged positions, which `retarget_slot_violation` applies for
+    // both this caller and the AI generator. Applies to both
     // `Single` and `All`. It is NOT a blanket no-op for `Single`: alongside the
     // two-surfaced-slot `Both`, `mana_multi_role` also admits the context-ref
     // recipient `Both` (surfaced == 1, generic == 0), which is parser-reachable
@@ -12605,9 +12607,12 @@ fn apply_retarget(
         .get(stack_entry_index)
         .and_then(|entry| entry.ability())
     {
-        if let Some(slot) =
-            crate::game::ability_utils::retarget_slot_violation(state, ability, &new_targets)
-        {
+        if let Some(slot) = crate::game::ability_utils::retarget_slot_violation(
+            state,
+            ability,
+            current_targets,
+            &new_targets,
+        ) {
             return Err(EngineError::InvalidAction(format!(
                 "Retarget: chosen target is not legal for target slot {slot}"
             )));
@@ -19361,7 +19366,39 @@ mod stage2_injector_tests {
                 //   `origin/main:crates/engine/src/game/engine.rs:12773`, and its offset from
                 //   `begin_pending_trigger_target_selection` (`:12662`) is STILL 134 — the
                 //   control that caught this row's one historical SILENT drift.
-                "game/engine.rs:12851".to_string(),
+                // CR 115.7 retarget-softlock fix (phase 1), MEASURED in the rebased tree
+                //   after the cherry-pick onto `origin/main` `1098f1b2ee`:
+                //   `:12851 ⇒ :12856`, +5, and ONLY this engine.rs entry moved — the four
+                //   `effects/mod.rs` + `scoped_library_search` entries are untouched by
+                //   this change. `git diff -U0 origin/main` on this file has exactly TWO
+                //   hunks above this producer, both inside `apply_retarget`:
+                //   `@@ -12594,2 +12594,4 @@` (+2 — the CR 115.7d clause added to the
+                //   per-slot re-check's comment) and `@@ -12608,3 +12610,6 @@` (+3 — the
+                //   `retarget_slot_violation` call gaining its `current_targets` argument
+                //   and wrapping across lines). `+2 +3 = +5`.
+                //   The coordinate below was MEASURED, never carried and never computed
+                //   from the pre-rebase value: this literal raised a CONFLICT on the
+                //   cherry-pick, which is exactly the anchor-rot class the note above
+                //   documents. `12851+5` agreeing with the measurement is a check on the
+                //   measurement, not a substitute for it. Identity re-established on BOTH
+                //   controls: the line at `:12856` is sha256-identical
+                //   (`8a544e87…5cc7d63`) to the producer at
+                //   `origin/main:crates/engine/src/game/engine.rs:12851`, and its offset
+                //   from `begin_pending_trigger_target_selection` (now `:12722`, was
+                //   `:12717` upstream) is STILL 134 — this change adds nothing inside that
+                //   function, and the offset is what discriminates when the same mint text
+                //   occurs at several coordinates in this crate.
+                //   Stated WITHOUT a whole-file delta, per the note above: THIS drift entry
+                //   is a further hunk in the same file, it is self-referential, and any
+                //   whole-file figure would be falsified by the next wording edit. It is
+                //   identified by POSITION instead — it sits BELOW the producer, so it
+                //   cannot move it. (It also cannot be counted: `code_of` strips comments,
+                //   and the needle is assembled.)
+                //   Neither above-producer hunk mints a prompt: both sit in the
+                //   VALIDATION half of `apply_retarget`, which consumes an already-minted
+                //   `RetargetChoice` and never writes `state.waiting_for`, so the census
+                //   set is still exactly 5.
+                "game/engine.rs:12856".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \

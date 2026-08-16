@@ -18,7 +18,8 @@ use crate::types::counter::CounterMatch;
 use crate::types::game_state::{
     CastOfferKind, CastPaymentMode, CastingVariant, CompanionDeclaration, ConvokeMode, CostResume,
     CounterCostChoice, CounterMoveChoice, CounterRemoveChoice, GameState, MulliganDecisionPhase,
-    PayCostKind, PayableResource, PendingMulliganAction, TargetSelectionSlot, WaitingFor,
+    PayCostKind, PayableResource, PendingMulliganAction, RetargetScope, TargetSelectionSlot,
+    WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::interaction::MAX_INTERACTION_LIST_LEN;
@@ -3039,20 +3040,26 @@ pub fn candidate_actions_broad_with_probe(
                 )]
             }
         }
-        // CR 115.7: Retarget — keep current targets as default.
+        // CR 115.7a: propose every legal alternative. The previous arm proposed
+        // ONLY `current_targets`, which `apply_retarget` rejects whenever the
+        // current target is not in `legal_new_targets` — three rejections in a
+        // row halt the AI controller and freeze the game.
         WaitingFor::RetargetChoice {
             player,
+            stack_entry_index,
+            scope,
             current_targets,
-            ..
-        } => {
-            vec![candidate(
-                GameAction::RetargetSpell {
-                    new_targets: current_targets.clone(),
-                },
-                TacticalClass::Selection,
-                Some(*player),
-            )]
-        }
+            legal_new_targets,
+        } => retarget_actions(
+            state,
+            *stack_entry_index,
+            scope,
+            current_targets,
+            legal_new_targets,
+        )
+        .into_iter()
+        .map(|action| candidate(action, TacticalClass::Selection, Some(*player)))
+        .collect(),
         // CR 701.62a: AI selects one card to manifest — one action per card option
         WaitingFor::ManifestDreadChoice { player, cards, .. } => {
             if cards.is_empty() {
@@ -3534,6 +3541,97 @@ fn authorize_candidate_actors(state: &GameState, actions: &mut [CandidateAction]
         action.metadata.actor = action.metadata.actor.map(|player| {
             crate::game::turn_control::authorized_submitter_for_player(state, player)
         });
+    }
+}
+
+/// CR 115.7: Every submission `apply_retarget` will accept for a parked
+/// `RetargetChoice`, derived from the prompt's own payload and filtered through
+/// the same per-slot authority the reducer consults.
+///
+/// Shared by the engine's candidate generator and `phase-ai`'s fallback so the
+/// two cannot disagree about what a legal retarget is — they previously agreed
+/// only in being wrong the same way.
+pub fn retarget_actions(
+    state: &GameState,
+    stack_entry_index: usize,
+    scope: &RetargetScope,
+    current_targets: &[TargetRef],
+    legal_new_targets: &[TargetRef],
+) -> Vec<GameAction> {
+    // CR 115.7a: the pool is FLAT for a multi-role mana node — it `flat_map`s
+    // every surfaced role filter together, so it is a per-slot SUPERSET
+    // (`change_targets.rs`, multi-role branch). `apply_retarget` re-checks each
+    // changed submission positionally via `retarget_slot_violation`, so a
+    // proposal built from a pool member legal only for another slot would be
+    // rejected. Consult the same authority here rather than re-deriving
+    // legality, so every proposed action is accepted by construction —
+    // including CR 115.7d's unchanged submissions, which that authority exempts.
+    let slot_legal = |new_targets: &[TargetRef]| {
+        state
+            .stack
+            .get(stack_entry_index)
+            .and_then(|entry| entry.ability())
+            .is_none_or(|ability| {
+                crate::game::ability_utils::retarget_slot_violation(
+                    state,
+                    ability,
+                    current_targets,
+                    new_targets,
+                )
+                .is_none()
+            })
+    };
+
+    match scope {
+        // CR 115.7a: "each target can be changed only to another legal target."
+        // One proposal per member of the pool `apply_retarget` validates
+        // against. That pool normally still contains the current target — that
+        // member IS CR 115.7a's "the original target is unchanged" fallback, so
+        // it is offered rather than filtered out. An empty pool yields no
+        // proposals; after Unit 1 `change_targets::resolve` no longer parks that
+        // state.
+        RetargetScope::Single => legal_new_targets
+            .iter()
+            .map(|target| vec![target.clone()])
+            .filter(|new_targets| slot_legal(new_targets))
+            .map(|new_targets| GameAction::RetargetSpell { new_targets })
+            .collect(),
+        // CR 115.7d: "the player may leave any number of the targets unchanged,
+        // even if those targets would be illegal." Leaving every target
+        // unchanged anchors the list; each single-slot substitution to another
+        // legal target is offered on top of it. The anchor goes through the same
+        // `slot_legal` filter as every other proposal and passes unconditionally,
+        // because `retarget_slot_violation` exempts unchanged positions — no
+        // carve-out is needed, and none is made.
+        RetargetScope::All => {
+            let mut actions = Vec::new();
+            let anchor = current_targets.to_vec();
+            if slot_legal(&anchor) {
+                actions.push(GameAction::RetargetSpell {
+                    new_targets: anchor,
+                });
+            }
+            for slot in 0..current_targets.len() {
+                for target in legal_new_targets {
+                    if current_targets[slot] == *target {
+                        continue;
+                    }
+                    let mut new_targets = current_targets.to_vec();
+                    new_targets[slot] = target.clone();
+                    if slot_legal(&new_targets) {
+                        actions.push(GameAction::RetargetSpell { new_targets });
+                    }
+                }
+            }
+            actions
+        }
+        // A forced retarget is applied by `change_targets::resolve` without a
+        // prompt, so this scope never reaches an interactive `RetargetChoice`;
+        // `apply_retarget` rejects it unconditionally (`engine.rs`, the
+        // `RetargetScope::ForcedTo(_)` arm) and the parser emits only
+        // `Single`/`All` (`parser/oracle_effect/mod.rs`, the retarget-scope
+        // combinator). There is no legal submission to propose.
+        RetargetScope::ForcedTo(_) => Vec::new(),
     }
 }
 

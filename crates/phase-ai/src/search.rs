@@ -2014,12 +2014,25 @@ pub fn fallback_action(
             Some(GameAction::SubmitPayAmount { amount: *min })
         }
 
-        // Retarget: keep current targets.
+        // CR 115.7a: a retarget must change to ANOTHER legal target; keeping the
+        // current targets is rejected by `apply_retarget` whenever the current
+        // target is not in the pool. Share the engine's enumeration so this
+        // fallback and `candidate_actions` cannot drift.
         WaitingFor::RetargetChoice {
-            current_targets, ..
-        } => Some(GameAction::RetargetSpell {
-            new_targets: current_targets.clone(),
-        }),
+            stack_entry_index,
+            scope,
+            current_targets,
+            legal_new_targets,
+            ..
+        } => engine::ai_support::retarget_actions(
+            state,
+            *stack_entry_index,
+            scope,
+            current_targets,
+            legal_new_targets,
+        )
+        .into_iter()
+        .next(),
 
         // Companion reveal: decline.
         WaitingFor::CompanionReveal { .. } => Some(GameAction::DeclareCompanion {

@@ -932,6 +932,7 @@ mod refurbished_familiar;
 mod relic_of_progenitus_6446;
 mod render_silent_cant_cast;
 mod repro_pilot_crew;
+mod retarget_prompt_softlock;
 mod revealed_card_type_disjunction_518;
 mod rhys_evermore_remove_counters;
 mod riot_control_regression;

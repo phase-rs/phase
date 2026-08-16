@@ -7387,15 +7387,29 @@ fn chain_has_target_sink_after_deferred_effect(sub_ability: Option<&ResolvedAbil
 
 /// CR 115.7a: "each target can be changed only to another legal target." A
 /// multi-slot node's replacement targets are submitted positionally, but
-/// `legal_new_targets_for_stack_ability` can only return a FLAT union pool
+/// `legal_new_targets_for_stack_entry` can only return a FLAT union pool
 /// (one `Vec<TargetRef>`, no slot structure), so the union alone would let a
 /// count-source-legal player be assigned into the recipient slot. This is the
 /// seam where slot identity IS available: re-validate each submitted target
 /// against the filter of the slot it actually lands in.
 ///
-/// Returns `Some(slot_index)` for the first positionally-illegal submission.
-/// `None` = the submission is slot-legal, or this node declares no per-slot
-/// structure this function knows about.
+/// Takes the prompt's `current_targets` and **exempts positions whose submission
+/// is unchanged**: CR 115.7d ("the player may leave any number of the targets
+/// unchanged, even if those targets would be illegal") licenses this for the
+/// "choose new targets" scope, and CR 115.7a licenses it for the "change the
+/// target(s)" scope from the other direction — a slot already holding its own
+/// submission was never changed, so "changed only to another legal target" has
+/// nothing to bite on. The exemption is therefore correct without a scope
+/// parameter.
+///
+/// Consumed by `engine::apply_retarget` AND by
+/// `ai_support::candidates::retarget_actions`, so the reducer and the AI
+/// generator cannot disagree about which submissions are legal.
+///
+/// Returns `Some(slot_index)` for the first positionally-illegal CHANGED
+/// submission. `None` = the submission is slot-legal, every illegal position was
+/// left unchanged, or this node declares no per-slot structure this function
+/// knows about.
 ///
 /// SCOPE: today this recognizes any node `mana_multi_role` admits — both the
 /// two-surfaced-slot `Both` and the one-surfaced-slot context-ref recipient
@@ -7407,19 +7421,47 @@ fn chain_has_target_sink_after_deferred_effect(sub_ability: Option<&ResolvedAbil
 pub fn retarget_slot_violation(
     state: &GameState,
     ability: &ResolvedAbility,
+    current_targets: &[TargetRef],
     new_targets: &[TargetRef],
 ) -> Option<usize> {
     let role = mana_multi_role(&ability.effect)?;
     role.surfaced_filters()
         .zip(new_targets.iter())
-        .position(|((_slot, filter), submitted)| {
-            targeting::validate_targets_for_ability(
+        .enumerate()
+        .find_map(|(slot, ((_slot, filter), submitted))| {
+            // CR 115.7d: "the player may leave any number of the targets
+            // unchanged, even if those targets would be illegal." CR 115.7a says
+            // the same thing for the other scope from the other direction: a
+            // target is "changed only to another legal target", and a slot
+            // already holding its own submission was not changed at all. So a
+            // position whose submission equals its current target is exempt
+            // under BOTH retarget scopes, which is why this authority needs no
+            // scope parameter.
+            //
+            // `apply_retarget`'s pool-membership stage already exempts exactly
+            // these positions (its `All` arm's `continue` on
+            // `current_targets.get(idx) == Some(target)`); before this, the
+            // per-slot stage re-rejected them, so the one submission CR 115.7d
+            // guarantees — leave everything unchanged — was refused for every
+            // node `mana_multi_role` admits whose current target had become
+            // slot-illegal. The forced seam
+            // (`change_targets::forced_retarget_targets`) has always conjoined
+            // "changes" with "legal", and its doc already claims parity with
+            // this function; this is that same conjunction, here.
+            //
+            // Index `current_targets` rather than zipping it: a third `.zip`
+            // would truncate the scan and silently skip validation for any
+            // position beyond `current_targets.len()`, where `get` correctly
+            // yields `None` (no current target cannot be "unchanged").
+            let changes = current_targets.get(slot) != Some(submitted);
+            let illegal = targeting::validate_targets_for_ability(
                 state,
                 std::slice::from_ref(submitted),
                 filter,
                 ability,
             )
-            .is_empty()
+            .is_empty();
+            (changes && illegal).then_some(slot)
         })
 }
 
@@ -8268,7 +8310,7 @@ mod tests {
     }
 
     /// Matrix row 8b — CR 115.7a: "each target can be changed only to another
-    /// legal target." A flat `legal_new_targets_for_stack_ability` union pool
+    /// legal target." A flat `legal_new_targets_for_stack_entry` union pool
     /// cannot express per-slot legality, so `retarget_slot_violation` re-checks
     /// each submission against the filter of the slot it actually lands in.
     #[test]
@@ -8300,11 +8342,17 @@ mod tests {
         assert_eq!(role.surfaced_filters().count(), 2);
 
         // Positive: a slot-legal submission is accepted. Without this the
-        // negative below could pass because EVERYTHING is rejected.
+        // negative below could pass because EVERYTHING is rejected. Both slots
+        // genuinely CHANGE against the current targets passed here, so this case
+        // proves legality rather than the CR 115.7d unchanged-position exemption.
         assert_eq!(
             retarget_slot_violation(
                 &state,
                 &ability,
+                &[
+                    TargetRef::Player(PlayerId(1)),
+                    TargetRef::Player(PlayerId(0)),
+                ],
                 &[
                     TargetRef::Player(PlayerId(0)),
                     TargetRef::Player(PlayerId(1)),
@@ -8315,11 +8363,17 @@ mod tests {
         );
 
         // Negative: P0 is in the flat union pool (legal for the recipient slot)
-        // but illegal in the COUNT SOURCE slot it was submitted into.
+        // but illegal in the COUNT SOURCE slot it was submitted into. Slot 1
+        // genuinely changes (P1 -> P0) against the current targets, so the
+        // exemption does not apply and the violation must be reported.
         assert_eq!(
             retarget_slot_violation(
                 &state,
                 &ability,
+                &[
+                    TargetRef::Player(PlayerId(1)),
+                    TargetRef::Player(PlayerId(1)),
+                ],
                 &[
                     TargetRef::Player(PlayerId(1)),
                     TargetRef::Player(PlayerId(0)),
@@ -8328,6 +8382,82 @@ mod tests {
             Some(1),
             "CR 115.7a: P0 is not an opponent, so it is illegal in slot 1 even though \
              the flat union pool contains it"
+        );
+    }
+
+    /// Matrix row 2d — CR 115.7d: "the player may leave any number of the
+    /// targets unchanged, even if those targets would be illegal." A submission
+    /// that changes nothing must never be rejected for slot legality, even when
+    /// its current target is illegal for the slot it sits in. CR 115.7a licenses
+    /// the same exemption for the "change the target(s)" scope: a slot already
+    /// holding its own submission was not changed at all.
+    #[test]
+    fn retarget_slot_violation_exempts_an_unchanged_illegal_target() {
+        use crate::types::ability::ManaTargetRole;
+
+        let mut state = GameState::new_two_player(24);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Retarget Mana Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Recipient: any player. Count source: an OPPONENT of P0 (i.e. P1 only).
+        // P0 is therefore legal for slot 0 and ILLEGAL for slot 1.
+        let role = ManaTargetRole::Both {
+            recipient: TargetFilter::Player,
+            count_source: TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            ),
+        };
+        let ability = mana_ability_with_role(role.clone(), source);
+
+        // Reach guard: the node is admitted and has two discriminable slots.
+        assert!(mana_multi_role(&ability.effect).is_some());
+        assert_eq!(role.surfaced_filters().count(), 2);
+
+        // Reach guard: the function still DISCRIMINATES. Slot 1 genuinely
+        // changes P1 -> P0 and is illegal there, so a violation is still
+        // reported. Without this, the exemption assertion below could pass in a
+        // world where this authority stopped rejecting anything at all.
+        assert_eq!(
+            retarget_slot_violation(
+                &state,
+                &ability,
+                &[
+                    TargetRef::Player(PlayerId(1)),
+                    TargetRef::Player(PlayerId(1)),
+                ],
+                &[
+                    TargetRef::Player(PlayerId(1)),
+                    TargetRef::Player(PlayerId(0)),
+                ],
+            ),
+            Some(1),
+            "reach guard: a CHANGED slot-illegal submission is still a violation"
+        );
+
+        // CR 115.7d: slot 1 holds P0, which is illegal for the opponent-only
+        // count-source slot — but the submission leaves it unchanged, so there
+        // is no violation to report.
+        assert_eq!(
+            retarget_slot_violation(
+                &state,
+                &ability,
+                &[
+                    TargetRef::Player(PlayerId(1)),
+                    TargetRef::Player(PlayerId(0)),
+                ],
+                &[
+                    TargetRef::Player(PlayerId(1)),
+                    TargetRef::Player(PlayerId(0)),
+                ],
+            ),
+            None,
+            "CR 115.7d: an unchanged position is exempt from slot legality even \
+             though P0 is illegal in slot 1"
         );
     }
 
