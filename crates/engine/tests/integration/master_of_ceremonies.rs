@@ -135,7 +135,7 @@ fn make_master_of_ceremonies_vote(controller: PlayerId, source_id: ObjectId) -> 
 fn make_threshold_vote(
     controller: PlayerId,
     source_id: ObjectId,
-    tie_breaker: usize,
+    tie_breaker: u8,
 ) -> ResolvedAbility {
     let vote_def = AbilityDefinition::new(
         AbilityKind::Spell,
