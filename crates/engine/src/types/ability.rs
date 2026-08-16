@@ -4106,8 +4106,9 @@ pub enum DamageAmountScope {
     WholeEvent,
 }
 
-/// Serde guard: the `PerSource` default scope is elided from serialized output,
-/// so every card that predates the scope axis serializes byte-identically.
+/// Serde guard: the `PerSource` default scope is elided from serialized output.
+/// Elision alone keeps the object minimal; it is
+/// [`serialize_damage_amount_compat`] that preserves the pre-axis *shape*.
 /// Modeled on `is_total_damage_channel` above.
 fn is_per_source_damage_scope(scope: &DamageAmountScope) -> bool {
     matches!(scope, DamageAmountScope::PerSource)
@@ -4144,6 +4145,32 @@ pub struct DamageAmountThreshold {
 /// `crates/server-core/src/persist.rs:23`), and the in-repo shared card fixture
 /// `crates/engine/tests/fixtures/integration_cards.json.gz`, which already
 /// carries legacy `["GE",5]` / `["EQ",1]` arrays.
+/// Write-side counterpart to [`deserialize_damage_amount_compat`]: `PerSource`
+/// is the pre-axis pole, so it is emitted as the legacy tuple `["GE", 6]` —
+/// the shape every reader that predates the scope axis accepts. Only
+/// `WholeEvent` emits the object form, and no pre-axis reader can represent
+/// that pole anyway.
+///
+/// Without this, the migration is one-way: the three consumers named on
+/// `deserialize_damage_amount_compat` read persisted state with no version
+/// gate, so a build carrying the axis writes an object where an older build
+/// still expects an array, and the older build fails the whole restore. Modeled
+/// on `serialize_multi_target_min` above, which collapses the same way.
+fn serialize_damage_amount_compat<S>(
+    value: &Option<DamageAmountThreshold>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(threshold) if is_per_source_damage_scope(&threshold.scope) => {
+            (threshold.comparator, threshold.threshold).serialize(serializer)
+        }
+        other => other.serialize(serializer),
+    }
+}
+
 fn deserialize_damage_amount_compat<'de, D>(d: D) -> Result<Option<DamageAmountThreshold>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -23254,6 +23281,7 @@ pub struct TriggerDefinition {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_damage_amount_compat",
         deserialize_with = "deserialize_damage_amount_compat"
     )]
     pub damage_amount: Option<DamageAmountThreshold>,
@@ -30817,13 +30845,18 @@ mod modal_ability_tests {
         assert_eq!(def.mode_abilities.len(), 2);
     }
 
-    /// V13 / H8 — CR 603.2 + CR 120.4b: `damage_amount` changed from the legacy
-    /// tuple `["GE", 6]` to an object carrying the scope axis. Both shapes must
-    /// deserialize, and the `PerSource` default must stay elided so every card
-    /// that predates the axis serializes byte-identically.
+    /// V13 / H8 — CR 603.2 + CR 120.4b: `damage_amount` gained a scope axis, so
+    /// the object form `{"comparator":"GE","threshold":6,"scope":…}` had to
+    /// coexist with the legacy tuple `["GE", 6]`. The migration must be
+    /// two-way: both shapes deserialize, AND `PerSource` still *serializes* as
+    /// the tuple, so a build carrying the axis writes state that a build
+    /// predating it can still read. Only `WholeEvent` — a pole no pre-axis
+    /// reader can represent — emits the object.
     ///
-    /// Revert-failing: drop the array arm from `deserialize_damage_amount_compat`
-    /// and the legacy half fails to deserialize.
+    /// Revert-failing in both directions: drop the array arm from
+    /// `deserialize_damage_amount_compat` and the legacy read fails; drop
+    /// `serialize_damage_amount_compat` and the `PerSource` write reverts to an
+    /// object that older readers reject.
     #[test]
     fn damage_amount_threshold_serde_accepts_legacy_array_and_elides_default_scope() {
         let mut def = TriggerDefinition::new(TriggerMode::DamageDone);
@@ -30833,13 +30866,15 @@ mod modal_ability_tests {
             scope: DamageAmountScope::PerSource,
         });
 
-        // The default scope is elided: the new shape carries only the two
-        // legacy fields for every pre-existing card.
+        // PerSource serializes as the LEGACY TUPLE, byte-identically to what a
+        // build predating the scope axis would have written. This is what keeps
+        // the migration two-way for the three unversioned persistence consumers
+        // named on `deserialize_damage_amount_compat`.
         let value = serde_json::to_value(&def).expect("serializes");
         assert_eq!(
             value["damage_amount"],
-            serde_json::json!({ "comparator": "GE", "threshold": 6 }),
-            "PerSource must be elided from serialized output"
+            serde_json::json!(["GE", 6]),
+            "PerSource must serialize as the legacy tuple, or older readers reject the row"
         );
 
         // Legacy array shape (5 cards on disk, plus the shared card fixture)
@@ -30849,6 +30884,17 @@ mod modal_ability_tests {
         let from_legacy: TriggerDefinition =
             serde_json::from_value(legacy).expect("legacy array deserializes");
         assert_eq!(from_legacy.damage_amount, def.damage_amount);
+
+        // Object shape with no `scope` key reads as the PerSource default. This
+        // pins `#[serde(default)]` on `DamageAmountThreshold::scope`: without
+        // it, such a row fails with a missing-field error. Reachable because a
+        // build between the axis landing and the tuple serializer wrote exactly
+        // this shape.
+        let mut scopeless = value.clone();
+        scopeless["damage_amount"] = serde_json::json!({ "comparator": "GE", "threshold": 6 });
+        let from_scopeless: TriggerDefinition =
+            serde_json::from_value(scopeless).expect("object without scope deserializes");
+        assert_eq!(from_scopeless.damage_amount, def.damage_amount);
 
         // New object shape round-trips the non-default pole.
         let mut whole_event = def.clone();
