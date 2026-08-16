@@ -195,5 +195,6 @@ describe("NamedChoiceModal", () => {
 
       expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
       expect(screen.getByRole("button", { name: "1" })).toBeInTheDocument();
+    });
   });
 });
