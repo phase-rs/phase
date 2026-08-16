@@ -3222,6 +3222,7 @@ mod tests {
         ContinuousModification, Duration, Effect, QuantityExpr, QuantityRef, ResolvedAbility,
         TargetFilter, TargetRef,
     };
+    use engine::types::actions::ResolveAllConsentDecision;
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType};
     use engine::types::counter::{CounterMatch, CounterType};
@@ -4477,7 +4478,6 @@ mod tests {
         state.active_player = PlayerId(1);
         state.turn_decision_controller = Some(PlayerId(0));
         state.priority_player = PlayerId(0);
-        state.priority_passes.insert(PlayerId(0));
         state.stack.push_back(no_op_stack_entry(1, PlayerId(1)));
         apply(
             &mut state,
@@ -4505,6 +4505,28 @@ mod tests {
             WaitingFor::ResolveAllReady { epoch: ready_epoch } if ready_epoch == epoch
         ));
         GAME_STATE.with(|cell| cell.set(Some(state)));
+
+        with_state_mut(|state| {
+            apply(
+                state,
+                PlayerId(0),
+                GameAction::BeginResolveAll { max_resolutions: 0 },
+            )
+            .expect("turn controller may begin the consent run");
+            let WaitingFor::ResolveAllConsent { epoch, .. } = &state.waiting_for else {
+                panic!("controlled priority should queue Resolve All consent");
+            };
+            apply(
+                state,
+                PlayerId(0),
+                GameAction::RespondResolveAllConsent {
+                    epoch: *epoch,
+                    decision: ResolveAllConsentDecision::Grant,
+                },
+            )
+            .expect("frozen turn controller may grant for the queued representative");
+        })
+        .expect("test state remains installed");
 
         let value = resolve_all(0, "[]", 0).unwrap();
         let result: BatchResolveResult = serde_wasm_bindgen::from_value(value).unwrap();
