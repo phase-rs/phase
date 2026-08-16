@@ -9,7 +9,7 @@ use crate::types::player::PlayerId;
 
 use super::engine::{apply_action_boundary_with_stack_limit, PublicFinalizeMode};
 use super::public_state::finalize_display_state;
-use super::{stack, topology, turn_control};
+use super::{interaction, stack, topology, turn_control};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -74,6 +74,7 @@ pub fn resolve_all_ready_prefix(
         if matches!(&state.waiting_for, WaitingFor::ResolveAllReady { .. }) {
             turn_control::invalidate_resolve_all_consent(state);
             finalize_display_state(state);
+            interaction::ensure_interaction_authority(state);
         }
         return ResolveAllFastForwardResult {
             events,
@@ -131,6 +132,7 @@ pub fn resolve_all_ready_prefix(
     // priority; no later stack entry inherits this consent.
     state.resolve_all_consent_run = None;
     finalize_display_state(state);
+    interaction::ensure_interaction_authority(state);
 
     ResolveAllFastForwardResult {
         events,
@@ -140,6 +142,14 @@ pub fn resolve_all_ready_prefix(
         total,
         recorded_actions,
     }
+}
+
+/// Returns whether the frozen Ready consent run authorizes this requester.
+/// Transport callers must reject an unauthorized request before mutating the
+/// authoritative session; the resolver's fail-closed invalidation remains its
+/// defense-in-depth boundary.
+pub fn resolve_all_ready_requester_is_authorized(state: &GameState, requester: PlayerId) -> bool {
+    ready_consent_run(state, requester).is_some()
 }
 
 /// Validates the frozen Phase-1 consent against the live topology before the
@@ -920,5 +930,38 @@ mod tests {
             ],
             "the collapsed prefix remains reproducible through ordinary actions"
         );
+    }
+
+    #[test]
+    fn ready_consent_honors_its_saved_resolution_cap() {
+        let mut state = ready_state(vec![
+            no_op_entry(1, PlayerId(0)),
+            no_op_entry(2, PlayerId(0)),
+        ]);
+        state
+            .resolve_all_consent_run
+            .as_mut()
+            .expect("Ready retains its frozen run")
+            .max_resolutions = 1;
+
+        let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
+
+        assert_eq!(result.items_resolved, 1);
+        assert_eq!(state.stack.len(), 1);
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.resolve_all_consent_run.is_none());
+    }
+
+    #[test]
+    fn changed_controller_invalidates_ready_consent_without_resolving() {
+        let mut state = ready_state(vec![no_op_entry(1, PlayerId(0))]);
+        state.turn_decision_controller = Some(PlayerId(1));
+
+        let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
+
+        assert_eq!(result.items_resolved, 0);
+        assert_eq!(state.stack.len(), 1);
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.resolve_all_consent_run.is_none());
     }
 }

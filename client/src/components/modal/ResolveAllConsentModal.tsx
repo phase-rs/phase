@@ -23,13 +23,16 @@ export function ResolveAllConsentModal({ playerId }: { playerId: number }) {
   const respond = useCallback(
     async (decision: "Grant" | "Decline") => {
       if (waitingFor?.type !== "ResolveAllConsent") return;
+      const grantedEpoch = waitingFor.data.epoch;
       await dispatch({
         type: "RespondResolveAllConsent",
-        data: { epoch: waitingFor.data.epoch, decision: { type: decision } },
+        data: { epoch: grantedEpoch, decision: { type: decision } },
       });
+      const waitingForAfterSubmission = useGameStore.getState().gameState?.waiting_for;
       if (
         decision === "Grant" &&
-        useGameStore.getState().gameState?.waiting_for?.type === "ResolveAllReady"
+        waitingForAfterSubmission?.type === "ResolveAllReady" &&
+        waitingForAfterSubmission.data.epoch === grantedEpoch
       ) {
         await dispatchResolveAll(playerId, []);
       }

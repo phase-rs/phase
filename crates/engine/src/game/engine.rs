@@ -7653,6 +7653,8 @@ fn resolve_all_consent_waiting_for(state: &GameState) -> Option<WaitingFor> {
     )
 }
 
+// CR 117.3d + CR 117.4: A declined shortcut resumes the exact ordinary
+// priority-pass sequence it interrupted; no spell or ability has resolved.
 fn restore_resolve_all_priority_snapshot(state: &mut GameState) -> Result<WaitingFor, EngineError> {
     let run = state.resolve_all_consent_run.take().ok_or_else(|| {
         EngineError::InvalidAction("Resolve All consent is not active".to_string())
@@ -7687,20 +7689,26 @@ fn respond_resolve_all_consent(
                 "Resolve All consent response is no longer pending".to_string(),
             ));
         }
-        if matches!(decision, ResolveAllConsentDecision::Grant) {
-            let participant = run
-                .participants
-                .iter_mut()
-                .find(|participant| participant.representative == representative)
-                .expect("pending Resolve All representative must be a participant");
-            participant.granted = true;
+        match decision {
+            ResolveAllConsentDecision::Grant => {
+                let participant = run
+                    .participants
+                    .iter_mut()
+                    .find(|participant| participant.representative == representative)
+                    .expect("pending Resolve All representative must be a participant");
+                participant.granted = true;
+            }
+            ResolveAllConsentDecision::Decline => {}
         }
     }
-    if matches!(decision, ResolveAllConsentDecision::Decline) {
-        return restore_resolve_all_priority_snapshot(state);
+    match decision {
+        ResolveAllConsentDecision::Decline => restore_resolve_all_priority_snapshot(state),
+        ResolveAllConsentDecision::Grant => {
+            resolve_all_consent_waiting_for(state).ok_or_else(|| {
+                EngineError::InvalidAction("Resolve All consent is not active".to_string())
+            })
+        }
     }
-    resolve_all_consent_waiting_for(state)
-        .ok_or_else(|| EngineError::InvalidAction("Resolve All consent is not active".to_string()))
 }
 
 fn revoke_resolve_all_consent(
@@ -19753,7 +19761,7 @@ mod stage2_injector_tests {
                 //   `begin_pending_trigger_target_selection` is STILL 134 — the function opens
                 //   `:12722 ⇒ :12778`, moving by the same `+56` as the pin, so the control
                 //   that caught this row's one historical silent drift is intact.
-                "game/engine.rs:13086".to_string(),
+                "game/engine.rs:13094".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \

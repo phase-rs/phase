@@ -1698,7 +1698,9 @@ mod tests {
         DecisionGroupKey, DecisionKind, DecisionTemplate, IterationCount, ReplayMode,
     };
     use crate::game::combat::AttackTarget;
-    use crate::types::actions::{MayTriggerAutoChoiceOp, PrecastCopyShortcutResponse};
+    use crate::types::actions::{
+        MayTriggerAutoChoiceOp, PrecastCopyShortcutResponse, ResolveAllConsentDecision,
+    };
     use crate::types::game_state::{EndEffectGroupId, MayTriggerAutoChoiceKey, MayTriggerOrigin};
     use crate::types::identifiers::ObjectId;
     use crate::types::mana::{ManaCost, ManaCostShard};
@@ -1711,6 +1713,30 @@ mod tests {
 
     #[test]
     fn newer_action_variants_compare_their_payloads() {
+        assert_distinct_order(
+            GameAction::BeginResolveAll { max_resolutions: 1 },
+            GameAction::BeginResolveAll { max_resolutions: 2 },
+        );
+        assert_distinct_order(
+            GameAction::RespondResolveAllConsent {
+                epoch: 1,
+                decision: ResolveAllConsentDecision::Grant,
+            },
+            GameAction::RespondResolveAllConsent {
+                epoch: 1,
+                decision: ResolveAllConsentDecision::Decline,
+            },
+        );
+        assert_distinct_order(
+            GameAction::RevokeResolveAllConsent {
+                epoch: 1,
+                representative: PlayerId(0),
+            },
+            GameAction::RevokeResolveAllConsent {
+                epoch: 1,
+                representative: PlayerId(1),
+            },
+        );
         assert_distinct_order(
             GameAction::EndContinuousEffect {
                 group: EndEffectGroupId(1),

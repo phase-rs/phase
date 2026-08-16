@@ -3614,11 +3614,12 @@ fn authorize_candidate_actors(state: &GameState, actions: &mut [CandidateAction]
                 WaitingFor::ResolveAllConsent {
                     epoch: active_epoch,
                     representative,
-                } if *epoch == *active_epoch => state
-                    .resolve_all_consent_run
-                    .as_ref()
-                    .filter(|run| run.epoch == *active_epoch)
-                    .and_then(|run| run.authorized_submitter_for(*representative)),
+                } if *epoch == *active_epoch => {
+                    Some(crate::game::turn_control::authorized_submitter_for_player(
+                        state,
+                        *representative,
+                    ))
+                }
                 _ => None,
             },
             GameAction::RevokeResolveAllConsent {

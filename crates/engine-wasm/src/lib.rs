@@ -4496,6 +4496,31 @@ mod tests {
         state.priority_player = PlayerId(0);
         state.priority_passes.insert(PlayerId(0));
         state.stack.push_back(no_op_stack_entry(1, PlayerId(1)));
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::BeginResolveAll { max_resolutions: 0 },
+        )
+        .expect("the controlled priority holder begins Resolve All consent");
+        let epoch = match state.waiting_for {
+            WaitingFor::ResolveAllConsent { epoch, .. } => epoch,
+            ref other => {
+                panic!("Resolve All must prompt the remaining representative, got {other:?}")
+            }
+        };
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::RespondResolveAllConsent {
+                epoch,
+                decision: engine::types::actions::ResolveAllConsentDecision::Grant,
+            },
+        )
+        .expect("the controlled representative grants Resolve All consent");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ResolveAllReady { epoch: ready_epoch } if ready_epoch == epoch
+        ));
         GAME_STATE.with(|cell| cell.set(Some(state)));
 
         let value = resolve_all(0, "[]", 0).unwrap();

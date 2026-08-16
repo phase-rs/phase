@@ -1,12 +1,14 @@
 //! Phase-1 protocol coverage for explicit Resolve All consent.
 
 use engine::ai_support::{candidate_actions, legal_actions_for_viewer};
+use engine::game::elimination::eliminate_player;
 use engine::game::engine::apply;
 use engine::game::interaction::{
     bind_interaction_authority, derive_viewer_interaction, resolve_interaction_response,
 };
 use engine::game::visibility::filter_state_for_viewer;
 use engine::types::actions::{GameAction, ResolveAllConsentDecision};
+use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::interaction::{
     InteractionOpportunityResponse, InteractionResponse, InteractionSessionId,
@@ -16,6 +18,7 @@ use engine::types::player::PlayerId;
 
 const P0: PlayerId = PlayerId(0);
 const P1: PlayerId = PlayerId(1);
+const P2: PlayerId = PlayerId(2);
 
 fn begin(state: &mut GameState) -> u64 {
     apply(
@@ -107,6 +110,36 @@ fn stale_epoch_and_decline_restore_the_exact_priority_snapshot() {
 }
 
 #[test]
+fn eliminating_a_consent_representative_drops_the_run_and_restores_living_priority() {
+    let mut state = GameState::new(FormatConfig::free_for_all(), 3, 44);
+    apply(
+        &mut state,
+        P0,
+        GameAction::BeginResolveAll { max_resolutions: 7 },
+    )
+    .expect("priority holder may begin Resolve All consent");
+    assert!(matches!(
+        &state.waiting_for,
+        WaitingFor::ResolveAllConsent {
+            representative: P1,
+            ..
+        }
+    ));
+    state.priority_pass_count = 2;
+    state.priority_passes.insert(P0);
+
+    eliminate_player(&mut state, P1, &mut Vec::new());
+
+    assert!(state.players[P1.0 as usize].is_eliminated);
+    assert!(state.resolve_all_consent_run.is_none());
+    assert!(matches!(&state.waiting_for, WaitingFor::Priority { player } if *player == P0));
+    assert_eq!(state.priority_player, P0);
+    assert_eq!(state.priority_pass_count, 0);
+    assert!(state.priority_passes.is_empty());
+    assert!(!state.players[P2.0 as usize].is_eliminated);
+}
+
+#[test]
 fn queued_response_and_candidate_keep_the_frozen_submitter_after_control_changes() {
     let mut state = GameState::new_two_player(44);
     let epoch = begin(&mut state);
@@ -123,6 +156,15 @@ fn queued_response_and_candidate_keep_the_frozen_submitter_after_control_changes
             } if candidate_epoch == epoch
         ) && candidate.metadata.actor == Some(P1)
     }));
+    assert!(apply(
+        &mut state,
+        P0,
+        GameAction::RespondResolveAllConsent {
+            epoch,
+            decision: ResolveAllConsentDecision::Grant,
+        },
+    )
+    .is_err());
     apply(
         &mut state,
         P1,
@@ -267,6 +309,7 @@ fn ready_state_transport_materializes_each_grantors_frozen_revoke() {
     )
     .expect("Ready binds one slot per frozen grantor");
     let p0_view = derive_viewer_interaction(&state, &filter_state_for_viewer(&state, P0), P0);
+    assert_eq!(p0_view.opportunities.len(), 1);
     let InteractionOpportunityResponse::ExactChoices { choices } =
         &p0_view.opportunities[0].response
     else {

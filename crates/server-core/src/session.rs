@@ -7,7 +7,9 @@ use engine::database::legality::{validate_cedh_bracket, CedhBracketError};
 use engine::database::CardDatabase;
 use engine::game::deck_loading::{DeckPayload, PlayerDeckPayload};
 use engine::game::engine::{apply, start_game};
-use engine::game::engine_resolve_batch::resolve_all_ready_prefix;
+use engine::game::engine_resolve_batch::{
+    resolve_all_ready_prefix, resolve_all_ready_requester_is_authorized,
+};
 use engine::game::interaction::{bind_interaction_authority, submit_interaction};
 use engine::game::layers::flush_layers;
 use engine::game::match_flow::apply_trusted_match_forfeit;
@@ -96,8 +98,8 @@ pub type ActionResult = (
 pub type RevisionedActionResult = (u64, ActionResult);
 
 /// Maximum server-authorized stack entries in one remote Resolve All request.
-/// The wire request is untrusted; `0` is intentionally not the engine's
-/// unlimited sentinel on this transport.
+/// The wire request is untrusted, but `0` remains the engine-defined uncapped
+/// sentinel; the active consent run, not this transport value, owns the cap.
 pub const MAX_RESOLVE_ALL_RESOLUTIONS: u32 = 5_000;
 
 #[derive(Debug, Clone)]
@@ -1570,17 +1572,18 @@ impl SessionManager {
         ))
     }
 
-    /// Fast-forwards stack resolution for an authenticated player while every
-    /// non-requester priority holder is a server-configured AI seat.
+    /// Consumes an engine-issued Resolve All consent run for an authenticated
+    /// player. Every priority representative has already granted consent, so
+    /// the state must be `WaitingFor::ResolveAllReady`.
     pub fn resolve_all_for_player(
         &mut self,
         game_code: &str,
         player_token: &str,
         max_resolutions: u32,
     ) -> Result<ResolveAllActionResult, String> {
-        if max_resolutions == 0 || max_resolutions > MAX_RESOLVE_ALL_RESOLUTIONS {
+        if max_resolutions > MAX_RESOLVE_ALL_RESOLUTIONS {
             return Err(format!(
-                "Resolve All maximum must be between 1 and {MAX_RESOLVE_ALL_RESOLUTIONS}"
+                "Resolve All maximum must not exceed {MAX_RESOLVE_ALL_RESOLUTIONS}"
             ));
         }
 
@@ -1605,12 +1608,17 @@ impl SessionManager {
         ) {
             return Err("Resolve All consent is not ready".to_string());
         }
+        if !resolve_all_ready_requester_is_authorized(&session.state, requester) {
+            return Err(
+                "Resolve All requester is not authorized by the active consent".to_string(),
+            );
+        }
 
         session.state.log_player_names = session.display_names.clone();
         flush_layers(&mut session.state);
         let pre_action_state = session.state.clone();
         // The cap is frozen into the consent run by BeginResolveAll. The wire
-        // argument remains range-checked above for protocol compatibility but
+        // argument remains range-checked above for transport compatibility but
         // cannot enlarge or replace that explicit authorization.
         let _ = max_resolutions;
         let batch = resolve_all_ready_prefix(&mut session.state, requester);

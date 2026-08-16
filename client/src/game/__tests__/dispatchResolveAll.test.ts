@@ -181,6 +181,52 @@ describe("dispatchResolveAll progress", () => {
     expect(submitAction).not.toHaveBeenCalled();
   });
 
+  it("begins consent before the batch drain and retains its AI seats until Ready", async () => {
+    const seats = [{ playerId: 1, difficulty: "Medium" }];
+    const phaseOneResolveAll = vi.fn<EngineResolveAll>();
+    const submitAction = vi.fn().mockResolvedValue({ events: [] });
+    const consent = buildGameState({
+      waiting_for: { type: "ResolveAllConsent", data: { epoch: 1, representative: 1 } },
+      stack: Array.from({ length: 2 }, (_, index) => buildStackEntry({ id: index + 1 })),
+    });
+    useGameStore.setState({
+      gameState: stateWithStack(2),
+      adapter: {
+        resolveAll: phaseOneResolveAll,
+        submitAction,
+        getSnapshot: vi.fn(async () => ({
+          state: consent,
+          legalResult: { actions: [], autoPassRecommended: false },
+          seq: nextSnapshotSeq(),
+        })),
+      } as never,
+    });
+
+    await dispatchResolveAll(0, seats);
+
+    expect(submitAction).toHaveBeenCalledWith(
+      { type: "BeginResolveAll", data: { max_resolutions: 5 } },
+      0,
+    );
+    expect(phaseOneResolveAll).not.toHaveBeenCalled();
+
+    const resolveAll = vi.fn<EngineResolveAll>().mockResolvedValue(chunk(1, 2));
+    const getState = vi.fn().mockResolvedValue(stateWithStack(1));
+    useGameStore.setState({
+      gameState: readyStateWithStack(2),
+      adapter: {
+        resolveAll,
+        getState,
+        getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
+        getSnapshot: snapshotVia(getState),
+      } as never,
+    });
+
+    await dispatchResolveAll(0, []);
+
+    expect(resolveAll).toHaveBeenCalledWith(0, seats, 5);
+  });
+
   it("uses an empty AI-seat list when the adapter delegates native AI ownership to its server", async () => {
     const resolveAll = vi.fn<EngineResolveAll>().mockResolvedValue(chunk(0, 2));
     const getState = vi.fn().mockResolvedValue(stateWithStack(0));

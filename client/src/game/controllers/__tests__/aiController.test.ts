@@ -296,6 +296,35 @@ describe("AI proposal controller", () => {
     controller.dispose();
   });
 
+  it("does not start Resolve All after an AI representative declines consent", async () => {
+    const consent = {
+      type: "ResolveAllConsent",
+      data: { epoch: 7, representative: 1 },
+    } as WaitingFor;
+    const state = buildGameState({ waiting_for: consent, priority_player: 0, stack: [] });
+    const issued: AiActionProposal = {
+      token: "engine-bound-consent-decline",
+      semanticOwner: 1,
+      actor: 0,
+      action: {
+        type: "RespondResolveAllConsent",
+        data: { epoch: 7, decision: { type: "Decline" } },
+      },
+    };
+    storeState.gameState = state;
+    storeState.waitingFor = consent;
+    storeState.adapter = { getAiActionProposal: vi.fn(async () => issued) };
+    dispatchAiActionProposal.mockResolvedValue({ status: "applied" });
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+    await runOnce();
+
+    expect(dispatchAiActionProposal).toHaveBeenCalledWith(issued);
+    expect(dispatchResolveAll).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
   it("does not act when the local human is the Resolve All consent representative", async () => {
     const consent = {
       type: "ResolveAllConsent",
