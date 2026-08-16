@@ -137,23 +137,44 @@ fn aura_hosted_trigger_retarget_pool_uses_the_abilitys_own_filter() {
     let mut runner = scenario.build();
     add_mana(&mut runner, P0, &[ManaType::Red]);
 
-    runner.attach_as_bestowed_aura(aura, host);
+    // Pain for All is a PRINTED Aura ("Enchant creature you control"), not a
+    // bestow creature. `attach_as_bestowed_aura` is the only attach helper the
+    // scenario builder exposes, and it routes through
+    // `casting::apply_bestow_aura_form`, which GRANTS the broad bestow
+    // `Enchant(creature)` to any object carrying no `Keyword::Enchant` — and
+    // `add_enchantment_from_oracle` installs none. Seed the printed filter first
+    // so the grant is skipped (it is idempotent on an existing `Enchant`) and the
+    // Aura keeps the filter the card actually prints.
+    //
+    // BOTH fields, deliberately. `layers::seed_live_characteristics_from_base`
+    // resets `obj.keywords = obj.base_keywords.clone()` at the top of every full
+    // layer pass, and `attach_as_bestowed_aura` itself calls
+    // `layers_dirty.mark_full()`, so a write to `keywords` alone cannot survive
+    // its own attach call. A previous revision wrote only `keywords`, and only
+    // AFTER attaching: the grant had already fired into both fields, so that
+    // write was overwritten by the broad filter and row 1b below was VACUOUS —
+    // a broad `Enchant(creature)` pool contains the victim, so its assertion
+    // passed at base too. Verified by the guard below, which failed against
+    // `controller: None` before this seed existed.
     {
-        // `attach_as_bestowed_aura` grants the broad bestow "enchant creature"
-        // filter. Pain for All is printed "Enchant creature you control", and
-        // that narrower filter is the discriminator: it yields no player, so a
-        // pool derived from it cannot contain "any other target"'s players.
-        let aura_obj = runner.state_mut().objects.get_mut(&aura).unwrap();
-        aura_obj.keywords = vec![Keyword::Enchant(TargetFilter::Typed(
+        let printed_enchant = vec![Keyword::Enchant(TargetFilter::Typed(
             TypedFilter::creature().controller(ControllerRef::You),
         ))];
+        let aura_obj = runner.state_mut().objects.get_mut(&aura).unwrap();
+        aura_obj.base_keywords = printed_enchant.clone();
+        aura_obj.keywords = printed_enchant;
     }
+    runner.attach_as_bestowed_aura(aura, host);
 
     // The ETB trigger, already on the stack targeting P1's creature.
+    // `&["Enchant"]` is the MTGJSON keyword-name list the `card-test` convention
+    // passes for an Aura; the previous `&[]` parsed only via
+    // `parse_keyword_line`'s non-MTGJSON fallback, which is a different code
+    // path from the one a real card takes.
     let parsed = parse_oracle_text(
         PAIN_FOR_ALL_ORACLE,
         "Pain for All",
-        &[],
+        &["Enchant".to_string()],
         &["Enchantment".to_string()],
         &["Aura".to_string()],
     );
@@ -213,6 +234,27 @@ fn aura_hosted_trigger_retarget_pool_uses_the_abilitys_own_filter() {
         "fixture guard: stack[0] must be the Aura's triggered ability"
     );
 
+    // Premise guard — pins the LIVE enchant filter, which is row 1b's whole
+    // discriminator: the narrow "creature you control" filter excludes P1's
+    // creatures, so a pool derived from it cannot contain the victim, and it
+    // yields no player, so it cannot contain row 1a's players either.
+    //
+    // ASSERTED, never assigned — the assignment happens once, above the attach,
+    // where it can actually take. This guard is what caught that the previous
+    // revision's post-attach write to `keywords` alone did NOT take: it failed
+    // here with `controller: None`, the broad bestow grant, proving row 1b had
+    // been passing against a pool that contains the victim at base too. Nothing
+    // else between the fixture and the pool pins this filter, so without this
+    // assertion the same regression is silent.
+    assert_eq!(
+        runner.state().objects[&aura].keywords,
+        vec![Keyword::Enchant(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ))],
+        "fixture guard: the Aura's live enchant filter must be the narrow printed \
+         one, or this row's pool discriminator is vacuous"
+    );
+
     let pool = parked_retarget_pool(&runner);
 
     // Positive reach-guard: a P0 creature is in the pool under BOTH the old
@@ -252,7 +294,7 @@ fn retarget_with_no_legal_alternative_resolves_as_no_change() {
 
     // P0 controls NO creature — that is what empties "target creature you
     // control". P1 controls one, so the battlefield is not globally empty.
-    let bystander = scenario.add_creature(P1, "Bear", 2, 2).id();
+    scenario.add_creature(P1, "Bear", 2, 2);
     let bolt_bend = scenario
         .add_spell_to_hand_from_oracle(P0, "Bolt Bend", true, BOLT_BEND_ORACLE)
         .id();
@@ -343,14 +385,18 @@ fn retarget_with_no_legal_alternative_resolves_as_no_change() {
         !controls_creature(runner.state(), P0),
         "fixture guard: P0 must control no creature, which is what empties the pool"
     );
+    // Non-vacuity control for the guard above, NOT a production discriminator:
+    // it cannot catch an engine regression, only a fixture that has degraded
+    // into a globally empty battlefield, where "the pool is empty" would be
+    // uninformative. Kept deliberately and labelled so it is not read as
+    // coverage. A third assertion (`objects[&bystander].zone == Battlefield`)
+    // stood here and was removed as strictly entailed: P1's Bear is the only P1
+    // creature in this fixture, so this assertion is true exactly when that one
+    // was.
     assert!(
         controls_creature(runner.state(), P1),
         "fixture guard: P1 must control a creature, so the battlefield is not \
          globally empty"
-    );
-    assert!(
-        runner.state().objects[&bystander].zone == Zone::Battlefield,
-        "fixture guard: P1's creature is on the battlefield"
     );
 
     runner
@@ -510,9 +556,32 @@ fn ai_retarget_candidates_are_accepted_by_the_reducer() {
 }
 
 /// Row 2c — CR 115.7d: an "All" retarget offers the unchanged anchor AND every
-/// single-slot substitution to another legal target. At base exactly one
-/// candidate is produced, so a multi-slot prompt could only ever be answered one
-/// way — and if that way is rejected, not at all.
+/// single-slot substitution. At base exactly one candidate is produced, so a
+/// multi-slot prompt could only ever be answered one way — and if that way is
+/// rejected, not at all.
+///
+/// SCOPE OF THE CLAIM — read before citing this row. It pins the generator's
+/// ENUMERATION SHAPE for a node OUTSIDE the per-slot admitted class
+/// (`mana_multi_role` is `None`, so `retarget_slot_violation` early-outs and
+/// nothing filters the enumeration). It does NOT claim every enumerated
+/// submission is CR-legal, and it must not be cited as evidence that it is:
+///
+///   * `expected` contains `[b, b]` and `[a, a]`. The generator substitutes one
+///     slot at a time from the FLAT pool with no distinctness check, so a pool
+///     member already held by another slot produces a duplicate. Whether a
+///     duplicate is legal is a per-INSTANCE question (CR 601.2c: the same target
+///     can't be chosen twice for any ONE instance of "target", but may be chosen
+///     once for EACH instance if the spell uses "target" in several places), and
+///     the flat pool carries no instance structure to answer it with. That is
+///     the same pre-existing flat-pool gap `retarget_slot_violation`'s SCOPE
+///     note records for `Attach` / `MoveCounters` / `Fight`. These two entries
+///     are therefore recorded as OBSERVED CURRENT BEHAVIOUR, deliberately not
+///     endorsed.
+///   * The fixture is synthetic in the same direction: Lightning Bolt's "any
+///     target" is ONE instance of "target", so a genuine Bolt cannot hold two
+///     targets at all. The two-target list is fabricated to isolate enumeration,
+///     which is why per-slot legality is out of this row's reach rather than
+///     merely unasserted.
 #[test]
 fn all_scope_retarget_candidates_cover_every_slot() {
     let mut scenario = GameScenario::new();
@@ -575,8 +644,24 @@ fn all_scope_retarget_candidates_cover_every_slot() {
 
     let candidates = retarget_candidates(runner.state());
 
+    // Positive reach-guards — each covers half the claim. Ordered BEFORE the
+    // exact-equality assert deliberately: after it they are strictly entailed by
+    // it and can never fire, which is how they previously stood. Row 2e already
+    // uses this ordering. They localize a failure to "the anchor was dropped" or
+    // "no substitution was offered" before the exact list is compared.
+    assert!(
+        candidates.iter().any(|c| *c != current_targets),
+        "reach guard: at least one per-slot substitution was offered"
+    );
+    assert!(
+        candidates.contains(&current_targets),
+        "reach guard: CR 115.7d's unchanged anchor survived"
+    );
+
     // Derived from the arm's own shape: the anchor, plus one substitution per
-    // (slot, pool member) pair minus the two identity pairs.
+    // (slot, pool member) pair minus the two identity pairs. `[b, b]` and
+    // `[a, a]` are the duplicate-producing entries; per this row's SCOPE note
+    // they are pinned as observed behaviour, NOT asserted to be CR-legal.
     let expected = vec![
         vec![TargetRef::Object(a), TargetRef::Object(b)],
         vec![TargetRef::Object(b), TargetRef::Object(b)],
@@ -586,17 +671,8 @@ fn all_scope_retarget_candidates_cover_every_slot() {
     ];
     assert_eq!(
         candidates, expected,
-        "CR 115.7d: the anchor plus every single-slot substitution"
-    );
-
-    // Positive reach-guards — each covers half the claim.
-    assert!(
-        candidates.iter().any(|c| *c != current_targets),
-        "reach guard: at least one per-slot substitution was offered"
-    );
-    assert!(
-        candidates.contains(&current_targets),
-        "reach guard: CR 115.7d's unchanged anchor survived"
+        "the anchor plus one substitution per (slot, pool member) pair — \
+         enumeration shape only; see this row's SCOPE note on the duplicates"
     );
 }
 
@@ -673,6 +749,33 @@ fn assert_multi_role_entry_is_live(runner: &GameRunner) {
 /// so it contains members legal only for the *other* slot. The generator must
 /// consult the same per-slot authority the reducer does, rather than proposing
 /// a pool member the reducer will reject.
+///
+/// SCOPE OF THE CLAIM — read before citing this row. It pins SLOT LEGALITY: that
+/// the generator filters the flat pool through the same authority the reducer
+/// applies. It does NOT claim the submission it accepts is CR-115.7b-legal, and
+/// must not be cited as if it did.
+///
+/// This fixture's `current_targets` has LENGTH 2 and the accepted submission has
+/// LENGTH 1, because the reducer's `Single` arm hard-requires exactly one target.
+/// Applying it assigns `ability.targets = [P1]` and TRUNCATES the count-source
+/// slot. CR 115.7b says the opposite — "only one of those targets may be
+/// changed", following CR 115.7a's process, so every other declared target stays
+/// in place. The length-1 acceptance is recorded here as OBSERVED CURRENT
+/// BEHAVIOUR, deliberately NOT endorsed:
+///
+///   DEFERRED(out-of-run): interactive Single-scope retarget collapses
+///   multi-target lists (CR 115.7b) — upstream cause filter.rs
+///   FilterProp::HasSingleTarget is permissive with no resolution-time
+///   validation; fix needs filter.rs + interaction.rs, both outside phase 1's
+///   frozen scope.
+///
+/// The honest behavioural delta this phase knowingly takes: at BASE the AI froze
+/// on this class — the generator's sole proposal was rejected, so no actor could
+/// discharge the prompt. AFTER this change it PROGRESSES and TRUNCATES. Progress
+/// with a corrupted target list is the trade; it is not a claim that the result
+/// is rules-correct. A genuinely CR-115.7b-correct submission is not expressible
+/// against today's reducer contract at all, which is why the deferral above
+/// names two paths outside this run's frozen scope rather than a local repair.
 #[test]
 fn multi_role_mana_single_retarget_candidates_are_slot_legal() {
     let mut runner = GameScenario::new().build();
@@ -720,6 +823,13 @@ fn multi_role_mana_single_retarget_candidates_are_slot_legal() {
 
     // Discriminating: every candidate is accepted by the reducer. At base the
     // sole candidate is `[P1, P0]` (length 2), which the `Single` arm rejects.
+    //
+    // "Accepted by the reducer" is the WHOLE claim here — acceptance, not
+    // rules-correctness. Applying this length-1 submission to a length-2 target
+    // list truncates the count-source slot, contrary to CR 115.7b. See this
+    // row's SCOPE note and the DEFERRED(out-of-run) entry it carries; that
+    // truncation is why this loop deliberately asserts only that the submission
+    // is accepted, and never asserts the resulting `ability.targets`.
     for new_targets in &candidates {
         let mut probe = GameRunner::from_state(runner.state().clone());
         probe
@@ -776,8 +886,22 @@ fn all_scope_unchanged_anchor_is_proposed_and_accepted_when_current_targets_are_
         "CR 115.7d: the unchanged anchor must be proposed, got {candidates:?}"
     );
 
-    // Discriminating (reducer half): at base this fails with
-    // "Retarget: chosen target is not legal for target slot 0".
+    // Reducer half. Stated as a COUNTERFACTUAL because the straightforward
+    // reading was measured and refuted: at base this line is NOT REACHED. The
+    // base generator proposes only the anchor, so the reach guard above
+    // (`candidates.len() >= 2`) fails first and is the row's actual base
+    // discriminator. WERE it reached at base, base would fail here with
+    // "Retarget: chosen target is not legal for target slot 0" — that is a
+    // derivation from base source (base `retarget_slot_violation` has no CR
+    // 115.7d exemption, so this fixture's slot 0 returns `Some(0)`), not an
+    // observation.
+    //
+    // What this call uniquely guards at candidate is therefore NARROWER than a
+    // second independent discriminator: the generator and the reducer now
+    // consult one authority, so it can only fail if the REDUCER drifts strictly
+    // more restrictive than the GENERATOR. That is an anti-drift consistency
+    // check between the two consumers, and it is worth keeping as one — but it
+    // is not independent evidence, and must not be cited as such.
     runner
         .act(GameAction::RetargetSpell {
             new_targets: current_targets.clone(),
@@ -785,11 +909,15 @@ fn all_scope_unchanged_anchor_is_proposed_and_accepted_when_current_targets_are_
         .expect("CR 115.7d: leaving every target unchanged must be accepted");
 
     // Behavioural: the unchanged submission is a completed retarget, not a skip.
-    assert_eq!(
-        runner.state().stack[0].ability().unwrap().targets,
-        current_targets,
-        "CR 115.7d: the targets are left unchanged"
-    );
+    // `WaitingFor::Priority` is the load-bearing half — only `apply_retarget`'s
+    // tail sets it, so it cannot hold unless the reducer ran to completion.
+    //
+    // A `stack[0].ability().targets == current_targets` assertion stood here and
+    // was REMOVED as trivially satisfied: `push_multi_role_mana_entry` already
+    // set those targets, and the submission IS `current_targets`, so the write
+    // `apply_retarget` performs is a no-op and the assertion holds whether or
+    // not the reducer ever ran. It read as behavioural evidence while proving
+    // nothing. The `.expect()` above plus this check are the real evidence.
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::Priority { .. }

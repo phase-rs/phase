@@ -3,8 +3,17 @@
 //!
 //! The fallback is the AI's last resort when scoring produces nothing, so a
 //! fallback that proposes an illegal submission is a freeze by a second route.
-//! Both rows drive `fallback_action` itself, not the engine's candidate
-//! generator, because that is the seam these rows exist to carry.
+//! Both rows drive `fallback_action` itself — the seam these rows exist to
+//! carry. That is an ENTRY POINT, not an isolation: `fallback_action` ends in
+//! `gate(action)`, which filters through `contract.contains_action`, and the
+//! contract builds its candidates from the same engine enumerator that reaches
+//! `retarget_actions` (`ai_support::context`'s `AiDecisionContract::issue` ->
+//! `candidate_actions_for_semantic_owner_with_probe`). Its `issued` helper reads
+//! `contract.candidates` even more directly. So these rows assert a
+//! CO-DEPENDENCE property — the fallback answers the prompt only when the
+//! generator and the fallback agree — and reverting EITHER side alone yields
+//! `None` and fails the `is_some()` guard. They do not isolate the fallback from
+//! the generator, and must not be cited as if they did.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones::create_object;

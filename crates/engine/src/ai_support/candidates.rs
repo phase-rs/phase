@@ -3590,6 +3590,30 @@ pub fn retarget_actions(
         // it is offered rather than filtered out. An empty pool yields no
         // proposals; after Unit 1 `change_targets::resolve` no longer parks that
         // state.
+        //
+        // KNOWN GAP, carried deliberately. Each proposal is a ONE-element list,
+        // because `apply_retarget`'s `Single` arm hard-requires exactly one
+        // target. When the parked entry's `current_targets` has MORE than one
+        // element, applying such a proposal assigns `ability.targets` that
+        // one-element list and TRUNCATES the remaining slots — contrary to CR
+        // 115.7b, under which only one target changes and the others stay in
+        // place. `change_targets::forced_retarget_targets` already implements
+        // that slot preservation on the FORCED path; the interactive path has no
+        // equivalent, and cannot have one while the reducer's arm rejects any
+        // length but 1.
+        //
+        //   DEFERRED(out-of-run): interactive Single-scope retarget collapses
+        //   multi-target lists (CR 115.7b) — upstream cause filter.rs
+        //   FilterProp::HasSingleTarget is permissive with no resolution-time
+        //   validation; fix needs filter.rs + interaction.rs, both outside phase
+        //   1's frozen scope.
+        //
+        // Behavioural delta this phase knowingly takes: at base the AI FROZE on
+        // this class (its sole proposal was rejected, so nothing could discharge
+        // the prompt); now it PROGRESSES and TRUNCATES. Pinned by
+        // `retarget_prompt_softlock.rs` row 2e, whose SCOPE note records the
+        // acceptance as observed behaviour and explicitly not as CR-115.7b
+        // legality.
         RetargetScope::Single => legal_new_targets
             .iter()
             .map(|target| vec![target.clone()])

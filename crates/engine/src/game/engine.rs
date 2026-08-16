@@ -19395,9 +19395,14 @@ mod stage2_injector_tests {
                 //   cannot move it. (It also cannot be counted: `code_of` strips comments,
                 //   and the needle is assembled.)
                 //   Neither above-producer hunk mints a prompt: both sit in the
-                //   VALIDATION half of `apply_retarget`, which consumes an already-minted
-                //   `RetargetChoice` and never writes `state.waiting_for`, so the census
-                //   set is still exactly 5.
+                //   VALIDATION half of `apply_retarget` — the half that consumes an
+                //   already-minted `RetargetChoice`, and it is THAT HALF which never writes
+                //   `state.waiting_for`. Scoped deliberately: `apply_retarget` as a whole
+                //   DOES write it, at its tail (`:12664`, `WaitingFor::Priority`), so the
+                //   claim is about the two hunks' half of the function and not about the
+                //   function. That tail write is below both hunks and is not a `*Choice`
+                //   producer, so it is not the needle either way. The census set is still
+                //   exactly 5.
                 "game/engine.rs:12856".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
