@@ -164,7 +164,16 @@ fn ready_consent_run(state: &GameState, requester: PlayerId) -> Option<&ResolveA
 }
 
 fn consent_authorization_matches(state: &GameState, run: &ResolveAllConsentRun) -> bool {
-    let representatives = topology::priority_pass_participants(state);
+    let mut representatives = topology::priority_pass_participants(state);
+    let current =
+        topology::priority_pass_representative(state, run.priority_snapshot.waiting_player);
+    let Some(current_index) = representatives
+        .iter()
+        .position(|representative| *representative == current)
+    else {
+        return false;
+    };
+    representatives.rotate_left(current_index);
     representatives.len() == run.participants.len()
         && representatives
             .iter()
@@ -825,7 +834,15 @@ mod tests {
     }
 
     fn ready_state(stack: Vec<StackEntry>) -> GameState {
+        ready_state_with_active_player(PlayerId(0), stack)
+    }
+
+    fn ready_state_with_active_player(
+        active_player: PlayerId,
+        stack: Vec<StackEntry>,
+    ) -> GameState {
         let mut state = priority_state(PlayerId(0), stack);
+        state.active_player = active_player;
         super::super::engine::apply(
             &mut state,
             PlayerId(0),
@@ -850,6 +867,17 @@ mod tests {
             WaitingFor::ResolveAllReady { .. }
         ));
         state
+    }
+
+    #[test]
+    fn ready_consent_uses_the_priority_holder_first_when_active_player_has_passed() {
+        let mut state =
+            ready_state_with_active_player(PlayerId(1), vec![no_op_entry(1, PlayerId(0))]);
+
+        let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
+
+        assert_eq!(result.items_resolved, 1);
+        assert!(state.stack.is_empty());
     }
 
     #[test]
