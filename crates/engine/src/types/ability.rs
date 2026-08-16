@@ -16585,8 +16585,8 @@ impl Effect {
             | Effect::PutSticker { target, .. }
             | Effect::ApplySticker { target, .. }
             | Effect::ProliferateTarget { target, .. }
-            // CR 115.7 + CR 115.1: "Change the target of target spell or ability"
-            // (Bolt Bend, Redirect, Misdirection) targets the stack spell/ability
+            // CR 115.7a + CR 115.1: "Change the target of target spell or ability"
+            // (Bolt Bend, Misdirection) targets the stack spell/ability
             // it will retarget. That target is chosen as the spell is cast (CR
             // 115.1), so it must be surfaced here — both to build the cast-time
             // target slot and so resolution-time re-validation (CR 608.2b) checks

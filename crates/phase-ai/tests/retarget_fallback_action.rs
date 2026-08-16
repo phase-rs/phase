@@ -29,6 +29,7 @@ use engine::types::game_state::{
 };
 use engine::types::identifiers::CardId;
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 use phase_ai::config::{create_config, AiDifficulty, Platform};
 
@@ -256,5 +257,185 @@ fn fallback_multi_role_retarget_action_is_slot_legal() {
     runner.act(action.unwrap()).expect(
         "the fallback's action must be ACCEPTED by the reducer — acceptance only, not a \
          claim of CR-115.7a / CR-115.7b legality; see this row's SCOPE note",
+    );
+}
+
+/// A third player, so slot 0's "an opponent of P0" filter admits MORE THAN ONE
+/// player. In a two-player game that filter admits exactly P1, so the only
+/// slot-0-legal candidate is necessarily the current target — which survives via
+/// the unchanged-position exemption rather than through the admit path.
+const P2: PlayerId = PlayerId(2);
+
+/// Builds the same two-slot mana node row 2f uses, but at an explicit player
+/// count and with caller-chosen targets, so a row can put a genuine slot-0
+/// CHANGE in the pool. Slot 0 (recipient) takes an opponent of P0; slot 1
+/// (count source) takes any player.
+fn park_multi_role_retarget(
+    player_count: u8,
+    current_targets: Vec<TargetRef>,
+    legal_new_targets: Vec<TargetRef>,
+) -> GameRunner {
+    let mut runner = GameScenario::new_n_player(player_count, 42).build();
+
+    let role = ManaTargetRole::Both {
+        recipient: TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+        count_source: TargetFilter::Player,
+    };
+    let source = create_object(
+        runner.state_mut(),
+        CardId(902),
+        P0,
+        "Multi-Role Mana Source".to_string(),
+        Zone::Battlefield,
+    );
+    let entry_id = create_object(
+        runner.state_mut(),
+        CardId(902),
+        P0,
+        "Multi-Role Mana Ability".to_string(),
+        Zone::Stack,
+    );
+    let ability = ResolvedAbility::new(
+        Effect::Mana {
+            produced: ManaProduction::Colorless {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: Some(role),
+        },
+        current_targets.clone(),
+        source,
+        P0,
+    );
+    runner.state_mut().stack.push_back(StackEntry {
+        id: entry_id,
+        source_id: source,
+        controller: P0,
+        kind: StackEntryKind::ActivatedAbility {
+            source_id: source,
+            ability: Box::new(ability),
+        },
+    });
+
+    // The same two structural reach-guards row 2f carries: without the entry,
+    // `retarget_actions`' `is_none_or` passes every candidate unfiltered and
+    // `apply_retarget` skips its per-slot stage, so any row built here would be
+    // vacuous in both directions.
+    assert!(
+        runner.state().stack[0].ability().is_some(),
+        "reach guard: stack index 0 must carry the ability under test"
+    );
+    assert!(
+        mana_multi_role(&runner.state().stack[0].ability().unwrap().effect).is_some(),
+        "reach guard: the node must be inside the per-slot admitted class"
+    );
+
+    runner.state_mut().waiting_for = WaitingFor::RetargetChoice {
+        player: P0,
+        stack_entry_index: 0,
+        scope: RetargetScope::Single,
+        current_targets,
+        legal_new_targets,
+    };
+    runner
+}
+
+/// Row 2g — the ADMIT half of the per-slot authority, which row 2f cannot show.
+///
+/// Row 2f proves the filter REJECTS a pool member legal only for another slot.
+/// It cannot prove the filter ADMITS a legal CHANGE, because its surviving
+/// candidate equals the current slot-0 target and therefore passes through
+/// `retarget_slot_violation`'s unchanged-position exemption. A generator that
+/// dropped every changed proposal would still pass row 2f.
+///
+/// This row removes that escape by construction: the current slot-0 target (P1)
+/// is deliberately ABSENT from the pool, so no exempt non-change exists and the
+/// only candidate that can survive is a genuine, slot-0-legal CHANGE.
+#[test]
+fn fallback_multi_role_retarget_admits_a_legal_slot_change() {
+    // Slot 0 currently holds P1. Pool offers P0 (illegal for slot 0 — P0 is not
+    // its own opponent) and P2 (legal for slot 0, and a real change).
+    let runner = park_multi_role_retarget(
+        3,
+        vec![TargetRef::Player(P1), TargetRef::Player(P0)],
+        vec![TargetRef::Player(P0), TargetRef::Player(P2)],
+    );
+
+    // Drop-guard: the pool must genuinely exclude the current slot-0 target, or
+    // the exemption is back and this row degenerates into row 2f.
+    let WaitingFor::RetargetChoice {
+        current_targets,
+        legal_new_targets,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!("fixture must park a RetargetChoice");
+    };
+    assert!(
+        !legal_new_targets.contains(&current_targets[0]),
+        "drop-guard: the current slot-0 target must be ABSENT from the pool, or the \
+         surviving candidate would be an exempt non-change; got {legal_new_targets:?}"
+    );
+
+    let action = fallback_for_prompt(&runner);
+
+    assert!(action.is_some(), "reach guard: the fallback must answer");
+
+    // Discriminating, ADMIT side: the surviving proposal is the slot-0-legal
+    // CHANGE. Under a generator that dropped changed proposals this is `None`;
+    // under one that ignored slot legality it would be `[P0]`.
+    assert_eq!(
+        action,
+        Some(GameAction::RetargetSpell {
+            new_targets: vec![TargetRef::Player(P2)],
+        }),
+        "CR 115.7a: the fallback must propose the slot-0-legal CHANGE, and must not \
+         propose the pool member legal only for the count-source slot"
+    );
+}
+
+/// Row 2h — the `None` contract this layer deliberately introduces.
+///
+/// `fallback_action`'s retarget arm returns `None` when the engine's enumeration
+/// is empty, and that refusal is deliberate: under `Single` scope an empty
+/// enumeration means every pool member fails the per-slot check, and
+/// `apply_retarget`'s `Single` arm would reject any submission built from that
+/// pool. Returning a knowingly-rejected action instead would launder an engine
+/// gap into an AI retry loop.
+///
+/// Nothing pinned that contract, so a future change could silently restore a
+/// rejected submission and no test would notice. This row pins it.
+#[test]
+fn fallback_multi_role_retarget_yields_none_when_no_pool_member_is_slot_legal() {
+    // Slot 0 holds P1 and the pool offers only P0, which is illegal for slot 0.
+    // P1 is absent, so there is no exempt non-change to fall back on either.
+    let runner = park_multi_role_retarget(
+        3,
+        vec![TargetRef::Player(P1), TargetRef::Player(P0)],
+        vec![TargetRef::Player(P0)],
+    );
+
+    // Positive control for a negative assertion: the prompt really is parked and
+    // its pool really is non-empty, so a `None` below means "every candidate was
+    // filtered out", never "there was nothing to filter" or "no prompt existed".
+    let WaitingFor::RetargetChoice {
+        legal_new_targets, ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!("positive control: the fixture must park a RetargetChoice");
+    };
+    assert!(
+        !legal_new_targets.is_empty(),
+        "positive control: the pool must be NON-empty, or `None` proves nothing about \
+         the per-slot filter"
+    );
+
+    assert_eq!(
+        fallback_for_prompt(&runner),
+        None,
+        "the retarget arm must refuse rather than submit an action `apply_retarget` \
+         would reject; see the DEFERRED(out-of-run) note in `phase-ai/src/search.rs`"
     );
 }
