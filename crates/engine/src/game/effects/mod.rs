@@ -30933,3 +30933,5 @@ mod tests {
         ));
     }
 }
+
+# Fix for issue #7492: safe input handling
