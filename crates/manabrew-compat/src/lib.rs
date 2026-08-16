@@ -674,7 +674,7 @@ pub fn unsupported_protocol_capabilities() -> &'static [UnsupportedCapability] {
 /// `upstream.` = the protocol has no primitive for something the engine can do.
 /// `local.` = the protocol has the primitive but this engine cannot source it,
 /// or a documented adapter-local extension is intentionally in use.
-static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 88] = [
+static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 89] = [
     UnsupportedCapability {
         code: "upstream.object-selection-missing",
         area: "prompts",
@@ -764,6 +764,12 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 88] = [
         area: "responses",
         reason: "v2 added ChooseActionOutput::Pass.exhaustStack (pass until the stack empties). Like pass.until it is a multi-window intent, and Phase's PassPriority yields exactly one priority window.",
         suggested_protocol_extension: "Clarify whether exhaustStack is advisory or requires an engine-backed auto-pass contract, alongside pass.until.",
+    },
+    UnsupportedCapability {
+        code: "local.resolve-all-unsupported",
+        area: "responses",
+        reason: "Phase's Resolve All consent protocol has no upstream action family and cannot be faithfully round-tripped as ordinary priority passing.",
+        suggested_protocol_extension: "Add an explicit consent-backed stack-resolution shortcut protocol, including grant, decline, and revocation semantics.",
     },
     UnsupportedCapability {
         code: "local.meld-pair-choice-unsupported",
@@ -8164,13 +8170,13 @@ mod tests {
     #[test]
     fn unsupported_capability_registry_is_well_formed() {
         let capabilities = unsupported_protocol_capabilities();
-        assert_eq!(capabilities.len(), 88);
+        assert_eq!(capabilities.len(), 89);
 
         let codes: HashSet<_> = capabilities
             .iter()
             .map(|capability| capability.code)
             .collect();
-        assert_eq!(codes.len(), 88, "capability codes must be unique");
+        assert_eq!(codes.len(), 89, "capability codes must be unique");
 
         for capability in capabilities {
             assert!(
@@ -8341,6 +8347,7 @@ mod tests {
             "local.harmonize-tap-unsupported",
             "local.payment-resource-actions-missing",
             "local.exhaust-stack-pass-unsupported",
+            "local.resolve-all-unsupported",
             // Every code the adapter can emit must be declared here, or a
             // client that receives it looks it up and finds nothing.
             "local.dungeon-room-unsupported",
