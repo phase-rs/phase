@@ -8576,6 +8576,62 @@ fn apply_single_replacement(
                         | (ProposedEvent::Scry { .. }, Effect::Scry { .. })
                         | (ProposedEvent::Proliferate { .. }, Effect::Proliferate)
                         | (ProposedEvent::LifeGain { .. }, Effect::GainLife { .. })
+                        // CR 614.6 + CR 701.17a: `mill_applier` folds the execute's
+                        // resolved count into the substituted Mill event, and
+                        // `apply_mill_after_replacement` mills the event's own
+                        // `player_id`. After the `sub_ability` escape above, a Mill
+                        // execute is a bare `Effect::Mill` with no residual work, so
+                        // a continuation could only re-run the mill — and because
+                        // `ProposedEvent::Mill::affected_object_id()` is `None`, the
+                        // stash binds to `rid.source`, resolving the execute's
+                        // `TargetFilter::Controller` to the REPLACEMENT's controller
+                        // instead of the affected player.
+                        //
+                        // PREMISES this arm depends on. Suppressing is safe only
+                        // because the applier's fold is total over what a
+                        // continuation would have done, and the fold reads ONLY the
+                        // count:
+                        //
+                        //   1. COUNT is statically resolvable. Every form
+                        //      `parse_mill_replacement_count` emits is rooted in
+                        //      `QuantityRef::EventContextAmount`, so
+                        //      `resolve_event_replacement_quantity` never returns
+                        //      `None` for it. A count form that is NOT statically
+                        //      resolvable must re-check this arm.
+                        //   2. `mill_applier` IGNORES the execute's `target` and
+                        //      `destination` — it passes the EVENT's `player_id` and
+                        //      `destination` through. Every production Mill execute
+                        //      is `TargetFilter::Controller` / `Zone::Graveyard`, so
+                        //      the fold loses nothing today. A Mill execute targeting
+                        //      anyone but the affected player must re-check this arm:
+                        //      the fold would silently drop that target, and the
+                        //      continuation this arm suppresses is the only thing
+                        //      that would have honoured it.
+                        //   3. The def is read solely via `state.objects.get(&rid
+                        //      .source)`, with no `ObjectId(0)` sentinel branch. A
+                        //      FLOATING Mill def would fail that lookup, stay
+                        //      UNFOLDED, and still be suppressed here — a silent
+                        //      no-op. Unreachable today (no production path pushes a
+                        //      Mill def into `pending_damage_replacements`), which is
+                        //      why "suppressed implies folded" holds in practice but
+                        //      is not entailed by premise 1 alone.
+                        //
+                        // WHERE A MILL DEFINITION CAN ORIGINATE. `ReplacementEvent
+                        // ::Mill` definitions come from exactly one production
+                        // producer today, `parse_mill_count_replacement`. (This is a
+                        // claim about MILL definitions only — `ReplacementDefinition`
+                        // itself has many production producers, e.g.
+                        // `database/synthesis.rs`, `effects/create_damage_replacement
+                        // .rs`, and `Deserialize`.) The other door one could appear
+                        // through is the Forge translator: add a `"Mill"` arm to
+                        // `database/forge/replacement.rs::translate_replacement_event`
+                        // (16 arms today, no `Mill`) and its caller
+                        // `translate_replacement` would build the definition,
+                        // resolving the execute from `ReplaceWith$` via
+                        // `resolver.resolve_ability`. That door is the wider one: an
+                        // SVar-resolved execute can carry both an unresolvable count
+                        // and a `sub_ability` rider.
+                        | (ProposedEvent::Mill { .. }, Effect::Mill { .. })
                         // CR 614.1a: these specialized appliers already perform
                         // their exact, unchained execute body inline. Parking it
                         // would create an un-dispatchable sibling drain for every

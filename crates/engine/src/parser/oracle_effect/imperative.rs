@@ -5893,25 +5893,38 @@ pub(super) fn parse_utility_imperative_ast(
     None
 }
 
+/// Parse the target phrase of a "Copy target <stack ability> …" effect.
+///
+/// CR 707.10: copying an activated or triggered ability puts a copy of it onto
+/// the stack. CR 113.3b / CR 113.3c + CR 115.1: the kind spelling defines the
+/// legal target set, so a "triggered ability" phrase must NOT accept an
+/// activated ability (Mister Fantastic / Strionic Resonator / Kirol).
+///
+/// Two independent axes, composed — never enumerated as a spelling×qualifier
+/// product:
+///   1. ability kind → delegated to `nom_target::parse_ability_kind`, the
+///      single authority shared with the counter and cost-condition paths;
+///   2. controller qualifier → the local "you control" tag.
+///
+/// CONTRACT (preserved): returns `None` for any qualifier that is neither
+/// "you control" nor end-of-phrase, so a phrase this combinator cannot fully
+/// model (e.g. "you don't control", or a spell+ability disjunction such as
+/// Return the Favor's) falls through to `parse_stack_object_target` rather than
+/// silently widening to an unscoped `StackAbility`. Source restrictions
+/// ("… from an artifact source") remain in the returned remainder,
+/// byte-identical to pre-delegation behavior.
 fn parse_copy_stack_ability_target(input: &str) -> Option<(TargetFilter, &str)> {
     let (input, _) = opt(tag::<_, _, OracleError<'_>>("target "))
         .parse(input)
         .ok()?;
-    let (input, _) = alt((
-        tag::<_, _, OracleError<'_>>("activated or triggered ability"),
-        tag("triggered or activated ability"),
-        tag("activated ability"),
-        tag("triggered ability"),
-    ))
-    .parse(input)
-    .ok()?;
+    let (input, kind) = nom_target::parse_ability_kind(input).ok()?;
     let (input, _) = nom::character::complete::multispace0::<_, OracleError<'_>>(input).ok()?;
     if let Ok((rem, _)) = tag::<_, _, OracleError<'_>>("you control").parse(input) {
         return Some((
             TargetFilter::StackAbility {
                 controller: Some(ControllerRef::You),
                 tag: None,
-                kind: None,
+                kind,
             },
             rem,
         ));
@@ -5925,7 +5938,7 @@ fn parse_copy_stack_ability_target(input: &str) -> Option<(TargetFilter, &str)> 
             TargetFilter::StackAbility {
                 controller: None,
                 tag: None,
-                kind: None,
+                kind,
             },
             input,
         ));
@@ -5933,6 +5946,19 @@ fn parse_copy_stack_ability_target(input: &str) -> Option<(TargetFilter, &str)> 
     None
 }
 
+/// Build the stack-ability filter for a COUNTER phrase, from its controller
+/// qualifier alone.
+///
+/// CR 113.3b / CR 113.3c: `kind: None` (both kinds legal) is CORRECT here and
+/// is not a dropped axis. Every call site is gated to a phrase that names both
+/// kinds or none: `parse_counter_ast` (this file) requires
+/// "activated or triggered ability" or mass-mode bare "abilities", and both
+/// `oracle_effect::mod` sites require the same phrase. A kind-narrowing counter
+/// phrase ("counter target triggered ability …", Consign to Memory) never
+/// reaches here — it is routed to
+/// `oracle_nom::target::parse_stack_object_target`, which owns the kind axis
+/// via `parse_ability_kind`. Do not add a kind axis here without first widening
+/// those gates; doing so would be dead code.
 pub(super) fn stack_ability_filter_from_text(input: &str) -> TargetFilter {
     let controller = if nom_primitives::scan_contains(input, "you control") {
         Some(ControllerRef::You)
@@ -13044,7 +13070,13 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
             profile,
             multi_target: _,
         } => Effect::TurnFaceDown { target, profile },
-        ImperativeFamilyAst::BecomeMonarch => Effect::BecomeMonarch,
+        // CR 109.5: a bare "become the monarch" imperative has no printed
+        // subject, so the subject is "you". The targeted form
+        // ("target opponent becomes the monarch") carries an explicit subject
+        // phrase and is lowered by `subject::build_become_clause` instead.
+        ImperativeFamilyAst::BecomeMonarch => Effect::BecomeMonarch {
+            target: TargetFilter::Controller,
+        },
         ImperativeFamilyAst::VentureIntoDungeon => Effect::VentureIntoDungeon,
         ImperativeFamilyAst::VentureIntoUndercity => Effect::VentureInto {
             dungeon: crate::game::dungeon::DungeonId::Undercity,
@@ -20023,30 +20055,52 @@ mod tests {
 
     #[test]
     fn parse_copy_stack_ability_target_preserves_unknown_qualifier_remainder() {
+        use crate::types::ability::StackAbilityKind;
+
+        // CR 113.3b / CR 113.3c: the combined spelling accepts BOTH kinds →
+        // `kind: None`. The controller assertion is the reach-guard: it proves
+        // the parse actually ran rather than the arm being satisfied by a
+        // parse failure.
         let controlled =
             parse_copy_stack_ability_target("target activated or triggered ability you control")
                 .expect("controlled stack ability target should parse");
         assert_eq!(controlled.1, "");
-        assert!(matches!(
+        assert_eq!(
             controlled.0,
             TargetFilter::StackAbility {
                 controller: Some(ControllerRef::You),
                 tag: None,
                 kind: None,
             }
-        ));
+        );
+
+        // CR 115.1: a lone "triggered ability" spelling NARROWS the legal set.
+        // Regression: this returned `kind: None`, letting Mister Fantastic /
+        // Strionic Resonator / Kirol illegally copy an ACTIVATED ability.
+        let triggered_only =
+            parse_copy_stack_ability_target("target triggered ability you control")
+                .expect("triggered-only stack ability target should parse");
+        assert_eq!(triggered_only.1, "");
+        assert_eq!(
+            triggered_only.0,
+            TargetFilter::StackAbility {
+                controller: Some(ControllerRef::You),
+                tag: None,
+                kind: Some(StackAbilityKind::Triggered),
+            }
+        );
 
         let unscoped = parse_copy_stack_ability_target("target triggered ability")
             .expect("unqualified stack ability target should parse");
         assert_eq!(unscoped.1, "");
-        assert!(matches!(
+        assert_eq!(
             unscoped.0,
             TargetFilter::StackAbility {
                 controller: None,
                 tag: None,
-                kind: None,
+                kind: Some(StackAbilityKind::Triggered),
             }
-        ));
+        );
 
         assert!(
             parse_copy_stack_ability_target(
@@ -20054,6 +20108,110 @@ mod tests {
             )
             .is_none(),
             "unknown qualifier must not widen to an unscoped StackAbility target"
+        );
+    }
+
+    /// CR 113.3b: the activated-only spelling is the narrowing sibling of the
+    /// triggered-only case — the axis must be complete, not patched at one leaf.
+    #[test]
+    fn copy_stack_ability_target_narrows_activated_only() {
+        use crate::types::ability::StackAbilityKind;
+
+        let activated = parse_copy_stack_ability_target("target activated ability you control")
+            .expect("activated-only stack ability target should parse");
+        assert_eq!(activated.1, "");
+        assert_eq!(
+            activated.0,
+            TargetFilter::StackAbility {
+                controller: Some(ControllerRef::You),
+                tag: None,
+                kind: Some(StackAbilityKind::Activated),
+            }
+        );
+
+        // Positive sibling in the same test: the two narrowing spellings must
+        // land on DIFFERENT kinds, so neither can pass by the axis collapsing.
+        let triggered = parse_copy_stack_ability_target("target triggered ability you control")
+            .expect("triggered-only stack ability target should parse");
+        assert_eq!(
+            triggered.0,
+            TargetFilter::StackAbility {
+                controller: Some(ControllerRef::You),
+                tag: None,
+                kind: Some(StackAbilityKind::Triggered),
+            }
+        );
+    }
+
+    /// CR 113.3b / CR 113.3c: delegating to the shared axis authority also gives
+    /// the copy path the three combined spellings its private list never had,
+    /// and the longest-match-first ordering is what lets an ANCHORED caller
+    /// consume them whole. Each must leave an EMPTY remainder, so the
+    /// `assert_no_compound_remainder` debug path cannot newly fire on them.
+    #[test]
+    fn copy_stack_ability_target_accepts_all_combined_spellings() {
+        for phrase in [
+            "target activated ability, triggered ability you control",
+            "target triggered ability, activated ability you control",
+            "target triggered ability or activated ability you control",
+            "target activated ability or triggered ability you control",
+        ] {
+            let (filter, rem) = parse_copy_stack_ability_target(phrase)
+                .unwrap_or_else(|| panic!("combined spelling must parse: {phrase}"));
+            assert_eq!(
+                rem, "",
+                "combined spelling must be fully consumed: {phrase}"
+            );
+            assert_eq!(
+                filter,
+                TargetFilter::StackAbility {
+                    controller: Some(ControllerRef::You),
+                    tag: None,
+                    kind: None,
+                },
+                "combined spelling names both kinds, so kind must stay None: {phrase}"
+            );
+        }
+    }
+
+    /// The source restriction stays in the remainder, byte-identical to
+    /// pre-delegation behavior — delegating the kind axis must not change which
+    /// bytes the combinator consumes.
+    #[test]
+    fn copy_stack_ability_target_remainder_survives_source_restriction() {
+        let (filter, rem) = parse_copy_stack_ability_target(
+            "target activated or triggered ability you control from an artifact source",
+        )
+        .expect("source-restricted phrase should still parse its prefix");
+        assert_eq!(rem, " from an artifact source");
+        assert_eq!(
+            filter,
+            TargetFilter::StackAbility {
+                controller: Some(ControllerRef::You),
+                tag: None,
+                kind: None,
+            }
+        );
+    }
+
+    /// Return the Favor must NOT be hijacked by the widened copy combinator —
+    /// the spell+ability disjunction still falls through to
+    /// `parse_stack_object_target`, which is the only combinator that can
+    /// represent its spell legs.
+    #[test]
+    fn copy_stack_ability_target_defers_spell_ability_disjunction() {
+        assert!(
+            parse_copy_stack_ability_target(
+                "target instant spell, sorcery spell, activated ability, or triggered ability"
+            )
+            .is_none(),
+            "a spell+ability disjunction must fall through, not collapse to a bare StackAbility"
+        );
+        // Positive reach-guard: the combinator is otherwise live on this input
+        // shape, so the negative above is not vacuous.
+        assert!(
+            parse_copy_stack_ability_target("target triggered ability you control").is_some(),
+            "the plain controller-qualified phrase must still parse"
         );
     }
 

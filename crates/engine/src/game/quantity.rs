@@ -377,14 +377,43 @@ fn source_controller_for_context(state: &GameState, ctx: &QuantityContext) -> Op
     source_lki_for_context(state, ctx).map(|lki| lki.controller)
 }
 
+/// CR 508.5: `ControllerRef::DefendingPlayer` door, quantity-context flavour.
+///
+/// Identical call, identical arguments, identical rule as the
+/// `PlayerScope::DefendingPlayer` door and the `filter.rs` door. Previously
+/// this answered `None` outright whenever the trigger source's combat latch was
+/// empty (an Equipment/Aura source is never in `combat.attackers`), silently
+/// making every comparison against it false; the shared authority supplies the
+/// event and live-combat fallbacks the other doors already had.
 fn source_defending_player_for_context(
     state: &GameState,
     ctx: &QuantityContext,
 ) -> Option<PlayerId> {
-    match ctx.trigger_source.as_ref() {
-        Some(source) => source.combat_status.defending_player,
-        None => crate::game::combat::resolve_defending_player(state, ctx.source),
-    }
+    crate::game::combat::defending_player_cr508_5(state, ctx.source, ctx.trigger_source.as_ref())
+}
+
+/// Drive the production `ControllerRef::DefendingPlayer` quantity-context door
+/// (the `attachment-controller` and `damage-source-controller` comparisons) from
+/// the cross-door fixtures in `combat.rs`. This door had the largest behaviour
+/// delta in the CR 508.5 consolidation — before it, a trigger source with an
+/// empty combat latch answered `None` unconditionally.
+#[cfg(test)]
+pub(crate) fn source_defending_player_for_context_for_test(
+    state: &GameState,
+    source: ObjectId,
+    trigger_source: Option<&TriggerSourceContext>,
+) -> Option<PlayerId> {
+    source_defending_player_for_context(
+        state,
+        &QuantityContext {
+            entering: None,
+            source,
+            trigger_source: trigger_source.cloned(),
+            recipient: None,
+            scoped_player: None,
+            damage_source: None,
+        },
+    )
 }
 
 fn source_enchanted_player_for_context(
@@ -1111,7 +1140,7 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
         | StaticCondition::SourceIsAttacking
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
-        | StaticCondition::IsMonarch
+        | StaticCondition::IsMonarch { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -2060,11 +2089,103 @@ pub(crate) fn resolve_quantity_for_trigger_check(
     resolve_quantity_with_ctx(state, expr, controller, ctx)
 }
 
+/// CR 109.4 + CR 603.4: Resolve a `PlayerScope` in TRIGGER-CONDITION context.
+///
+/// The player-axis sibling of [`resolve_quantity_for_trigger_check`]: it builds
+/// the identical `QuantityContext` from the same four inputs and delegates to
+/// `resolve_single_player_scope`, the existing single authority for
+/// `PlayerScope` → `PlayerId`. No per-scope logic is re-implemented here, and
+/// `PlayerScope::DefendingPlayer` therefore reaches
+/// `combat::defending_player_cr508_5` on the same path as every other door.
+///
+/// Trigger conditions are checked before targets exist at fire time (CR 603.4),
+/// so `targets` is empty and `ability` is `None`; scopes that need either
+/// (`Target`, `ParentObjectTargetController`) resolve to `None` and the entry
+/// boundary rejects the condition rather than substituting the controller.
+///
+/// Duration-timing-only scopes are rejected BEFORE delegating: because
+/// `IsMonarch { player }` is serde-constructible from `card-data.json` and from
+/// mtgish input, `PlayerScope::AnyTurn` / `SpecificPlayer` can reach this
+/// function from a malformed row, and `resolve_single_player_scope` answers
+/// those with `unreachable!()`. Returning `None` here makes a bad row fail
+/// closed instead of panicking the engine inside a trigger check. (Validating
+/// at the serde boundary was considered and rejected: it would need a custom
+/// deserializer on every variant that carries a `PlayerScope`.)
+///
+/// [`PlayerScope::ScopedPlayer`] is rejected the same way when the triggering
+/// event names no player. `resolve_single_player_scope` answers that scope with
+/// `ctx.scoped_player.unwrap_or(controller)` — always `Some`. That fallback is
+/// right in a VALUE context (an unanchored "that player's life total" degrading
+/// to the controller's is a wrong number, not a wrong control-flow decision),
+/// but it fails OPEN here: this function is the anchor authority for the
+/// designation boundary gates in `game::triggers` / `game::layers`, whose whole
+/// contract is that an unresolvable anchor is UNANSWERABLE rather than false.
+/// Inheriting the controller instead answers a "that player is the monarch"
+/// intervening-if about the ABILITY CONTROLLER — silently the wrong player, and
+/// with no gate rejection to catch it. This is reachable for any
+/// `ScopedPlayer` anchor the parser's attack-trigger rebind does not convert to
+/// [`PlayerScope::DefendingPlayer`] (a non-`Attacks` mode, or an `Attacks`
+/// trigger whose attacked noun is not a player).
+pub(crate) fn resolve_player_scope_for_trigger_check(
+    state: &GameState,
+    scope: &PlayerScope,
+    controller: PlayerId,
+    source_context: Option<&TriggerSourceContext>,
+    event: Option<&crate::types::events::GameEvent>,
+) -> Option<PlayerId> {
+    if scope.duration_timing_only() {
+        return None;
+    }
+
+    // CR 603.4: the explicit `event` wins over `current_trigger_event`, which
+    // may still hold a stale event from an unrelated in-flight resolution in
+    // the same step (issue #1323). Same precedence as the `scoped_player`
+    // derivation in `resolve_quantity_for_trigger_check`.
+    let resolution_event = event.or(state.current_trigger_event.as_ref());
+    let scoped_player =
+        resolution_event.and_then(|e| crate::game::targeting::extract_player_from_event(e, state));
+
+    // CR 603.4 + CR 109.4: "that player" is an ANAPHOR — it denotes nobody when
+    // the triggering event names nobody. Fail closed here rather than let
+    // `resolve_single_player_scope`'s value-context `unwrap_or(controller)`
+    // fallback hand the boundary gate the ability controller. See the doc
+    // comment above for why the two contexts want opposite answers.
+    if matches!(scope, PlayerScope::ScopedPlayer) && scoped_player.is_none() {
+        return None;
+    }
+
+    let ctx = QuantityContext {
+        entering: None,
+        source: source_context
+            .map(|source| source.identity.reference.object_id)
+            .unwrap_or(ObjectId(0)),
+        trigger_source: source_context.cloned(),
+        recipient: None,
+        scoped_player,
+        damage_source: None,
+    };
+
+    match event {
+        // CR 603.4: make the triggering event visible to the CR 508.5 anchor
+        // authority for detection-time checks, exactly as the quantity sibling
+        // does for `ObjectCount`.
+        Some(event) => with_detection_trigger_event(event, || {
+            resolve_single_player_scope(state, scope, controller, ctx.clone(), &[], None)
+        }),
+        None => resolve_single_player_scope(state, scope, controller, ctx, &[], None),
+    }
+}
+
 std::thread_local! {
-    /// Detection-time trigger event override. Populated only inside
-    /// `resolve_quantity_for_trigger_check` when `state.current_trigger_event`
-    /// is `None`. Consumed by `ObjectCount` evaluation (see `resolve_ref`) to
-    /// implement `FilterProp::OtherThanTriggerObject` semantics.
+    /// Detection-time trigger event override. Populated by
+    /// `resolve_quantity_for_trigger_check` whenever an EXPLICIT `event` is
+    /// supplied — including when `state.current_trigger_event` is also set, in
+    /// which case the explicit event is authoritative (CR 603.4; see the
+    /// `event.is_none() && …` fast-path guard at the top of that function, and
+    /// the same precedence applied to `scoped_player` just above it).
+    /// Consumed by `ObjectCount` evaluation (see `resolve_ref`) to implement
+    /// `FilterProp::OtherThanTriggerObject` semantics, and by
+    /// `combat::defending_player_cr508_5` for the CR 508.5 anchor binding.
     static DETECTION_TRIGGER_EVENT: std::cell::RefCell<Option<crate::types::events::GameEvent>>
         = const { std::cell::RefCell::new(None) };
 }
@@ -6766,60 +6887,39 @@ where
     }
 }
 
+/// CR 508.5: `PlayerScope::DefendingPlayer` door.
+///
+/// The single authority `combat::defending_player_cr508_5` owns BOTH the
+/// binding rule and the precedence. Do NOT read `state.current_trigger_event`,
+/// the detection TLS, or `combat_status.defending_player` here — one anaphor
+/// must not be able to bind two different players across doors.
 fn defending_player_for_quantity_context(
     state: &GameState,
     ctx: QuantityContext,
 ) -> Option<PlayerId> {
-    // CR 508.5: prefer the single authority, which resolves the defending player of
-    // the source's own attack or — for an Equipment/Aura whose source is not the
-    // attacker — the attacker carried by the triggering event (CR 508.5a, per-attacker).
-    if let Some(source) = ctx.trigger_source.as_ref() {
-        let source_id = source.identity.reference.object_id;
-        return source
-            .combat_status
-            .defending_player
-            // Event-global read: the event's attacker/defender relation, keyed
-            // by the exact source identity, is authoritative for this trigger.
-            .or_else(|| {
-                defending_player_from_event(state.current_trigger_event.as_ref(), source_id)
-            })
-            .or_else(|| {
-                defending_player_from_event(detection_trigger_event().as_ref(), source_id)
-            });
-    }
-    crate::game::combat::resolve_defending_player(state, ctx.source)
-        // CR 508.5a 1v1 fallback: a batched multi-attacker trigger event has no single
-        // attacking object to resolve individually, so use the event's defending player.
-        .or_else(|| defending_player_from_event(state.current_trigger_event.as_ref(), ctx.source))
-        .or_else(|| defending_player_from_event(detection_trigger_event().as_ref(), ctx.source))
+    crate::game::combat::defending_player_cr508_5(state, ctx.source, ctx.trigger_source.as_ref())
 }
 
-fn defending_player_from_event(
-    event: Option<&crate::types::events::GameEvent>,
-    source_id: ObjectId,
+/// Drive the production `PlayerScope::DefendingPlayer` door from the cross-door
+/// agreement fixture in `combat.rs` without reconstructing a `QuantityContext`
+/// by hand (which would let the two doors diverge in the test itself).
+#[cfg(test)]
+pub(crate) fn defending_player_for_quantity_context_for_test(
+    state: &GameState,
+    source: ObjectId,
+    trigger_source: Option<&TriggerSourceContext>,
 ) -> Option<PlayerId> {
-    let crate::types::events::GameEvent::AttackersDeclared {
-        defending_player,
-        attacks,
-        ..
-    } = event?
-    else {
-        return None;
-    };
-    attacks
-        .iter()
-        .find_map(|(attacker_id, target)| {
-            if *attacker_id == source_id {
-                match target {
-                    crate::game::combat::AttackTarget::Player(pid) => Some(*pid),
-                    crate::game::combat::AttackTarget::Planeswalker(_)
-                    | crate::game::combat::AttackTarget::Battle(_) => None,
-                }
-            } else {
-                None
-            }
-        })
-        .or(Some(*defending_player))
+    defending_player_for_quantity_context(
+        state,
+        QuantityContext {
+            entering: None,
+            source,
+            trigger_source: trigger_source.cloned(),
+            recipient: None,
+            scoped_player: None,
+            damage_source: None,
+        },
+    )
 }
 
 /// CR 810.9a + CR 810.9d: Resolve an aggregate (multi-player) `LifeTotal`

@@ -174,6 +174,51 @@ fn assert_current_action_consumed_occurrences_were_journaled(
     );
 }
 
+/// A completed mana frame claims exactly the live occurrences it settled, and
+/// its ordinary observers are *deferred* rather than dispatched from inside the
+/// payment. The owner's own boundary later drains that release group into the
+/// same public event vector, so the action's final event list is strictly longer
+/// than the claim. Comparing the journal against the whole final list — which
+/// the pre-deferral contract did — is therefore no longer meaningful; the exact
+/// contract is that the claim is the settlement's own full-buffer prefix.
+///
+/// Returns the claimed prefix length so the caller can assert the release
+/// actually happened after it.
+fn assert_mana_frame_claimed_exactly_its_own_event_prefix(
+    state: &GameState,
+    events: &[GameEvent],
+) -> usize {
+    let expected = current_action_occurrences(events);
+    let claims: Vec<Vec<ConsumedTriggerEventOccurrence>> = state
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry.command.as_ref() {
+            Some(ResolvedRulesCommand::TriggerCollection(ResolvedTriggerCollectionCommand {
+                collection: ResolvedTriggerCollection::ConsumeBeforePriority { occurrences },
+                ..
+            })) => Some(occurrences.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        claims.len(),
+        1,
+        "one completed mana frame claims its live occurrences exactly once"
+    );
+    let claimed = &claims[0];
+    assert!(
+        !claimed.is_empty() && claimed.len() <= expected.len(),
+        "the claim must be a non-empty prefix of the action's events"
+    );
+    assert_eq!(
+        claimed.as_slice(),
+        &expected[..claimed.len()],
+        "the settlement must journal its own event prefix by exact full-buffer occurrence identity"
+    );
+    claimed.len()
+}
+
 #[test]
 fn trigger_collection_command_variants_round_trip_inside_the_journal_envelope() {
     for command in [
@@ -381,7 +426,8 @@ fn paused_mana_cost_settlement_journals_consumed_occurrences_without_recollectin
         event,
         GameEvent::ZoneChanged { object_id, .. } if *object_id == source
     )));
-    assert_current_action_consumed_occurrences_were_journaled(runner.state(), &resumed.events);
+    let claimed =
+        assert_mana_frame_claimed_exactly_its_own_event_prefix(runner.state(), &resumed.events);
     assert_eq!(
         runner
             .state()
@@ -394,6 +440,19 @@ fn paused_mana_cost_settlement_journals_consumed_occurrences_without_recollectin
             .count(),
         1,
         "the settled mana-cost zone change must not be collected again at priority"
+    );
+    // One release group, formed at the owner's boundary rather than inside the
+    // payment: the observer was deferred at the claim and announced afterwards,
+    // so the action's public event vector grew past the claimed prefix.
+    assert!(
+        claimed < resumed.events.len(),
+        "the deferred release group must append its announcement after the settlement's claim \
+         (claimed {claimed} of {} events)",
+        resumed.events.len()
+    );
+    assert!(
+        runner.state().deferred_triggers.is_empty(),
+        "the owner's boundary must release the whole deferred group exactly once"
     );
 }
 

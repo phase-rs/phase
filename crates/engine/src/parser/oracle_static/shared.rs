@@ -419,6 +419,7 @@ fn try_parse_inverted_bare_self_rule_static(
 
     Some(vec![lower_rule_static(
         predicate,
+        None,
         TargetFilter::SelfRef,
         description,
     )
@@ -542,7 +543,8 @@ pub(crate) fn try_parse_inverted_attached_combat_grant(
             all_consuming(parse_rule_static_predicate_nom).parse(residual_lower.trim())
         {
             let _ = rest;
-            let mut companion = lower_rule_static(predicate, affected.clone(), &residual_text);
+            let mut companion =
+                lower_rule_static(predicate, None, affected.clone(), &residual_text);
             companion.condition = Some(gate.clone());
             defs.push(companion);
             continue;
@@ -1940,13 +1942,35 @@ fn parse_cant_attack_you_or_block_predicate(
         return Err(super::oracle_nom::error::oracle_err(input));
     }
     let (input, _) = tag(" or block ").parse(input)?;
-    // CR 509.1b: the block target ("creatures you control") is parsed by the
-    // full type-phrase grammar so the class covers any "block <filter>" object.
-    let (block_filter, rest) = parse_type_phrase(input);
-    if rest.len() >= input.len() || matches!(block_filter, TargetFilter::Any) {
+    let (rest, block_filter) = parse_block_object_filter(input)?;
+    Ok((rest, (defended, block_filter)))
+}
+
+/// CR 509.1b: the OBJECT of a `block <filter>` clause — the attackers the
+/// subject is prohibited from blocking. The single grammar authority for that
+/// object, shared by the compound "can't attack you or block <object>"
+/// template (Storm, Windrider) and the bare "<subject> can't block <object>"
+/// production in [`parse_subject_combat_rule_static`], so the object lowers
+/// through one grammar in both.
+///
+/// Delegates to the full `parse_type_phrase` grammar, so the class covers any
+/// object that grammar can express — a subtype ("Warriors"), a controller
+/// scope ("creatures you control"), a card type ("artifact creatures"), a
+/// color ("black creatures"), a static or dynamic power comparison — rather
+/// than one card's wording.
+///
+/// Declines only a non-object tail: an unconsumed input or `TargetFilter::Any`
+/// means what follows "block " is not an object at all ("can't block **as long
+/// as** …", "can't block **or be blocked by** …", "can't block **unless** …"),
+/// and those keep their existing dispatch. This is the pure object grammar —
+/// callers that must additionally reject a self-referential object apply that
+/// rule themselves, so no caller inherits a restriction it did not ask for.
+pub(crate) fn parse_block_object_filter(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (filter, rest) = parse_type_phrase(input);
+    if rest.len() >= input.len() || matches!(filter, TargetFilter::Any) {
         return Err(super::oracle_nom::error::oracle_err(input));
     }
-    Ok((rest, (defended, block_filter)))
+    Ok((rest, filter))
 }
 
 /// CR 508.1c + CR 509.1b: "<subject> can't attack you or block creatures you
@@ -1982,13 +2006,12 @@ fn parse_subject_cant_attack_you_or_block_static(
         .affected(affected.clone())
         .attack_defended(defended)
         .description(text.to_string());
-    let block = StaticDefinition::new(StaticMode::BlockRestriction {
-        filter: TargetFilter::Not {
-            filter: Box::new(block_filter),
-        },
-    })
-    .affected(affected)
-    .description(text.to_string());
+    let block = lower_rule_static(
+        RuleStaticPredicate::CantBlock,
+        Some(block_filter),
+        affected,
+        text,
+    );
     Some(vec![attack, block])
 }
 

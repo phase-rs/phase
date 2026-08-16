@@ -889,6 +889,84 @@ fn clear_post_replacement_token_choice_seed_if_resolution_drained(state: &mut Ga
     }
 }
 
+/// CR 603.3 + CR 603.3b + CR 608.2c: retire every ownerless `Dispatching`
+/// post-replacement resident on the active frame.
+///
+/// `Dispatching` means "taken and running". The sole production dispatcher —
+/// `engine_replacement::apply_pending_post_replacement_effect` — is synchronous,
+/// and `engine_replacement::post_replacement_dispatch_is_live` reports whether
+/// any such dispatch is on this thread's call stack. When that predicate is
+/// false, a `Dispatching` entry has no owner AT ALL: `begin_dispatch` refuses
+/// it, `finish_paused_dispatch` pops only `Paused`, and `finish_dispatch` needs
+/// a handle that died with its call frame. Left behind it keeps
+/// `resolution_stack` non-empty forever, which makes
+/// `triggers::resolution_completion_can_settle` false forever: deferred
+/// triggered abilities can then never be put on the stack the next time a
+/// player would receive priority (CR 603.3 + CR 603.3b) and the resolving
+/// carrier can never settle (CR 608.2c).
+///
+/// The predicate is sound only because the dispatcher's cleanup leaves every
+/// returned dispatch either `Paused` (parked awaiting a player answer, CR
+/// 614.12a) or removed. A parked continuation therefore never presents as
+/// `Dispatching`, which is what the `h1_devour_...` row witnesses at an action
+/// boundary.
+///
+/// TWO CALL SITES, answering two different questions — this is deliberate, and
+/// neither is redundant:
+///   * `resume_resolution_frames` (below), at a priority boundary, for a strand
+///     THIS action just created. CR 603.3 requires the abilities it blocks to
+///     reach the stack the next time a player would receive priority in this
+///     same action, not one action later.
+///   * `engine::apply_action_boundary_core`, at the ENTRY of the outer action
+///     boundary, for a strand the engine FOUND rather than made — above all one
+///     that arrived through `PersistedGameState::into_game_state()`, which no
+///     in-action seam can observe because no engine write produced it.
+///
+/// Because the ownerless predicate is call-stack state rather than game state,
+/// it is equally valid at both, at any frame depth and any drain depth.
+///
+/// The loop handles a multi-entry strand (both drains in the turn-20 capture);
+/// it stops at the first `Ready` or `Paused` resident, which is live parked work.
+///
+/// RECOVERY LIMIT, stated rather than overclaimed: this reaches only the frame
+/// the two-deep positional accessor can see. A wedge whose `PostReplacement`
+/// frame is buried under a child frame that itself never drains is NOT
+/// recovered here; only identity-addressed dispatch prevents that shape.
+///
+/// This emits no `GameEvent`: removing an impossible state is not a game event.
+pub(crate) fn sweep_ownerless_post_replacement_strand(state: &mut GameState) {
+    if crate::game::engine_replacement::post_replacement_dispatch_is_live() {
+        // A live dispatch legitimately suppresses the sweep. In healthy play
+        // this branch is unreachable: this policy is entered only from
+        // `resume_resolution_frames` at a priority boundary and from
+        // `engine::apply_action_boundary_core` at an outer action boundary,
+        // never from inside a dispatch. It fires on every boundary forever if
+        // the guard flag has leaked, which is the WASM `panic='abort'` residual
+        // documented on `POST_REPLACEMENT_DISPATCH_LIVE` — this warn is what
+        // makes that observable instead of silent. It is visible only in the
+        // server-hosted native build; `engine-wasm` installs no `tracing`
+        // subscriber, and this does NOT close that gap.
+        if state
+            .active_post_replacement_drains()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::resident)
+            .is_some_and(|drain| {
+                matches!(
+                    drain.status,
+                    crate::types::game_state::DrainStatus::Dispatching
+                )
+            })
+        {
+            tracing::warn!("post-replacement sweep suppressed by a live dispatch");
+        }
+    } else if let Some(drains) = state.active_post_replacement_drains_mut() {
+        while drains.finish_ownerless_dispatching_resident().is_some() {
+            tracing::warn!(
+                "retired an ownerless Dispatching post-replacement drain at a rest boundary"
+            );
+        }
+    }
+}
+
 /// Resume the active typed resolution frame through its runtime stack authority.
 ///
 /// The dispatcher reads only the stack top. The one shipped coupled shape is
@@ -1009,6 +1087,7 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
                 let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
                     state, None, None, None, events,
                 );
+                sweep_ownerless_post_replacement_strand(state);
                 if state
                     .active_post_replacement_drains()
                     .is_some_and(crate::types::game_state::PostReplacementDrainStack::is_empty)
@@ -2248,10 +2327,90 @@ fn try_begin_deferred_else_branch_target_selection(
     Ok(false)
 }
 
-/// CR 603.12: Begin reflexive target selection for a `WhenYouDo` /
-/// `QuantityCheck` ability whose targets were deferred to resolution time.
-/// Returns `true` when `WaitingFor::TriggerTargetSelection` (or inline random
-/// resolution) was entered.
+/// CR 603.12: Consume the `WhenYouDo` creation gate across a whole reflexive
+/// BODY — the root plus every `sub_ability` / `else_ability` clause the created
+/// trigger carries with it.
+///
+/// The parser stamps `WhenYouDo` on EVERY clause of a reflexive body, not only
+/// its first sentence: it is a membership marker for "this instruction belongs
+/// to the reflexive ability", which is why Ratonhnhaké꞉ton's
+/// `ChangeZone{forward_result} -> Attach{LastCreated}` body carries the
+/// condition on both links. CR 603.12 creates ONE triggered ability from that
+/// whole body, so consuming only the root would leave each later sentence as a
+/// live creation gate: resolving the stack object would materialize a SECOND
+/// trigger for its own tail, which both violates CR 603.12a occurrence
+/// semantics and severs the intra-body `forward_result` linkage the tail
+/// depends on (the Equipment returns but attaches to nothing).
+///
+/// Every OTHER chain condition — `EffectOutcome`, `QuantityCheck`, intervening
+/// `if` gates — is left intact and is still re-checked at resolution (CR 603.4).
+fn consume_reflexive_creation_gate(ability: &mut ResolvedAbility) {
+    if ability.condition == Some(AbilityCondition::WhenYouDo) {
+        ability.condition = None;
+    }
+    if let Some(sub) = ability.sub_ability.as_deref_mut() {
+        consume_reflexive_creation_gate(sub);
+    }
+    if let Some(alt) = ability.else_ability.as_deref_mut() {
+        consume_reflexive_creation_gate(alt);
+    }
+}
+
+/// CR 603.12 + CR 603.3: Build one complete synthetic reflexive trigger from an
+/// already context-bound runtime chain. The `WhenYouDo` creation gate is
+/// consumed across the whole body on the clone so resolving the resulting stack
+/// object cannot create itself again; every other chain condition remains
+/// intact.
+fn build_reflexive_pending_trigger(
+    state: &mut GameState,
+    reflexive: &ResolvedAbility,
+    parent: Option<&ResolvedAbility>,
+) -> crate::game::triggers::PendingTrigger {
+    let mut ability = reflexive.clone();
+    // The modal router accepts a `QuantityCheck` resolution gate as well as the
+    // `WhenYouDo` creation gate (both dispatch here at the call sites); the
+    // consume below strips only `WhenYouDo`, so a `QuantityCheck` survives onto
+    // the stack object and is re-checked at resolution per CR 603.4.
+    debug_assert!(
+        matches!(
+            ability.condition,
+            Some(AbilityCondition::WhenYouDo) | Some(AbilityCondition::QuantityCheck { .. })
+        ),
+        "build_reflexive_pending_trigger requires a WhenYouDo or QuantityCheck gate"
+    );
+    consume_reflexive_creation_gate(&mut ability);
+
+    let source_id = parent.map_or(ability.source_id, |parent| parent.source_id);
+    let controller = parent.map_or(ability.controller, |parent| parent.controller);
+    let description = ability
+        .description
+        .clone()
+        .or_else(|| parent.and_then(|parent| parent.description.clone()));
+    // CR 603.3b: a reflexive joins the same APNAP ordering machinery as every
+    // other pending trigger, so it needs its own live ordering timestamp.
+    let timestamp = u32::try_from(state.next_timestamp()).unwrap_or(u32::MAX);
+    crate::game::triggers::PendingTrigger {
+        source_id,
+        controller,
+        condition: None,
+        target_constraints: ability.target_constraints.clone(),
+        distribute: ability.distribute.clone(),
+        trigger_event: state.current_trigger_event.clone(),
+        modal: ability.modal.clone(),
+        mode_abilities: ability.mode_abilities.clone(),
+        description,
+        may_trigger_origin: ability.may_trigger_origin.clone(),
+        subject_match_count: freeze_reflexive_event_count(state, controller, source_id),
+        die_result: state.die_result_this_resolution,
+        provenance: None,
+        ability: Box::new(ability),
+        timestamp,
+    }
+}
+
+/// CR 603.12: Materialize a `WhenYouDo` reflexive trigger, or preserve the
+/// existing target-selection behavior for a `QuantityCheck` resolution gate.
+/// Returns `true` when the reflexive was queued/pushed or a target choice began.
 ///
 /// The whole body runs inside `with_reflexive_resolution_scope` so every
 /// `EventContextAmount` read reached from here — via `build_target_slots`,
@@ -2261,7 +2420,7 @@ fn try_begin_deferred_else_branch_target_selection(
 /// this scope a paused enclosing trigger (whose event is restored on a
 /// `PendingContinuation` resume) would leak its own "that many" into the
 /// reflexive ability's target-slot count.
-fn try_begin_reflexive_target_selection(
+fn try_materialize_reflexive_trigger(
     state: &mut GameState,
     reflexive: &ResolvedAbility,
     parent: Option<&ResolvedAbility>,
@@ -2270,7 +2429,7 @@ fn try_begin_reflexive_target_selection(
     depth: u32,
 ) -> Result<bool, EffectError> {
     crate::game::quantity::with_reflexive_resolution_scope(|| {
-        try_begin_reflexive_target_selection_inner(
+        try_materialize_reflexive_trigger_inner(
             state,
             reflexive,
             parent,
@@ -2281,7 +2440,7 @@ fn try_begin_reflexive_target_selection(
     })
 }
 
-fn try_begin_reflexive_target_selection_inner(
+fn try_materialize_reflexive_trigger_inner(
     state: &mut GameState,
     reflexive: &ResolvedAbility,
     parent: Option<&ResolvedAbility>,
@@ -2289,7 +2448,8 @@ fn try_begin_reflexive_target_selection_inner(
     events: &mut Vec<GameEvent>,
     depth: u32,
 ) -> Result<bool, EffectError> {
-    if !reflexive.targets.is_empty() {
+    let creates_reflexive_trigger = reflexive.condition == Some(AbilityCondition::WhenYouDo);
+    if !creates_reflexive_trigger && !reflexive.targets.is_empty() {
         return Ok(false);
     }
 
@@ -2298,9 +2458,48 @@ fn try_begin_reflexive_target_selection_inner(
     // the same resolution-scoped referents that the pending trigger will later
     // carry. Stamp one clone before `build_target_slots` so chosen-player and
     // amassed-Army filters enumerate legal targets from the actual parent event.
+    let mut propagated_parent_targets = false;
     let reflexive_context_owned;
     let reflexive = if let Some(parent) = parent {
         let mut owned = reflexive.clone();
+        // CR 608.2c + CR 603.12: an INHERITED referent ("…, exile that card")
+        // carries no declared target slot of its own — it reads the parent's
+        // bound target through `TargetFilter::ParentTarget`. The generic
+        // sub-chain descent below this function binds that referent with
+        // `should_propagate_parent_targets` immediately before it resolves the
+        // sub, and at HEAD every inherited-referent reflexive reached the chain
+        // that way because the slot-less shape returned `Ok(false)` here.
+        //
+        // A materialized reflexive resolves LATER, from its own stack object,
+        // where no parent frame exists — so the referent must be bound NOW, on
+        // the clone the pending trigger carries, using the SAME authority the
+        // descent uses. Without this, Superior Spider-Man's "exile that card"
+        // and the `BecomeCopy` post-replacement rider both resolve against an
+        // empty target list and silently exile nothing.
+        //
+        // Gated three ways, and each gate is load-bearing:
+        //   * `creates_reflexive_trigger` — the `QuantityCheck` gate still
+        //     returns `Ok(false)` for slot-less shapes and reaches the descent's
+        //     own propagation, so binding here would double-bind it.
+        //   * `ability_refs_parent_target` — bind ONLY a rider that actually
+        //     reads the referent. The descent propagates to every slot-less sub
+        //     because it resolves that sub immediately, inside the parent's own
+        //     frame, where a stray `targets` entry is inert for an effect that
+        //     never reads it. A materialized trigger CARRIES its targets onto
+        //     the stack, where they are no longer inert: The Fourteenth Doctor's
+        //     "it gains haste" rider (a `GenericEffect` whose static is
+        //     `affected: SelfRef`) would sail to the stack holding the copy
+        //     SOURCE in the graveyard as a target. The declined-branch
+        //     dispatcher above ANDs the same predicate for the same reason.
+        //   * `should_propagate_parent_targets` — the shared authority, so the
+        //     `ExiledBySource` / resolution-timing carve-outs stay in one place.
+        if creates_reflexive_trigger
+            && ability_refs_parent_target(&owned)
+            && should_propagate_parent_targets(parent, &owned)
+        {
+            owned.targets = parent.targets.clone();
+            propagated_parent_targets = true;
+        }
         apply_parent_chain_context(&mut owned, parent, effect_context_object, state);
         reflexive_context_owned = owned;
         &reflexive_context_owned
@@ -2316,35 +2515,13 @@ fn try_begin_reflexive_target_selection_inner(
     // pending trigger carrying the modal + per-mode abilities, then defer to the
     // shared modal-trigger router, which prompts `WaitingFor::AbilityModeChoice`
     // and only then collects each chosen mode's targets.
+    // NOT gated on `creates_reflexive_trigger`: a target-less modal marker
+    // behind a `QuantityCheck` resolution gate must also route through the
+    // modal-trigger router (as it did before deferral), or the slot-less
+    // fallback below would return `Ok(false)` and the descent would resolve
+    // every mode without a `WaitingFor::AbilityModeChoice`.
     if reflexive.modal.is_some() && !reflexive.mode_abilities.is_empty() {
-        let reflexive_clone = reflexive.clone();
-        let trigger_description = reflexive_clone
-            .description
-            .clone()
-            .or_else(|| parent.and_then(|p| p.description.clone()));
-        let source_id = parent.map(|p| p.source_id).unwrap_or(reflexive.source_id);
-        let controller = parent.map(|p| p.controller).unwrap_or(reflexive.controller);
-
-        let pending = crate::game::triggers::PendingTrigger {
-            source_id,
-            controller,
-            condition: None,
-            ability: Box::new(reflexive_clone),
-            timestamp: state.turn_number,
-            target_constraints: reflexive.target_constraints.clone(),
-            distribute: None,
-            trigger_event: state.current_trigger_event.clone(),
-            modal: reflexive.modal.clone(),
-            mode_abilities: reflexive.mode_abilities.clone(),
-            description: trigger_description,
-            may_trigger_origin: None,
-            // CR 603.12 + CR 601.2c: freeze the live event count (e.g. number
-            // sacrificed) so an "up to that many target ..." bound survives
-            // into the later fresh-`apply()` target-assign.
-            subject_match_count: freeze_reflexive_event_count(state, controller, source_id),
-            die_result: state.die_result_this_resolution,
-            provenance: None,
-        };
+        let pending = build_reflexive_pending_trigger(state, reflexive, parent);
         let trigger_events =
             crate::game::triggers::take_pending_trigger_event_batch(state, &pending);
         let pending_for_state = pending.clone();
@@ -2372,9 +2549,32 @@ fn try_begin_reflexive_target_selection_inner(
         }
     }
 
-    let target_slots = crate::game::ability_utils::build_target_slots(state, reflexive)
-        .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
+    let target_slots = match crate::game::ability_utils::build_target_slots(state, reflexive) {
+        Ok(slots) => slots,
+        Err(_) if creates_reflexive_trigger => {
+            let pending = build_reflexive_pending_trigger(state, reflexive, parent);
+            crate::game::triggers::defer_pending_trigger(state, pending);
+            return Ok(true);
+        }
+        Err(error) => return Err(EffectError::InvalidParam(error.to_string())),
+    };
+    // A parent-referent rider carries no declared slot of its own (that is the
+    // `ability_refs_parent_target` shape), so propagated targets and non-empty
+    // slots are mutually exclusive. If a future ability both reads a parent
+    // referent AND declares its own slot, the fresh stack-time selection below
+    // would clobber the bound referent — make that a counted event here rather
+    // than a silent exile-of-nothing at resolution.
+    debug_assert!(
+        !propagated_parent_targets || target_slots.is_empty(),
+        "a reflexive with propagated parent targets must be slot-less; \
+         a declared slot would re-prompt and clobber the bound referent"
+    );
     if target_slots.is_empty() {
+        if creates_reflexive_trigger {
+            let pending = build_reflexive_pending_trigger(state, reflexive, parent);
+            crate::game::triggers::defer_pending_trigger(state, pending);
+            return Ok(true);
+        }
         return Ok(false);
     }
 
@@ -2382,6 +2582,11 @@ fn try_begin_reflexive_target_selection_inner(
         reflexive.target_selection_mode,
         crate::types::ability::TargetSelectionMode::Random
     ) {
+        if creates_reflexive_trigger {
+            let pending = build_reflexive_pending_trigger(state, reflexive, parent);
+            crate::game::triggers::defer_pending_trigger(state, pending);
+            return Ok(true);
+        }
         // CR 115.1d + CR 603.12: Random-mode reflexive triggers still choose
         // the targets for the reflexive triggered ability; the seeded RNG
         // supplies that choice without entering an interactive prompt.
@@ -2395,6 +2600,29 @@ fn try_begin_reflexive_target_selection_inner(
         crate::game::ability_utils::assign_targets_in_chain(state, &mut reflexive_clone, &chosen)
             .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
         resolve_ability_chain(state, &reflexive_clone, events, depth + 1)?;
+        return Ok(true);
+    }
+
+    if creates_reflexive_trigger {
+        let pending = build_reflexive_pending_trigger(state, reflexive, parent);
+        let trigger_events =
+            crate::game::triggers::take_pending_trigger_event_batch(state, &pending);
+        let pending_for_state = pending.clone();
+        let entry_id = crate::game::triggers::push_pending_trigger_to_stack_with_event_batch(
+            state,
+            pending,
+            trigger_events,
+            events,
+        );
+        state.pending_trigger = Some(Box::new(pending_for_state));
+        state.pending_trigger_firing = Some(crate::types::identifiers::TriggerFiring::Ordinary);
+        state.pending_trigger_entry = Some(entry_id);
+        if let Some(waiting_for) =
+            crate::game::engine::begin_pending_trigger_target_selection(state)
+                .map_err(|error| EffectError::InvalidParam(error.to_string()))?
+        {
+            state.waiting_for = waiting_for;
+        }
         return Ok(true);
     }
 
@@ -4719,7 +4947,7 @@ pub fn resolve_effect(
         // CR 701.56a: Time travel — interactive counter manipulation on suspended/time-countered permanents.
         // Currently a no-op; full interactive implementation requires WaitingFor infrastructure.
         Effect::TimeTravel => time_travel::resolve(state, ability, events),
-        Effect::BecomeMonarch => become_monarch::resolve(state, ability, events),
+        Effect::BecomeMonarch { target } => become_monarch::resolve(state, ability, target, events),
         // CR 101.3 + CR 608.2: An instruction with no game action. Emit
         // `EffectResolved` so the chain continues, and do nothing else.
         Effect::NoOp => {
@@ -9901,7 +10129,7 @@ fn resolve_chain_body(
         if matches!(
             condition,
             AbilityCondition::WhenYouDo | AbilityCondition::QuantityCheck { .. }
-        ) && try_begin_reflexive_target_selection(state, ability, None, None, events, depth)?
+        ) && try_materialize_reflexive_trigger(state, ability, None, None, events, depth)?
         {
             return Ok(());
         }
@@ -11551,7 +11779,7 @@ fn resolve_chain_body(
             if matches!(
                 condition,
                 AbilityCondition::WhenYouDo | AbilityCondition::QuantityCheck { .. }
-            ) && try_begin_reflexive_target_selection(
+            ) && try_materialize_reflexive_trigger(
                 state,
                 sub,
                 Some(ability),
@@ -12442,19 +12670,36 @@ pub(crate) fn evaluate_condition(
             .is_some_and(|f| f.flipper == ability.controller && f.result == *result),
         // CR 603.12: A reflexive triggered ability ("when you do") triggers
         // "based on whether the trigger event or events occurred earlier during
-        // the resolution" of the parent. For a cost-payment parent
-        // (`Effect::PayCost`), an unpayable or declined cost is NOT a trigger
-        // event occurrence, so the reflexive sub-ability must NOT fire — the
-        // `PayCost` and mandatory-discard handlers signal this via
-        // `cost_payment_failed_flag` (mirrors `IfYouDo` above). An accepted
-        // "you may discard a card" with an empty hand did not discard a card,
-        // so it cannot create the reflexive trigger. Other non-cost parents
-        // (e.g. `BecomeCopy` reflexives) remain unconditional.
+        // the resolution" of the parent. Two independent ways the parent event
+        // can fail to occur, each read through the authority that owns it:
+        //
+        // 1. An OPTIONAL parent whose action was never performed — declined, or
+        //    never offered because it was impossible (CR 608.2d;
+        //    `optional_effect_is_infeasible`, e.g. "you may remove an oil
+        //    counter" with no oil counters). `optional_effect_performed` is the
+        //    engine's single record of "the player took the optional action",
+        //    and it is exactly what the sibling connector `IfYouDo`
+        //    (`EffectOutcome { OptionalEffectPerformed }`, above) reads. The two
+        //    connectors ask the same question about the same parent, so they
+        //    must consult the same authority — "when you do" is not a weaker
+        //    "if you do". A MANDATORY parent carries no such record (the flag
+        //    stays false because no choice was ever offered), so the gate is
+        //    scoped to `ability.optional` and mandatory reflexives
+        //    (`BecomeCopy`, `RollDie`) remain unconditional.
+        // 2. An accepted parent whose payment then failed: unpayable cost, or an
+        //    accepted "you may discard a card" with an empty hand. The `PayCost`
+        //    and mandatory-discard handlers signal this via
+        //    `cost_payment_failed_flag`. This is NOT subsumed by (1) — the
+        //    optional action WAS taken, it is the payment underneath that did
+        //    not happen — so both gates are load-bearing.
         AbilityCondition::WhenYouDo => {
-            !(matches!(
+            let optional_action_not_taken =
+                ability.optional && !ability.context.optional_effect_performed;
+            let payment_failed = matches!(
                 ability.effect,
                 Effect::PayCost { .. } | Effect::Discard { .. } | Effect::DiscardCard { .. }
-            ) && state.cost_payment_failed_flag)
+            ) && state.cost_payment_failed_flag;
+            !optional_action_not_taken && !payment_failed
         }
         // CR 601.2a + CR 707.10: "was cast (from [zone])" — check cast origin.
         // `zone: None` = cast from any origin; a copy or put-into-play object has
@@ -13634,6 +13879,236 @@ mod tests {
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
+    fn reflexive_test_creature(
+        state: &mut GameState,
+        controller: PlayerId,
+        name: &str,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            controller,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let object = state.objects.get_mut(&id).unwrap();
+        object.card_types.core_types.push(CoreType::Creature);
+        object.base_power = Some(2);
+        object.base_toughness = Some(2);
+        object.power = Some(2);
+        object.toughness = Some(2);
+        id
+    }
+
+    fn reflexive_counter_ability(source_id: ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            Vec::new(),
+            source_id,
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::WhenYouDo)
+    }
+
+    #[test]
+    fn targetless_reflexive_is_deferred_and_root_gate_is_consumed() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let mut reflexive = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: None,
+            },
+            Vec::new(),
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::WhenYouDo);
+        reflexive.player_scope = Some(PlayerFilter::Opponent);
+        let life_before = state.players[1].life;
+        let mut events = Vec::new();
+
+        assert!(try_materialize_reflexive_trigger(
+            &mut state,
+            &reflexive,
+            None,
+            None,
+            &mut events,
+            0,
+        )
+        .unwrap());
+        assert_eq!(state.players[1].life, life_before);
+        assert!(state.stack.is_empty());
+        assert_eq!(state.deferred_triggers.len(), 1);
+        assert!(state.deferred_triggers[0]
+            .pending
+            .ability
+            .condition
+            .is_none());
+
+        assert!(
+            crate::game::triggers::drain_deferred_trigger_queue(&mut state, &mut events).is_none()
+        );
+        assert_eq!(state.stack.len(), 1);
+        assert_eq!(state.players[1].life, life_before);
+
+        let mut safety = 4;
+        while !state.stack.is_empty() && safety > 0 {
+            crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+                .expect("resolve reflexive trigger through priority");
+            safety -= 1;
+        }
+        assert_eq!(state.players[1].life, life_before - 2);
+    }
+
+    #[test]
+    fn random_reflexive_materializes_on_stack_before_effect() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let a = reflexive_test_creature(&mut state, PlayerId(0), "A");
+        let b = reflexive_test_creature(&mut state, PlayerId(0), "B");
+        let mut reflexive = reflexive_counter_ability(ObjectId(100));
+        reflexive.target_selection_mode = TargetSelectionMode::Random;
+        let mut events = Vec::new();
+
+        try_materialize_reflexive_trigger(&mut state, &reflexive, None, None, &mut events, 0)
+            .unwrap();
+        crate::game::triggers::drain_deferred_trigger_queue(&mut state, &mut events);
+
+        assert_eq!(state.stack.len(), 1);
+        assert!(state.objects[&a].counters.is_empty());
+        assert!(state.objects[&b].counters.is_empty());
+        let StackEntryKind::TriggeredAbility { ability, .. } = &state.stack[0].kind else {
+            panic!("expected random reflexive trigger on stack");
+        };
+        assert_eq!(ability.targets.len(), 1);
+    }
+
+    #[test]
+    fn reflexive_with_no_legal_required_target_is_dropped_by_shared_dispatch() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let reflexive = reflexive_counter_ability(ObjectId(100));
+        let mut events = Vec::new();
+
+        let materialized =
+            try_materialize_reflexive_trigger(&mut state, &reflexive, None, None, &mut events, 0)
+                .unwrap();
+
+        // Positive reach guard: the empty-state assertions below only prove the
+        // shared-dispatch DROP if the reflexive actually took the deferral path.
+        // An `Ok(false)` fall-through would leave the same empty state without
+        // exercising the dispatch at all.
+        assert!(
+            materialized,
+            "the reflexive must materialize into the deferral path before dispatch can drop it"
+        );
+        crate::game::triggers::drain_deferred_trigger_queue(&mut state, &mut events);
+
+        assert!(state.deferred_triggers.is_empty());
+        assert!(state.stack.is_empty());
+    }
+
+    #[test]
+    fn reflexive_target_chooser_differs_from_stack_controller() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let target = reflexive_test_creature(&mut state, PlayerId(0), "Only target");
+        let mut reflexive = reflexive_counter_ability(ObjectId(100));
+        // CR 601.2c + CR 603.3d: `Opponent` is the ONLY non-`ScopedPlayer` chooser
+        // the parser ever stamps (`oracle_target.rs:3540`, "of an opponent's
+        // choice"), and it is the shape `resolve_effect_player_ref` resolves
+        // through the shared authority. A synthetic `SpecificPlayer` chooser is
+        // unreachable from any card and falls into that resolver's event-context
+        // catch-all, which returns `None` with no trigger event — the prompt would
+        // then fall back to the controller and the row would prove nothing about
+        // the chooser seam.
+        reflexive.target_chooser = Some(TargetFilter::Opponent);
+        let mut events = Vec::new();
+
+        try_materialize_reflexive_trigger(&mut state, &reflexive, None, None, &mut events, 0)
+            .unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::TriggerTargetSelection {
+                player: PlayerId(1),
+                trigger_controller: Some(PlayerId(0)),
+                ..
+            }
+        ));
+        assert!(
+            crate::game::engine::apply(
+                &mut state,
+                PlayerId(0),
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(target)),
+                },
+            )
+            .is_err(),
+            "the controller cannot answer another player's target prompt"
+        );
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(1),
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target)),
+            },
+        )
+        .expect("the designated chooser may select the target");
+
+        let StackEntryKind::TriggeredAbility { ability, .. } = &state.stack[0].kind else {
+            panic!("expected reflexive trigger entry");
+        };
+        assert_eq!(state.stack[0].controller, PlayerId(0));
+        assert_eq!(ability.targets, [TargetRef::Object(target)]);
+    }
+
+    #[test]
+    fn reflexive_constructor_preserves_unassigned_distribution_metadata() {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 7;
+        state.next_timestamp = 41;
+        let mut reflexive = reflexive_counter_ability(ObjectId(100));
+        reflexive.distribute = Some(crate::types::game_state::DistributionUnit::Counters(
+            "+1/+1".to_string(),
+        ));
+
+        let pending = build_reflexive_pending_trigger(&mut state, &reflexive, None);
+
+        assert_eq!(pending.distribute, reflexive.distribute);
+        assert_eq!(pending.ability.distribute, reflexive.distribute);
+        assert!(pending.ability.condition.is_none());
+        assert_eq!(pending.timestamp, 41);
+        assert_eq!(state.next_timestamp, 42);
+    }
+
+    #[test]
+    fn reflexive_construction_preserves_same_controller_ordering_timestamps() {
+        let mut state = GameState::new_two_player(42);
+        state.next_timestamp = 41;
+        let reflexive = reflexive_counter_ability(ObjectId(100));
+
+        let first = build_reflexive_pending_trigger(&mut state, &reflexive, None);
+        let second = build_reflexive_pending_trigger(&mut state, &reflexive, None);
+
+        assert!(
+            first.timestamp < second.timestamp,
+            "CR 603.3b same-controller ordering must retain the distinct live timestamps the trigger sorter consumes"
+        );
+    }
+
     // CR 608.2h (#6486): Volcanic Vision — "Return target instant or sorcery card
     // from your graveyard to your hand. ~ deals damage equal to that card's mana
     // value to each creature your opponents control. Exile ~." The card is
@@ -13690,7 +14165,9 @@ mod tests {
         );
 
         let ability = ResolvedAbility::new(
-            Effect::BecomeMonarch,
+            Effect::BecomeMonarch {
+                target: TargetFilter::Controller,
+            },
             Vec::new(),
             ObjectId(999),
             PlayerId(0),
@@ -18098,9 +18575,22 @@ mod tests {
 
     /// Issue #418 (Guide of Souls): when the embedded `{E}{E}{E}` cost IS paid,
     /// the `WhenYouDo` reflexive sub-ability runs and energy is deducted.
+    ///
+    /// CR 603.12 + CR 603.3b: the rider is a REFLEXIVE TRIGGERED ABILITY, so
+    /// "runs" means it is CREATED during this resolution and put on the stack at
+    /// the next priority point — not applied inline inside the parent's event
+    /// vector. This row therefore asserts the cost half inline (energy is spent
+    /// during `resolve_ability_chain`, exactly as before) and the rider half
+    /// after the trigger actually resolves, with an explicit no-inline-effect
+    /// assertion in between so the deferral itself is discriminated: reverting
+    /// the materializer to inline resolution puts the counters on before the
+    /// drain and fails the middle assertion.
     #[test]
     fn when_you_do_runs_when_embedded_energy_cost_paid() {
         let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
         // Controller has exactly enough energy to pay {E}{E}{E}.
         state.players[0].energy = 3;
 
@@ -18158,15 +18648,40 @@ mod tests {
                 .any(|e| matches!(e, GameEvent::EnergyChanged { delta: -3, .. })),
             "energy payment must emit EnergyChanged delta -3"
         );
+
+        // CR 603.2: the reflexive ability triggered, and "does nothing at this
+        // time" — it is queued, not applied.
+        assert_eq!(
+            state.deferred_triggers.len(),
+            1,
+            "the paid cost must CREATE the reflexive trigger"
+        );
         assert!(
-            events.iter().any(|e| matches!(
-                e,
-                GameEvent::CounterAdded {
-                    counter_type: CounterType::Plus1Plus1,
-                    count: 2,
-                    ..
-                }
-            )),
+            state.objects[&target].counters.is_empty(),
+            "the reflexive must not put its counters on during the parent resolution"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::CounterAdded { .. })),
+            "no CounterAdded may be emitted into the parent's event vector"
+        );
+
+        // CR 603.3b: it goes on the stack at the next priority point, then resolves.
+        crate::game::triggers::drain_deferred_trigger_queue(&mut state, &mut events);
+        assert_eq!(state.stack.len(), 1, "the reflexive is a stack object");
+        let mut safety = 4;
+        while !state.stack.is_empty() && safety > 0 {
+            crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+                .expect("resolve the reflexive trigger through priority");
+            safety -= 1;
+        }
+        assert_eq!(
+            state.objects[&target]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(2),
             "WhenYouDo reflexive sub-ability must run when the embedded cost was paid"
         );
     }
@@ -18219,6 +18734,52 @@ mod tests {
         assert!(
             !evaluate_condition(&AbilityCondition::WhenYouDo, &state, &pay_cost_parent),
             "WhenYouDo on a PayCost parent must be suppressed when cost_payment_failed_flag is set"
+        );
+    }
+
+    /// CR 603.12 + CR 608.2d: the reflexive connector "when you do" asks the
+    /// same question about the same parent as its sibling "if you do", so it
+    /// must read the same authority — `optional_effect_performed`. An optional
+    /// parent whose action was declined or never offered (because it was
+    /// impossible: "you may remove an oil counter" with no oil counters,
+    /// Atraxa's Skitterfang) did not produce the trigger event.
+    ///
+    /// The mandatory axis is the discriminator that keeps this from
+    /// over-suppressing: a parent with no "may" carries no performed-record at
+    /// all, so gating on the bare flag would silence every mandatory reflexive
+    /// (`RollDie`, `BecomeCopy`). All three rows below run against the same
+    /// `RemoveCounter` effect so the only thing varying is optionality and the
+    /// record — the effect type cannot be what carries the answer.
+    #[test]
+    fn when_you_do_reads_the_optional_performed_record_not_the_effect_type() {
+        let state = GameState::new_two_player(42);
+        let remove_counter = || Effect::RemoveCounter {
+            counter_type: Some(CounterType::Generic("oil".to_string())),
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        };
+        let parent = |optional: bool, performed: bool| {
+            let mut ability =
+                ResolvedAbility::new(remove_counter(), vec![], ObjectId(100), PlayerId(0));
+            ability.optional = optional;
+            ability.context.optional_effect_performed = performed;
+            ability
+        };
+
+        assert!(
+            !evaluate_condition(&AbilityCondition::WhenYouDo, &state, &parent(true, false)),
+            "an optional parent whose action was never performed produced no \
+             trigger event, so the reflexive must not fire (CR 603.12)"
+        );
+        assert!(
+            evaluate_condition(&AbilityCondition::WhenYouDo, &state, &parent(true, true)),
+            "an optional parent whose action WAS performed must still fire its \
+             reflexive — the gate must not suppress the working card"
+        );
+        assert!(
+            evaluate_condition(&AbilityCondition::WhenYouDo, &state, &parent(false, false)),
+            "a MANDATORY parent carries no performed-record; gating on the bare \
+             flag would silence every mandatory reflexive"
         );
     }
 

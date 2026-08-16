@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-08-14T00:00:00Z",
+  "updated": "2026-08-16T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -132,6 +132,153 @@
         {
           "count": 1,
           "name": "Sunderflock"
+        }
+      ]
+    },
+    {
+      "name": "Dimir Excruciator",
+      "author": "MTGGoldfish",
+      "colors": [
+        "B",
+        "U"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 2,
+          "name": "Winternight Stories"
+        },
+        {
+          "count": 9,
+          "name": "Swamp"
+        },
+        {
+          "count": 4,
+          "name": "Watery Grave"
+        },
+        {
+          "count": 3,
+          "name": "Bitter Triumph"
+        },
+        {
+          "count": 2,
+          "name": "Day of Black Sun"
+        },
+        {
+          "count": 3,
+          "name": "Doomsday Excruciator"
+        },
+        {
+          "count": 4,
+          "name": "Requiting Hex"
+        },
+        {
+          "count": 3,
+          "name": "Stock Up"
+        },
+        {
+          "count": 4,
+          "name": "Restless Reef"
+        },
+        {
+          "count": 4,
+          "name": "Duress"
+        },
+        {
+          "count": 1,
+          "name": "Deadly Cover-Up"
+        },
+        {
+          "count": 1,
+          "name": "Strategic Betrayal"
+        },
+        {
+          "count": 2,
+          "name": "Emeritus of Ideation"
+        },
+        {
+          "count": 4,
+          "name": "Gloomlake Verge"
+        },
+        {
+          "count": 1,
+          "name": "Cavern of Souls"
+        },
+        {
+          "count": 1,
+          "name": "M.O.D.O.K."
+        },
+        {
+          "count": 2,
+          "name": "Hidden Lair"
+        },
+        {
+          "count": 2,
+          "name": "Superior Spider-Man"
+        },
+        {
+          "count": 2,
+          "name": "Undercity Sewers"
+        },
+        {
+          "count": 4,
+          "name": "Deceit"
+        },
+        {
+          "count": 2,
+          "name": "Superior Spider-Man"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 1,
+          "name": "Negate"
+        },
+        {
+          "count": 3,
+          "name": "Preacher of the Schism"
+        },
+        {
+          "count": 1,
+          "name": "Doomsday Excruciator"
+        },
+        {
+          "count": 1,
+          "name": "Emeritus of Ideation"
+        },
+        {
+          "count": 1,
+          "name": "Strategic Betrayal"
+        },
+        {
+          "count": 1,
+          "name": "Bitter Triumph"
+        },
+        {
+          "count": 1,
+          "name": "Deadly Cover-Up"
+        },
+        {
+          "count": 1,
+          "name": "M.O.D.O.K."
+        },
+        {
+          "count": 2,
+          "name": "Malcolm, Alluring Scoundrel"
+        },
+        {
+          "count": 1,
+          "name": "Quantum Riddler"
+        },
+        {
+          "count": 1,
+          "name": "Disdainful Stroke"
+        },
+        {
+          "count": 1,
+          "name": "Flashfreeze"
         }
       ]
     },
@@ -297,149 +444,6 @@
         {
           "count": 3,
           "name": "Duress"
-        }
-      ]
-    },
-    {
-      "name": "Dimir Excruciator",
-      "author": "MTGGoldfish",
-      "colors": [
-        "B",
-        "U"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 2,
-          "name": "Winternight Stories"
-        },
-        {
-          "count": 9,
-          "name": "Swamp"
-        },
-        {
-          "count": 4,
-          "name": "Watery Grave"
-        },
-        {
-          "count": 3,
-          "name": "Bitter Triumph"
-        },
-        {
-          "count": 2,
-          "name": "Day of Black Sun"
-        },
-        {
-          "count": 3,
-          "name": "Doomsday Excruciator"
-        },
-        {
-          "count": 4,
-          "name": "Requiting Hex"
-        },
-        {
-          "count": 3,
-          "name": "Stock Up"
-        },
-        {
-          "count": 4,
-          "name": "Restless Reef"
-        },
-        {
-          "count": 4,
-          "name": "Duress"
-        },
-        {
-          "count": 1,
-          "name": "Deadly Cover-Up"
-        },
-        {
-          "count": 1,
-          "name": "Strategic Betrayal"
-        },
-        {
-          "count": 2,
-          "name": "Emeritus of Ideation"
-        },
-        {
-          "count": 4,
-          "name": "Gloomlake Verge"
-        },
-        {
-          "count": 1,
-          "name": "Cavern of Souls"
-        },
-        {
-          "count": 1,
-          "name": "M.O.D.O.K."
-        },
-        {
-          "count": 2,
-          "name": "Hidden Lair"
-        },
-        {
-          "count": 2,
-          "name": "Superior Spider-Man"
-        },
-        {
-          "count": 2,
-          "name": "Undercity Sewers"
-        },
-        {
-          "count": 4,
-          "name": "Deceit"
-        },
-        {
-          "count": 2,
-          "name": "Superior Spider-Man"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Negate"
-        },
-        {
-          "count": 4,
-          "name": "Preacher of the Schism"
-        },
-        {
-          "count": 1,
-          "name": "Doomsday Excruciator"
-        },
-        {
-          "count": 1,
-          "name": "Emeritus of Ideation"
-        },
-        {
-          "count": 1,
-          "name": "Strategic Betrayal"
-        },
-        {
-          "count": 1,
-          "name": "Bitter Triumph"
-        },
-        {
-          "count": 1,
-          "name": "Deadly Cover-Up"
-        },
-        {
-          "count": 1,
-          "name": "M.O.D.O.K."
-        },
-        {
-          "count": 2,
-          "name": "Malcolm, Alluring Scoundrel"
-        },
-        {
-          "count": 1,
-          "name": "Quantum Riddler"
-        },
-        {
-          "count": 1,
-          "name": "Disdainful Stroke"
         }
       ]
     },
@@ -857,68 +861,28 @@
       "name": "Dimir Midrange",
       "author": "MTGGoldfish",
       "colors": [
-        "B",
-        "U"
+        "U",
+        "B"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
+          "count": 5,
+          "name": "Island"
+        },
+        {
           "count": 2,
           "name": "Bitter Triumph"
         },
         {
-          "count": 3,
-          "name": "Dream Beavers"
-        },
-        {
-          "count": 2,
+          "count": 1,
           "name": "Spell Pierce"
-        },
-        {
-          "count": 3,
-          "name": "Enduring Curiosity"
-        },
-        {
-          "count": 3,
-          "name": "Floodpits Drowner"
-        },
-        {
-          "count": 4,
-          "name": "Kaito, Bane of Nightmares"
-        },
-        {
-          "count": 4,
-          "name": "Hidden Lair"
-        },
-        {
-          "count": 4,
-          "name": "Swamp"
-        },
-        {
-          "count": 2,
-          "name": "Restless Reef"
-        },
-        {
-          "count": 2,
-          "name": "Nowhere to Run"
         },
         {
           "count": 4,
           "name": "Requiting Hex"
-        },
-        {
-          "count": 2,
-          "name": "Soulstone Sanctuary"
-        },
-        {
-          "count": 2,
-          "name": "Shoot the Sheriff"
-        },
-        {
-          "count": 4,
-          "name": "Watery Grave"
         },
         {
           "count": 4,
@@ -926,57 +890,101 @@
         },
         {
           "count": 4,
-          "name": "Island"
+          "name": "Watery Grave"
+        },
+        {
+          "count": 3,
+          "name": "Swamp"
+        },
+        {
+          "count": 4,
+          "name": "Floodpits Drowner"
+        },
+        {
+          "count": 3,
+          "name": "Hidden Lair"
+        },
+        {
+          "count": 4,
+          "name": "Gloomlake Verge"
+        },
+        {
+          "count": 2,
+          "name": "Shoot the Sheriff"
+        },
+        {
+          "count": 4,
+          "name": "Dream Beavers"
+        },
+        {
+          "count": 4,
+          "name": "Enduring Curiosity"
         },
         {
           "count": 2,
           "name": "The Wondrous Wasp"
         },
         {
-          "count": 3,
-          "name": "Preacher of the Schism"
+          "count": 1,
+          "name": "Spell Snare"
         },
         {
           "count": 2,
           "name": "We Say Thee Nay!"
         },
         {
-          "count": 4,
-          "name": "Gloomlake Verge"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Day of Black Sun"
-        },
-        {
           "count": 2,
           "name": "Tishana's Tidebinder"
         },
         {
+          "count": 2,
+          "name": "Restless Reef"
+        },
+        {
+          "count": 4,
+          "name": "Kaito, Bane of Nightmares"
+        },
+        {
           "count": 1,
-          "name": "Negate"
+          "name": "Wan Shi Tong, Librarian"
         },
         {
           "count": 2,
-          "name": "Ghost Vacuum"
+          "name": "Soulstone Sanctuary"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 4,
+          "name": "Duress"
+        },
+        {
+          "count": 2,
+          "name": "Annul"
         },
         {
           "count": 1,
-          "name": "Vren, the Relentless"
+          "name": "Disdainful Stroke"
         },
         {
           "count": 2,
           "name": "Strategic Betrayal"
         },
         {
-          "count": 2,
-          "name": "Disdainful Stroke"
+          "count": 1,
+          "name": "Wan Shi Tong, Librarian"
         },
         {
-          "count": 3,
-          "name": "Duress"
+          "count": 1,
+          "name": "The Ooze"
+        },
+        {
+          "count": 2,
+          "name": "Raven Eagle"
+        },
+        {
+          "count": 2,
+          "name": "Flashfreeze"
         }
       ]
     },
@@ -984,29 +992,25 @@
       "name": "Mardu Discard",
       "author": "MTGGoldfish",
       "colors": [
+        "W",
         "B",
-        "R",
-        "W"
+        "R"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 2,
-          "name": "Inti, Seneschal of the Sun"
+          "count": 3,
+          "name": "Godless Shrine"
         },
         {
-          "count": 1,
+          "count": 2,
           "name": "Tersa Lightshatter"
         },
         {
-          "count": 2,
+          "count": 3,
           "name": "Carnage, Crimson Chaos"
-        },
-        {
-          "count": 2,
-          "name": "Casey Jones, Vigilante"
         },
         {
           "count": 3,
@@ -1022,7 +1026,7 @@
         },
         {
           "count": 1,
-          "name": "Swamp"
+          "name": "Mountain"
         },
         {
           "count": 4,
@@ -1046,7 +1050,7 @@
         },
         {
           "count": 1,
-          "name": "Mountain"
+          "name": "Swamp"
         },
         {
           "count": 3,
@@ -1065,26 +1069,22 @@
           "name": "Starting Town"
         },
         {
-          "count": 3,
-          "name": "Godless Shrine"
+          "count": 4,
+          "name": "Blood Crypt"
+        },
+        {
+          "count": 2,
+          "name": "Inti, Seneschal of the Sun"
         },
         {
           "count": 4,
           "name": "Bloodghast"
-        },
-        {
-          "count": 4,
-          "name": "Blood Crypt"
         }
       ],
       "sideboard": [
         {
           "count": 2,
           "name": "Avatar's Wrath"
-        },
-        {
-          "count": 1,
-          "name": "Deathmark"
         },
         {
           "count": 2,
@@ -1099,8 +1099,8 @@
           "name": "Pyroclasm"
         },
         {
-          "count": 1,
-          "name": "Requiting Hex"
+          "count": 2,
+          "name": "Duress"
         },
         {
           "count": 1,
@@ -1113,6 +1113,96 @@
         {
           "count": 2,
           "name": "Voice of Victory"
+        }
+      ]
+    },
+    {
+      "name": "Mono-Green Landfall",
+      "author": "MTGGoldfish",
+      "colors": [
+        "G"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Ba Sing Se"
+        },
+        {
+          "count": 4,
+          "name": "Esper Origins"
+        },
+        {
+          "count": 4,
+          "name": "Escape Tunnel"
+        },
+        {
+          "count": 4,
+          "name": "Fabled Passage"
+        },
+        {
+          "count": 4,
+          "name": "Icetill Explorer"
+        },
+        {
+          "count": 2,
+          "name": "Mole Man, Moloid Master"
+        },
+        {
+          "count": 4,
+          "name": "Sazh's Chocobo"
+        },
+        {
+          "count": 14,
+          "name": "Forest"
+        },
+        {
+          "count": 4,
+          "name": "Mightform Harmonizer"
+        },
+        {
+          "count": 2,
+          "name": "Sapling Nursery"
+        },
+        {
+          "count": 4,
+          "name": "Earthbender Ascension"
+        },
+        {
+          "count": 2,
+          "name": "Bristly Bill, Spine Sower"
+        },
+        {
+          "count": 4,
+          "name": "Llanowar Elves"
+        },
+        {
+          "count": 4,
+          "name": "Meltstrider's Resolve"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Surrak, Elusive Hunter"
+        },
+        {
+          "count": 4,
+          "name": "Soul-Guide Lantern"
+        },
+        {
+          "count": 4,
+          "name": "Mossborn Hydra"
+        },
+        {
+          "count": 1,
+          "name": "Sapling Nursery"
+        },
+        {
+          "count": 4,
+          "name": "Heritage Reclamation"
         }
       ]
     },
@@ -1211,96 +1301,6 @@
         {
           "count": 1,
           "name": "Sunspine Lynx"
-        }
-      ]
-    },
-    {
-      "name": "Mono-Green Landfall",
-      "author": "MTGGoldfish",
-      "colors": [
-        "G"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Ba Sing Se"
-        },
-        {
-          "count": 4,
-          "name": "Esper Origins"
-        },
-        {
-          "count": 4,
-          "name": "Escape Tunnel"
-        },
-        {
-          "count": 4,
-          "name": "Fabled Passage"
-        },
-        {
-          "count": 4,
-          "name": "Icetill Explorer"
-        },
-        {
-          "count": 2,
-          "name": "Mole Man, Moloid Master"
-        },
-        {
-          "count": 4,
-          "name": "Sazh's Chocobo"
-        },
-        {
-          "count": 14,
-          "name": "Forest"
-        },
-        {
-          "count": 4,
-          "name": "Mightform Harmonizer"
-        },
-        {
-          "count": 2,
-          "name": "Sapling Nursery"
-        },
-        {
-          "count": 4,
-          "name": "Earthbender Ascension"
-        },
-        {
-          "count": 2,
-          "name": "Bristly Bill, Spine Sower"
-        },
-        {
-          "count": 4,
-          "name": "Llanowar Elves"
-        },
-        {
-          "count": 4,
-          "name": "Meltstrider's Resolve"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Surrak, Elusive Hunter"
-        },
-        {
-          "count": 4,
-          "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 4,
-          "name": "Mossborn Hydra"
-        },
-        {
-          "count": 1,
-          "name": "Sapling Nursery"
-        },
-        {
-          "count": 4,
-          "name": "Heritage Reclamation"
         }
       ]
     }

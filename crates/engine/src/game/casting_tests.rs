@@ -21,7 +21,7 @@ use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ManaChoice, ManaChoicePrompt, SpellCastRecord};
-use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
+use crate::types::keywords::{EmergeCost, EscapeCost, FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::{
     ManaColor, ManaCost, ManaCostShard, ManaRestriction, ManaSourceSelection, ManaSpellGrant,
     ManaType, ManaUnit,
@@ -37230,8 +37230,46 @@ mod alt_cost_reduction_509 {
         obj.base_power = Some(5);
         obj.base_toughness = Some(5);
         obj.base_characteristics_initialized = true;
-        obj.keywords.push(Keyword::Emerge(emerge));
+        obj.keywords
+            .push(Keyword::Emerge(EmergeCost::creature(emerge)));
         obj_id
+    }
+
+    fn create_artifact_emerge_spell(
+        state: &mut GameState,
+        player: PlayerId,
+        card_id: u64,
+        printed: ManaCost,
+        emerge: ManaCost,
+    ) -> ObjectId {
+        let spell = create_emerge_spell(state, player, card_id, printed, emerge.clone());
+        state.objects.get_mut(&spell).unwrap().keywords =
+            vec![Keyword::Emerge(EmergeCost::from_quality(
+                emerge,
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+            ))];
+        spell
+    }
+
+    fn create_sacrifice_artifact(
+        state: &mut GameState,
+        player: PlayerId,
+        card_id: u64,
+        mana_cost: ManaCost,
+    ) -> ObjectId {
+        let artifact = create_object(
+            state,
+            CardId(card_id),
+            player,
+            "Sacrifice Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&artifact).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.base_card_types.core_types.push(CoreType::Artifact);
+        obj.mana_cost = mana_cost.clone();
+        obj.base_mana_cost = mana_cost;
+        artifact
     }
 
     fn create_sacrifice_creature(
@@ -37917,6 +37955,175 @@ mod alt_cost_reduction_509 {
             0,
             "Emerge should charge the reduced {{1}}{{U}}{{U}} cost, consuming exactly three mana"
         );
+    }
+
+    /// CR 702.119b-c: Emerge from artifact must offer only qualifying artifacts
+    /// and reduce the emerge cost by the selected artifact's mana value.
+    #[test]
+    fn emerge_from_artifact_casts_after_sacrificing_an_artifact() {
+        let mut state = setup_game_at_main_phase();
+        add_mana(&mut state, PlayerId(0), ManaType::Black, 2);
+
+        let emerge = create_artifact_emerge_spell(
+            &mut state,
+            PlayerId(0),
+            811,
+            ManaCost::generic(6),
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+                generic: 5,
+            },
+        );
+        let artifact =
+            create_sacrifice_artifact(&mut state, PlayerId(0), 812, ManaCost::generic(5));
+        let creature =
+            create_sacrifice_creature(&mut state, PlayerId(0), 813, ManaCost::generic(1));
+
+        assert!(
+            can_cast_object_now(&state, PlayerId(0), emerge),
+            "an artifact with mana value 5 must reduce {{5}}{{B}}{{B}} to payable {{B}}{{B}}"
+        );
+
+        let mut events = Vec::new();
+        let waiting_for =
+            handle_cast_spell(&mut state, PlayerId(0), emerge, CardId(811), &mut events)
+                .expect("artifact emerge should enter sacrifice payment");
+        match &waiting_for {
+            WaitingFor::PayCost {
+                kind: PayCostKind::Sacrifice,
+                choices,
+                ..
+            } => {
+                assert!(
+                    choices.contains(&artifact),
+                    "artifact must be a legal emerge sacrifice"
+                );
+                assert!(
+                    !choices.contains(&creature),
+                    "a creature must not be legal for emerge from artifact"
+                );
+            }
+            other => panic!("expected Emerge PayCost(Sacrifice), got {other:?}"),
+        }
+
+        state.waiting_for = waiting_for;
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![artifact],
+            },
+        )
+        .expect("sacrificing the artifact should complete the emerge cast");
+
+        assert_eq!(state.objects[&artifact].zone, Zone::Graveyard);
+        assert_eq!(state.objects[&emerge].zone, Zone::Stack);
+        assert_eq!(
+            state.players[0].mana_pool.total(),
+            0,
+            "artifact mana value must reduce the emerge cost before black mana is paid"
+        );
+    }
+
+    const CRABOMINATION_ORACLE: &str = "Emerge from artifact {5}{B}{B} (You may cast this spell by sacrificing an artifact and paying the emerge cost reduced by that artifact's mana value.)\nWhen this creature enters, target opponent exiles the top card of their library, a card at random from their graveyard, and a card at random from their hand. You may cast a spell from among cards exiled this way without paying its mana cost.";
+
+    /// CR 702.119b-c: Crabomination's real Oracle text must carry its artifact
+    /// quality through parsing and into the cast-cost selection pipeline.
+    #[test]
+    fn crabomination_real_oracle_casts_by_sacrificing_only_an_artifact() {
+        use crate::game::scenario::{GameScenario, P0};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let crabomination = scenario
+            .add_creature_to_hand_from_oracle(P0, "Crabomination", 5, 5, CRABOMINATION_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+                generic: 4,
+            })
+            .id();
+        let artifact = scenario
+            .add_creature(P0, "Artifact Tribute", 1, 1)
+            .as_artifact()
+            .with_mana_cost(ManaCost::generic(5))
+            .id();
+        let creature = scenario
+            .add_creature(P0, "Creature Tribute", 1, 1)
+            .with_mana_cost(ManaCost::generic(1))
+            .id();
+
+        let mut runner = scenario.build();
+        add_mana(runner.state_mut(), P0, ManaType::Black, 2);
+        let card_id = runner.state().objects[&crabomination].card_id;
+        let mut events = Vec::new();
+        let waiting_for =
+            handle_cast_spell(runner.state_mut(), P0, crabomination, card_id, &mut events)
+                .expect("Crabomination must enter its Emerge sacrifice payment");
+
+        match &waiting_for {
+            WaitingFor::PayCost {
+                kind: PayCostKind::Sacrifice,
+                choices,
+                ..
+            } => {
+                assert!(choices.contains(&artifact));
+                assert!(!choices.contains(&creature));
+            }
+            other => panic!("expected Crabomination Emerge PayCost(Sacrifice), got {other:?}"),
+        }
+
+        runner.state_mut().waiting_for = waiting_for;
+        apply_as_current(
+            runner.state_mut(),
+            GameAction::SelectCards {
+                cards: vec![artifact],
+            },
+        )
+        .expect("the artifact sacrifice must complete Crabomination's Emerge cast");
+
+        assert_eq!(runner.state().objects[&artifact].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&crabomination].zone, Zone::Stack);
+        assert_eq!(runner.state().players[P0.0 as usize].mana_pool.total(), 0);
+    }
+
+    #[test]
+    fn crabomination_real_oracle_prompt_describes_artifact_sacrifice() {
+        use crate::game::scenario::{GameScenario, P0};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let crabomination = scenario
+            .add_creature_to_hand_from_oracle(P0, "Crabomination", 5, 5, CRABOMINATION_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+                generic: 4,
+            })
+            .id();
+        scenario
+            .add_creature(P0, "Artifact Tribute", 1, 1)
+            .as_artifact()
+            .with_mana_cost(ManaCost::generic(5));
+
+        let mut runner = scenario.build();
+        add_mana(runner.state_mut(), P0, ManaType::Black, 6);
+        let card_id = runner.state().objects[&crabomination].card_id;
+        let mut events = Vec::new();
+        let waiting_for =
+            handle_cast_spell(runner.state_mut(), P0, crabomination, card_id, &mut events)
+                .expect("Crabomination must offer its normal and Emerge casts");
+
+        match waiting_for {
+            WaitingFor::AlternativeCastChoice {
+                keyword: crate::types::game_state::AlternativeCastKeyword::Emerge,
+                alternative_additional_cost_description,
+                ..
+            } => assert_eq!(
+                alternative_additional_cost_description,
+                Some(crate::types::game_state::AlternativeAdditionalCostDescription::EmergeSacrifice {
+                    quality: crate::types::game_state::EmergeSacrificeQuality::Artifact,
+                })
+            ),
+            other => panic!("expected Crabomination AlternativeCastChoice(Emerge), got {other:?}"),
+        }
     }
 
     #[test]
@@ -42687,6 +42894,7 @@ fn bestow_cost_choice_legal_actions_includes_both_paths() {
             generic: 3,
         }),
         alternative_additional_cost: None,
+        alternative_additional_cost_description: None,
         payment_mode: CastPaymentMode::Auto,
     };
     let cands = candidate_actions_broad(&state);

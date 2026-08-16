@@ -4565,7 +4565,16 @@ pub(crate) fn static_condition_to_ability_condition(
                 variant: *variant,
             })
         }
-        StaticCondition::IsMonarch => Some(AbilityCondition::IsMonarch),
+        // CR 725.1 + CR 109.5: only the controller-scoped monarch gate has an
+        // `AbilityCondition` counterpart. `AbilityCondition` has no player axis,
+        // so a scoped monarch gate must NOT be lowered — dropping the scope here
+        // would silently rebind "that player is the monarch" to the ability's
+        // controller. Returning `None` leaves the clause unrepresented and
+        // keeps coverage honest.
+        StaticCondition::IsMonarch {
+            player: PlayerScope::Controller,
+        } => Some(AbilityCondition::IsMonarch),
+        StaticCondition::IsMonarch { .. } => None,
         StaticCondition::IsInitiative => Some(AbilityCondition::IsInitiative),
         StaticCondition::HasCityBlessing => Some(AbilityCondition::HasCityBlessing),
         // CR 702.195b: The enduring story designation is available to effects.

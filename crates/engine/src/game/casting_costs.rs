@@ -2906,7 +2906,7 @@ pub(crate) fn handle_sacrifice_for_cost(
         {
             Some(SpellCostSource::Offering)
         } else if payment.source == SpellCostSource::Emerge
-            && is_emerge_sacrifice_cost(payment.cost)
+            && is_emerge_sacrifice_cost(state, player, pending.object_id, payment.cost)
         {
             Some(SpellCostSource::Emerge)
         } else {
@@ -7786,52 +7786,58 @@ fn is_offering_sacrifice_cost(
     )
 }
 
-fn emerge_sacrifice_filter() -> TargetFilter {
-    TargetFilter::Typed(TypedFilter::creature())
-}
-
-fn is_emerge_sacrifice_cost(cost: &AbilityCost) -> bool {
+fn is_emerge_sacrifice_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cost: &AbilityCost,
+) -> bool {
+    let Some(sacrifice_filter) = super::casting::effective_spell_keywords(state, player, object_id)
+        .into_iter()
+        .find_map(|keyword| match keyword {
+            crate::types::keywords::Keyword::Emerge(cost) => Some(cost.sacrifice_filter),
+            _ => None,
+        })
+    else {
+        return false;
+    };
     matches!(
         cost,
         AbilityCost::Sacrifice(cost)
             if cost.requirement == SacrificeRequirement::count(1)
-                && cost.target == emerge_sacrifice_filter()
+                && cost.target == sacrifice_filter
     )
 }
 
-/// CR 702.119a-c: Build the required sacrifice component of Emerge's
-/// alternative cost. The sacrificed creature's mana value is applied as a cost
-/// reduction by `handle_sacrifice_for_cost` while the creature is still on the
+/// CR 702.119a-b: Build Emerge's required sacrifice component from its printed
+/// permanent-quality filter. The sacrificed permanent's mana value is applied
+/// as a cost reduction by `handle_sacrifice_for_cost` while it remains on the
 /// battlefield.
-pub(super) fn emerge_sacrifice_cost() -> AbilityCost {
-    AbilityCost::Sacrifice(SacrificeCost::count(emerge_sacrifice_filter(), 1))
+pub(super) fn emerge_sacrifice_cost(sacrifice_filter: TargetFilter) -> AbilityCost {
+    AbilityCost::Sacrifice(SacrificeCost::count(sacrifice_filter, 1))
 }
 
-/// CR 702.119a-c: Emerge can be paid only if a legal creature can be
+/// CR 702.119a-b: Emerge can be paid only if a matching permanent can be
 /// sacrificed and the resulting reduced emerge mana cost can be paid.
 pub(super) fn can_pay_emerge_cost(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
     emerge_cost: &ManaCost,
+    sacrifice_filter: &TargetFilter,
 ) -> bool {
-    super::casting::find_eligible_sacrifice_targets(
-        state,
-        player,
-        object_id,
-        &emerge_sacrifice_filter(),
-    )
-    .into_iter()
-    .any(|creature| {
-        let mut reduced = emerge_cost.clone();
-        apply_emerge_cost_reduction(state, creature, &mut reduced);
-        // CR 601.2f + CR 702.119a: Affordability probes must include the
-        // final Trinisphere-class floor after Emerge's sacrifice reduction.
-        if !cost_has_x(&reduced) {
-            super::casting::apply_cost_floor(state, player, object_id, &mut reduced);
-        }
-        super::casting::can_pay_cost_after_auto_tap(state, player, object_id, &reduced)
-    })
+    super::casting::find_eligible_sacrifice_targets(state, player, object_id, sacrifice_filter)
+        .into_iter()
+        .any(|permanent| {
+            let mut reduced = emerge_cost.clone();
+            apply_emerge_cost_reduction(state, permanent, &mut reduced);
+            // CR 601.2f + CR 702.119a: Affordability probes must include the
+            // final Trinisphere-class floor after Emerge's sacrifice reduction.
+            if !cost_has_x(&reduced) {
+                super::casting::apply_cost_floor(state, player, object_id, &mut reduced);
+            }
+            super::casting::can_pay_cost_after_auto_tap(state, player, object_id, &reduced)
+        })
 }
 
 fn additional_cost_x_max(
@@ -8477,8 +8483,8 @@ pub(super) fn apply_offering_cost_reduction(
     *spell_generic = spell_generic.saturating_sub(sac_generic);
 }
 
-/// CR 702.119a: Reduce the Emerge cost by generic mana equal to the sacrificed
-/// creature's mana value. Colored pips in the Emerge cost are never reduced.
+/// CR 702.119a-b: Reduce the Emerge cost by generic mana equal to the sacrificed
+/// permanent's mana value. Colored pips in the Emerge cost are never reduced.
 pub(super) fn apply_emerge_cost_reduction(
     state: &GameState,
     sacrifice_id: ObjectId,

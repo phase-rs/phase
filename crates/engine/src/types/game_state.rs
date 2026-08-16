@@ -16,9 +16,9 @@ use super::ability::{
     CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition, DigRestOrder, Duration,
     EffectKind, FaceDownProfile, GameRestriction, KeywordAction, KickerVariant, LibraryPosition,
     ModalChoice, PermanentEntryMode, PileSource, QuantityExpr, ResolvedAbility,
-    SearchDestinationSplit, SearchSelectionConstraint, StaticCondition, TapCreaturesAggregate,
-    TargetFilter, TargetRef, ThisWayCause, TriggerBaseSetInstanceRef, TriggerCondition,
-    TriggerDefinition, TriggerDefinitionRef, TriggerEntry,
+    SearchDestinationSplit, SearchSelectionConstraint, StackAbilityKind, StaticCondition,
+    TapCreaturesAggregate, TargetFilter, TargetRef, ThisWayCause, TriggerBaseSetInstanceRef,
+    TriggerCondition, TriggerDefinition, TriggerDefinitionRef, TriggerEntry,
 };
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, PrintedCardRef, TokenImageRef};
@@ -6137,6 +6137,18 @@ pub struct ManaAbilityCostParent {
     pub cursor: Box<ManaAbilityCostCursor>,
     #[serde(default)]
     pub lifecycle: ManaAbilityCostParentLifecycle,
+    /// CR 603.2 + CR 603.3b: Index into the live reducer action's `events`
+    /// vector marking where this parent frame's own unscanned cost events
+    /// begin, while the lifecycle is `Synchronous`. Each nested child entry
+    /// prepares a fresh local snapshot whose ledger is extended with
+    /// `events[current_action_event_start..]`, so a later pausing child
+    /// inherits the parent prefix plus every earlier synchronously completed
+    /// sibling. It is never consulted once the parent becomes `Suspended`,
+    /// because the pause has already made that prefix durable, so it is not
+    /// serialized. Distinct from `ManaAbilityCostCursor::current_action_deferred_start`,
+    /// which indexes the local ledger rather than the event vector.
+    #[serde(skip)]
+    pub current_action_event_start: usize,
 }
 
 /// CR 601.2h + CR 602.2b + CR 605.3b + CR 616.1: The unpaid suffix of an
@@ -6184,16 +6196,18 @@ pub struct ManaAbilityCostCursor {
     /// before the cost cursor advances to the next component.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_sacrifice_remaining: Option<Vec<ObjectId>>,
-    /// CR 603.2 + CR 603.3b: Cost events produced before a replacement-choice
-    /// pause cannot reach the ordinary post-action pipeline. Keep them with
-    /// their typed payment root so observers are collected exactly once when
-    /// that root completes.
+    /// CR 603.2 + CR 603.3b: Frame-local cost events produced before a
+    /// replacement-choice pause cannot reach the ordinary post-action
+    /// pipeline. Each cursor owns only its own unscanned events; an ancestor's
+    /// ledger remains opaque in `parent` until a suspended child moves its
+    /// local ledger upward. Only the ultimate parentless cursor may settle the
+    /// accumulated batch.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_cost_events: Vec<GameEvent>,
-    /// Ephemeral split point for the active reducer action. It lets a newly
-    /// nested typed root prepend its parent's unscanned batch without copying
-    /// the local events this root already captured on pause. The split is
-    /// consumed before state is returned to a player, so it is not serialized.
+    /// Ephemeral split point into this cursor's frame-local ledger for the
+    /// active reducer action. It lets an immediately re-paused ultimate root
+    /// retain its already captured local suffix while inherited root events
+    /// move in front of that suffix without duplication. It is not serialized.
     #[serde(skip)]
     pub current_action_deferred_start: usize,
     /// A nested costed mana source owns this parent until it completes. This
@@ -7496,6 +7510,132 @@ pub struct ReplacementCandidateSummary {
     pub description: String,
 }
 
+/// CR 603.3b + CR 603.7: One completed normal-plus-delayed trigger collection
+/// for a single raw event batch, produced before any live occurrence is claimed.
+///
+/// Generic and phase processing consume this immediately; the triggered-mana
+/// continuation may instead persist it undispatched across a pause, so a later
+/// action partitions already-materialized contexts rather than rematching raw
+/// events. It deliberately carries no live action ordinal: occurrence identities
+/// are only meaningful against the reducer event vector of the action that
+/// claimed them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CollectedTriggerContextBatch {
+    /// The combined normal and delayed contexts in APNAP rank/timestamp order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contexts: Vec<crate::game::triggers::PendingTriggerContext>,
+    /// The raw logical delayed batch, stored exactly once for durable replay and
+    /// accounting. Immediate consumers drop it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delayed_events: Vec<GameEvent>,
+    /// Raw identities consumed by the delayed matcher for this batch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delayed_consumed: Vec<crate::game::triggers::ConsumedTriggerEventOccurrence>,
+    /// Whether the caller's already-observed normal seed was non-empty. The
+    /// closing processors clear post-collection transients only in that case.
+    #[serde(default)]
+    pub normal_was_non_empty: bool,
+}
+
+/// CR 605.3b + CR 608.2d: The activated mana ability's own colour prompt,
+/// latched exactly as the mana frame had already built it before the
+/// triggered-mana fixed point suspended that frame.
+///
+/// This wait belongs to the outer activated mana ability, never to an accepted
+/// triggered-mana body: the fixed point reconstructs it verbatim rather than
+/// re-deriving an option set against a board the accepted triggers may have
+/// changed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ManaColorChoiceResume {
+    pub player: PlayerId,
+    pub choice: ManaChoicePrompt,
+    pub context: ManaChoiceContext,
+}
+
+/// CR 605.4a: What resumes once every accepted triggered-mana occurrence in one
+/// completed mana frame has reached a terminal disposition.
+///
+/// Exactly one of the three shapes a completed frame can own. `Parent` is a
+/// nested child returning to its suspended cursor; `Root` is the completed root
+/// frame's own resume root; `ColorChoice` is the already-built prompt above.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub(crate) enum ManaTriggerFixedPointResume {
+    /// A nested child frame: its suspended parent cursor is the authority and
+    /// no wait is reconstructed here.
+    Parent,
+    /// The completed root mana frame's own activation resume root, together
+    /// with the mana source's controller — `resume_mana_ability_root`'s own
+    /// first argument, which its catch-all arm needs to rebuild the waiting
+    /// state. It travels with the root because a resumed accepted occurrence
+    /// no longer has the payment cursor that supplied it.
+    Root {
+        player: PlayerId,
+        resume: Box<ManaAbilityResume>,
+    },
+    /// The root frame's already-built `ChooseManaColor` wait.
+    ColorChoice(Box<ManaColorChoiceResume>),
+}
+
+/// CR 605.4a: Which existing interaction the current accepted triggered-mana
+/// occurrence is paused on. Private control state, never a wire discriminator:
+/// the public interaction surface is the ordinary `WaitingFor` value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub(crate) enum TriggeredManaStage {
+    /// CR 700.2e: the controller is choosing which other player picks modes.
+    ChoosingModalChooser,
+    /// The chosen player is selecting modes.
+    ChoosingModes,
+    /// The selected body is executing and paused on one whitelisted
+    /// optional / optional-for / repeat / replacement interaction.
+    ResolvingBody,
+}
+
+/// CR 605.4a + CR 603.12a: The authoritative continuation for a classifier-
+/// accepted triggered mana ability that paused mid-resolution.
+///
+/// It owns only "after this immediate trigger finishes under this exact
+/// rules-execution node, partition these already-collected emission batches,
+/// then run this accepted tail, then resume this exact mana frame". Every inner
+/// operation (resolution frames, optional/repeat frames, pending replacement or
+/// cost-move state, and `waiting_for` itself) keeps its existing owner.
+///
+/// This carrier is trusted persistence authority: it can hold hidden object
+/// identities, last-known source snapshots, controller-only event batches, and
+/// the current rules-execution node. It is redacted from every client
+/// projection by `visibility.rs` and `derived_views.rs`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct TriggeredManaResume {
+    /// The complete accepted work item currently executing.
+    pub current: Box<crate::game::triggers::PendingTriggerContext>,
+    /// The occurrence-local production override captured by the auto-tap
+    /// planner for this exact `TapsForMana` occurrence, if any. The transient
+    /// override map is cleared before an interactive trigger can resume, so it
+    /// must travel with the occurrence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_override: Option<ProductionOverride>,
+    /// CR 605.4a: The one `RulesExecutionNodeKind::TriggeredMana` node for this
+    /// occurrence. Required, not optional: every classifier-accepted context
+    /// yields exactly one source incarnation, and every pause of this
+    /// occurrence rebinds this exact ref.
+    pub rules_execution_node: RulesExecutionNodeRef,
+    /// Accepted work that has not been made current yet, in collection order.
+    /// Tail members deliberately have no node until they become current.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accepted_tail: Vec<crate::game::triggers::PendingTriggerContext>,
+    /// Already-collected, still-undispatched emission batches produced by the
+    /// current occurrence across its pauses. Stored before the live occurrences
+    /// were claimed, so a later action partitions materialized contexts instead
+    /// of rematching raw events.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collected_batches: Vec<CollectedTriggerContextBatch>,
+    /// The suspended mana frame this fixed point resumes exactly once.
+    pub outer_resume: ManaTriggerFixedPointResume,
+    /// Which existing interaction owns the current pause.
+    pub stage: TriggeredManaStage,
+}
+
 /// CR 603.3b: One controller's group within an in-flight trigger ordering
 /// pass. `ordered = true` once the controller has submitted their permutation
 /// (or once the group is single-trigger and trivially in final order, or once
@@ -7598,6 +7738,30 @@ pub struct PileResult {
 ///
 /// Adding a new alternative-cost keyword (e.g., Madness CR 702.35a, Spectacle
 /// CR 702.137a) is a compile error at every dispatch site until handled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum AlternativeAdditionalCostDescription {
+    /// CR 702.119b: The quality named by Emerge from [quality].
+    EmergeSacrifice { quality: EmergeSacrificeQuality },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum EmergeSacrificeQuality {
+    Artifact,
+    Battle,
+    Card,
+    Creature,
+    Enchantment,
+    Instant,
+    Kindred,
+    Land,
+    Permanent,
+    Planeswalker,
+    Sorcery,
+    Subtype(String),
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
 #[serde(tag = "type")]
 pub enum AlternativeCastKeyword {
@@ -7606,8 +7770,9 @@ pub enum AlternativeCastKeyword {
     /// CR 702.74a: ETB + sacrifice trigger fires when the resolving permanent
     /// was cast for its evoke cost (CR 702.74b).
     Evoke,
-    /// CR 702.119a-c: Emerge alternative cost requires sacrificing a creature
-    /// while casting and reduces the emerge cost by that creature's mana value.
+    /// CR 702.119a-c: Emerge alternative cost requires sacrificing the specified
+    /// permanent quality while casting and reduces the emerge cost by that
+    /// permanent's mana value.
     Emerge,
     /// CR 702.109a: Cast for the dash cost — the resolving permanent gains haste
     /// and is returned to its owner's hand at the next end step.
@@ -11470,10 +11635,15 @@ pub enum WaitingFor {
         /// the alternative cost (e.g., `AbilityCost::Exile { count, zone,
         /// filter }` for the MH2 Evoke Incarnations). `None` when the
         /// alternative cost is pure mana (Warp, Lorwyn Evoke, Overload,
-        /// Bestow, mana-only Flashback). Engine owns the derived display
-        /// string; the frontend renders the engine-provided description.
+        /// Bestow, mana-only Flashback). The engine owns the typed display
+        /// payload; the frontend localizes and renders the descriptor.
         #[serde(default)]
         alternative_additional_cost: Option<AbilityCost>,
+        /// Engine-authored typed display descriptor for an alternative cost's
+        /// non-mana component when its semantic details affect player-facing
+        /// wording. The frontend localizes this descriptor.
+        #[serde(default)]
+        alternative_additional_cost_description: Option<AlternativeAdditionalCostDescription>,
     },
     /// CR 702.140c + CR 730.2a: As a mutating creature spell resolves with a
     /// legal target, the spell's controller chooses whether the spell is put on
@@ -14183,6 +14353,53 @@ pub enum StackEntryKind {
     KeywordAction { action: KeywordAction },
 }
 
+impl StackEntryKind {
+    /// CR 113.3b / CR 113.3c: which kind of *ability* this stack entry is, or
+    /// `None` when the entry is a spell (a spell is not an ability, CR 112.1).
+    ///
+    /// SINGLE AUTHORITY for the ability-kind axis of
+    /// `TargetFilter::StackAbility`. Both legality authorities read it from
+    /// here — `game::targeting` at announcement (CR 601.2c) and `game::filter`
+    /// at the resolution recheck (CR 608.2b) — so the two gates cannot admit
+    /// different sets of stack-entry kinds. They previously each spelled the
+    /// mapping out inline and had already drifted: the recheck excluded
+    /// `KeywordAction` entirely while the announce gate admitted them, so a
+    /// kindless counter (Stifle / Trickbind / Repudiate) could legally announce
+    /// a target on an equip/crew entry and then fizzle at resolution.
+    ///
+    /// `KeywordAction` is `Activated`: CR 702.6a (equip), CR 702.122a (crew),
+    /// CR 702.171a (saddle) and CR 702.184a (station) each define the keyword as
+    /// an *activated ability*, so such an entry is an activated ability on the
+    /// stack for every rules purpose — including being a legal target of
+    /// "target activated ability" effects (Squelch, Interdict, Reroute).
+    ///
+    /// Exhaustive on purpose: a future `StackEntryKind` variant must make this
+    /// classification decision explicitly instead of silently defaulting.
+    pub fn stack_ability_kind(&self) -> Option<StackAbilityKind> {
+        match self {
+            StackEntryKind::Spell { .. } => None,
+            StackEntryKind::ActivatedAbility { .. } | StackEntryKind::KeywordAction { .. } => {
+                Some(StackAbilityKind::Activated)
+            }
+            StackEntryKind::TriggeredAbility { .. } => Some(StackAbilityKind::Triggered),
+        }
+    }
+
+    /// CR 113.3b / CR 113.3c + CR 115.1: whether this entry is a stack ability
+    /// that satisfies the optional `kind` narrowing of a
+    /// `TargetFilter::StackAbility`. This is the whole membership test, not just
+    /// the narrowing: a spell entry never satisfies it, and `None` (a combined
+    /// "activated or triggered ability" spelling) accepts either ability kind.
+    /// Mana abilities never reach the stack (CR 605.3b), so every ability entry
+    /// reaching this predicate is targetable in principle.
+    pub fn matches_stack_ability_kind(&self, kind: Option<&StackAbilityKind>) -> bool {
+        match self.stack_ability_kind() {
+            None => false,
+            Some(entry_kind) => kind.is_none_or(|wanted| *wanted == entry_kind),
+        }
+    }
+}
+
 /// CR 608.2e: A clause-local snapshot of an equalization minimum/maximum,
 /// frozen when a `player_scope` link begins so every player in that clause's
 /// APNAP fan-out resolves its disposal count against the same pre-clause board.
@@ -16879,6 +17096,55 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_deferred_life_cost_resume: Option<DeferredLifeCostResume>,
 
+    /// CR 605.4a + CR 603.12a: Typed continuation for a classifier-accepted
+    /// triggered mana ability that paused mid-resolution. It stays serialized
+    /// with the matching whitelisted prompt so a host checkpoint resumes the
+    /// same stackless occurrence under the same rules-execution node.
+    /// Redacted from every client projection (`visibility.rs`,
+    /// `derived_views.rs`); the projected `WaitingFor` is the complete public
+    /// interaction surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pending_triggered_mana_resume: Option<Box<TriggeredManaResume>>,
+
+    /// CR 117.3c + CR 117.5 + CR 605.4a: The player who must receive priority
+    /// once a settled-Priority trigger batch finishes announcing, when that
+    /// player is not the active player. Installed only by the settled-Priority
+    /// convergence wrapper from its own exhaustively validated
+    /// `WaitingFor::Priority { player }`, retained across every
+    /// trigger-construction prompt, and consumed by the construction finisher
+    /// once the whole construction/deferred tail is exhausted.
+    ///
+    /// Deliberately **not** part of `resolution_completion_can_settle`: that
+    /// predicate gates `can_drain_deferred_triggers`, so a carrier inside it
+    /// would reject the very drains this batch depends on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pending_trigger_construction_priority_recipient: Option<PlayerId>,
+
+    /// CR 605.1b + CR 605.4a: The exact rules-execution node of the accepted
+    /// triggered-mana occurrence whose stackless body is currently executing or
+    /// resuming. Presence means the complete classifier accepted the original
+    /// graph, so a resolver-time context-ref injection into `targets` cannot
+    /// reopen classification (CR 605.4a).
+    ///
+    /// Transient by construction: it is a lexical scope marker equal to
+    /// `active_rules_execution_node` while live, and every sidecar-owned action
+    /// reinstalls it from `TriggeredManaResume::rules_execution_node`. Serde
+    /// persists the sidecar and its node, never this marker.
+    #[serde(skip)]
+    pub(crate) active_accepted_triggered_mana_node: Option<RulesExecutionNodeRef>,
+
+    /// Debug-only witness that the trigger-construction finisher ran at most
+    /// once per reducer action. The finisher is applied at the outermost handler
+    /// return of each of its enumerated action seams; a second call in the same
+    /// action would mean a seam was added below dispatch, where a `Priority`
+    /// result is discarded and the recipient would be lost mid-batch.
+    ///
+    /// Transient by construction — `apply_action_boundary_core` clears it at
+    /// action entry beside the other per-action transients — so it is never
+    /// serialized and never part of state equality.
+    #[serde(skip)]
+    pub(crate) trigger_construction_finisher_ran_this_action: bool,
+
     /// CR 601.2h + CR 616.1: Resume a sequential discard cost after a
     /// replacement choice. Cost moves use `pending_cost_move_resume` above.
     #[serde(skip)]
@@ -17235,6 +17501,15 @@ pub enum DrainStatus {
 /// the synchronous dispatcher finish or pause the entry it took after a nested
 /// replacement has pushed another drain above it. It is never serialized and
 /// introduces no cross-carrier reference.
+///
+/// It addresses an entry *within* one drain stack, and says nothing about WHICH
+/// frame that stack belongs to. `types::resolution::IdentifiedPostReplacementDispatch`
+/// is what pairs it with the identity of that frame, so a cleanup can find the
+/// frame wherever the stack has since moved it. This type is deliberately left
+/// unchanged by that pairing: widening it would change
+/// [`PostReplacementDrainStack::begin_dispatch`]'s signature, which every
+/// existing call site — including two bare-path `Option::and_then` uses in
+/// `game/elimination.rs` — depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PostReplacementDrainDispatch {
     depth: usize,
@@ -17374,6 +17649,14 @@ pub enum ResidentDrainPolicy {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PostReplacementDrainStack {
     drains: Vec<PostReplacementDrain>,
+    /// This frame's stable identity, bound at its first dispatch and never
+    /// rebound. Private, and reached only through [`Self::frame_id`] /
+    /// [`Self::stamp_frame_id`], so "assigned at most once" is a property of the
+    /// type rather than of any call site. `skip_serializing_if` keeps an
+    /// unstamped frame's wire shape byte-identical to what it was before this
+    /// field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    id: Option<PostReplacementFrameId>,
 }
 
 impl PostReplacementDrain {
@@ -17549,9 +17832,74 @@ impl PostReplacementDrainStack {
         None
     }
 
+    /// CR 603.3b + CR 608.2c: retire a resident whose dispatch is over.
+    ///
+    /// `Dispatching` means "taken and running" (see [`DrainStatus`]). The sole
+    /// production dispatcher — `engine_replacement::apply_pending_post_replacement_effect`
+    /// — is synchronous, and `engine_replacement::post_replacement_dispatch_is_live`
+    /// reports whether any such dispatch is on this thread's call stack. The
+    /// sweeper calls this ONLY when that predicate is false, so a `Dispatching`
+    /// entry reaching here has no owner at all: `begin_dispatch` refuses it,
+    /// `finish_paused_dispatch` pops only `Paused`, and `finish_dispatch` needs a
+    /// handle that died with its call frame. Left behind, it keeps
+    /// `resolution_stack` non-empty forever, which makes
+    /// `triggers::resolution_completion_can_settle` false forever: deferred
+    /// triggered abilities can then never be put on the stack (CR 603.3b) and the
+    /// resolving carrier can never settle (CR 608.2c).
+    ///
+    /// Scope is the RESIDENT only, and that is exact rather than conservative. A
+    /// `Dispatching` entry sitting BELOW a nested `Paused` one is never the
+    /// resident, so it is never reached here; it is retired later, after the
+    /// `Paused` entry above it retires and it becomes the resident at a boundary
+    /// where — again — no dispatch is live. A `Dispatching` entry below another
+    /// `Dispatching` one is reachable only after the caller's loop has popped the
+    /// one above it, and the ownerless predicate is stack-wide rather than
+    /// per-entry, so it is equally ownerless. A `Ready` or `Paused` resident is
+    /// live parked work and is returned untouched.
+    pub fn finish_ownerless_dispatching_resident(&mut self) -> Option<PostReplacementDrain> {
+        match self.drains.last()?.status {
+            DrainStatus::Dispatching => self.drains.pop(),
+            DrainStatus::Ready(_) | DrainStatus::Paused => None,
+        }
+    }
+
     /// CR 800.4a: abandon every pending continuation (player departure).
     pub fn abandon_all(&mut self) {
         self.drains.clear();
+    }
+
+    /// This frame's identity, or `None` if it has never been dispatched.
+    ///
+    /// "Unstamped" is carried by the type, not by a reserved value: a legacy
+    /// payload, a freshly minted sibling frame, and a journal-replayed frame are
+    /// all `None`, and `None` can never equal a handle's `Some(id)`.
+    pub(super) fn frame_id(&self) -> Option<PostReplacementFrameId> {
+        self.id
+    }
+
+    /// Bind identity exactly once, and return the EFFECTIVE id.
+    ///
+    /// If this frame is already stamped, `candidate` is discarded and the
+    /// existing id is returned. That is not an optimisation — it is the
+    /// invariant. A nested same-frame dispatch is the shipped CR 616.1g shape (a
+    /// running continuation draws, the draw is replaced, and the replacement
+    /// carries a mandatory post-effect — Jace, Wielder of Mysteries' win; see
+    /// [`Self::install`]'s doc). Re-stamping there would invalidate the OUTER
+    /// dispatch's still-live handle and strand its entry `Dispatching` forever —
+    /// the exact failure this identity exists to close. Keeping the rule inside
+    /// the type means no call site can violate it. The caller detects "was my
+    /// candidate consumed?" by comparing the returned id against the candidate,
+    /// and only then commits its allocator, so no id is burned.
+    ///
+    /// This writes ONLY the frame's own id. It deliberately does not touch
+    /// `ResolutionStack::last_post_replacement_frame_id`, which is the mint's
+    /// business — that asymmetry is what lets a test build a payload whose
+    /// frames carry ids while its allocator is still 0.
+    pub(super) fn stamp_frame_id(
+        &mut self,
+        candidate: PostReplacementFrameId,
+    ) -> PostReplacementFrameId {
+        *self.id.get_or_insert(candidate)
     }
 }
 
@@ -17573,6 +17921,25 @@ pub struct PendingMultiDraw {
 /// may have been pushed and popped above it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct DrawSequenceFrameId(pub u64);
+
+/// Identifies one `PostReplacement` frame within a [`ResolutionStack`].
+///
+/// Frames are addressed by ID, never by position, for the same reason
+/// [`DrawSequenceFrameId`] is: between a dispatch's mint and its cleanup the
+/// frame may have left the two-deep positional window the accessor can see —
+/// because a nested instruction (CR 616.1g) raised child frames above it, or
+/// because a parent-of-active continuation insert slid a frame in between. In
+/// neither case did the frame itself move; only its distance from the stack top
+/// changed, and that is the only thing positional addressing can observe.
+///
+/// Deliberately no `Default`: the field that holds one is
+/// `Option<PostReplacementFrameId>`, whose `Default` is `None` regardless of
+/// `T`, so "unstamped" is carried by the type rather than by a reserved zero id
+/// that could alias a real frame.
+///
+/// [`ResolutionStack`]: crate::types::resolution::ResolutionStack
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct PostReplacementFrameId(pub u64);
 
 /// The unbookkept suffix of one individual draw whose Library → Hand delivery
 /// parked on a replacement choice.
@@ -19254,6 +19621,54 @@ impl GameState {
         Ok(completed)
     }
 
+    /// CR 614.12a + CR 616.1g: take the active frame's resident continuation and
+    /// return it paired with the identity of the frame it came from.
+    ///
+    /// Pure delegation to [`ResolutionStack::begin_active_post_replacement_dispatch`],
+    /// which is where the frame index, the id stamp and the allocator commit all
+    /// live. This exists so the dispatcher keeps talking to `GameState`.
+    ///
+    /// [`ResolutionStack::begin_active_post_replacement_dispatch`]: super::resolution::ResolutionStack::begin_active_post_replacement_dispatch
+    pub(crate) fn begin_post_replacement_dispatch(
+        &mut self,
+    ) -> Option<(
+        crate::types::ability::PostReplacementContinuation,
+        super::resolution::IdentifiedPostReplacementDispatch,
+    )> {
+        self.resolution_stack
+            .begin_active_post_replacement_dispatch()
+    }
+
+    /// Whether `dispatch` still owns the resident top of its OWN frame, found by
+    /// identity rather than by position. Pure delegation.
+    pub(crate) fn post_replacement_dispatch_is_resident_top(
+        &self,
+        dispatch: super::resolution::IdentifiedPostReplacementDispatch,
+    ) -> bool {
+        self.resolution_stack
+            .post_replacement_dispatch_is_resident_top(dispatch)
+    }
+
+    /// Park `dispatch`'s exact entry in its own frame. Pure delegation.
+    pub(crate) fn pause_post_replacement_dispatch(
+        &mut self,
+        dispatch: super::resolution::IdentifiedPostReplacementDispatch,
+    ) -> bool {
+        self.resolution_stack
+            .pause_post_replacement_dispatch(dispatch)
+    }
+
+    /// Retire `dispatch`'s exact entry in its own frame. Pure delegation — it
+    /// removes no frame; `remove_empty_active_post_replacement_frame` keeps that
+    /// job, and keeps its wider "any empty frame that is now the top" scope.
+    pub(crate) fn finish_post_replacement_dispatch(
+        &mut self,
+        dispatch: super::resolution::IdentifiedPostReplacementDispatch,
+    ) -> Option<PostReplacementDrain> {
+        self.resolution_stack
+            .finish_post_replacement_dispatch(dispatch)
+    }
+
     /// Retires only the exact top general drain whose continuation paused and
     /// whose MultiDraw child has already completed.
     pub fn finish_active_paused_post_replacement_dispatch(&mut self) {
@@ -20846,6 +21261,10 @@ impl GameState {
             current_triggered_mana_override: None,
             pending_cost_move_resume: None,
             pending_deferred_life_cost_resume: None,
+            pending_triggered_mana_resume: None,
+            pending_trigger_construction_priority_recipient: None,
+            active_accepted_triggered_mana_node: None,
+            trigger_construction_finisher_ran_this_action: false,
             pending_discard_for_cost: None,
             pending_cast: None,
             ring_level: HashMap::new(),
@@ -21561,22 +21980,52 @@ impl GameState {
                 ability.clear_trigger_identity_recursive();
             }
         }
+        // `PendingTrigger::timestamp` is a live CR 603.3b ordering key. It is
+        // monotonic allocation history, not a difference in the recurring game
+        // position, so normalize it only in this CR 104.4b snapshot. Keeping
+        // the live values preserves APNAP/same-controller ordering in
+        // `game::triggers`.
+        let normalize_pending_trigger = |pending: &mut crate::game::triggers::PendingTrigger| {
+            pending.timestamp = 0;
+            pending.ability.clear_trigger_identity_recursive();
+        };
         if let Some(pt) = clone.pending_trigger.as_mut() {
-            pt.ability.clear_trigger_identity_recursive();
+            normalize_pending_trigger(pt);
         }
         for ctx in clone.deferred_triggers.iter_mut() {
-            ctx.pending.ability.clear_trigger_identity_recursive();
+            normalize_pending_trigger(&mut ctx.pending);
         }
         if let Some(order) = clone.pending_trigger_order.as_mut() {
             for group in order.groups.iter_mut() {
                 for ctx in group.triggers.iter_mut() {
-                    ctx.pending.ability.clear_trigger_identity_recursive();
+                    normalize_pending_trigger(&mut ctx.pending);
                 }
             }
         }
         for dt in clone.delayed_triggers.iter_mut() {
             dt.ability.clear_trigger_identity_recursive();
             dt.provenance = DelayedInstallIdentity::LegacyDelayed;
+        }
+        // The triggered-mana sidecar is eq-compared like its sibling carriers
+        // above, and it holds both ability carriers and a globally advancing
+        // `SettlementNodeOrdinal`. The live loop-sample sites only fire at
+        // `WaitingFor::Priority`, where the sidecar is None today — this
+        // normalization keeps that a non-load-bearing coincidence rather than a
+        // hidden precondition of CR 104.4b detection.
+        if let Some(resume) = clone.pending_triggered_mana_resume.as_mut() {
+            normalize_pending_trigger(&mut resume.current.pending);
+            for ctx in resume.accepted_tail.iter_mut() {
+                normalize_pending_trigger(&mut ctx.pending);
+            }
+            for batch in resume.collected_batches.iter_mut() {
+                for ctx in batch.contexts.iter_mut() {
+                    normalize_pending_trigger(&mut ctx.pending);
+                }
+            }
+            resume.rules_execution_node =
+                crate::types::resolved_commands::RulesExecutionNodeRef::TriggeredMana(
+                    crate::types::resolved_commands::SettlementNodeOrdinal(0),
+                );
         }
         for epic in clone.epic_effects.iter_mut() {
             epic.spell.clear_trigger_identity_recursive();
@@ -22652,6 +23101,10 @@ fn _gamestate_partition_is_total(s: &GameState) {
         current_triggered_mana_override: _,
         pending_cost_move_resume: _,
         pending_deferred_life_cost_resume: _,
+        pending_triggered_mana_resume: _,
+        pending_trigger_construction_priority_recipient: _,
+        active_accepted_triggered_mana_node: _,
+        trigger_construction_finisher_ran_this_action: _,
         pending_discard_for_cost: _,
         pending_cast: _,
         ring_level: _,
@@ -22912,6 +23365,9 @@ impl PartialEq for GameState {
             && self.pending_library_search_delivery == other.pending_library_search_delivery
             && self.pending_search_found_batch == other.pending_search_found_batch
             && self.pending_cost_move_resume == other.pending_cost_move_resume
+            && self.pending_triggered_mana_resume == other.pending_triggered_mana_resume
+            && self.pending_trigger_construction_priority_recipient
+                == other.pending_trigger_construction_priority_recipient
             && self.may_trigger_auto_choices == other.may_trigger_auto_choices
             && self.decision_templates == other.decision_templates
             && self.priority_yields == other.priority_yields
@@ -23773,6 +24229,308 @@ mod drain_stack_reentrancy_tests {
             "the incoming continuation still installs — it is nested above the \
              dispatching drain (CR 616.1g), not dropped"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Identity-addressed dispatch rows.
+    // -----------------------------------------------------------------------
+
+    fn resident_status(state: &GameState) -> Option<&DrainStatus> {
+        match state.resolution_stack.last() {
+            Some(crate::types::resolution::ResolutionFrame::PostReplacement(drains)) => {
+                drains.drains.first().map(|drain| &drain.status)
+            }
+            _ => None,
+        }
+        .or_else(|| {
+            state.resolution_stack.iter().find_map(|frame| match frame {
+                crate::types::resolution::ResolutionFrame::PostReplacement(drains) => {
+                    drains.drains.first().map(|drain| &drain.status)
+                }
+                _ => None,
+            })
+        })
+    }
+
+    /// **B1 — discriminating(U2).** CR 614.12a + CR 616.1g: a dispatch whose own
+    /// continuation BURIED its frame still addresses its exact entry.
+    ///
+    /// The continuation is an `Effect::Discard` carrying a sub-ability. Parking
+    /// on `DiscardChoice` raises a direct-choice frame, and the sub-ability then
+    /// takes `append_to_pending_continuation`'s parent-of-active branch, which
+    /// inserts an `AbilityContinuation` BETWEEN the `PostReplacement` frame and
+    /// the active child. The frame's absolute index never changes; its distance
+    /// from the top goes from 1 to 2, which is the only thing the two-deep
+    /// positional accessor can see.
+    ///
+    /// Revert-failing assertion: the entry reads `Paused`. With the cleanup
+    /// resolved positionally the accessor misses, both arms degrade to no-ops,
+    /// and the entry is left `Dispatching` — the strand.
+    #[test]
+    fn b1_a_dispatch_whose_continuation_buried_its_frame_still_parks_its_own_entry() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_player = PlayerId(0);
+        for index in 0..3u64 {
+            let id = crate::game::zones::create_object(
+                &mut state,
+                crate::types::identifiers::CardId(500 + index),
+                PlayerId(0),
+                format!("Hand Card {index}"),
+                crate::types::zones::Zone::Hand,
+            );
+            let _ = id;
+        }
+
+        let mut discard_with_tail = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Discard {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: crate::types::ability::TargetFilter::Controller,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                unless_filter: None,
+                filter: None,
+            },
+        );
+        discard_with_tail = discard_with_tail.sub_ability(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                    player: crate::types::ability::TargetFilter::Controller,
+                },
+            )
+            // CR 701.9a + CR 608.2c: a discard whose tail is gated on what was
+            // discarded raises a real `ResolutionFrame::Discard` for the operation
+            // (`effects/discard.rs::resolve` mints it on the PRESENCE of this
+            // condition variant, not on its contents). The parked tail then becomes a
+            // second frame above it, so the `PostReplacement` frame sits two deep and
+            // the two-deep positional accessor can no longer see it — which is the
+            // burial this row exists to measure.
+            .condition(
+                crate::types::ability::AbilityCondition::DiscardedCardMatchesFilter {
+                    filter: crate::types::ability::TargetFilter::Any,
+                },
+            ),
+        );
+
+        let mut drains = PostReplacementDrainStack::default();
+        assert!(drains.install(
+            PostReplacementDrain::ready(PostReplacementContinuation::Template(Box::new(
+                discard_with_tail
+            ))),
+            ResidentDrainPolicy::KeepResident,
+        ));
+        state.resolution_stack.push_post_replacement(drains);
+
+        // Reach-guard: the mint really handed out a pair — this row is not
+        // passing because no dispatch ever started.
+        assert!(
+            state
+                .active_post_replacement_drains()
+                .is_some_and(PostReplacementDrainStack::has_ready),
+            "the fixture parks a Ready drain reachable by the mint"
+        );
+
+        let mut events = Vec::new();
+        let waiting = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+            &mut state,
+            None,
+            None,
+            None,
+            &mut events,
+        );
+
+        // Reach-guard: the continuation ran AND buried its own frame.
+        assert!(
+            waiting.is_some(),
+            "the continuation must park on a prompt, got {:?}",
+            state.waiting_for
+        );
+        assert!(
+            state.resolution_stack.len() >= 3,
+            "the continuation must have raised two frames above its own, got {}",
+            state.resolution_stack.len()
+        );
+        assert!(
+            state.active_post_replacement_drains().is_none(),
+            "reach-guard: the two-deep positional accessor can no longer see the frame — \
+             without this the row measures nothing"
+        );
+
+        assert!(
+            matches!(resident_status(&state), Some(DrainStatus::Paused)),
+            "CR 614.12a: the dispatch parks its OWN entry wherever its frame now sits; \
+             a positional cleanup no-ops and leaves it Dispatching. got {:?}",
+            resident_status(&state)
+        );
+    }
+
+    /// **H2 — guard.** *Hostile: the negative sibling status.* A resident
+    /// `Ready` drain reached at a priority boundary must still be DISPATCHED,
+    /// never swept.
+    ///
+    /// This is `main`'s behaviour with no sweep at all, so it stays green under
+    /// a sweep revert — that is why it is a guard. Its assertion is
+    /// mutation-failing: a sweep written with a wildcard arm, or scoped to
+    /// `!Paused` rather than to `Dispatching` alone, swallows the `Ready`
+    /// continuation and turns this red.
+    ///
+    /// Positive control: the drain's effect is observed to have executed, so
+    /// "the drain is gone" cannot be satisfied by a sweep that discarded it.
+    #[test]
+    fn h2_a_ready_resident_is_dispatched_at_a_priority_boundary_never_swept() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_player = PlayerId(0);
+        let life_before = state.players[0].life;
+
+        let mut drains = PostReplacementDrainStack::default();
+        assert!(drains.install(
+            PostReplacementDrain::ready(PostReplacementContinuation::Template(Box::new(
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
+                        player: crate::types::ability::TargetFilter::Controller,
+                    },
+                )
+            ))),
+            ResidentDrainPolicy::KeepResident,
+        ));
+        state.resolution_stack.push_post_replacement(drains);
+
+        let mut events = Vec::new();
+        crate::game::effects::resume_resolution_frames(&mut state, &mut events);
+
+        assert_eq!(
+            state.players[0].life,
+            life_before + 3,
+            "positive control: the Ready continuation actually RAN — without this, \
+             'the drain is gone' would also be satisfied by a sweep that ate it"
+        );
+        assert!(
+            state.resolution_stack.is_empty(),
+            "the dispatched-and-finished drain leaves no frame behind"
+        );
+    }
+
+    /// **H3 — discriminating(U2).** *Hostile: multi-authority CR 616.1g
+    /// nesting.* One frame, an outer `Dispatching` entry below an inner `Paused`
+    /// one, with the frame buried two deep.
+    ///
+    /// Three claims:
+    ///  (i) the second (inner) mint against the same frame returns a pair whose
+    ///      `frame()` EQUALS the outer's — red under an overwriting stamp;
+    ///  (ii) the outer dispatch's finish removes ONLY depth 0; the inner `Paused`
+    ///      entry survives with its own `event_source` intact and the frame's id
+    ///      unchanged — red under a positional lookup;
+    ///  (iii) the ownerless sweep does not fire here, because the resident is
+    ///      `Paused`, which is live parked work.
+    #[test]
+    fn h3_nested_same_frame_dispatches_share_one_identity_and_retire_lifo() {
+        let mut stack = crate::types::resolution::ResolutionStack::default();
+        stack.push_post_replacement(PostReplacementDrainStack::default());
+
+        let mut outer = ready_drain("outer");
+        outer.event_source = Some(ObjectId(7));
+        assert!(stack
+            .active_post_replacement_or_paired_parent_mut()
+            .expect("frame is active")
+            .install(outer, ResidentDrainPolicy::KeepResident));
+        let (_, handle_outer) = stack
+            .begin_active_post_replacement_dispatch()
+            .expect("the outer ready drain begins dispatching");
+
+        let mut inner = ready_drain("inner");
+        inner.event_source = Some(ObjectId(9));
+        assert!(stack
+            .active_post_replacement_or_paired_parent_mut()
+            .expect("frame is active")
+            .install(inner, ResidentDrainPolicy::KeepResident));
+
+        // Positive control: two entries with DISTINCT event contexts exist.
+        match stack.last() {
+            Some(crate::types::resolution::ResolutionFrame::PostReplacement(drains)) => {
+                assert_eq!(drains.drains.len(), 2, "outer + inner both resident");
+                assert_eq!(drains.drains[0].event_source, Some(ObjectId(7)));
+                assert_eq!(drains.drains[1].event_source, Some(ObjectId(9)));
+                assert!(
+                    drains.frame_id().is_some(),
+                    "the outer mint stamped the frame"
+                );
+            }
+            other => panic!("expected the post-replacement frame, got {other:?}"),
+        }
+
+        let (_, handle_inner) = stack
+            .begin_active_post_replacement_dispatch()
+            .expect("the inner ready drain begins dispatching");
+
+        // (i) The re-stamp regression witness.
+        assert_eq!(
+            handle_inner.frame(),
+            handle_outer.frame(),
+            "CR 616.1g: a nested same-frame dispatch reuses the frame's identity; \
+             re-stamping invalidates the outer dispatch's still-live handle"
+        );
+        assert!(stack.pause_post_replacement_dispatch(handle_inner));
+
+        // Bury the frame two deep, out of the two-deep positional window.
+        stack.push_inner(crate::types::resolution::ResolutionFrame::PostReplacement(
+            PostReplacementDrainStack::default(),
+        ));
+        stack.push_inner(crate::types::resolution::ResolutionFrame::PostReplacement(
+            PostReplacementDrainStack::default(),
+        ));
+        let frames_before = stack.len();
+
+        // (ii) The outer finish retires exactly depth 0.
+        let retired = stack.finish_post_replacement_dispatch(handle_outer);
+        assert!(
+            retired.is_some_and(|drain| drain.event_source == Some(ObjectId(7))),
+            "the outer dispatch retires its OWN entry, identified by event context"
+        );
+        assert_eq!(
+            stack.len(),
+            frames_before,
+            "a buried frame is never removed by a finish — that would reorder the stack"
+        );
+        // Bound out as a statement so the `iter()` temporary (which holds the borrow
+        // of `stack`) drops here rather than after `stack` itself — a tail-expression
+        // `match stack.iter().next()` outlives its own receiver.
+        let bottom_frame = stack.iter().next();
+        match bottom_frame {
+            Some(crate::types::resolution::ResolutionFrame::PostReplacement(drains)) => {
+                assert_eq!(drains.drains.len(), 1, "only the inner entry survives");
+                assert_eq!(
+                    drains.drains[0].event_source,
+                    Some(ObjectId(9)),
+                    "CR 615.5: the surviving inner entry keeps its own prevented-event context"
+                );
+                assert!(
+                    matches!(drains.drains[0].status, DrainStatus::Paused),
+                    "the inner entry is still parked"
+                );
+                assert_eq!(
+                    drains.frame_id(),
+                    Some(handle_outer.frame()),
+                    "the frame's identity is unchanged by either dispatch"
+                );
+
+                // (iii) The ownerless sweep does not fire on a Paused resident.
+                let mut probe = drains.clone();
+                assert!(
+                    probe.finish_ownerless_dispatching_resident().is_none(),
+                    "a Paused resident is live parked work, never an ownerless strand"
+                );
+            }
+            other => panic!("expected the original post-replacement frame, got {other:?}"),
+        }
     }
 }
 
@@ -26458,6 +27216,18 @@ mod tests {
     /// intentionally outside the state-equality key just as it was before the
     /// ChangeZone frame migration. Replacing `game_state_eq` with derived stack
     /// equality makes this assertion fail.
+    ///
+    /// Exposure note for the per-frame `PostReplacementFrameId`: it DOES
+    /// participate in `GameState` equality, through `ResolutionStack::game_state_eq`'s
+    /// derived fall-through arm for `PostReplacement` — exactly the treatment
+    /// `DiscardFrame.id` already receives, and the direction that function's own
+    /// comment calls fail-safe (COMPARED is fail-safe; EXCLUSION is the
+    /// fail-DANGEROUS direction). Worst case: a repeating position that mints a
+    /// new frame id each iteration stops comparing equal, so the CR 104.4b
+    /// auto-pass window terminates on its iteration cap instead of on loop
+    /// detection. The ALLOCATOR is not exposed here at all — `game_state_eq`
+    /// compares `frames` only, the same treatment `next_draw_sequence_frame_id`
+    /// and `next_discard_frame_id` already get.
     #[test]
     fn game_state_equality_excludes_devour_only_change_zone_frame() {
         let state = GameState::new_two_player(7);
@@ -27517,6 +28287,36 @@ mod tests {
         assert!(
             loop_states_equal(&base.normalize_for_loop(), &later.normalize_for_loop()),
             "states differing only in volatile counters must confirm as a repeat"
+        );
+    }
+
+    /// CR 104.4b: deferred-trigger timestamps are CR 603.3b scheduling history,
+    /// not a changed recurring position. Their live values must remain distinct
+    /// for ordering, while loop snapshots compare the same pending trigger
+    /// regardless of the allocator position that produced it.
+    #[test]
+    fn normalize_for_loop_canonicalizes_deferred_trigger_timestamps() {
+        let mut first = GameState::new_two_player(7);
+        let source = ObjectId(90_001);
+        first
+            .deferred_triggers
+            .push(PendingTriggerContext::single(ordinary_pending_trigger(
+                source, 11,
+            )));
+        let mut later = first.clone();
+        later.deferred_triggers[0].pending.timestamp = 97;
+
+        assert_ne!(
+            first, later,
+            "fixture must differ in the Eq-compared deferred scheduling timestamp"
+        );
+        let first_normalized = first.normalize_for_loop();
+        let later_normalized = later.normalize_for_loop();
+        assert_eq!(first_normalized.deferred_triggers[0].pending.timestamp, 0);
+        assert_eq!(later_normalized.deferred_triggers[0].pending.timestamp, 0);
+        assert!(
+            loop_states_equal(&first_normalized, &later_normalized),
+            "the volatile deferred ordering timestamp must not hide a recurring state"
         );
     }
 

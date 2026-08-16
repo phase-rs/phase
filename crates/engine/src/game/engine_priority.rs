@@ -1,12 +1,14 @@
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
+use crate::types::player::PlayerId;
 
 use super::engine::{begin_pending_trigger_target_selection, check_exile_returns, EngineError};
 use super::match_flow;
 use super::players;
 use super::sba;
 use super::triggers;
+use super::triggers::DeferredTriggerDrainPolicy;
 
 pub(super) fn run_post_action_pipeline(
     state: &mut GameState,
@@ -36,7 +38,93 @@ pub(crate) fn run_post_action_pipeline_from(
     skip_trigger_scan: bool,
     skip_deferred_trigger_drain: bool,
 ) -> Result<WaitingFor, EngineError> {
+    run_post_action_pipeline_from_with_policy(
+        state,
+        events,
+        event_start,
+        default_wf,
+        skip_trigger_scan,
+        if skip_deferred_trigger_drain {
+            DeferredTriggerDrainPolicy::Skip
+        } else {
+            DeferredTriggerDrainPolicy::ResolutionSafe
+        },
+        None,
+    )
+}
+
+/// CR 117.3c + CR 117.5 + CR 605.4a: the settled-Priority convergence wrapper.
+///
+/// The one caller family is a handler that returns its `ActionResult` directly,
+/// bypassing the reducer's ordinary epilogue, after a sidecar-owned accepted
+/// triggered-mana occurrence resumed a **direct `ManaAbilityResume::Priority`
+/// root** with no live cast/resolution/payment owner left. Its `settled_priority`
+/// is that root's own exact reconstructed wait, and it is exhaustively validated
+/// here rather than trusted.
+///
+/// It differs from the ordinary wrappers in exactly three ways: the drain policy
+/// permits a passive announced spell to remain on the stack (the batch below it
+/// is fully settled, so its observers belong above it); the carried recipient
+/// governs the no-choice stack-growth exit and is persisted before any ordering
+/// or construction step can pause; and its own return is a finisher call, which
+/// is Round-20 seam 7 — this wrapper must never hand back a non-prompt
+/// `Priority` with the recipient still installed.
+pub(crate) fn run_post_action_pipeline_from_settled_priority(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    event_start: usize,
+    settled_priority: &WaitingFor,
+) -> Result<WaitingFor, EngineError> {
+    let WaitingFor::Priority { player } = *settled_priority else {
+        debug_assert!(
+            false,
+            "settled-Priority convergence requires the root's exact Priority wait, \
+             got {settled_priority:?}",
+        );
+        return Ok(settled_priority.clone());
+    };
+    triggers::preserve_trigger_construction_priority_recipient(state, player);
+    let produced = run_post_action_pipeline_from_with_policy(
+        state,
+        events,
+        event_start,
+        settled_priority,
+        false,
+        DeferredTriggerDrainPolicy::SettledPriority,
+        Some(player),
+    )?;
+    Ok(triggers::finish_trigger_construction_action(
+        state, events, produced,
+    ))
+}
+
+/// The shared post-action settlement core. Every ordinary wrapper reaches it
+/// through the boolean form above, with `carried_priority_recipient == None`,
+/// which preserves their current stack-growth fallback and every current
+/// non-sidecar ordering behavior byte-for-byte.
+///
+/// `carried_priority_recipient` is `Some(player)` only for a settled-Priority
+/// convergence whose activator was not the active player (CR 117.3c + CR 117.5).
+/// It changes exactly two things: the wait computed at the no-choice
+/// stack-growth exit, and the fact that any ordering or construction prompt the
+/// pipeline opens persists that player so the construction finisher can hand
+/// priority back to them once the batch is fully announced.
+fn run_post_action_pipeline_from_with_policy(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    event_start: usize,
+    default_wf: &WaitingFor,
+    skip_trigger_scan: bool,
+    drain_policy: DeferredTriggerDrainPolicy,
+    carried_priority_recipient: Option<PlayerId>,
+) -> Result<WaitingFor, EngineError> {
     stage_pending_activation_trigger_events(state, events, event_start);
+
+    // CR 117.3c + CR 117.5: the wait a completed no-choice pass hands back. With
+    // no carried recipient this is exactly baseline's active-player wait.
+    let settled_priority_wait = WaitingFor::Priority {
+        player: carried_priority_recipient.unwrap_or(state.active_player),
+    };
 
     // Capture stack depth before any trigger/SBA processing so we can detect
     // whether new triggered abilities were added during this pipeline pass.
@@ -192,6 +280,7 @@ pub(crate) fn run_post_action_pipeline_from(
             // next SBA pass.
             if let Some(waiting_for) = begin_pending_trigger_target_selection(state)? {
                 state.waiting_for = waiting_for.clone();
+                persist_carried_recipient_across_prompt(state, carried_priority_recipient);
                 state.consumed_before_priority_trigger_events.clear();
                 return Ok(waiting_for);
             }
@@ -241,6 +330,7 @@ pub(crate) fn run_post_action_pipeline_from(
             );
             if let Some(waiting_for) = outcome.prompt {
                 state.waiting_for = waiting_for.clone();
+                persist_carried_recipient_across_prompt(state, carried_priority_recipient);
                 state.consumed_before_priority_trigger_events.clear();
                 return Ok(waiting_for);
             }
@@ -262,9 +352,10 @@ pub(crate) fn run_post_action_pipeline_from(
         }
     } else if matches!(state.waiting_for, WaitingFor::Priority { .. })
         && !state.deferred_triggers.is_empty()
-        && !skip_deferred_trigger_drain
     {
-        if let Some(wf) = triggers::drain_deferred_trigger_queue(state, events) {
+        if let Some(wf) =
+            triggers::drain_deferred_trigger_queue_with_policy(state, events, drain_policy)
+        {
             state.waiting_for = wf;
         }
     }
@@ -273,6 +364,7 @@ pub(crate) fn run_post_action_pipeline_from(
         if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
             match_flow::handle_game_over_transition(state);
         }
+        persist_carried_recipient_across_prompt(state, carried_priority_recipient);
         state.consumed_before_priority_trigger_events.clear();
         return Ok(state.waiting_for.clone());
     }
@@ -300,6 +392,7 @@ pub(crate) fn run_post_action_pipeline_from(
     // sets pending_trigger and is re-derived at begin_pending_trigger_target_selection)
     // is untouched.
     if matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
+        persist_carried_recipient_across_prompt(state, carried_priority_recipient);
         return Ok(state.waiting_for.clone());
     }
 
@@ -310,15 +403,14 @@ pub(crate) fn run_post_action_pipeline_from(
 
     if let Some(waiting_for) = begin_pending_trigger_target_selection(state)? {
         state.waiting_for = waiting_for.clone();
+        persist_carried_recipient_across_prompt(state, carried_priority_recipient);
         return Ok(waiting_for);
     }
 
     if state.stack.len() > stack_before {
         let outgoing = flush_pending_priority_intercepts(
             state,
-            WaitingFor::Priority {
-                player: state.active_player,
-            },
+            settled_priority_wait.clone(),
             default_wf.acting_player(),
         );
         return Ok(outgoing);
@@ -331,6 +423,34 @@ pub(crate) fn run_post_action_pipeline_from(
         default_wf.clone(),
         default_wf.acting_player(),
     ))
+}
+
+/// CR 117.3c + CR 117.5: persist a carried priority recipient across any
+/// ordering or trigger-construction prompt this pipeline pass just installed, so
+/// the construction finisher can hand priority back to that player once the
+/// batch has finished announcing.
+///
+/// With `carried_priority_recipient == None` — every ordinary wrapper — this is
+/// a no-op, and the existing active-player/controller fallbacks at each
+/// construction seam are untouched. When ordering opens, the same player is
+/// stored in both authorities: `PendingTriggerOrder::resume_after_ordering`
+/// (which `handle_order_triggers` consumes and then drops) and the durable
+/// recipient (which stays authoritative across every early return after that
+/// order carrier is taken).
+fn persist_carried_recipient_across_prompt(
+    state: &mut GameState,
+    carried_priority_recipient: Option<PlayerId>,
+) {
+    let Some(player) = carried_priority_recipient else {
+        return;
+    };
+    if !triggers::is_trigger_construction_prompt(&state.waiting_for) {
+        return;
+    }
+    if matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
+        triggers::preserve_order_triggers_resume(state, WaitingFor::Priority { player });
+    }
+    triggers::preserve_trigger_construction_priority_recipient(state, player);
 }
 
 /// Route events emitted while a target-bearing activation remains pending into

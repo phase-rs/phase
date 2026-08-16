@@ -1245,10 +1245,12 @@ fn parse_turn_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
 /// Handles "you're the monarch", "you have the initiative", and "you have the city's blessing".
 fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
-        // CR 725.1: Monarch status
-        value(
-            StaticCondition::IsMonarch,
-            alt((tag("you're the monarch"), tag("you are the monarch"))),
+        // CR 725.1 + CR 109.5: monarch identity, decomposed into
+        // subject × predicate. The subject is one `alt()`; the predicate tag is
+        // matched once. Do NOT enumerate (subject × predicate) full-phrase tags.
+        map(
+            terminated(parse_monarch_identity_subject, tag("the monarch")),
+            |player| StaticCondition::IsMonarch { player },
         ),
         // CR 725.1: "if an opponent is the monarch" — a monarch exists and it
         // is not the controller. Distinct from `Not(IsMonarch)` (also true when
@@ -1257,7 +1259,9 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
             StaticCondition::And {
                 conditions: vec![
                     StaticCondition::Not {
-                        condition: Box::new(StaticCondition::IsMonarch),
+                        condition: Box::new(StaticCondition::IsMonarch {
+                            player: PlayerScope::Controller,
+                        }),
                     },
                     StaticCondition::Not {
                         condition: Box::new(StaticCondition::NoMonarch),
@@ -1336,6 +1340,32 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
                 ownership: CommanderOwnership::Any,
             },
             tag("you control a commander"),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 109.5: subject axis of the monarch-identity predicate.
+///
+/// "you're"/"you are" is the ability's controller (CR 109.5). "that
+/// player"/"that opponent" is the anaphoric event-scoped player; this
+/// combinator cannot see the owning trigger, so it emits the generic
+/// [`PlayerScope::ScopedPlayer`] anchor, which an attack trigger rebinds to
+/// [`PlayerScope::DefendingPlayer`] when its clause supplies a more specific
+/// antecedent (CR 508.5 — see
+/// `oracle_trigger::rebind_attack_anaphor_to_defending_player`).
+///
+/// Mirrors `parse_that_player_has_conditions` in this module, which already
+/// maps the same two anaphors to [`PlayerScope::ScopedPlayer`].
+fn parse_monarch_identity_subject(input: &str) -> OracleResult<'_, PlayerScope> {
+    alt((
+        value(
+            PlayerScope::Controller,
+            alt((tag("you're "), tag("you are "))),
+        ),
+        value(
+            PlayerScope::ScopedPlayer,
+            alt((tag("that player is "), tag("that opponent is "))),
         ),
     ))
     .parse(input)
@@ -9785,19 +9815,16 @@ pub fn parse_you_draw_this_way_condition(input: &str) -> OracleResult<'_, Abilit
     ))
 }
 
-/// CR 603.12: the AFFIRMATIVE half of the reflexive-conditional connector set —
-/// "the preceding optional effect WAS performed" ("if you do, ", "when you do, ",
-/// "if they do, ", …).
+/// CR 603.12 + CR 608.2c: the affirmative connector set. Literal "when you do"
+/// creates a reflexive triggered ability; literal "if ... do" continues the
+/// resolving effect when its preceding instruction was performed.
 ///
 /// Split out from [`parse_reflexive_conditional_connector`] because the two halves
-/// are NOT interchangeable to a consumer that wants to fold the gate away. A gate
-/// that is redundant in the affirmative — a permission attached to an effect that
-/// only exists when the antecedent happened, e.g. CR 707.10c's "If you do, you may
-/// choose new targets for the copy" riding an already-optional `CopySpell` — is the
-/// exact OPPOSITE of redundant in the negative ("if they don't, …" gates a branch
-/// that runs precisely when the antecedent did NOT happen). A consumer must
-/// therefore be able to ask for the affirmative set ALONE; matching the whole set
-/// and discarding the condition would silently invert a negated clause.
+/// are NOT interchangeable to a consumer that wants to fold the gate away. Such a
+/// consumer must inspect the typed result: folding an already-proven
+/// `EffectOutcome::OptionalEffectPerformed` can be sound, while folding
+/// `WhenYouDo` would erase a CR 603.12 trigger. The negative set remains separate
+/// because discarding it would invert the branch.
 pub(crate) fn parse_affirmative_reflexive_connector(
     input: &str,
 ) -> OracleResult<'_, AbilityCondition> {
@@ -9859,7 +9886,7 @@ fn parse_discard_this_way_affirmative_connector(input: &str) -> OracleResult<'_,
     .parse(input)
 }
 
-/// CR 603.12: the NEGATED half — "the preceding optional effect was NOT performed".
+/// CR 608.2c: the negated half — the preceding optional effect was not performed.
 ///
 /// Kept disjoint from the affirmative half by construction, not by luck: each tag
 /// here ends in `n't, `, so no affirmative tag (which requires `, ` immediately
@@ -9919,15 +9946,14 @@ fn parse_discard_this_way_negated_connector(input: &str) -> OracleResult<'_, Abi
     .parse(input)
 }
 
-/// CR 603.12 + CR 608.2c: Recognize a leading reflexive-conditional connector
+/// CR 603.12 + CR 608.2c: Recognize a leading conditional connector
 /// and return the corresponding AbilityCondition with the connector consumed.
 /// Single authority for this set; consumed by both
 /// `oracle_effect::conditions::strip_if_you_do_conditional` and the
 /// `oracle_effect::sequence` chunk-splitter sticky-detection so they never drift.
 ///
-/// Composed from the affirmative + negated halves so a consumer that needs only one
-/// polarity (CR 707.10c copy-retarget) shares this exact tag set rather than
-/// re-spelling it.
+/// Composed from the affirmative + negated halves so consumers share this exact
+/// grammar while retaining the typed `When`/`If` distinction.
 pub(crate) fn parse_reflexive_conditional_connector(
     input: &str,
 ) -> OracleResult<'_, AbilityCondition> {
@@ -14454,14 +14480,24 @@ mod tests {
     fn test_youre_the_monarch() {
         let (rest, c) = parse_inner_condition("you're the monarch").unwrap();
         assert_eq!(rest, "");
-        assert_eq!(c, StaticCondition::IsMonarch);
+        assert_eq!(
+            c,
+            StaticCondition::IsMonarch {
+                player: PlayerScope::Controller
+            }
+        );
     }
 
     #[test]
     fn test_you_are_the_monarch() {
         let (rest, c) = parse_inner_condition("you are the monarch").unwrap();
         assert_eq!(rest, "");
-        assert_eq!(c, StaticCondition::IsMonarch);
+        assert_eq!(
+            c,
+            StaticCondition::IsMonarch {
+                player: PlayerScope::Controller
+            }
+        );
     }
 
     #[test]
@@ -14473,7 +14509,9 @@ mod tests {
             StaticCondition::And {
                 conditions: vec![
                     StaticCondition::Not {
-                        condition: Box::new(StaticCondition::IsMonarch),
+                        condition: Box::new(StaticCondition::IsMonarch {
+                            player: PlayerScope::Controller
+                        }),
                     },
                     StaticCondition::Not {
                         condition: Box::new(StaticCondition::NoMonarch),
@@ -14481,6 +14519,56 @@ mod tests {
                 ],
             }
         );
+    }
+
+    /// CR 725.1 + CR 109.5: the anaphoric subject "that player"/"that opponent"
+    /// parses to the generic `ScopedPlayer` anchor. Revert-failing: all three
+    /// inputs return `Err` without the subject axis, which is what dropped
+    /// M'Baku's intervening-if entirely.
+    #[test]
+    fn test_that_player_is_the_monarch() {
+        let (rest, c) = parse_inner_condition("that player is the monarch").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::IsMonarch {
+                player: PlayerScope::ScopedPlayer
+            }
+        );
+    }
+
+    #[test]
+    fn test_that_opponent_is_the_monarch() {
+        let (rest, c) = parse_inner_condition("that opponent is the monarch").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::IsMonarch {
+                player: PlayerScope::ScopedPlayer
+            }
+        );
+    }
+
+    /// CR 603.4: the clause-boundary contract `try_extract_intervening` depends
+    /// on — the condition stops at the comma and hands the effect body back.
+    #[test]
+    fn test_that_player_is_the_monarch_stops_at_clause_boundary() {
+        let (rest, c) =
+            parse_inner_condition("that player is the monarch, that creature gets +1/+1").unwrap();
+        assert_eq!(rest, ", that creature gets +1/+1");
+        assert_eq!(
+            c,
+            StaticCondition::IsMonarch {
+                player: PlayerScope::ScopedPlayer
+            }
+        );
+    }
+
+    /// The `tag("the monarch")` predicate guard: a bare subject is not a
+    /// monarch-identity condition.
+    #[test]
+    fn test_that_player_is_the_without_monarch_predicate_is_rejected() {
+        assert!(parse_inner_condition("that player is the").is_err());
     }
 
     #[test]

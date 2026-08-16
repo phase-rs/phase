@@ -370,6 +370,13 @@ export function getKeywordDetail(kw: Keyword): string | null {
   const key = Object.keys(kw)[0];
   const val = kw[key];
 
+  if (key === "Emerge") {
+    const manaCost = val && typeof val === "object" && "mana_cost" in val
+      ? val.mana_cost
+      : val;
+    return formatKeywordManaCost(manaCost);
+  }
+
   if (MANA_COST_KEYWORDS.has(key)) return formatKeywordManaCost(val);
   if (U32_KEYWORDS.has(key)) return String(val);
 

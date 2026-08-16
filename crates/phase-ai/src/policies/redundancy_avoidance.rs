@@ -417,7 +417,7 @@ fn redundancy_delta(
         | Effect::ExploreAll { .. }
         | Effect::Investigate
         | Effect::TimeTravel
-        | Effect::BecomeMonarch
+        | Effect::BecomeMonarch { .. }
         | Effect::NoOp
         | Effect::Proliferate
         | Effect::EndTheTurn

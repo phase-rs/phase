@@ -1893,7 +1893,12 @@ pub fn convert_player_predicate_trigger(
         // Designation/state predicates with direct engine analogs.
         Players::IsTheMonarch => {
             require_you_player(player, "Players::IsTheMonarch (trigger)")?;
-            TriggerCondition::IsMonarch
+            // CR 109.5: `require_you_player` above has already proven the
+            // subject is "you", so the controller scope is the exact
+            // equivalent of the pre-parameterization variant.
+            TriggerCondition::IsMonarch {
+                player: PlayerScope::Controller,
+            }
         }
         Players::HasTheCitysBlessing => {
             require_you_player(player, "Players::HasTheCitysBlessing (trigger)")?;
@@ -2409,7 +2414,11 @@ pub fn convert_player_predicate_static(
         // Direct StaticCondition analogs.
         Players::IsTheMonarch => {
             require_you_player(player, "Players::IsTheMonarch (static)")?;
-            StaticCondition::IsMonarch
+            // CR 109.5: see the trigger-side sibling — `require_you_player`
+            // proves the controller scope.
+            StaticCondition::IsMonarch {
+                player: PlayerScope::Controller,
+            }
         }
         Players::HasTheCitysBlessing => {
             require_you_player(player, "Players::HasTheCitysBlessing (static)")?;

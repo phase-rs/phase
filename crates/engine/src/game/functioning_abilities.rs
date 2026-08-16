@@ -485,7 +485,8 @@ pub fn active_replacements(
 mod tests {
     use super::*;
     use crate::types::ability::{
-        ReplacementDefinition, StaticCondition, StaticDefinition, TriggerDefinition, TypedFilter,
+        PlayerScope, ReplacementDefinition, StaticCondition, StaticDefinition, TriggerDefinition,
+        TypedFilter,
     };
     use crate::types::format::FormatConfig;
     use crate::types::game_state::GameState;
@@ -826,9 +827,11 @@ mod tests {
         let state = new_state();
         assert!(state.monarch.is_none());
         let mut obj = make_obj(1, Zone::Battlefield);
-        obj.static_definitions = vec![
-            StaticDefinition::new(StaticMode::Continuous).condition(StaticCondition::IsMonarch)
-        ]
+        obj.static_definitions = vec![StaticDefinition::new(StaticMode::Continuous).condition(
+            StaticCondition::IsMonarch {
+                player: PlayerScope::Controller,
+            },
+        )]
         .into();
         assert_eq!(active_static_definitions(&state, &obj).count(), 0);
     }
@@ -838,9 +841,11 @@ mod tests {
         let mut state = new_state();
         state.monarch = Some(PlayerId(0));
         let mut obj = make_obj(1, Zone::Battlefield);
-        obj.static_definitions = vec![
-            StaticDefinition::new(StaticMode::Continuous).condition(StaticCondition::IsMonarch)
-        ]
+        obj.static_definitions = vec![StaticDefinition::new(StaticMode::Continuous).condition(
+            StaticCondition::IsMonarch {
+                player: PlayerScope::Controller,
+            },
+        )]
         .into();
         assert_eq!(active_static_definitions(&state, &obj).count(), 1);
     }
@@ -853,7 +858,9 @@ mod tests {
         let state = new_state();
         let mut obj = make_obj(1, Zone::Battlefield);
         let trig = TriggerDefinition {
-            condition: Some(crate::types::ability::TriggerCondition::IsMonarch),
+            condition: Some(crate::types::ability::TriggerCondition::IsMonarch {
+                player: PlayerScope::Controller,
+            }),
             ..TriggerDefinition::new(TriggerMode::ChangesZone)
         };
         obj.trigger_definitions = vec![trig].into();
@@ -966,9 +973,11 @@ mod tests {
         let mut state = new_state();
         assert!(state.monarch.is_none());
         let mut obj = make_obj(1, Zone::Battlefield);
-        obj.static_definitions = vec![
-            StaticDefinition::new(StaticMode::Continuous).condition(StaticCondition::IsMonarch)
-        ]
+        obj.static_definitions = vec![StaticDefinition::new(StaticMode::Continuous).condition(
+            StaticCondition::IsMonarch {
+                player: PlayerScope::Controller,
+            },
+        )]
         .into();
         put_on_battlefield(&mut state, obj);
 
@@ -1047,9 +1056,11 @@ mod tests {
         let state = new_state();
         assert!(state.monarch.is_none());
         let mut obj = make_obj(1, Zone::Battlefield);
-        obj.static_definitions = vec![
-            StaticDefinition::new(StaticMode::Continuous).condition(StaticCondition::IsMonarch)
-        ]
+        obj.static_definitions = vec![StaticDefinition::new(StaticMode::Continuous).condition(
+            StaticCondition::IsMonarch {
+                player: PlayerScope::Controller,
+            },
+        )]
         .into();
         assert_eq!(
             active_static_definitions(&state, &obj).count(),

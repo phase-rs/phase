@@ -1352,6 +1352,56 @@ fn scan_contains_phrase(text: &str, phrase: &str) -> bool {
     nom_primitives::scan_contains(text, phrase)
 }
 
+/// CR 115.7 + CR 113.3b / CR 113.3c: locate the stack-object target grammar
+/// anywhere in a retarget phrase.
+///
+/// Delegates WHOLESALE to `oracle_nom::target::parse_stack_object_target` — the
+/// same grammar the counter path uses — via the shared word-boundary scanning
+/// primitive, because the retarget clause puts the phrase after "target " and
+/// possibly after other words, so it is not anchored at position 0.
+///
+/// Delegating the WHOLE grammar (not just the ability-kind axis) is deliberate:
+/// the grammar already composes ability legs with type-restricted spell legs in
+/// any order. Rebuilding a bare `StackAbility` from a kind probe — which is what
+/// this branch used to do — cannot represent a phrase that mixes a spell leg
+/// with an ability-kind leg ("target spell or triggered ability"), and would
+/// silently drop the spell leg.
+///
+/// Returns `None` when the phrase contains no ability leg at all — that is
+/// `parse_stack_object_target`'s documented contract — so a purely-spell phrase
+/// still falls through to the "spell" branch in `try_parse_change_targets`.
+///
+/// NOTE (blast radius — read before adding the next retarget pattern): this is
+/// materially WIDER than the two `scan_contains_phrase` probes it replaced.
+/// Those tested exactly two fixed spellings ("activated or triggered ability",
+/// "activated ability"). This applies the ENTIRE stack-object grammar at every
+/// word boundary: both single-kind spellings, all five combined spellings,
+/// "spell or ability" / "spell and/or ability" / "ability or spell", and the
+/// order-free comma/"or" disjunction of type-restricted spell legs with ability
+/// legs. Any phrase that grammar recognizes ANYWHERE in the retarget clause now
+/// wins this branch ahead of the `"spell"` + `parse_target` fallback below it in
+/// `try_parse_change_targets`. In particular the "ability or spell" spelling,
+/// which the preceding `"spell or ability"` branch does not cover, now lands
+/// here. What still falls through is exactly what the grammar declines: a
+/// purely-spell phrase with no ability leg (its documented contract, above).
+///
+/// NOTE (precision residual): `scan_at_word_boundaries` applies the combinator
+/// at word STARTS only and performs no trailing-boundary check, so the grammar
+/// may match a strict prefix of the remaining text and the remainder is silently
+/// discarded — e.g. "activated ability's controller" matches the bare
+/// "activated ability" leg. That discard is deliberate (it is what lets the
+/// clause carry trailing qualifiers such as "with a single target"), and it is
+/// the same shape of imprecision the replaced `scan_contains_phrase` probes had.
+/// A PLURAL is NOT affected and needs no guard: `tag("triggered ability")`
+/// diverges from "triggered abilities" at the final letter ('y' vs 'i') and
+/// simply fails, as does `tag("activated ability")`.
+fn scan_stack_object_target(text: &str) -> Option<TargetFilter> {
+    nom_primitives::scan_at_word_boundaries(
+        text,
+        super::oracle_nom::target::parse_stack_object_target,
+    )
+}
+
 fn has_unless_clause(text: &str) -> bool {
     nom_primitives::scan_preceded(text, |i| tag::<_, _, OracleError<'_>>("unless ").parse(i))
         .is_some()
@@ -35932,14 +35982,19 @@ fn try_parse_change_targets(lower: &str) -> Option<Effect> {
                 },
             ],
         }
-    } else if scan_contains_phrase(spell_phrase_clean, "activated or triggered ability")
-        || scan_contains_phrase(spell_phrase_clean, "activated ability")
-    {
-        TargetFilter::StackAbility {
-            controller: None,
-            tag: None,
-            kind: None,
-        }
+    } else if let Some(stack_target) = scan_stack_object_target(spell_phrase_clean) {
+        // CR 115.7a + CR 113.3b / CR 113.3c + CR 115.1: a changed target must be
+        // another LEGAL target, so the kind spelling defines which stack
+        // abilities may be retargeted. Reroute ("Change the target of target
+        // activated ability with a single target.") must NOT accept a TRIGGERED
+        // ability. This branch previously kept a private two-spelling probe and
+        // hardcoded `kind: None` — the same defect the copy path had — and could
+        // not represent a mixed spell/ability phrase at all.
+        //
+        // Legs produced here are already stack-scoped (`StackAbility`,
+        // `StackSpell`, or a `Typed` leg carrying `InZone { Stack }`), so no
+        // `constrain_filter_to_stack` pass is needed or wanted.
+        stack_target
     } else if scan_contains_phrase(spell_phrase_clean, "spell") {
         // Parse with parse_target for type-specific spells (e.g. "instant or sorcery spell")
         let (parsed, _) = parse_target(spell_phrase_clean);
@@ -36606,4 +36661,139 @@ fn last_night_together_folds_attacker_restriction_into_additional_phase() {
         saw_additional_phase,
         "the AdditionalPhase clause must be present in the chain"
     );
+}
+
+/// CR 115.7a + CR 113.3b / CR 113.3c: the retarget grammar shares the counter
+/// path's stack-object grammar, so the ability-kind spelling narrows which
+/// stack abilities may be retargeted (Reroute) and mixed spell/ability phrases
+/// keep both legs.
+#[cfg(test)]
+mod change_targets_stack_object_tests {
+    use super::{try_parse_change_targets, TargetFilter};
+    use crate::types::ability::{Effect, FilterProp, StackAbilityKind, TypeFilter};
+    use crate::types::zones::Zone;
+
+    fn change_targets_filter(lower: &str) -> TargetFilter {
+        match try_parse_change_targets(lower)
+            .unwrap_or_else(|| panic!("retarget clause must parse: {lower}"))
+        {
+            Effect::ChangeTargets { target, .. } => target,
+            other => panic!("expected ChangeTargets, got {other:?}"),
+        }
+    }
+
+    fn stack_ability_leg(filter: &TargetFilter) -> Option<Option<StackAbilityKind>> {
+        match filter {
+            TargetFilter::StackAbility { kind, .. } => Some(*kind),
+            TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+                filters.iter().find_map(stack_ability_leg)
+            }
+            _ => None,
+        }
+    }
+
+    /// Reroute: "Change the target of target activated ability with a single
+    /// target." CR 115.7a — a changed target can be changed only to another
+    /// LEGAL target, so an "activated ability" phrase must NOT accept a
+    /// TRIGGERED ability. Before the fix this branch hardcoded a kindless
+    /// StackAbility.
+    #[test]
+    fn reroute_narrows_to_activated_and_keeps_single_target_leg() {
+        let filter = change_targets_filter(
+            "change the target of target activated ability with a single target",
+        );
+        let TargetFilter::And { filters } = &filter else {
+            panic!("expected And[StackAbility, Typed HasSingleTarget], got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2, "both legs must survive: {filter:?}");
+        assert_eq!(
+            filters[0],
+            TargetFilter::StackAbility {
+                controller: None,
+                tag: None,
+                kind: Some(StackAbilityKind::Activated),
+            },
+            "the ability leg must narrow to Activated (FLIPS to a kindless leg on revert)"
+        );
+        // Reach-guard: the arity axis is still applied, so the kind assertion is
+        // not passing merely because the whole branch changed shape.
+        let TargetFilter::Typed(tf) = &filters[1] else {
+            panic!(
+                "second leg must be the HasSingleTarget Typed leg, got {:?}",
+                filters[1]
+            );
+        };
+        assert_eq!(tf.properties, vec![FilterProp::HasSingleTarget]);
+    }
+
+    /// The ten printed "spell or ability" retarget cards (Bolt Bend, Spellskite,
+    /// Willbender, …) must be unchanged: the literal both-kinds arm still wins
+    /// ahead of the delegated branch, so the ability leg stays kindless.
+    #[test]
+    fn spell_or_ability_retarget_shape_is_unchanged() {
+        let filter = change_targets_filter(
+            "change the target of target spell or ability with a single target",
+        );
+        let TargetFilter::Or { filters } = &filter else {
+            panic!("expected the canonical Or[spell, ability] shape, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        assert_eq!(
+            stack_ability_leg(&filter),
+            Some(None),
+            "a both-kinds phrase must keep a kindless ability leg"
+        );
+    }
+
+    /// The defect the wholesale delegation closes: a phrase mixing a spell leg
+    /// with an ability-kind leg. Rebuilding a bare StackAbility from a kind
+    /// probe (the pre-fix shape, and the shape a kind-axis-only delegation would
+    /// also produce) silently DROPS the spell leg.
+    #[test]
+    fn mixed_spell_and_ability_kind_legs_both_survive() {
+        let filter =
+            change_targets_filter("change the target of target spell or triggered ability");
+        let TargetFilter::Or { filters } = &filter else {
+            panic!("a mixed spell/ability phrase must produce two legs, got {filter:?}");
+        };
+        assert_eq!(
+            filters.len(),
+            2,
+            "the spell leg must not be dropped: {filter:?}"
+        );
+        assert_eq!(
+            stack_ability_leg(&filter),
+            Some(Some(StackAbilityKind::Triggered)),
+            "the ability leg must narrow to Triggered"
+        );
+        // CR 112.1: a spell is a card on the stack — the spell leg stays pinned
+        // to the stack zone.
+        assert!(
+            filters.iter().any(|leg| matches!(
+                leg,
+                TargetFilter::Typed(tf)
+                    if tf.type_filters == vec![TypeFilter::Card]
+                        && tf.properties.contains(&FilterProp::InZone { zone: Zone::Stack })
+            )),
+            "the stack-pinned spell leg must survive: {filter:?}"
+        );
+    }
+
+    /// A combined ability-kind spelling inside a retarget phrase names both
+    /// kinds, so it must NOT be narrowed to the first spelling in the list.
+    #[test]
+    fn combined_ability_kind_spelling_stays_unnarrowed() {
+        let filter = change_targets_filter(
+            "change the target of target activated ability or triggered ability",
+        );
+        assert_eq!(
+            filter,
+            TargetFilter::StackAbility {
+                controller: None,
+                tag: None,
+                kind: None,
+            },
+            "a combined spelling must widen to both kinds"
+        );
+    }
 }

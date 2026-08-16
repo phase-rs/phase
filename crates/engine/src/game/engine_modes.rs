@@ -61,7 +61,12 @@ pub(super) fn handle_ability_mode_choice(
             events,
         )
     } else {
-        handle_triggered_mode_choice(
+        // Round-20 seam 2: the finisher wraps the result HERE, at the public
+        // `SelectModes` entry, and never inside `handle_triggered_mode_choice`.
+        // That function is re-entered inside trigger dispatch (via
+        // `resolve_random_modal_trigger`), where a `Priority` result is
+        // discarded — consuming the recipient there would lose it mid-batch.
+        let produced = handle_triggered_mode_choice(
             state,
             TriggeredModeChoice {
                 player,
@@ -72,7 +77,10 @@ pub(super) fn handle_ability_mode_choice(
                 indices,
             },
             events,
-        )
+        )?;
+        Ok(triggers::finish_trigger_construction_action(
+            state, events, produced,
+        ))
     }?;
 
     Ok(waiting_for)

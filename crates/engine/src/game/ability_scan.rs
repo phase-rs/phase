@@ -264,6 +264,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         replacement_applied: _,   // replacement provenance set, no dynamic read
         sub_link: _,              // SubAbilityLink kind tag
         sibling_condition: _,     // SiblingCondition replication marker, no dynamic read
+        distribute: _,            // announcement unit tag/string, no resolution-time dynamic read
         parent_target_missing_reason: _, // seam flag
     } = a;
 
@@ -814,7 +815,10 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
         Effect::Investigate => Axes::NONE,
         Effect::Tribute { count: _ } => Axes::NONE,
         Effect::TimeTravel => Axes::NONE,
-        Effect::BecomeMonarch => Axes::NONE,
+        // CR 725.1 + CR 115.1: the designation subject is a target filter,
+        // walked through the same single authority every other targeted effect
+        // uses.
+        Effect::BecomeMonarch { target } => scan_target_filter(target, target_ctx, mode),
         Effect::NoOp => Axes::NONE,
         // Captured at activation time; no resolution-time dynamic read.
         Effect::NoteManaSpent => Axes::NONE,
@@ -3355,7 +3359,11 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
             acc
         }
         TriggerCondition::HasMaxSpeed => Axes::NONE,
-        TriggerCondition::IsMonarch => Axes::NONE,
+        // CR 725.1: the monarch predicate itself reads no axis; its subject
+        // scope is classified per-axis by the shared `PlayerScope` classifier,
+        // mirroring `WasStartingPlayer { controller }`'s delegation to
+        // `scan_controller_ref`.
+        TriggerCondition::IsMonarch { player } => scan_player_scope(player),
         TriggerCondition::IsInitiative => Axes::NONE,
         TriggerCondition::NoMonarch => Axes::NONE,
         TriggerCondition::WasStartingPlayer { controller, .. } => {
@@ -3659,7 +3667,9 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes {
         StaticCondition::SourceIsAttacking => Axes::NONE,
         StaticCondition::SourceIsBlocking => Axes::NONE,
         StaticCondition::SourceIsBlocked => Axes::NONE,
-        StaticCondition::IsMonarch => Axes::NONE,
+        // CR 725.1: see the `TriggerCondition::IsMonarch` arm above — the
+        // subject scope is classified through the shared `PlayerScope` walker.
+        StaticCondition::IsMonarch { player } => scan_player_scope(player),
         StaticCondition::IsInitiative => Axes::NONE,
         StaticCondition::NoMonarch => Axes::NONE,
         StaticCondition::HasCityBlessing => Axes::NONE,
@@ -4931,7 +4941,8 @@ fn scan_keyword(kw: &Keyword, mode: ScanMode) -> Axes {
         | Keyword::Echo(_)
         | Keyword::Buyback(_)
         | Keyword::Cycling(_)
-        | Keyword::Flashback(_) => Axes::CONSERVATIVE,
+        | Keyword::Flashback(_)
+        | Keyword::Emerge(_) => Axes::CONSERVATIVE,
         // Every other keyword carries a read-free payload (unit / u32 / String /
         // ManaCost / value tag): it reads nothing on any axis here. Its cost-read,
         // if any, is already captured by `cost_read` above.
@@ -5017,7 +5028,6 @@ fn scan_keyword(kw: &Keyword, mode: ScanMode) -> Axes {
         | Keyword::Madness(_)
         | Keyword::Miracle(_)
         | Keyword::Dash(_)
-        | Keyword::Emerge(_)
         | Keyword::Harmonize(_)
         | Keyword::Foretell(_)
         | Keyword::Mutate(_)
@@ -5505,7 +5515,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::Investigate
         | Effect::Tribute { .. }
         | Effect::TimeTravel
-        | Effect::BecomeMonarch
+        | Effect::BecomeMonarch { .. }
         | Effect::NoOp
         | Effect::NoteManaSpent
         | Effect::Proliferate
@@ -5913,7 +5923,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::Investigate
         | Effect::Tribute { .. }
         | Effect::TimeTravel
-        | Effect::BecomeMonarch
+        | Effect::BecomeMonarch { .. }
         | Effect::NoOp
         | Effect::NoteManaSpent
         | Effect::Proliferate
@@ -6150,7 +6160,7 @@ pub(crate) fn effect_is_randomness_bearing(e: &Effect) -> bool {
         | Effect::Investigate
         | Effect::Tribute { .. }
         | Effect::TimeTravel
-        | Effect::BecomeMonarch
+        | Effect::BecomeMonarch { .. }
         | Effect::NoOp
         | Effect::NoteManaSpent
         | Effect::Proliferate
@@ -6377,6 +6387,24 @@ mod tests {
             ObjectId(1),
             PlayerId(0),
         )
+    }
+
+    #[test]
+    fn unassigned_distribution_unit_adds_no_dynamic_read_axis() {
+        let base = fixed_drain();
+        let mut divided = base.clone();
+        divided.distribute = Some(crate::types::game_state::DistributionUnit::Life);
+
+        let base_axes = resolved_ability_axes(&base, ScanMode::Conservative);
+        let divided_axes = resolved_ability_axes(&divided, ScanMode::Conservative);
+        assert_eq!(
+            (base_axes.event, base_axes.sibling, base_axes.projected),
+            (
+                divided_axes.event,
+                divided_axes.sibling,
+                divided_axes.projected
+            )
+        );
     }
 
     // ---- P0/P2: the ScanMode split + descending object-growth firewall ----

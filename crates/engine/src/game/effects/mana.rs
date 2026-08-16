@@ -188,10 +188,12 @@ pub fn resolve(
     // "first player target" quantity resolution cannot read the recipient.
     let count_ability = count_scoped_ability(state, ability, mana_role.as_ref());
     let count_ability = &count_ability;
-    let is_triggered_mana_inline = crate::game::mana_abilities::is_triggered_mana_ability(
-        ability,
-        state.current_trigger_event.as_ref(),
-    );
+    // CR 605.4a: read back the acceptance decision for the occurrence that is
+    // actually executing rather than re-answering CR 605.1b from a clone the
+    // resolver may already have bound a context referent onto. With no accepted
+    // occurrence live this is byte-for-byte the baseline raw classifier call.
+    let is_triggered_mana_inline =
+        crate::game::mana_abilities::is_resolving_triggered_mana(state, ability);
     let mana_choice = (!is_triggered_mana_inline)
         .then(|| {
             crate::game::mana_abilities::mana_choice_prompt(

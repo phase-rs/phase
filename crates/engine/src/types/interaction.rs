@@ -1189,6 +1189,47 @@ pub struct InteractionAttachmentFan {
     pub children: Vec<InteractionAttachmentFanChild>,
 }
 
+/// One card in a host's attachment view, with the engine's own submission when
+/// a one-step pick was published for it and `None` when it was not.
+///
+/// `None` is not "unavailable": it means this projection publishes no direct
+/// pick, and the card's remaining affordances stay on the normal interaction
+/// surface. Membership does not depend on it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionAttachmentViewCard {
+    #[cfg_attr(feature = "interaction-bindings", ts(type = "number"))]
+    pub object_id: u64,
+    pub submission: Option<InteractionSubmission>,
+}
+
+/// Viewer-scoped membership of one host's attachment subtree: what is attached
+/// to this object, in the order the engine lays it out, whatever the viewer may
+/// currently do about it.
+///
+/// This is deliberately a different question from [`InteractionAttachmentFan`],
+/// which publishes the picks the viewer is *authorized to submit right now*. An
+/// attached permanent is an object on the battlefield (CR 301.5 / CR 303.4), so
+/// its membership follows visibility, not authorization — it must survive an
+/// opponent's turn, a prompt that owns the waiting state, and a terminal game.
+/// Consumers render and count this list; they must never rebuild it by scanning
+/// `attachments`, which carries authority-only relationship data.
+///
+/// Every card here is validated in both directions (the host lists the child and
+/// the child points back at the host) and read only from the filtered
+/// projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionAttachmentView {
+    #[cfg_attr(feature = "interaction-bindings", ts(type = "number"))]
+    pub host_id: u64,
+    pub cards: Vec<InteractionAttachmentViewCard>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
 #[serde(
@@ -1227,6 +1268,14 @@ pub struct ViewerInteraction {
         ts(type = "Record<number, InteractionAttachmentFan>")
     )]
     pub attachment_fans: BTreeMap<u64, InteractionAttachmentFan>,
+    /// What is attached to each visible object, keyed by that object. Published
+    /// on every projection, including the ones that carry no opportunity at all.
+    #[serde(default)]
+    #[cfg_attr(
+        feature = "interaction-bindings",
+        ts(type = "Record<number, InteractionAttachmentView>")
+    )]
+    pub attachment_views: BTreeMap<u64, InteractionAttachmentView>,
     pub availability: InteractionAvailability,
 }
 

@@ -458,6 +458,442 @@ fn attachment_fans_are_per_interaction_filtered_and_direct() {
     );
 }
 
+/// Attaches `attachment` to `host` and asserts the engine wrote both directions
+/// of the relationship, so a later membership assertion cannot pass on a
+/// half-built fixture.
+fn attach_and_assert_linked(state: &mut GameState, attachment: ObjectId, host: ObjectId) {
+    engine::game::effects::attach::attach_to(state, attachment, host);
+    assert!(
+        state.objects[&host].attachments.contains(&attachment),
+        "fixture guard: the host must list its attachment"
+    );
+    assert_eq!(
+        state.objects[&attachment].attached_to,
+        Some(engine::game::game_object::AttachTarget::Object(host)),
+        "fixture guard: the attachment must point back at its host"
+    );
+}
+
+/// A host wearing two attachments, one of them itself a host, with exactly one
+/// published pick in the whole subtree.
+///
+/// This is the shape that made membership and affordance look like one question:
+/// the engine publishes a fan per DIRECT host and only for a child with exactly
+/// one legal choice, so a consumer that read the fans as the membership list
+/// dropped the two cards nothing was published for — off the only surface that
+/// shows what is attached at all.
+#[test]
+fn attachment_views_publish_the_whole_subtree_whatever_is_pickable() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "View Host", 2, 2).id();
+    let inner = scenario.add_creature(P0, "View Inner", 1, 1).id();
+    let nested = scenario.add_creature(P0, "View Nested", 1, 1).id();
+    let sibling = scenario.add_creature(P0, "View Sibling", 1, 1).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        attach_and_assert_linked(state, inner, host);
+        attach_and_assert_linked(state, nested, inner);
+        attach_and_assert_linked(state, sibling, host);
+        state.objects.get_mut(&nested).unwrap().tapped = true;
+        // Only the nested card is a candidate, so only the INTERMEDIATE host
+        // gets a fan — the outer host gets none at all.
+        state.waiting_for = WaitingFor::ChooseUntapSubset {
+            player: P0,
+            group: vec![nested],
+            max: 1,
+        };
+        bind(state, "attachment-view");
+    }
+
+    let view = priority_view(runner.state());
+    assert_eq!(
+        view.attachment_fans.keys().copied().collect::<Vec<_>>(),
+        vec![inner.0],
+        "reach guard: the engine publishes its pick under the direct host only"
+    );
+
+    let outer = view
+        .attachment_views
+        .get(&host.0)
+        .expect("the outer host publishes its own membership");
+    assert_eq!(
+        outer
+            .cards
+            .iter()
+            .map(|card| card.object_id)
+            .collect::<Vec<_>>(),
+        vec![inner.0, nested.0, sibling.0],
+        "membership is the whole subtree in depth-first order, not the published picks"
+    );
+    assert!(
+        outer.cards[0].submission.is_none() && outer.cards[2].submission.is_none(),
+        "a card the engine published no pick for is still a member, without a submission"
+    );
+    let nested_submission = outer.cards[1]
+        .submission
+        .clone()
+        .expect("a pick published under a nested host reaches the outer host's view");
+
+    let intermediate = view
+        .attachment_views
+        .get(&inner.0)
+        .expect("an attachment that is itself a host publishes its own membership");
+    assert_eq!(
+        intermediate
+            .cards
+            .iter()
+            .map(|card| card.object_id)
+            .collect::<Vec<_>>(),
+        vec![nested.0],
+        "a nested host lists what hangs on it, and never itself"
+    );
+
+    submit_interaction(runner.state_mut(), P0, nested_submission).expect(
+        "the submission published in the view resolves through production interaction dispatch",
+    );
+    assert!(
+        !runner.state().objects[&nested].tapped,
+        "the nested card's published submission applies its selected untap"
+    );
+}
+
+/// Membership answers a different question than the fan does, and must not
+/// inherit its authorization gate: an attached permanent is an object in play
+/// (CR 301.5 / CR 303.4), so it stays visible while another player holds the
+/// turn. Both directions of the relationship still have to agree.
+#[test]
+fn attachment_views_follow_visibility_while_fans_follow_authorization() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Link Host", 2, 2).id();
+    let attachment = scenario.add_creature(P0, "Link Attachment", 1, 1).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        attach_and_assert_linked(state, attachment, host);
+        state.objects.get_mut(&attachment).unwrap().tapped = true;
+        state.waiting_for = WaitingFor::ChooseUntapSubset {
+            player: P0,
+            group: vec![attachment],
+            max: 1,
+        };
+        bind(state, "attachment-view-links");
+    }
+
+    let unauthorized = viewer_interaction(runner.state(), P1);
+    assert!(
+        unauthorized.attachment_fans.is_empty(),
+        "reach guard: the pick sidecar stays authorization-scoped"
+    );
+    let opponent_view = unauthorized
+        .attachment_views
+        .get(&host.0)
+        .expect("the opponent still sees what is attached to a battlefield permanent");
+    assert_eq!(
+        opponent_view
+            .cards
+            .iter()
+            .map(|card| card.object_id)
+            .collect::<Vec<_>>(),
+        vec![attachment.0]
+    );
+    assert!(
+        opponent_view.cards[0].submission.is_none(),
+        "a viewer who may not submit is offered nothing to submit"
+    );
+
+    let mut stale_back_link = filter_state_for_viewer(runner.state(), P0);
+    stale_back_link
+        .objects
+        .get_mut(&host)
+        .expect("fixture host remains visible")
+        .attachments
+        .clear();
+    assert!(
+        derive_viewer_interaction(runner.state(), &stale_back_link, P0)
+            .attachment_views
+            .is_empty(),
+        "a host that no longer lists the attachment publishes no membership for it"
+    );
+
+    let mut stale_forward_link = filter_state_for_viewer(runner.state(), P0);
+    stale_forward_link
+        .objects
+        .get_mut(&attachment)
+        .expect("fixture attachment remains visible")
+        .attached_to = None;
+    assert!(
+        derive_viewer_interaction(runner.state(), &stale_forward_link, P0)
+            .attachment_views
+            .is_empty(),
+        "an attachment that no longer points back at its host publishes no membership"
+    );
+}
+
+/// The projection crosses the generated adapter as the client reads it: camel
+/// case on the wire, a `null` submission for a card with no published pick.
+#[test]
+fn attachment_views_survive_the_adapter_round_trip() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Wire Host", 2, 2).id();
+    let attachment = scenario.add_creature(P0, "Wire Attachment", 1, 1).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        attach_and_assert_linked(state, attachment, host);
+        bind(state, "attachment-view-wire");
+    }
+
+    let view = priority_view(runner.state());
+    assert!(view.attachment_views.contains_key(&host.0));
+    let wire = serde_json::to_string(&view).expect("serialize the viewer projection");
+    assert!(
+        wire.contains("\"attachmentViews\"") && wire.contains("\"objectId\""),
+        "the adapter reads camel case: {wire}"
+    );
+    assert!(
+        wire.contains("\"submission\":null"),
+        "a member with no published pick crosses the wire as null: {wire}"
+    );
+    let decoded: engine::types::interaction::ViewerInteraction =
+        serde_json::from_str(&wire).expect("deserialize the viewer projection");
+    assert_eq!(decoded.attachment_views, view.attachment_views);
+
+    // A projection written before this field existed still loads.
+    let mut legacy: serde_json::Value = serde_json::from_str(&wire).expect("reparse as value");
+    legacy
+        .as_object_mut()
+        .expect("the projection is an object")
+        .remove("attachmentViews");
+    let legacy: engine::types::interaction::ViewerInteraction =
+        serde_json::from_value(legacy).expect("a projection without the field still loads");
+    assert!(legacy.attachment_views.is_empty());
+}
+
+/// Hangs one more copy of the engine-written attachment `seed` on `host`,
+/// writing both directions exactly as `attach::attach_to` wrote them for the
+/// seed itself. Cloning rather than re-attaching keeps a ten-thousand-row
+/// fixture cheap without inventing a relationship shape of its own.
+fn clone_attachment_onto(
+    state: &mut GameState,
+    seed: ObjectId,
+    host: ObjectId,
+    next_id: &mut u64,
+) -> ObjectId {
+    let id = ObjectId(*next_id);
+    *next_id += 1;
+    let mut copy = state.objects[&seed].clone();
+    copy.id = id;
+    copy.attachments.clear();
+    copy.attached_to = Some(engine::game::game_object::AttachTarget::Object(host));
+    state.objects.insert(id, copy);
+    state.battlefield.push_back(id);
+    state
+        .objects
+        .get_mut(&host)
+        .expect("host exists")
+        .attachments
+        .push(id);
+    id
+}
+
+fn next_object_id(state: &GameState) -> u64 {
+    state.objects.keys().map(|id| id.0).max().unwrap_or(0) + 1
+}
+
+/// Membership is derived before the authorization, session and slot gates, so
+/// an early return carries as much of it as the derived path does. Only the
+/// whole-projection bound charges the map and every card in it: each view below
+/// is inside the per-view cap, and it is their SUM that has to fail closed —
+/// otherwise a viewer who may not submit anything at all still receives an
+/// attachment tree of unbounded size.
+///
+/// The same early return ships its membership normally while it fits — that is
+/// `attachment_views_follow_visibility_while_fans_follow_authorization`.
+#[test]
+fn an_early_return_fails_closed_on_the_aggregate_attachment_budget() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Budget Host", 2, 2).id();
+    let seed = scenario.add_creature(P0, "Budget Attachment", 1, 1).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        attach_and_assert_linked(state, seed, host);
+        // Fill the host to the per-view maximum, so no single view is oversized
+        // on its own and only the aggregate can object.
+        let mut next_id = next_object_id(state);
+        while state.objects[&host].attachments.len() < MAX_INTERACTION_LIST_LEN {
+            clone_attachment_onto(state, seed, host, &mut next_id);
+        }
+        bind(state, "attachment-view-budget");
+    }
+    assert!(
+        runner.state().objects[&host]
+            .attachments
+            .iter()
+            .all(|id| runner.state().objects[id].attached_to
+                == runner.state().objects[&seed].attached_to),
+        "fixture guard: every filled row carries the same back-link the engine wrote"
+    );
+
+    let unauthorized = viewer_interaction(runner.state(), P1);
+    assert_eq!(
+        unauthorized.availability,
+        InteractionAvailability::Unsupported {
+            reason: InteractionReasonCode::PayloadTooLarge,
+        },
+        "an early return that cannot be bounded says so instead of shipping the payload"
+    );
+    assert!(
+        unauthorized.attachment_views.is_empty()
+            && unauthorized.attachment_fans.is_empty()
+            && unauthorized.opportunities.is_empty(),
+        "failing the budget drops every unbounded list rather than truncating one"
+    );
+    assert!(
+        !unauthorized.can_submit,
+        "the fail-closed projection keeps the authority answer it was already carrying"
+    );
+}
+
+/// A single direct host whose own subtree passes the per-view cap.
+///
+/// This shape used to be absorbed inside the membership derivation — the host
+/// was skipped, and an over-limit host map was replaced by an empty one — which
+/// handed the budget gate a small, plausible projection it had no reason to
+/// reject. The viewer then read a bounded empty map as an authoritative
+/// "nothing is attached", which is the one answer the engine must never invent.
+///
+/// Read through the unauthorized early return, which is the cheap seat: the
+/// derived path would enumerate every legal action over ten thousand
+/// permanents, and `a_deep_attachment_chain_fails_closed_on_the_aggregate`
+/// already carries the same claim through it.
+#[test]
+fn an_oversized_attachment_tree_fails_closed_instead_of_publishing_an_empty_map() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Wide Host", 2, 2).id();
+    let seed = scenario.add_creature(P0, "Wide Attachment", 1, 1).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        attach_and_assert_linked(state, seed, host);
+        let mut next_id = next_object_id(state);
+        while state.objects[&host].attachments.len() <= MAX_INTERACTION_LIST_LEN {
+            clone_attachment_onto(state, seed, host, &mut next_id);
+        }
+        bind(state, "attachment-view-wide");
+    }
+    let wide = viewer_interaction(runner.state(), P1);
+    assert_eq!(
+        wide.availability,
+        InteractionAvailability::Unsupported {
+            reason: InteractionReasonCode::PayloadTooLarge,
+        },
+        "a host whose own subtree is over the cap fails closed; it is not skipped"
+    );
+    assert!(wide.attachment_views.is_empty() && wide.opportunities.is_empty());
+}
+
+/// The nesting half of the same claim, read through the DERIVED path: every
+/// view is small, and it is the tree that is too large.
+///
+/// A chain is the shape where the derivation's own cost is quadratic — every
+/// ancestor carries the whole tail beneath it — so the row is also the one that
+/// says the budget is charged while membership is derived rather than after it.
+/// At this depth the finished payload would hold 499 500 cards; the derivation
+/// stops one card past the aggregate instead.
+///
+/// The depth is capped by what the derived path costs elsewhere, not by what the
+/// walk costs: enumerating every legal action over the chain is quadratic too,
+/// and measured on this fixture it runs 1 s at 1 000 links, 14 s at 3 000 and
+/// 109 s at 10 000. `a_cap_depth_attachment_chain_is_refused_before_it_is_built`
+/// carries the depth claim past that ceiling through the cheap seat.
+#[test]
+fn a_deep_attachment_chain_fails_closed_on_the_aggregate() {
+    const CHAIN: usize = 1_000;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let root = scenario.add_creature(P0, "Chain Root", 2, 2).id();
+    let seed = scenario.add_creature(P0, "Chain Link", 1, 1).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        attach_and_assert_linked(state, seed, root);
+        let mut next_id = next_object_id(state);
+        let mut tip = seed;
+        for _ in 1..CHAIN {
+            tip = clone_attachment_onto(state, seed, tip, &mut next_id);
+        }
+        bind(state, "attachment-view-deep");
+    }
+    let deep = priority_view(runner.state());
+    assert_eq!(
+        deep.availability,
+        InteractionAvailability::Unsupported {
+            reason: InteractionReasonCode::PayloadTooLarge,
+        },
+        "nesting sums the same way: {CHAIN} views of at most {CHAIN} cards each \
+         exceed the aggregate even though none exceeds the per-view cap"
+    );
+    assert!(deep.attachment_views.is_empty());
+}
+
+/// The depth half, at the worst depth there is: a chain exactly
+/// `MAX_INTERACTION_LIST_LEN` links long is the LONGEST one in which no single
+/// view exceeds the per-view cap, so it is precisely the shape a per-host check
+/// cannot catch. One link shorter and the aggregate is smaller; one longer and
+/// the outermost view trips the per-view cap on its own and the derivation stops
+/// at the first host. This is the depth the engine permits, too — CR 732.2's
+/// runaway-cascade guard (`MAX_OBJECT_GROWTH`, `game::engine`) lets one dispatch
+/// grow the board by 16 000 objects.
+///
+/// The finished payload here holds 49 995 000 cards, the prefix sums of every
+/// nested view. Measured on this fixture, deriving membership in full and
+/// measuring afterwards costs 23.2 s and peaks at 7.4 GB resident; charging the
+/// aggregate as the walk goes costs 0.16 s and 4.7 GB, which is the fixture
+/// itself. The engine ships to WASM, where that difference is linear-memory
+/// exhaustion rather than a slow frame.
+///
+/// The answer is the same either way — the finalizer always refused this payload
+/// — so the row asserts the answer and the cost above is what the change is for.
+/// Read through the unauthorized early return, which reaches the same membership
+/// derivation without the action enumeration the derived path owes over ten
+/// thousand permanents (109 s, measured); the row above carries the same
+/// fail-closed answer through the derived path at an affordable depth.
+#[test]
+fn a_cap_depth_attachment_chain_is_refused_before_it_is_built() {
+    const CHAIN: usize = MAX_INTERACTION_LIST_LEN;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let root = scenario.add_creature(P0, "Cap Depth Root", 2, 2).id();
+    let seed = scenario.add_creature(P0, "Cap Depth Link", 1, 1).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        attach_and_assert_linked(state, seed, root);
+        let mut next_id = next_object_id(state);
+        let mut tip = seed;
+        for _ in 1..CHAIN {
+            tip = clone_attachment_onto(state, seed, tip, &mut next_id);
+        }
+        bind(state, "attachment-view-cap-depth");
+    }
+    let deep = viewer_interaction(runner.state(), P1);
+    assert_eq!(
+        deep.availability,
+        InteractionAvailability::Unsupported {
+            reason: InteractionReasonCode::PayloadTooLarge,
+        },
+        "a chain {CHAIN} links deep is refused, not walked to the bottom"
+    );
+    assert!(deep.attachment_views.is_empty() && deep.opportunities.is_empty());
+}
+
 #[test]
 fn authority_requires_explicit_binding_and_rebinding_invalidates_old_capabilities() {
     let mut state = GameState::new_two_player(42);
@@ -868,6 +1304,7 @@ fn alternative_cast_siblings_use_stable_typed_codes() {
         normal_cost: ManaCost::NoCost,
         alternative_cost: Some(ManaCost::NoCost),
         alternative_additional_cost: None,
+        alternative_additional_cost_description: None,
     };
     bind(runner.state_mut(), "alternative-cast-codes");
 

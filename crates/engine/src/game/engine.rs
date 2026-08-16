@@ -1063,6 +1063,62 @@ fn apply_action_boundary_core(
         lifecycle.discard();
         return Err(error);
     }
+    // CR 603.3 + CR 603.3b + CR 608.2c: recover an ownerless post-replacement
+    // strand on the state AS FOUND, before this action touches it.
+    //
+    // A `Dispatching` drain whose dispatcher is not on this thread's call stack
+    // has no owner and no retirement path: `begin_dispatch` refuses it,
+    // `finish_paused_dispatch` pops only `Paused`, and `finish_dispatch` needs a
+    // handle that died with its call frame. It keeps `resolution_stack`
+    // non-empty forever, so `triggers::resolution_completion_can_settle` is
+    // false forever — deferred triggered abilities can never be put on the stack
+    // the next time a player would receive priority (CR 603.3 + CR 603.3b) and
+    // the resolving carrier can never settle (CR 608.2c).
+    //
+    // WHY HERE, and not only at the priority boundary. The sweeper inside
+    // `resume_pending_continuation_if_priority` is evaluated AFTER a reducer arm
+    // has run, and only when the RESULTING state is `Priority`. It therefore
+    // repairs a strand this engine just created, and can never repair one it
+    // merely FOUND — including the reporter's saves, whose strand arrives
+    // through `PersistedGameState::into_game_state()` and is never produced by
+    // any engine write. Measured: the turn-20 capture rests at `Priority`, and
+    // its `PassPriority` advances the phase into the declare-attackers
+    // turn-based action (CR 117.3a + CR 703.1: a turn-based action doesn't use
+    // the stack, and the active player receives priority only AFTER it has been
+    // dealt with — so no player has priority during it), so the post-action
+    // sweep is not entered on that action. This is the only seam
+    // that observes the rest state the engine was parked at, and it is
+    // boundary-type agnostic: an ownerless `Dispatching` resident is not a rules
+    // state at any boundary.
+    //
+    // Live parked work is NOT ownerless and is not touched here: a continuation
+    // awaiting a player's answer (CR 614.12a) is left `Paused` by the
+    // dispatcher's cleanup, and the sweep's exhaustive match pops only
+    // `Dispatching`.
+    //
+    // This is the OUTER action funnel — `apply_action_boundary_core` has exactly
+    // three call sites: two public/simulation entry points and one internal
+    // clone-local life-safety preview. Deliberately NOT `apply_action`, which
+    // the auto-pass and shortcut loops re-enter twelve further ways.
+    //
+    // BEFORE `boundary_snapshot`, deliberately: every failure path restores that
+    // same snapshot, and removing an impossible state is not part of the action
+    // and must not be rolled back with it. CONSEQUENCE, stated so it is not
+    // later read as a bug: an action this boundary REJECTS still leaves
+    // `resolution_stack` repaired, with no `bump_state_revision` and no events,
+    // because the error paths return before `finish_action_boundary` runs. That
+    // is intended — a client that submitted one bad action before its pass must
+    // not stay wedged because of it.
+    //
+    // Re-entrancy is handled by the same live-dispatch guard the priority-
+    // boundary sweep uses: `SimulationFilter`'s clone-and-apply probe re-enters
+    // this function from inside an outer `apply`, and when that outer apply is
+    // inside a dispatch the flag is set, the sweep is suppressed, and recovery
+    // defers to the next boundary at which the flag is clear. No "outermost"
+    // depth test is added: gating on it would leave AI-probe clones unrepaired
+    // while the real state is repaired.
+    effects::sweep_ownerless_post_replacement_strand(state);
+    state.remove_empty_active_post_replacement_frame();
     let boundary_snapshot = state.clone();
     let journal_start = state.resolved_rules_journal.entries().len();
     let is_actor_scoped_preference = action.is_actor_scoped_preference();
@@ -7575,6 +7631,11 @@ fn apply_action(
     let mut events = Vec::new();
     let mut triggers_processed_inline = false;
     let skip_deferred_trigger_drain = false;
+    // The trigger-construction finisher runs at most once per reducer action, at
+    // the outermost handler return of its enumerated seams. Reset the witness
+    // here rather than at the outer boundary so a direct `apply_action` caller
+    // (drive loops, injector harnesses) is measured per action too.
+    state.trigger_construction_finisher_ran_this_action = false;
 
     // CancelAutoPass works from any WaitingFor state (player may cancel during
     // interactive choices). Routed by `actor` — previously used
@@ -9186,6 +9247,17 @@ fn apply_action(
             },
         ) => {
             let events_before = events.len();
+            // CR 605.4a: which typed half of the colour seam this action is.
+            // A `ManaAbility` choice is a completed mana frame and has already
+            // recorded its exact occurrences through
+            // `mana_abilities::collect_completed_mana_frame_events` (the
+            // original source in `handle_choose_mana_color`, each sibling on its
+            // own finish path). A `ResolvingEffect` choice is not a mana frame
+            // at all and keeps its historical immediate scan.
+            let is_completed_mana_frame = matches!(
+                context,
+                crate::types::game_state::ManaChoiceContext::ManaAbility(_)
+            );
             let wf = match context {
                 crate::types::game_state::ManaChoiceContext::ManaAbility(pending_mana_ability) => {
                     // CR 605.3a: validate the requested batch size BEFORE any mana
@@ -9253,15 +9325,22 @@ fn apply_action(
                     )?
                 }
             };
-            // CR 603.2c + CR 605.4a: A mana color choice produces mana inline.
-            // Scan its events for TapsForMana mana multipliers and for
-            // cost-payment triggers HERE, because for `ManaPayment` /
-            // `UnlessPayment` resumes the post-action pipeline is skipped
-            // (it is guarded by `matches!(waiting_for, WaitingFor::Priority)`),
-            // so this is the only scan site — and CR 605.4a requires the bonus
-            // mana to enter the pool before the spell's payment step continues.
-            // Do NOT "simplify" this scan away for non-Priority resumes.
-            if events.len() > events_before {
+            // CR 603.2c + CR 605.4a: A NON-mana `ResolvingEffect` colour choice
+            // produces mana inline. Scan its events for TapsForMana mana
+            // multipliers and for cost-payment triggers HERE, because for
+            // `ManaPayment` / `UnlessPayment` resumes the post-action pipeline is
+            // skipped (it is guarded by `matches!(waiting_for,
+            // WaitingFor::Priority)`), so this is the only scan site — and
+            // CR 605.4a requires the bonus mana to enter the pool before the
+            // spell's payment step continues. Do NOT "simplify" this scan away
+            // for non-Priority resumes.
+            //
+            // The `ManaAbility` half owns no aggregate scan: every source and
+            // sibling already recorded exact occurrences through the typed
+            // completed-frame seam, so a second scan here would rediscover
+            // events the frame already claimed and dispatch an ordinary cost
+            // observer separately from that frame's synthetic reflexive.
+            if !is_completed_mana_frame && events.len() > events_before {
                 let mana_events: Vec<_> = events[events_before..].to_vec();
                 super::triggers::process_triggers(state, &mana_events);
             }
@@ -9286,7 +9365,12 @@ fn apply_action(
             // Claim the scan via `triggers_processed_inline` — the same
             // mechanism `DeclareAttackers` uses — so the pipeline runs SBAs,
             // delayed/state triggers, and layers but skips the trigger re-scan.
-            if matches!(wf, WaitingFor::Priority { .. }) {
+            //
+            // The `ManaAbility` half must NOT use this broad suppression: its
+            // occurrence journal already narrows the pipeline's scan to exactly
+            // the events the mana frames did not claim, and the pipeline's
+            // guarded deferred drain is what releases their queued contexts once.
+            if !is_completed_mana_frame && matches!(wf, WaitingFor::Priority { .. }) {
                 triggers_processed_inline = true;
             }
             wf
@@ -10099,7 +10183,6 @@ fn apply_action(
             if ability_index < obj.abilities.len()
                 && mana_abilities::is_mana_ability(&obj.abilities[ability_index])
             {
-                let events_before = events.len();
                 let ability_def = obj.abilities[ability_index].clone();
                 let wf = mana_abilities::activate_mana_ability(
                     state,
@@ -10114,18 +10197,14 @@ fn apply_action(
                     },
                     None,
                 )?;
-                // CR 605.1b: Process TapsForMana triggers inline during mana payment
-                // (same rationale as the TapLandForMana arm below).
-                // CR 605.3b + CR 616.1 + CR 603.3b: A paused costed mana
-                // ability serializes its unscanned events in its typed cursor.
-                // The cursor is their single settlement authority, so do not
-                // scan them here and again when the replacement choice resumes.
-                if events.len() > events_before
-                    && !casting::mana_ability_cost_payment_is_paused(state)
-                {
-                    let mana_events: Vec<_> = events[events_before..].to_vec();
-                    super::triggers::process_triggers(state, &mana_events);
-                }
+                // CR 605.4a: no outer scan. `activate_mana_ability`
+                // builds a real typed cursor here, and its completed frame has
+                // already run `collect_completed_mana_frame_events` — collecting
+                // TapsForMana multipliers and ordinary cost observers together
+                // and journaling the exact live occurrences it claimed. Rescanning
+                // the same range would rediscover them. A paused costed mana
+                // ability keeps owning its unscanned events in that cursor, and
+                // still settles them when the replacement choice resumes.
                 if let Some(order_wf) =
                     super::triggers::preserve_order_triggers_resume(state, wf.clone())
                 {
@@ -10161,21 +10240,39 @@ fn apply_action(
                 },
                 &mut events,
             )?;
-            super::triggers::resolve_tap_mana_triggers_inline(
-                state,
-                &mut events,
-                events_before,
-            );
-            // CR 605.1b: TapsForMana triggered mana abilities (Wild Growth, Vorinclex,
-            // Fertile Ground, Mana Flare class) must resolve inline when mana is
-            // produced during cost payment. The ManaPayment path does not flow through
-            // run_post_action_pipeline, so process triggers explicitly here so the
-            // bonus mana reaches the pool before the payment check.
-            if events.len() > events_before
-                && !casting::mana_ability_cost_payment_is_paused(state)
-            {
-                let mana_events: Vec<_> = events[events_before..].to_vec();
-                super::triggers::process_triggers(state, &mana_events);
+            // CR 605.1b + CR 605.4a: the manual land tap has no cursor wrapper
+            // of its own — `activate_mana_source_option`'s no-ability branch
+            // taps and produces directly — so this arm IS its completed mana
+            // frame and runs the same typed empty-ledger preparation the cursor
+            // path runs internally. It resolves the TapsForMana triggered mana
+            // abilities inline (Wild Growth, Vorinclex, Fertile Ground, Mana
+            // Flare class) so the bonus mana reaches the pool before the payment
+            // check, and collects the ordinary tap observers into the same
+            // release group instead of dispatching them separately. The
+            // `ManaPayment` path does not flow through
+            // `run_post_action_pipeline`, so this remains the only seam. Frames
+            // whose ability branch already collected are protected by the
+            // helper's own consumed-occurrence filter.
+            if !casting::mana_ability_cost_payment_is_paused(state) {
+                if let Some(pause) = mana_abilities::collect_completed_mana_frame_events(
+                    state,
+                    Vec::new(),
+                    &mut events,
+                    events_before,
+                    crate::types::game_state::ManaTriggerFixedPointResume::Root {
+                        player: *player,
+                        resume: Box::new(ManaAbilityResume::ManaPayment {
+                            outer_player: Some(*player),
+                            convoke_mode: *convoke_mode,
+                        }),
+                    },
+                ) {
+                    return Ok(ActionResult {
+                        events,
+                        waiting_for: pause,
+                        log_entries: vec![],
+                    });
+                }
             }
             if let Some(order_wf) =
                 super::triggers::preserve_order_triggers_resume(state, wf.clone())
@@ -10615,7 +10712,12 @@ fn apply_action(
         // `actor` is already authorized as the prompted player by
         // `check_actor_authorization` (via `WaitingFor::acting_player`).
         (WaitingFor::OrderTriggers { .. }, GameAction::OrderTriggers { order }) => {
-            triggers::handle_order_triggers(state, order)?
+            // Round-20 seam 1: this arm is the outermost handler return for the
+            // whole ordered batch, so it is where the construction finisher runs
+            // — covering the multi-group re-prompt, both early returns after
+            // `pending_trigger_order.take()`, and the terminal resume.
+            let produced = triggers::handle_order_triggers(state, order)?;
+            triggers::finish_trigger_construction_action(state, &mut events, produced)
         }
         // CR 707.9: Player chose a permanent to copy for "enter as a copy of" replacement.
         (
@@ -12092,7 +12194,10 @@ fn apply_action(
                 // `pending_trigger_entry` so the resolver may now fire it.
                 pending_trigger.ability.distribution =
                     Some(distribution.iter().map(|(t, a)| (t.clone(), *a)).collect());
-                if !triggers::finalize_pending_trigger_entry(state, &pending_trigger.ability) {
+                let produced = if !triggers::finalize_pending_trigger_entry(
+                    state,
+                    &pending_trigger.ability,
+                ) {
                     // Unexpected dangling cursor: the entry is no longer on the
                     // stack. Recover per CR 608.2b / CR 800.4a (a stack object
                     // that has left the stack does not resolve) — record the
@@ -12118,7 +12223,13 @@ fn apply_action(
                     } else {
                         WaitingFor::Priority { player: p }
                     }
-                }
+                };
+                // Round-20 seam 4: the trigger-owned division arm's produced
+                // wait — dangling recovery, deferred sibling, or success — goes
+                // through the construction finisher exactly once. The
+                // resolution-time and cast-time distribution arms below are not
+                // trigger-owned and are deliberately untouched.
+                triggers::finish_trigger_construction_action(state, &mut events, produced)
             } else {
                 // Resolution-time distribution continuation path.
                 state.waiting_for = WaitingFor::Priority { player: p };
@@ -12208,11 +12319,11 @@ fn apply_action(
                 new_targets,
             },
         )?,
-        // CR 115.7: Retarget a single-target spell via a board click. The
+        // CR 115.7a: Retarget a single-target spell via a board click. The
         // universal `ChooseTarget` action — already consumed by every other
-        // targeting state — drives single-target retargets (Bolt Bend,
-        // Redirect, Misdirection) so the player picks the new target directly
-        // on the battlefield instead of through a dialog.
+        // targeting state — drives "change the target of" retargets (Bolt Bend,
+        // Misdirection — NOT Redirect, which is "choose new targets", so CR
+        // 115.7d `All`) so the player picks the new target on the battlefield.
         (
             WaitingFor::RetargetChoice {
                 player,
@@ -12536,23 +12647,28 @@ fn apply_retarget(
 
     // CR 115.7a: "each target can be changed only to another legal target." The
     // `legal_new_targets` pool checked above is flat, so for a multi-slot node it
-    // cannot tell slot 0's legal set from slot 1's. Re-check positionally against
-    // the node's own per-slot filters before mutating the stack. Applies to both
+    // cannot tell slot 0's legal set from slot 1's. Re-check each CHANGED
+    // position against its own slot filter before mutating the stack; CR 115.7d
+    // exempts unchanged positions, which `retarget_slot_violation` applies for
+    // both this caller and the AI generator. Applies to both
     // `Single` and `All`. It is NOT a blanket no-op for `Single`: alongside the
     // two-surfaced-slot `Both`, `mana_multi_role` also admits the context-ref
     // recipient `Both` (surfaced == 1, generic == 0), which is parser-reachable
     // ("That player adds {R} for each card in target opponent's hand"). A
-    // `Single`-scope retarget (Bolt Bend, Redirect) of that shape therefore does
-    // run this per-slot validation — CR 115.7a-correct, and the reason the check
+    // `Single`-scope retarget (Bolt Bend) of that shape therefore does run
+    // this per-slot validation — CR 115.7a-correct, and the reason the check
     // is wired for both scopes rather than only `All`.
     if let Some(ability) = state
         .stack
         .get(stack_entry_index)
         .and_then(|entry| entry.ability())
     {
-        if let Some(slot) =
-            crate::game::ability_utils::retarget_slot_violation(state, ability, &new_targets)
-        {
+        if let Some(slot) = crate::game::ability_utils::retarget_slot_violation(
+            state,
+            ability,
+            current_targets,
+            &new_targets,
+        ) {
             return Err(EngineError::InvalidAction(format!(
                 "Retarget: chosen target is not legal for target slot {slot}"
             )));
@@ -18108,20 +18224,38 @@ mod stage2_injector_tests {
 
         assert_eq!(
             producers.len() + readers.len() + in_test,
-            38,
+            41,
             "CR 603.5 prompt census drifted. A new PRODUCER must have its recipient bound \
              somewhere — the mint's conjunct (a) covers exactly ONE of them. A new READER is \
              the benign case (U4's own consumption arm was one): adjudicate it in this doc and \
              name the site, do not merely move the number.\n\
              producers={producers:#?}\nreaders={readers:#?}"
         );
+        // TEST-FIXTURE DRIFT, adjudicated on THIS branch (plan-v23 Step 5, session 4),
+        // `27 ⇒ 28`. One new line, again in the third (benign) partition:
+        // `game/triggers.rs::approved_construction_prompts` — the fixture that enumerates one
+        // instance of each of the six approved trigger-construction prompts, which the
+        // construction-finisher contract rows iterate. It mints nothing in production and
+        // reads `state.waiting_for` nowhere. The PRODUCER half is unchanged at 5 and the
+        // READER half unchanged at 7, both with byte-identical per-file lists.
+        // TEST-FIXTURE DRIFT, adjudicated on THIS branch (plan-v23 Steps 6/7), `25 ⇒ 27`.
+        // Both new lines are `#[cfg(test)]` fixture waits, i.e. the third partition — the
+        // benign class. The PRODUCER half is unchanged at 5 with a byte-identical per-file
+        // list, and the READER half is unchanged at 7, which is what this row's claim is
+        // about. The two lines are:
+        //   - `game/triggers.rs::observer_helper_fixture` — the paused wait the
+        //     `park_observer_triggers_if_paused` rows need in order to reach that helper's
+        //     collecting branch at all;
+        //   - `game/visibility.rs::triggered_mana_projection_fixture` — the live public
+        //     prompt the Step-6 redaction rows assert survives viewer filtering.
+        // Neither mints a prompt in production; neither reads `state.waiting_for` in
+        // production. Adjudicated, not relaxed: a sixth PRODUCER would still red the
+        // partition assert below before this total could absorb it.
         assert_eq!(
             (producers.len(), readers.len(), in_test),
-            (5, 8, 25),
+            (5, 8, 28),
             "the partition, not just the total: five PRODUCTION producers, eight PRODUCTION \
-             readers (they read `state.waiting_for` and never write it — the seventh is U4's \
-             `inject_pinned_answer` arm, the eighth is C1's journalling `apply_action` arm), \
-             25 `#[cfg(test)]` lines.\nproducers={producers:#?}\n\
+             readers (they read `state.waiting_for` and never write it), 28 `#[cfg(test)]` lines.\nproducers={producers:#?}\n\
              readers={readers:#?}"
         );
         assert_eq!(
@@ -18600,9 +18734,99 @@ mod stage2_injector_tests {
                 // trust looks like — and it is why the two prose entries are BOTH kept
                 // rather than one overwriting the other: they are separate witnesses, not
                 // duplicates.
-                "game/effects/mod.rs:6774".to_string(),
-                "game/effects/mod.rs:6851".to_string(),
-                "game/effects/mod.rs:10089".to_string(),
+                // Mycoloth devour/drain freeze (Discord 1537641754298290226), measured at
+                // upstream `66b2cbf5a1`: `:6774/:6851/:10089 ⇒ :6852/:6929/:10167`, a UNIFORM
+                // `+78` on all three. LOCAL, not upstream, so the CI-vs-local diagnosis in the
+                // header does not apply — the `+78` is this change's own `effects/mod.rs` delta
+                // (`git diff --stat` on that file against `76751548f` is `+78/-0`), namely the
+                // ADDITION of the new `sweep_ownerless_post_replacement_strand` function and its
+                // doc block, inserted immediately above `resume_resolution_frames` and therefore
+                // above all three producers.
+                //
+                // Stated as an ADDITION because that is what the committed diff contains: the
+                // hunk is `+78/-0` with no deletion anywhere, and
+                // `git grep -c ownerless 76751548f -- crates/engine/src` finds nothing, so there
+                // was no already-shipped sweep for a relocation to have moved. An earlier draft
+                // of this entry called it a relocation; the block was indeed moved, but only
+                // within this branch's own uncommitted history, which is invisible to every
+                // future reader of the committed diff. This log speaks in terms of the committed
+                // diff or it is not evidence.
+                //
+                // The conclusion is unchanged and still correct: the new function mints nothing,
+                // because it only retires a `DrainStatus::Dispatching` resident and creates no
+                // recipient, so it is correctly absent from this census.
+                // The `engine.rs` entry moved TOO this round (`:12796 ⇒ :12850`, `+54`) — see the
+                // note on that entry below. That is the first time a non-`effects/mod.rs` pin has
+                // drifted here, and the cause is this change's OWN second authorized edit in this
+                // file, not a set change.
+                // Identity re-established, not assumed: each producer at its new coordinate is
+                // sha256-identical to `66b2cbf5a1:effects/mod.rs` at its old one
+                // (`9869a19f28c791ee`, `2bc316e3aa0297f8`, `8df98486627bfe15`).
+                // Set preservation: the two asserts above this one ran FIRST and both fired
+                // GREEN on the run that caught this — total still **38**, partition still
+                // **5/8/25** — so no producer was added or lost, and this change's added lines
+                // contain zero occurrences of the assembled needle.
+                // `scoped_library_search.rs:452` did NOT move, re-read and confirmed in place.
+                //
+                // C1 FIX ROUND (clippy `doc_lazy_continuation` on that same new sweep's doc):
+                // `:6852/:6929/:10167 ⇒ :6853/:6930/:10168`, a UNIFORM `+1`. LOCAL, not
+                // upstream, so the CI-vs-local diagnosis in the header does not apply. The whole
+                // cause is ONE blank `///` line added to `sweep_ownerless_post_replacement_strand`'s
+                // doc block, separating its two closing prose lines from the bullet list above
+                // them so they read as their own paragraph rather than as an unindented
+                // continuation of the last bullet. That doc block sits above all three producers
+                // and is `effects/mod.rs`'s only change this round, taking the whole-file delta
+                // against `76751548f` from the `+78/-0` measured above to `+79/-0`. A doc line
+                // cannot mint a prompt.
+                //
+                // Set preservation: this row's OWN failure output named all five entries, and
+                // only the three `effects/mod.rs` ones shifted — `scoped_library_search.rs:452`
+                // was reported unmoved, which a census that had gained or lost a producer could
+                // not do.
+                // The `engine.rs` entry is deliberately NOT offered as a second unmoved control.
+                // It did read `:12850` when this row failed, but the L1 entry below moves it to
+                // `:12852` in this same commit, so a future reader of the committed diff cannot
+                // reproduce the `:12850` reading at all. The two readings reconcile only as
+                // separate uncommitted sub-rounds — exactly the within-branch history the
+                // ADDITION-vs-relocation note above rules inadmissible. One reproducible control
+                // is worth more than two that need the branch's private history to agree.
+                // Identity re-established rather than assumed:
+                // each producer at its new coordinate is sha256-identical to
+                // `2264d4aa3:effects/mod.rs` at its old one (`9869a19f28c791ee`,
+                // `2bc316e3aa0297f8`, `8df98486627bfe15` — the SAME three prefixes the entry
+                // above records, so this is pure line movement).
+                //
+                // REBASE ONTO `b2071a7f41`, the PR base. The local base this change was
+                // authored on (`76751548f`) never reached the remote; its companion
+                // phase-boundary drain landed upstream as #7475 instead. The header's rule
+                // applies yet again: this branch carried `:6853/:6930/:10168` and main
+                // carries `:6923/:7000/:10238`; NEITHER is correct for the rebased tree, and
+                // neither was taken — it measures `:7002/:7079/:10317`.
+                //
+                // Predicted with the cumulative offset, which is what makes this a
+                // measurement rather than a fixup: main's `:6923/:7000/:10238` plus this
+                // branch's CUMULATIVE net insertion into `effects/mod.rs` — `git diff
+                // --numstat` against the rebase base reads `79 0`, the `+78` sweep relocation
+                // plus the `+1` doc-continuation blank, and every hunk sits above the first
+                // producer — gives `6923+79`/`7000+79`/`10238+79` =
+                // `:7002`/`:7079`/`:10317`, equal to the observation on all three.
+                //
+                // Set preservation, measured on BOTH sides rather than assumed: the census
+                // reads total **41**, partition **5/8/28**, identically at the rebase base and
+                // in the rebased tree. Additivity holding on every pin while the partition is
+                // unchanged is the evidence the rebase minted and displaced nothing — a rebase
+                // that had gained or lost a producer would break the additivity, not merely
+                // shift a coordinate. Note the totals themselves moved upstream since this
+                // change was authored (**38**, `5/8/25` ⇒ **41**, `5/8/28`); that drift is
+                // main's and is adjudicated in the asserts above, which this branch does not
+                // touch.
+                //
+                // Identity re-established, not assumed: `9869a19f28c791ee`,
+                // `2bc316e3aa0297f8`, `8df98486627bfe15` at the new coordinates — the same
+                // three digests this log has carried since the first merge.
+                "game/effects/mod.rs:7002".to_string(),
+                "game/effects/mod.rs:7079".to_string(),
+                "game/effects/mod.rs:10317".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
@@ -19288,7 +19512,68 @@ mod stage2_injector_tests {
                 //   `origin/main:crates/engine/src/game/engine.rs:12773`, and its offset from
                 //   `begin_pending_trigger_target_selection` (`:12662`) is STILL 134 — the
                 //   control that caught this row's one historical SILENT drift.
-                "game/engine.rs:12796".to_string(),
+                //   Mycoloth devour/drain freeze, measured at upstream `66b2cbf5a1`:
+                //   `:12796 ⇒ :12850`, `+54`, and this is the FIRST time this entry has moved
+                //   for a LOCAL reason. The cause is this change's other authorized edit in this
+                //   same file: the ownerless-strand recovery call at the ENTRY of
+                //   `apply_action_boundary_core`, inserted immediately before
+                //   `let boundary_snapshot = state.clone();` at `:1066`. `git diff --stat` on
+                //   this file is `+54/-0`, the insertion is a comment block plus exactly two
+                //   call lines, and it sits ~11.7k lines ABOVE this producer, so predicted
+                //   `12796+54` equals the observed coordinate exactly. The inserted code mints
+                //   NOTHING: it calls `effects::sweep_ownerless_post_replacement_strand` and
+                //   `GameState::remove_empty_active_post_replacement_frame`, which retire a
+                //   corrupt `Dispatching` drain and drop an emptied frame — no recipient is
+                //   created, so the census set is still exactly 5.
+                //   Identity re-established, not assumed, on BOTH controls this row uses: the
+                //   line at `:12850` is sha256-identical (`a6d7f2f9d1e15de5`) to
+                //   `66b2cbf5a1:crates/engine/src/game/engine.rs:12796`, and it is still the
+                //   announcement-time modal mint inside `begin_pending_trigger_target_selection`
+                //   that this row NAMES.
+                //   L1 FIX ROUND (the CR-citation correction on that same recovery call's doc):
+                //   `:12850 ⇒ :12852`, `+2`. LOCAL, not upstream. This file has FOUR hunks this
+                //   round, and only ONE is above this producer — `@@ -1086,2 +1086,4 @@`, which
+                //   replaces the wrong `CR 508.1` gloss on the declare-attackers turn-based
+                //   action with `CR 117.3a + CR 703.1` and costs two lines. Predicted `12850+2`
+                //   equals the observed coordinate exactly.
+                //   The other THREE all sit in this `stage2_injector_tests` module BELOW the
+                //   producer: the two census edits ~5.8k lines below it, and — the one an
+                //   earlier revision of this row miscounted away — THIS ENTRY ITSELF, ~6.5k
+                //   lines below it. That revision said "exactly three hunks" because it counted
+                //   the file before writing itself into it. A self-referential census must count
+                //   the hunk it is being written as.
+                //   Position is the whole load-bearing claim and position alone settles it:
+                //   everything below `:12852` cannot move `:12852`, so the miscount never
+                //   threatened the conclusion. Those three are deliberately NOT pinned by `@@`
+                //   coordinate or line count — each is self-referential, and any rewording of
+                //   this log falsifies such a pin by exactly the size of the edit, the same trap
+                //   recorded in the row above. A comment cannot mint a prompt, so the census set
+                //   is still exactly 5.
+                //   Identity re-established, not assumed, on BOTH controls this row uses: the
+                //   line at `:12852` is sha256-identical (`a6d7f2f9d1e15de5`, the SAME prefix
+                //   the entry above records) to `2264d4aa3:crates/engine/src/game/engine.rs:12850`,
+                //   and its offset from `begin_pending_trigger_target_selection` is STILL 134
+                //   (the function opens `:12716 ⇒ :12718`, moving by the same `+2`) — the
+                //   control that caught this row's one historical SILENT drift.
+                //
+                //   REBASE ONTO `b2071a7f41`. Same rule, same composition: main carries
+                //   `:12856`, this branch carried `:12852`, and the rebased tree measures
+                //   `:12912`. Predicted as `12856+56`. This file's diff against the rebase
+                //   base is `+211/-41`, but only ONE hunk (`old@1065`, `+56`) lies above this
+                //   producer — the entry hook described above, plus the doc-continuation
+                //   blank; the other two hunks (`old@18681`, `+90`; `old@19369`, `+24`) are
+                //   THIS census array's own prose, ~5.8k lines BELOW the pin, which is why the
+                //   file's net `+170` is the wrong figure to compose and `+56` is the right
+                //   one. Those two figures include the two entries you are reading: this log
+                //   grows inside the region it measures, so they were re-measured AFTER being
+                //   written rather than quoted from the pre-edit tree.
+                //   Identity re-established, not assumed, on BOTH controls: the line at
+                //   `:12912` is sha256-identical (`a6d7f2f9d1e15de5`) to the same producer at
+                //   main's `:12856`, and its offset from
+                //   `begin_pending_trigger_target_selection` is STILL 134 — the function opens
+                //   `:12722 ⇒ :12778`, moving by the same `+56` as the pin, so the control
+                //   that caught this row's one historical silent drift is intact.
+                "game/engine.rs:12912".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \

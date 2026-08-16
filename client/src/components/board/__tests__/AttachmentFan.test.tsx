@@ -20,7 +20,12 @@ import { AttachmentFan } from "../AttachmentFan.tsx";
 
 /**
  * `AttachmentFan` mode 2 — the fan as a reachability surface for an attached
- * permanent's OWN legal actions (plan §6.9). Rows V1–V9.
+ * permanent's OWN legal actions (plan §6.9). Rows V1–V12.
+ *
+ * Membership is NOT tested here beyond "the fan renders exactly what the engine
+ * published", because it is no longer this component's decision:
+ * `crates/engine/tests/integration/interaction_contract.rs` owns the subtree
+ * walk, its order and its both-direction validation.
  *
  * THE BUG THIS MODULE COVERS: with Kilo (401) enchanted by Freed from the Real
  * (408), the engine published `legalActionsByObject["408"] = [#0, #1]` and the
@@ -130,8 +135,9 @@ function seed(options: {
   freedAbilities?: unknown[];
   viewerInteraction?: ViewerInteraction | null;
 } = {}) {
+  const attachments = options.attachments ?? [FREED_ID];
   const gameState = makeState({
-    attachments: options.attachments,
+    attachments,
     freedAbilities: options.freedAbilities,
   });
   const waitingFor = options.waitingFor ?? gameState.waiting_for;
@@ -142,7 +148,11 @@ function seed(options: {
     waitingFor,
     legalActions: [],
     legalActionsByObject: options.legalActionsByObject ?? {},
-    viewerInteraction: options.viewerInteraction ?? null,
+    // Membership comes from the engine on every projection, prompt or not, so
+    // the default fixture publishes it with no pick attached. Passing `null`
+    // explicitly models a projection that never arrived.
+    viewerInteraction:
+      options.viewerInteraction === undefined ? projection(attachments) : options.viewerInteraction,
   });
   useUiStore.setState({ attachmentFanHostId: HOST_ID, pendingAbilityChoice: null });
   return render(<AttachmentFan />);
@@ -168,22 +178,39 @@ function isSelectable(name: string): boolean {
   return ringed;
 }
 
-function interactionOver(objectIds: number[]): ViewerInteraction {
+/**
+ * An engine-shaped projection for this fixture's host.
+ *
+ * `members` is what the engine publishes as attached — the whole subtree, in
+ * its order — and `published` the subset it ALSO published a one-step pick for.
+ * The two lists differ on purpose: the engine publishes a fan per direct host
+ * and only for a child with exactly one legal choice, so a member without a
+ * pick is the normal case, not an edge case.
+ */
+function projection(
+  members: number[],
+  options: { published?: number[]; canSubmit?: boolean } = {},
+): ViewerInteraction {
+  const published = options.published ?? [];
   const interactionId = "fan-interaction" as InteractionId;
   const choiceId = (objectId: number) => `fan-${objectId}` as InteractionChoiceId;
+  const submission = (objectId: number) => ({
+    interactionId,
+    response: { type: "choose" as const, data: { choiceId: choiceId(objectId) } },
+  });
   return {
     waitingForKind: { simultaneous: null, terminal: false, code: "choose" },
     authorizedSubmitters: [0],
-    canSubmit: true,
+    canSubmit: options.canSubmit ?? true,
     autoPassRecommended: false,
-    opportunities: [{
+    opportunities: published.length === 0 ? [] : [{
       interactionId,
       response: {
         type: "exactChoices",
         data: {
-          choices: objectIds.map((objectId) => ({
+          choices: published.map((objectId) => ({
             id: choiceId(objectId),
-            status: { type: "available" },
+            status: { type: "available" as const },
             surfaces: [],
           })),
         },
@@ -191,20 +218,23 @@ function interactionOver(objectIds: number[]): ViewerInteraction {
       surfaces: [],
       progress: { selected: 0, minimum: 1, maximum: 1, aggregate: null, confirmable: false },
     }],
-    attachmentFans: {
+    attachmentFans: published.length === 0 ? {} : {
       [HOST_ID]: {
         hostId: HOST_ID,
-        children: objectIds.map((objectId) => ({
+        children: published.map((objectId) => ({ objectId, submission: submission(objectId) })),
+      },
+    },
+    attachmentViews: {
+      [HOST_ID]: {
+        hostId: HOST_ID,
+        cards: members.map((objectId) => ({
           objectId,
-          submission: {
-            interactionId,
-            response: { type: "choose", data: { choiceId: choiceId(objectId) } },
-          },
+          submission: published.includes(objectId) ? submission(objectId) : null,
         })),
       },
     },
     availability: { type: "inputRequired" },
-  };
+  } as ViewerInteraction;
 }
 
 describe("AttachmentFan mode 2 — the permanent's own legal actions", () => {
@@ -349,7 +379,7 @@ describe("AttachmentFan mode 2 — the permanent's own legal actions", () => {
   it("still forwards the engine's own submission when an interaction owns the prompt", () => {
     seed({
       legalActionsByObject: {},
-      viewerInteraction: interactionOver([FREED_ID]),
+      viewerInteraction: projection([FREED_ID], { published: [FREED_ID] }),
     });
 
     fireEvent.click(fanCard("Freed from the Real"));
@@ -375,7 +405,7 @@ describe("AttachmentFan mode 2 — the permanent's own legal actions", () => {
   it("lets the engine interaction win when a prompt and a bucket are both live", () => {
     seed({
       legalActionsByObject: { [String(FREED_ID)]: [FREED_TAP, FREED_UNTAP] },
-      viewerInteraction: interactionOver([FREED_ID]),
+      viewerInteraction: projection([FREED_ID], { published: [FREED_ID] }),
     });
 
     fireEvent.click(fanCard("Freed from the Real"));
@@ -383,5 +413,53 @@ describe("AttachmentFan mode 2 — the permanent's own legal actions", () => {
     expect(dispatchInteraction).toHaveBeenCalledTimes(1);
     expect(dispatchAction).not.toHaveBeenCalled();
     expect(useUiStore.getState().pendingAbilityChoice).toBeNull();
+  });
+
+  // V10 — THE SECOND USER-VISIBLE BUG. The engine published a pick for the Boots
+  // and none for the Aura; both are still attached, so both are still in the fan.
+  // The old fan read the published list as its membership list and the Aura
+  // vanished from the only surface that shows attached cards.
+  //
+  // MEASURED (drop side): rebuilding `cardIds` from the published picks only
+  //   reports `AssertionError: expected null not to be null` on the Aura's card.
+  it("lists an attachment the engine published no pick for, beside one it did", () => {
+    seed({
+      attachments: [FREED_ID, BOOTS_ID],
+      viewerInteraction: projection([FREED_ID, BOOTS_ID], { published: [BOOTS_ID] }),
+    });
+
+    expect(fanCard("Freed from the Real")).not.toBeNull();
+    expect(isSelectable("Swiftfoot Boots")).toBe(true);
+    expect(isSelectable("Freed from the Real")).toBe(false);
+
+    fireEvent.click(fanCard("Swiftfoot Boots"));
+    expect(dispatchInteraction).toHaveBeenCalledTimes(1);
+  });
+
+  // V11 — a published pick the viewer may not submit is not offered. The click
+  // path already refused it (`canSubmit`), so lighting it up promised an action
+  // that could not happen.
+  //
+  // MEASURED (always side): dropping `canSubmit` from `selectable` flips the
+  //   first assert to `AssertionError: expected true to be false`.
+  it("offers nothing while the viewer may not submit", () => {
+    seed({
+      viewerInteraction: projection([FREED_ID], { published: [FREED_ID], canSubmit: false }),
+    });
+
+    expect(isSelectable("Freed from the Real")).toBe(false);
+    fireEvent.click(fanCard("Freed from the Real"));
+    expect(dispatchInteraction).not.toHaveBeenCalled();
+  });
+
+  // V12 — no projection, no fan. The membership authority is the engine's alone:
+  // with nothing published there is nothing to show, and the display must NOT
+  // fall back to walking `attachments` itself (CLAUDE.md: the frontend is a
+  // display layer). The host is attached-to in the fixture, so a fallback would
+  // be plainly visible here.
+  it("shows no fan at all when the engine published no membership", () => {
+    seed({ attachments: [FREED_ID, BOOTS_ID], viewerInteraction: null });
+
+    expect(document.querySelector("[data-attachment-fan]")).toBeNull();
   });
 });

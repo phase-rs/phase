@@ -116,6 +116,37 @@ pub enum BestowCost {
     NonMana(AbilityCost),
 }
 
+/// CR 702.119a-b: Emerge's mana cost and the permanent quality required for
+/// its sacrifice cost. Ordinary emerge sacrifices a creature; "emerge from
+/// [quality]" uses the printed permanent filter instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmergeCost {
+    pub mana_cost: ManaCost,
+    pub sacrifice_filter: TargetFilter,
+}
+
+impl EmergeCost {
+    pub fn creature(mana_cost: ManaCost) -> Self {
+        Self {
+            mana_cost,
+            sacrifice_filter: TargetFilter::Typed(TypedFilter::creature()),
+        }
+    }
+
+    pub fn from_quality(mana_cost: ManaCost, sacrifice_filter: TargetFilter) -> Self {
+        Self {
+            mana_cost,
+            sacrifice_filter,
+        }
+    }
+}
+
+impl Default for EmergeCost {
+    fn default() -> Self {
+        Self::creature(ManaCost::default())
+    }
+}
+
 /// CR 702.138a + CR 118.9 + CR 601.2f-h: Escape cost — an alternative cost paid
 /// to cast a card from the graveyard (CR 702.138a). Almost always a compound
 /// cost: a mana sub-cost plus "Exile N other cards from your graveyard". A few
@@ -756,9 +787,10 @@ pub enum Keyword {
     /// `CastingVariant::Miracle` with the miracle mana cost.
     Miracle(ManaCost),
     Dash(ManaCost),
-    /// CR 702.119a-c: Emerge is an alternative cost paid by sacrificing a
-    /// creature and reducing the emerge cost by that creature's mana value.
-    Emerge(ManaCost),
+    /// CR 702.119a-b: Emerge is an alternative cost paid by sacrificing the
+    /// specified permanent quality and reducing the emerge cost by that
+    /// permanent's mana value.
+    Emerge(EmergeCost),
     /// CR 702.138a: Escape — cast from graveyard for an alternative cost. The
     /// compound escape cost (mana sub-cost plus one or more exile sub-costs) is
     /// modeled by `EscapeCost` and split at runtime by
@@ -2371,7 +2403,12 @@ impl FromStr for Keyword {
                 "madness" => return Ok(Keyword::Madness(parse_keyword_mana_cost(p))),
                 "miracle" => return Ok(Keyword::Miracle(parse_keyword_mana_cost(p))),
                 "dash" => return Ok(Keyword::Dash(parse_keyword_mana_cost(p))),
-                "emerge" => return Ok(Keyword::Emerge(parse_keyword_mana_cost(p))),
+                // CR 702.119a: Bare Emerge defaults to sacrificing a creature.
+                "emerge" => {
+                    return Ok(Keyword::Emerge(EmergeCost::creature(
+                        parse_keyword_mana_cost(p),
+                    )))
+                }
                 "harmonize" => return Ok(Keyword::Harmonize(parse_keyword_mana_cost(p))),
                 "escape" => {
                     // CR 702.138a: MTGJSON's keywords array carries only the bare
@@ -3231,7 +3268,15 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Madness" => Ok(Keyword::Madness(mana(data)?)),
         "Miracle" => Ok(Keyword::Miracle(mana(data)?)),
         "Dash" => Ok(Keyword::Dash(mana(data)?)),
-        "Emerge" => Ok(Keyword::Emerge(mana(data)?)),
+        // CR 702.119a: Historic bare Emerge payloads use only the mana cost,
+        // which implies the ordinary creature sacrifice filter.
+        "Emerge" => match serde_json::from_value::<EmergeCost>(data.clone()) {
+            Ok(cost) => Ok(Keyword::Emerge(cost)),
+            Err(_) => Ok(Keyword::Emerge(EmergeCost::creature(mana(data)?))),
+        },
+        "EmergeFromQuality" => serde_json::from_value(data.clone())
+            .map(Keyword::Emerge)
+            .map_err(|error| format!("EmergeFromQuality: {error}")),
         "Harmonize" => Ok(Keyword::Harmonize(mana(data)?)),
         // CR 702.138a: MTGJSON provides bare "Escape" with no structured cost data.
         // Accept both legacy ManaCost format and new EscapeCost tagged format
@@ -4734,6 +4779,29 @@ mod tests {
                 },
             }
         );
+
+        let legacy_emerge: Keyword =
+            serde_json::from_str(r#"{"Emerge":{"type":"Cost","shards":["Blue"],"generic":3}}"#)
+                .expect("legacy Emerge mana payload deserializes");
+        assert_eq!(
+            legacy_emerge,
+            Keyword::Emerge(EmergeCost::creature(ManaCost::Cost {
+                shards: vec![crate::types::mana::ManaCostShard::Blue],
+                generic: 3,
+            }))
+        );
+
+        let legacy_quality_emerge: Keyword = serde_json::from_str(
+            r#"{"EmergeFromQuality":{"mana_cost":{"type":"Cost","shards":[],"generic":5},"sacrifice_filter":{"type":"Typed","type_filters":["Artifact"],"controller":null,"properties":[]}}}"#,
+        )
+        .expect("legacy EmergeFromQuality payload deserializes");
+        assert_eq!(
+            legacy_quality_emerge,
+            Keyword::Emerge(EmergeCost::from_quality(
+                ManaCost::generic(5),
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+            ))
+        );
     }
 
     #[test]
@@ -5153,7 +5221,10 @@ mod tests {
             Keyword::Madness(mc("{2}{R}")),
             Keyword::Miracle(mc("{2}{R}")),
             Keyword::Dash(mc("{2}{R}")),
-            Keyword::Emerge(mc("{2}{R}")),
+            Keyword::Emerge(EmergeCost::from_quality(
+                mc("{2}{R}"),
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+            )),
             Keyword::Escape(EscapeCost::NonMana(pay_life_cost())),
             Keyword::Harmonize(mc("{2}{R}")),
             Keyword::Evoke(EvokeCost::NonMana(pay_life_cost())),

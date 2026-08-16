@@ -641,10 +641,12 @@ pub(crate) fn parse_damage_not_removed_during_cleanup(
 /// block this creature." — a can't-be-blocked-by restriction whose blocker
 /// filter gates on a power threshold that may be DYNAMIC (Kraken of the Straits:
 /// "Creatures with power less than the number of Islands you control can't block
-/// this creature."). Sibling of `parse_source_power_block_restriction` (which
-/// fixes the threshold to `~'s power` and targets `creatures you control`); this
-/// arm accepts any `parse_target` power-comparison filter — including a dynamic
-/// `ObjectCount` threshold — and targets the source itself. Without it the
+/// this creature."). Sibling of the general "<subject> can't block <object>"
+/// production in `parse_subject_combat_rule_static`, which owns every FILTERED
+/// object but declines a self-referential one; this arm covers exactly that
+/// declined case. It accepts any `parse_target` power-comparison filter —
+/// including a dynamic `ObjectCount` threshold — and targets the source
+/// itself, keeping `affected` tight. Without it the
 /// subject-first "creatures with power … can't block this creature" wording
 /// mis-dispatches to a bare `CantBlock { SelfRef }` (source can't block), which
 /// is the inverse of the intended restriction.
@@ -2261,10 +2263,6 @@ pub(crate) fn parse_static_line_inner(
     // CR 702.122a / 702.171a / 702.184c: crew/saddle/station power-contribution
     // modifier (Reckoner Bankbuster, Giant Ox, Stoic Star-Captain).
     if let Some(def) = parse_crew_contribution_static(&text) {
-        return Some(def);
-    }
-
-    if let Some(def) = parse_source_power_block_restriction(&text) {
         return Some(def);
     }
 

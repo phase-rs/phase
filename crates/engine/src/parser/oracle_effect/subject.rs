@@ -4463,6 +4463,28 @@ fn try_parse_become_basic_land_type_modifications(
     })
 }
 
+/// CR 725.1 + CR 109.5: map the parsed subject of "`<subject>` become[s] the
+/// monarch" onto [`Effect::BecomeMonarch`]'s `target` axis.
+///
+/// - a TARGETED PLAYER subject keeps its own parsed filter (CR 115.1) — that is
+///   what makes `collect_target_slots` declare a target slot whose legality is
+///   the printed restriction, so "target OPPONENT becomes the monarch" cannot be
+///   answered with the controller's own seat
+/// - an untargeted subject is [`TargetFilter::Controller`], CR 109.5's "you".
+///   Deliberately permissive: this is the pre-axis behaviour for every
+///   already-shipping "you become the monarch" card, so a stricter
+///   `affected == Controller` test would regress them for no gain. `Controller`
+///   is a context ref, so it surfaces no target slot.
+/// - a targeted NON-player subject has no reading at all under CR 725.3 (only a
+///   player can hold the designation), so it declines and the caller emits an
+///   honest gap
+fn monarch_subject_target(application: &SubjectApplication) -> Option<TargetFilter> {
+    match &application.target {
+        Some(filter) => filter.is_player_scope().then(|| filter.clone()),
+        None => Some(TargetFilter::Controller),
+    }
+}
+
 fn build_become_clause(
     application: SubjectApplication,
     predicate: &str,
@@ -4478,7 +4500,20 @@ fn build_become_clause(
     let consumed = predicate_lower.len() - become_rest.len();
     let become_text = predicate[consumed..].trim();
     if become_text.eq_ignore_ascii_case("the monarch") {
-        return Some(super::parsed_clause(Effect::BecomeMonarch));
+        // CR 725.1 + CR 109.5: the designation's SUBJECT is the parsed subject
+        // phrase, not the ability's controller. Dropping it made every
+        // "target opponent becomes the monarch" card (M'Baku, Jabari Chieftain;
+        // Garland, Royal Kidnapper; Jared Carthalion, True Heir) crown its own
+        // controller — the exact player the clause was written to deny.
+        return Some(match monarch_subject_target(&application) {
+            Some(target) => super::parsed_clause(Effect::BecomeMonarch { target }),
+            // A subject the axis cannot express must stay a visible gap rather
+            // than silently default to the controller.
+            None => super::parsed_clause(Effect::unimplemented(
+                "become_monarch_subject",
+                predicate.trim(),
+            )),
+        });
     }
     // CR 611.2b: "Becomes" effects without explicit duration are permanent
     let duration = duration.or(Some(Duration::Permanent));

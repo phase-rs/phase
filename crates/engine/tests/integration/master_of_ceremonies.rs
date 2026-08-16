@@ -132,7 +132,11 @@ fn make_master_of_ceremonies_vote(controller: PlayerId, source_id: ObjectId) -> 
     build_resolved_from_def(&vote_def, source_id, controller)
 }
 
-fn make_threshold_vote(controller: PlayerId, source_id: ObjectId) -> ResolvedAbility {
+fn make_threshold_vote(
+    controller: PlayerId,
+    source_id: ObjectId,
+    tie_breaker: u8,
+) -> ResolvedAbility {
     let vote_def = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Vote {
@@ -141,13 +145,15 @@ fn make_threshold_vote(controller: PlayerId, source_id: ObjectId) -> ResolvedAbi
                 Box::new(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
                 Box::new(AbilityDefinition::new(
                     AbilityKind::Spell,
-                    Effect::BecomeMonarch,
+                    Effect::BecomeMonarch {
+                        target: TargetFilter::Controller,
+                    },
                 )),
             ],
             starting_with: ControllerRef::You,
             voter_scope: VoterScope::AllPlayers,
             tally_mode: VoteTally::TopVotes {
-                tie: TieResolution::Breaker(0),
+                tie: TieResolution::Breaker(tie_breaker),
             },
             subject: VoteSubject::Named,
             visibility: VoteVisibility::Open,
@@ -209,7 +215,7 @@ fn moc_per_choice_bodies_parse_into_distributed_chain() {
 fn threshold_vote_tie_breaker_survives_choose_option_path() {
     let mut state = GameState::new_two_player(77);
     let controller = state.players[0].id;
-    let ability = make_threshold_vote(controller, ObjectId(9100));
+    let ability = make_threshold_vote(controller, ObjectId(9100), 0);
     let mut events = Vec::new();
 
     resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
@@ -245,6 +251,35 @@ fn threshold_vote_tie_breaker_survives_choose_option_path() {
         state.monarch.is_none(),
         "threshold tie-breaker NoOp must win; per-vote fan-out would make the controller monarch"
     );
+}
+
+/// CR 701.38a + CR 725.1: the same production vote continuation executes the
+/// selected `BecomeMonarch { Controller }` payload when the guilty choice wins.
+#[test]
+fn threshold_vote_guilty_winner_makes_the_ability_controller_monarch() {
+    let mut state = GameState::new_two_player(78);
+    let controller = state.players[0].id;
+    let ability = make_threshold_vote(controller, ObjectId(9101), 1);
+    let mut events = Vec::new();
+
+    resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+    for choice in ["innocent", "guilty"] {
+        let voter = match &state.waiting_for {
+            WaitingFor::VoteChoice { player, .. } => *player,
+            other => panic!("expected VoteChoice, got {other:?}"),
+        };
+        apply(
+            &mut state,
+            voter,
+            GameAction::ChooseOption {
+                choice: choice.to_string(),
+            },
+        )
+        .expect("ChooseOption must resolve");
+    }
+
+    assert_eq!(state.monarch, Some(controller));
 }
 
 /// CR 800.4g: In a 2-player game, the controller does NOT vote. The
