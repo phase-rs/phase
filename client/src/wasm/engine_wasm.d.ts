@@ -429,11 +429,20 @@ export function restore_game_state(json_str: string): void;
  *
  * Differs from `restore_game_state` in two load-bearing ways:
  *
- * 1. **Fresh RNG seed.** `restore_game_state` re-seeds from the saved
- *    `rng_seed`, which rewinds the ChaCha20 stream to position 0 —
- *    correct for undo (replay from origin) but wrong for resume
- *    (subsequent draws would replay the pre-save sequence). This
- *    function stamps a fresh seed so continued play diverges.
+ * 1. **Fresh RNG seed.** `restore_game_state` re-seeds from the SAVED
+ *    `rng_seed` and fast-forwards to the saved `rng_word_pos`, so the
+ *    restored game continues the very stream the snapshot was taken on —
+ *    correct for undo, wrong for resume, where continued play must not
+ *    re-draw the values the pre-save timeline already committed to. This
+ *    function stamps a FRESH seed and resets `rng_word_pos` to 0 so the
+ *    resumed host diverges instead.
+ *
+ *    It does NOT rewind to position 0: that was true only before issue
+ *    #5466 taught the restore path to carry the offset, and it survives
+ *    today just for snapshots written back then, which carry
+ *    `rng_word_pos == 0`. Both the shared decode chokepoint
+ *    (`PersistedGameState::into_game_state`) and `restore_game_state`'s
+ *    own repeat call `rehydrate_rng`.
  * 2. **Atomic multiplayer-flag flip.** Sets `MULTIPLAYER_MODE` in the
  *    same call that loads state, so there's no window where a stray
  *    `restore_game_state` (undo) would be accepted on the resumed

@@ -206,6 +206,8 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::RespondToShortcut { .. }
         | WaitingFor::PrecastCopyShortcutOffer { .. }
         | WaitingFor::RespondToPrecastCopyShortcut { .. }
+        | WaitingFor::ResolveAllConsent { .. }
+        | WaitingFor::ResolveAllReady { .. }
         | WaitingFor::EntryControllerChoice { .. } => DecisionKind::ActivateAbility,
     }
 }

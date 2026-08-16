@@ -159,10 +159,11 @@ fn ready_consent_run(state: &GameState, requester: PlayerId) -> Option<&ResolveA
     let WaitingFor::ResolveAllReady { epoch } = &state.waiting_for else {
         return None;
     };
-    let run = state
-        .resolve_all_consent_run
-        .as_ref()
-        .filter(|run| run.epoch == *epoch && run.participants.iter().all(|p| p.granted))?;
+    let run = state.resolve_all_consent_run.as_ref().filter(|run| {
+        state.auto_pass.is_empty()
+            && run.epoch == *epoch
+            && run.participants.iter().all(|p| p.granted)
+    })?;
     (run.participants
         .iter()
         .any(|participant| participant.authorized_submitter == requester)
@@ -486,7 +487,7 @@ mod tests {
     use crate::types::actions::ResolveAllConsentDecision;
     use crate::types::card_type::{CardType, CoreType};
     use crate::types::format::FormatConfig;
-    use crate::types::game_state::{PublicStateDirty, StackEntry, StackEntryKind};
+    use crate::types::game_state::{AutoPassMode, PublicStateDirty, StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::ManaColor;
     use crate::types::phase::{Phase, PhaseStop, PhaseStopScope};
@@ -916,7 +917,13 @@ mod tests {
 
         let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
 
-        assert_eq!(result.items_resolved, 2);
+        assert_eq!(
+            result.items_resolved,
+            2,
+            "safe-prefix proof unexpectedly stopped: result={result:?}, waiting={:?}, stack_len={}",
+            state.waiting_for,
+            state.stack.len(),
+        );
         assert_eq!(state.stack.len(), 1, "unsafe item remains on the stack");
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         assert!(state.resolve_all_consent_run.is_none());
@@ -956,6 +963,23 @@ mod tests {
     fn changed_controller_invalidates_ready_consent_without_resolving() {
         let mut state = ready_state(vec![no_op_entry(1, PlayerId(0))]);
         state.turn_decision_controller = Some(PlayerId(1));
+        let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
+
+        assert_eq!(result.items_resolved, 0);
+        assert_eq!(state.stack.len(), 1);
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.resolve_all_consent_run.is_none());
+    }
+
+    #[test]
+    fn ready_consent_refuses_to_collapse_while_an_auto_pass_preference_is_active() {
+        let mut state = ready_state(vec![no_op_entry(1, PlayerId(0))]);
+        state.auto_pass.insert(
+            PlayerId(0),
+            AutoPassMode::UntilStackEmpty {
+                initial_stack_len: state.stack.len(),
+            },
+        );
 
         let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
 

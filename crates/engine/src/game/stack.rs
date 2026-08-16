@@ -2838,12 +2838,12 @@ pub fn resolve_next_with_limit(
                 }
             }
         }
-        if let Some(run_len) = fixed_opponent_lose_life_run_len(state) {
+        if let Some(run_len) = fixed_opponent_effect_run_len(state) {
             let run_len = run_len.min(max_consumed);
             if run_len >= 2 {
                 crate::game::perf_counters::record_stack_batch_candidate();
                 if let Some(consumed) =
-                    resolve_proven_fixed_opponent_lose_life_batch(state, events, run_len)
+                    resolve_proven_fixed_opponent_effect_batch(state, events, run_len)
                 {
                     return consumed;
                 }
@@ -3449,10 +3449,10 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         && parent_target_missing_reason.is_none()
 }
 
-/// CR 117.3b + CR 117.3d + CR 117.5 + CR 608.2 + CR 704.3 + CR 119.3: Fixed
-/// opponent life-loss class — shared inert proof; life-loss observer refusal
-/// is covered by the common event/settled checkpoint checks.
-fn resolve_proven_fixed_opponent_lose_life_batch(
+/// CR 117.3b + CR 117.3d + CR 117.5 + CR 608.2 + CR 704.3: Fixed opponent-
+/// scoped effect class — shared inert proof. Zone-change and life-change
+/// observers are covered by the common event/settled checkpoint checks.
+fn resolve_proven_fixed_opponent_effect_batch(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     run_len: u32,
@@ -3460,7 +3460,7 @@ fn resolve_proven_fixed_opponent_lose_life_batch(
     resolve_proven_inert_trigger_batch(state, events, run_len, None)
 }
 
-struct FixedOpponentLoseLifeRunKey<'a> {
+struct FixedOpponentEffectRunKey<'a> {
     controller: PlayerId,
     ability: &'a ResolvedAbility,
     condition: Option<&'a TriggerCondition>,
@@ -3468,17 +3468,17 @@ struct FixedOpponentLoseLifeRunKey<'a> {
 }
 
 /// CR 603.3b + CR 603.4 + CR 608.2: Length of the top contiguous run of
-/// identical triggered abilities that make each opponent lose a fixed amount
-/// of life. Equal intervening-if conditions are admitted because the shared
-/// clone proof rechecks every entry at resolution time before committing.
+/// identical triggered abilities that apply a fixed life-loss or mill effect
+/// to each opponent. Equal intervening-if conditions are admitted because the
+/// shared clone proof rechecks every entry at resolution time before committing.
 /// Source provenance is inert for this effect shape, so distinct sources can
 /// share one run when all resolution-relevant fields agree.
-fn fixed_opponent_lose_life_run_len(state: &GameState) -> Option<u32> {
+fn fixed_opponent_effect_run_len(state: &GameState) -> Option<u32> {
     let top = state.stack.back()?;
-    let top_key = fixed_opponent_lose_life_run_key(state, top)?;
+    let top_key = fixed_opponent_effect_run_key(state, top)?;
     let mut len = 1u32;
     for entry in state.stack.iter().rev().skip(1) {
-        match fixed_opponent_lose_life_run_key(state, entry) {
+        match fixed_opponent_effect_run_key(state, entry) {
             Some(key)
                 if key.controller == top_key.controller
                     && key.condition == top_key.condition
@@ -3496,10 +3496,10 @@ fn fixed_opponent_lose_life_run_len(state: &GameState) -> Option<u32> {
     Some(len)
 }
 
-fn fixed_opponent_lose_life_run_key<'a>(
+fn fixed_opponent_effect_run_key<'a>(
     state: &'a GameState,
     entry: &'a StackEntry,
-) -> Option<FixedOpponentLoseLifeRunKey<'a>> {
+) -> Option<FixedOpponentEffectRunKey<'a>> {
     let StackEntryKind::TriggeredAbility {
         source_id: _,
         ability,
@@ -3516,12 +3516,12 @@ fn fixed_opponent_lose_life_run_key<'a>(
     };
 
     if !flatten_targets_in_chain(ability).is_empty()
-        || !fixed_opponent_lose_life_ability_is_batch_candidate(ability)
+        || !fixed_opponent_effect_ability_is_batch_candidate(ability)
     {
         return None;
     }
 
-    Some(FixedOpponentLoseLifeRunKey {
+    Some(FixedOpponentEffectRunKey {
         controller: entry.controller,
         ability,
         condition: condition.as_ref(),
@@ -3529,7 +3529,7 @@ fn fixed_opponent_lose_life_run_key<'a>(
     })
 }
 
-fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
+fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
     let ResolvedAbility {
         effect,
         targets,
@@ -3589,15 +3589,19 @@ fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility
         parent_target_missing_reason,
     } = ability;
 
-    let fixed_opponent_lose_life = matches!(
+    let fixed_opponent_effect = matches!(
         effect,
         Effect::LoseLife {
             amount: QuantityExpr::Fixed { .. },
             target: None,
+        } | Effect::Mill {
+            count: QuantityExpr::Fixed { .. },
+            target: TargetFilter::Controller,
+            destination: Zone::Graveyard,
         }
     );
 
-    fixed_opponent_lose_life
+    fixed_opponent_effect
         && targets.is_empty()
         && scoped_player.is_none()
         && matches!(kind, AbilityKind::Spell | AbilityKind::Database)
@@ -4816,12 +4820,10 @@ mod tests {
             PlayerId(0),
         );
         lose_life.player_scope = Some(crate::types::ability::PlayerFilter::Opponent);
-        assert!(fixed_opponent_lose_life_ability_is_batch_candidate(
-            &lose_life
-        ));
+        assert!(fixed_opponent_effect_ability_is_batch_candidate(&lose_life));
         let mut divided_loss = lose_life.clone();
         divided_loss.distribute = Some(crate::types::game_state::DistributionUnit::Life);
-        assert!(!fixed_opponent_lose_life_ability_is_batch_candidate(
+        assert!(!fixed_opponent_effect_ability_is_batch_candidate(
             &divided_loss
         ));
     }
@@ -7494,7 +7496,7 @@ mod tests {
         // Driver internals under test (the stack module).
         use super::super::{
             batch_run_len, effects, fixed_controller_gain_life_run_len,
-            fixed_opponent_lose_life_run_len, observers_are_batch_safe,
+            fixed_opponent_effect_run_len, observers_are_batch_safe,
             priority_checkpoint_is_settled, resolve_next, resolve_next_with_limit, resolve_top,
             self_counter_run_len,
         };
@@ -7992,6 +7994,47 @@ mod tests {
             });
         }
 
+        fn fixed_opponent_mill_effect() -> Effect {
+            Effect::Mill {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                destination: Zone::Graveyard,
+            }
+        }
+
+        fn push_fixed_opponent_mill_trigger(
+            state: &mut GameState,
+            source: ObjectId,
+            trigger_event: GameEvent,
+        ) {
+            let entry_id = ObjectId(state.next_object_id);
+            state.next_object_id += 1;
+            let mut ability =
+                ResolvedAbility::new(fixed_opponent_mill_effect(), vec![], source, PlayerId(0));
+            ability.player_scope = Some(PlayerFilter::Opponent);
+            ability.description = Some("each opponent mills a card".to_string());
+            ability.ability_index = Some(0);
+            state.stack.push_back(StackEntry {
+                id: entry_id,
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: source,
+                    ability: Box::new(ability),
+                    condition: None,
+                    trigger_event: Some(trigger_event),
+                    description: Some(
+                        "Whenever another permanent enters, each opponent mills a card."
+                            .to_string(),
+                    ),
+                    source_name: state.objects[&source].name.clone(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            });
+        }
+
         fn life_event(player_id: PlayerId, amount: i32) -> GameEvent {
             GameEvent::LifeChanged { player_id, amount }
         }
@@ -8349,7 +8392,7 @@ mod tests {
             );
 
             assert_eq!(
-                fixed_opponent_lose_life_run_len(&state),
+                fixed_opponent_effect_run_len(&state),
                 Some(3),
                 "fixed opponent life loss should ignore inert source provenance"
             );
@@ -8428,7 +8471,7 @@ mod tests {
             );
 
             assert_eq!(
-                fixed_opponent_lose_life_run_len(&state),
+                fixed_opponent_effect_run_len(&state),
                 Some(2),
                 "a distinct intervening-if must end the contiguous batch"
             );
@@ -8479,6 +8522,99 @@ mod tests {
             assert_eq!(
                 consumed, 1,
                 "life-lost observers must force single-entry fallback"
+            );
+            assert_eq!(
+                crate::game::perf_counters::snapshot().stack_batched_entries,
+                0
+            );
+        }
+
+        #[test]
+        fn fixed_opponent_mill_triggers_batch() {
+            crate::game::perf_counters::reset();
+            let mut state = setup();
+            let source = add_self_counter_source(&mut state, "Altar of the Brood");
+            let milled_cards: Vec<_> = (0..3)
+                .map(|index| {
+                    create_object(
+                        &mut state,
+                        CardId(9_700 + index),
+                        PlayerId(1),
+                        format!("Library Card {index}"),
+                        Zone::Library,
+                    )
+                })
+                .collect();
+            let trigger_event = life_event(PlayerId(0), 0);
+            for _ in 0..3 {
+                push_fixed_opponent_mill_trigger(&mut state, source, trigger_event.clone());
+            }
+
+            assert_eq!(
+                fixed_opponent_effect_run_len(&state),
+                Some(3),
+                "identical Altar of the Brood triggers should form one inert run"
+            );
+
+            let mut events = Vec::new();
+            let consumed = resolve_next(&mut state, &mut events);
+
+            assert_eq!(consumed, 3);
+            assert!(state.stack.is_empty());
+            assert!(milled_cards
+                .iter()
+                .all(|id| state.objects[id].zone == Zone::Graveyard));
+            assert_eq!(
+                crate::game::perf_counters::snapshot().stack_batched_entries,
+                3
+            );
+        }
+
+        #[test]
+        fn fixed_opponent_mill_batch_refuses_when_mill_observer_fires() {
+            crate::game::perf_counters::reset();
+            let mut state = setup();
+            let source = add_self_counter_source(&mut state, "Altar of the Brood");
+            let observer = create_object(
+                &mut state,
+                CardId(9_701),
+                PlayerId(0),
+                "Mill Watcher".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&observer).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .origin(Zone::Library)
+                    .destination(Zone::Graveyard)
+                    .execute(AbilityDefinition::new(
+                        crate::types::ability::AbilityKind::Database,
+                        Effect::NoOp,
+                    ));
+                Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger.clone());
+                obj.trigger_definitions.push(trigger);
+            }
+            crate::types::game_state::TriggerIndex::rebuild_from_battlefield(&mut state);
+            for index in 0..2 {
+                create_object(
+                    &mut state,
+                    CardId(9_710 + index),
+                    PlayerId(1),
+                    format!("Library Card {index}"),
+                    Zone::Library,
+                );
+            }
+            let trigger_event = life_event(PlayerId(0), 0);
+            push_fixed_opponent_mill_trigger(&mut state, source, trigger_event.clone());
+            push_fixed_opponent_mill_trigger(&mut state, source, trigger_event);
+
+            let mut events = Vec::new();
+            let consumed = resolve_next(&mut state, &mut events);
+
+            assert_eq!(
+                consumed, 1,
+                "a library-to-graveyard observer must preserve the per-entry priority checkpoint"
             );
             assert_eq!(
                 crate::game::perf_counters::snapshot().stack_batched_entries,

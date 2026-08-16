@@ -414,6 +414,13 @@ export function createAIController(config: AIControllerConfig): AIController {
           void dispatchResolveAll(proposal.actor, config.seats);
         }
         if (!isAttemptCurrent(attempt)) return;
+        if (
+          proposal.action.type === "RespondResolveAllConsent" &&
+          proposal.action.data.decision.type === "Grant" &&
+          useGameStore.getState().gameState?.waiting_for?.type === "ResolveAllReady"
+        ) {
+          void dispatchResolveAll(playerId, config.seats);
+        }
         // The proposal boundary returns a tagged stale result without mutating
         // the store. That is a normal race, not a failed AI decision: leave
         // the counters untouched and let the final scheduler re-query the

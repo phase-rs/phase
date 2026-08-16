@@ -3579,7 +3579,7 @@ fn semantic_candidate_actions_with_probe(
     // for broad-only callers, so composing both here would expose every
     // Grant, Decline, and Revoke choice twice.
     if !matches!(
-        &state.waiting_for,
+        state.waiting_for,
         WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. }
     ) {
         actions.extend(candidate_actions_broad_with_probe(state, probe));
@@ -3614,12 +3614,11 @@ fn authorize_candidate_actors(state: &GameState, actions: &mut [CandidateAction]
                 WaitingFor::ResolveAllConsent {
                     epoch: active_epoch,
                     representative,
-                } if *epoch == *active_epoch => {
-                    Some(crate::game::turn_control::authorized_submitter_for_player(
-                        state,
-                        *representative,
-                    ))
-                }
+                } if *epoch == *active_epoch => state
+                    .resolve_all_consent_run
+                    .as_ref()
+                    .filter(|run| run.epoch == *active_epoch)
+                    .and_then(|run| run.authorized_submitter_for(*representative)),
                 _ => None,
             },
             GameAction::RevokeResolveAllConsent {

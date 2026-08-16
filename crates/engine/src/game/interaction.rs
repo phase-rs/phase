@@ -3598,6 +3598,8 @@ fn selection_projection(
             source_id: Some(*source_id),
         }),
         WaitingFor::Priority { .. }
+        | WaitingFor::ResolveAllConsent { .. }
+        | WaitingFor::ResolveAllReady { .. }
         | WaitingFor::MeldPairChoice { .. }
         | WaitingFor::MeldAttackTargetChoice { .. }
         | WaitingFor::EntryAttackTargetChoice { .. }

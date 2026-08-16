@@ -76,7 +76,8 @@ use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use super::zones;
 
 pub use super::engine_resolve_batch::{
-    resolve_all_fast_forward, ResolveAllCallbackDecision, ResolveAllFastForwardResult,
+    resolve_all_fast_forward, resolve_all_ready_prefix, ResolveAllCallbackDecision,
+    ResolveAllFastForwardResult,
 };
 
 #[derive(Debug, Clone, Error)]
@@ -7689,26 +7690,34 @@ fn respond_resolve_all_consent(
                 "Resolve All consent response is no longer pending".to_string(),
             ));
         }
-        match decision {
-            ResolveAllConsentDecision::Grant => {
-                let participant = run
-                    .participants
-                    .iter_mut()
-                    .find(|participant| participant.representative == representative)
-                    .expect("pending Resolve All representative must be a participant");
-                participant.granted = true;
-            }
-            ResolveAllConsentDecision::Decline => {}
+        if matches!(decision, ResolveAllConsentDecision::Grant) {
+            let participant = run
+                .participants
+                .iter_mut()
+                .find(|participant| participant.representative == representative)
+                .expect("pending Resolve All representative must be a participant");
+            participant.granted = true;
         }
     }
-    match decision {
-        ResolveAllConsentDecision::Decline => restore_resolve_all_priority_snapshot(state),
-        ResolveAllConsentDecision::Grant => {
-            resolve_all_consent_waiting_for(state).ok_or_else(|| {
-                EngineError::InvalidAction("Resolve All consent is not active".to_string())
-            })
-        }
+    if matches!(decision, ResolveAllConsentDecision::Decline) {
+        return restore_resolve_all_priority_snapshot(state);
     }
+    let waiting_for = resolve_all_consent_waiting_for(state).ok_or_else(|| {
+        EngineError::InvalidAction("Resolve All consent is not active".to_string())
+    })?;
+    // ResolveAllReady has no current actor, so the ordinary waiting-state sync
+    // deliberately leaves `priority_player` alone. Restore the saved priority
+    // cursor now; the Ready consumer validates this exact snapshot before it
+    // begins its first materialized CR 117.4 pass cycle.
+    if matches!(waiting_for, WaitingFor::ResolveAllReady { .. }) {
+        state.priority_player = state
+            .resolve_all_consent_run
+            .as_ref()
+            .expect("an active consent run produced ResolveAllReady")
+            .priority_snapshot
+            .priority_player;
+    }
+    Ok(waiting_for)
 }
 
 fn revoke_resolve_all_consent(

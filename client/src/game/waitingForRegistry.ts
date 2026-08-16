@@ -33,8 +33,11 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
   new Set<WaitingFor["type"]>([
     // Active priority — passes via PassButton / mana payment / cast.
     "Priority",
-    // ResolveAllConsentModal presents the engine-issued Grant/Decline prompt.
+    // Resolve All's explicit standing-pass authorization. The consent modal
+    // gathers each representative's response; its final Grant consumes Ready
+    // through the engine adapter before ordinary priority resumes.
     "ResolveAllConsent",
+    "ResolveAllReady",
     // CR 701.42 / CR 508.4: meld pair and attacking-entry destination dialogs.
     "MeldPairChoice",
     "MeldAttackTargetChoice",
