@@ -19,7 +19,8 @@ use crate::types::game_state::{
     PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingMultiDraw,
     PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice, PendingRepeatIteration,
     PendingRepeatUntil, PendingSpellResolution, PendingVoteBallotIteration, PostReplacementDrain,
-    PostReplacementDrainStack, ResidentDrainPolicy, ResolvingTriggerContext, WaitingFor,
+    PostReplacementDrainDispatch, PostReplacementDrainStack, PostReplacementFrameId,
+    ResidentDrainPolicy, ResolvingTriggerContext, WaitingFor,
 };
 use crate::types::identifiers::{DiscardFrameId, ObjectId};
 use crate::types::player::PlayerId;
@@ -448,6 +449,71 @@ pub struct ResolutionStack {
     /// rewinds, so a stale replacement event cannot bind to a later discard.
     #[serde(default)]
     next_discard_frame_id: u64,
+    /// The LAST post-replacement frame id allocated in this stack — named for
+    /// what it holds, not for the next value, because the two sibling
+    /// allocators above are *next* allocators and conflating the conventions is
+    /// what makes an off-by-one in `validate` look correct.
+    ///
+    /// Monotonic WITHIN AN ACTION, so a stale captured id cannot alias a later
+    /// frame. It is NOT monotonic across actions: every failure path in
+    /// `engine::apply_action_boundary_core` restores the whole state with
+    /// `*state = boundary_snapshot`, which rewinds this counter along with the
+    /// `frames` it numbered.
+    ///
+    /// The two sibling allocators above are NOT exempt from that rewind. All
+    /// three are fields of this one `ResolutionStack`, `GameState` holds exactly
+    /// one of those as `resolution_stack`, and `*state = boundary_snapshot` is a
+    /// wholesale `GameState` assignment — so all three rewind identically. The
+    /// siblings' flat "never rewinds" wording is scoped the same way this field's
+    /// is, to within an action, and has simply not been corrected yet. Do not
+    /// read it onto this field as though it stated a contrast, and do not take it
+    /// as license to make this counter survive a rollback.
+    ///
+    /// The rewind is safe precisely BECAUSE it is not selective: a handle is
+    /// unserialized and dies inside its synchronous dispatch, so every id this
+    /// counter issued during the rolled-back action was already dead by the time
+    /// the action failed, and the frames those ids named are rolled back in the
+    /// same assignment. Reissuing a rolled-back id can therefore only ever
+    /// re-number a frame that no live handle refers to. An allocator that
+    /// survived the rollback while its frames did not would be the actual
+    /// hazard, and is what this note exists to stop a future reader from
+    /// "fixing" the field into.
+    ///
+    /// Allocation is pre-increment, so the first id in any stack is 1 and
+    /// 0 is never a live id — but correctness does not rest on that: an
+    /// unstamped frame is `None`, and no handle can carry `None`.
+    #[serde(default)]
+    last_post_replacement_frame_id: u64,
+}
+
+/// A dispatch handle bound to the identity of the frame that issued it.
+///
+/// [`PostReplacementDrainDispatch`] addresses an entry WITHIN a drain stack;
+/// this pairs it with the [`PostReplacementFrameId`] of the frame that drain
+/// stack belongs to, so the dispatcher's cleanup can find that frame wherever it
+/// has since moved to (CR 616.1g nesting, continuation inserts). Both fields are
+/// private and neither is serialized: the pair must not outlive its synchronous
+/// dispatch, and persisting it would legitimise exactly the cross-round-trip
+/// `Dispatching` status this fix exists to forbid.
+///
+/// Construction is confined to this module — there is deliberately no public
+/// constructor and no `dispatch()` accessor. Note that in-module code, INCLUDING
+/// this file's `#[cfg(test)] mod`, can still write a struct literal; unit rows
+/// must nonetheless obtain every handle from
+/// [`ResolutionStack::begin_active_post_replacement_dispatch`], because a
+/// hand-built literal bypasses the stamp and the allocator commit and would go
+/// green for the wrong reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdentifiedPostReplacementDispatch {
+    frame: PostReplacementFrameId,
+    dispatch: PostReplacementDrainDispatch,
+}
+
+impl IdentifiedPostReplacementDispatch {
+    /// The identity of the frame this dispatch belongs to.
+    pub(crate) fn frame(self) -> PostReplacementFrameId {
+        self.frame
+    }
 }
 
 impl ResolutionStack {
@@ -484,6 +550,14 @@ impl ResolutionStack {
 
     pub(crate) fn restore_next_discard_frame_id(&mut self, next_frame_id: u64) {
         self.next_discard_frame_id = next_frame_id;
+    }
+
+    pub(crate) fn last_post_replacement_frame_id(&self) -> u64 {
+        self.last_post_replacement_frame_id
+    }
+
+    pub(crate) fn restore_last_post_replacement_frame_id(&mut self, last_frame_id: u64) {
+        self.last_post_replacement_frame_id = last_frame_id;
     }
 
     /// Starts one discard operation and returns its unique provenance id.
@@ -535,6 +609,30 @@ impl ResolutionStack {
             .max();
         if let Some(next_frame_id) = next_frame_id {
             self.next_discard_frame_id = self.next_discard_frame_id.max(next_frame_id);
+        }
+    }
+
+    /// Raise the post-replacement allocator above every id the restored frames
+    /// already carry, so the next mint cannot collide with a persisted frame and
+    /// so [`Self::validate`] accepts a payload whose outer allocator field was
+    /// absent.
+    ///
+    /// That is its ONLY job, stated exactly. It does not provide the `>= 1`
+    /// floor — allocation is pre-increment, so a fresh stack yields 1 without
+    /// any recovery — and it does not provide uniqueness against unstamped
+    /// frames, which are `None` and unaddressable by type.
+    fn recover_post_replacement_frame_id_allocator(&mut self) {
+        let last_frame_id = self
+            .frames
+            .iter()
+            .filter_map(|frame| match frame {
+                ResolutionFrame::PostReplacement(drains) => drains.frame_id().map(|id| id.0),
+                _ => None,
+            })
+            .max();
+        if let Some(last_frame_id) = last_frame_id {
+            self.last_post_replacement_frame_id =
+                self.last_post_replacement_frame_id.max(last_frame_id);
         }
     }
 
@@ -2293,6 +2391,174 @@ impl ResolutionStack {
         .then_some(parent_index)
     }
 
+    /// CR 614.12a + CR 616.1g: take the active frame's resident continuation and
+    /// bind the dispatch to that frame's stable identity.
+    ///
+    /// Ordering here is load-bearing:
+    ///
+    ///  * the frame index is resolved through the EXISTING private
+    ///    [`Self::active_post_replacement_parent_index`], which keeps its
+    ///    documented "no general frame search" contract and remains the
+    ///    mint-time authority — identity addressing is added for the CLEANUP,
+    ///    which is the only side that can be reached after the frame has moved;
+    ///  * `begin_dispatch()` runs BEFORE any stamping, so a declined dispatch
+    ///    (a `Dispatching` or `Paused` resident) consumes no id;
+    ///  * the id is bound to the frame at most once, by `stamp_frame_id`, so a
+    ///    nested same-frame dispatch reuses it and the outer handle stays valid;
+    ///  * the allocator is committed only when the candidate was the id actually
+    ///    taken, so no id is ever burned.
+    ///
+    /// The resulting id is strictly greater than every id already allocated in
+    /// this stack and therefore names exactly one frame — on a fresh game, with
+    /// no restore and no recovery pass. Legacy and unstamped frames are `None`
+    /// and are unaddressable by type.
+    pub(crate) fn begin_active_post_replacement_dispatch(
+        &mut self,
+    ) -> Option<(
+        crate::types::ability::PostReplacementContinuation,
+        IdentifiedPostReplacementDispatch,
+    )> {
+        let index = self.active_post_replacement_parent_index()?;
+        let candidate =
+            PostReplacementFrameId(self.last_post_replacement_frame_id.saturating_add(1));
+        let Some(ResolutionFrame::PostReplacement(drains)) = self.frames.get_mut(index) else {
+            unreachable!("checked post-replacement parent must match")
+        };
+        let (continuation, dispatch) = drains.begin_dispatch()?;
+        let frame = drains.stamp_frame_id(candidate);
+        // Commit the allocation only if this frame actually took the candidate. A
+        // nested same-frame dispatch (CR 616.1g) reuses the existing id and leaves
+        // the allocator untouched, and a declined `begin_dispatch` returns above
+        // without touching it either, so no id is ever burned. The equality test is
+        // exact rather than heuristic: every stamped id in this stack is
+        // <= `last_post_replacement_frame_id` (enforced by `validate` and by this
+        // rule), so a pre-existing id can never equal `last + 1`.
+        if frame == candidate {
+            self.last_post_replacement_frame_id = candidate.0;
+        }
+        Some((
+            continuation,
+            IdentifiedPostReplacementDispatch { frame, dispatch },
+        ))
+    }
+
+    /// Identity-addressed frame lookup.
+    ///
+    /// This does not violate this module's "no general frame search" rule: that
+    /// prohibition is on POSITIONAL or adjacency-inferred searches that guess a
+    /// structural relationship. This is the opposite — an identity-addressed
+    /// lookup, licensed and precedented by `DrawSequenceFrameId`'s own doc,
+    /// which exists for exactly this reason. Unstamped frames carry `None` and
+    /// can never match.
+    fn post_replacement_frame_index(&self, id: PostReplacementFrameId) -> Option<usize> {
+        self.frames.iter().position(|frame| {
+            matches!(frame, ResolutionFrame::PostReplacement(drains) if drains.frame_id() == Some(id))
+        })
+    }
+
+    /// Report a lookup that found no frame. The frame was consumed by
+    /// `GameState::abandon_active_replacement_tails`, so the operation is a
+    /// correct no-op — reported rather than silent.
+    ///
+    /// That is the ONLY consuming path named here because it is the only one
+    /// reachable during a live dispatch. `take_active_post_replacement` is this
+    /// module's shared primitive, not itself such a path: of its three callers,
+    /// `effects::resume_resolution_frames` reaches it only after
+    /// `apply_pending_post_replacement_effect` has returned, and
+    /// `GameState::remove_empty_active_post_replacement_frame` is gated on
+    /// `PostReplacementDrainStack::is_empty`, which counts the still-resident
+    /// `Dispatching` entry and so cannot be true of a live frame. The third is
+    /// `abandon_active_replacement_tails` itself, which is why the body below
+    /// names it alone.
+    ///
+    /// Reported by `warn!` ALONE, deliberately. This is NOT a proven-impossible
+    /// state, so a `debug_assert!(false)` here would panic every dev and test
+    /// build on a path that may be legitimate. Only the dispatcher's own live
+    /// handle can reach this (a handle is unserialized and dies inside its
+    /// synchronous dispatch), so entering it requires the frame to be consumed
+    /// DURING that dispatch — and the consuming path is not guarded against
+    /// that: `GameState::abandon_active_replacement_tails` pops the top
+    /// `PostReplacement` frame unconditionally, with no
+    /// `engine_replacement::post_replacement_dispatch_is_live` check of the kind
+    /// `effects::sweep_ownerless_post_replacement_strand` carries, and player
+    /// elimination (CR 800.4a) reaches it synchronously from a continuation's
+    /// own ability chain through `effects::win_lose` (CR 104.2b + CR 104.3e).
+    /// What is unsettled is only whether the `state.pending_replacement`
+    /// is-some gate on both `elimination.rs` call sites can still hold at that
+    /// instant. No test in the suite covers the path either way, so its absence
+    /// from a green run is not evidence of unreachability.
+    ///
+    /// The predecessor returned `None` here silently, so asserting would be a
+    /// newly minted panic rather than a preserved invariant. `warn!` is also
+    /// what survives the shipped WASM release profile, which is where this
+    /// class of bug lives.
+    fn report_missing_post_replacement_frame(dispatch: IdentifiedPostReplacementDispatch) {
+        tracing::warn!(
+            frame = dispatch.frame().0,
+            "post-replacement dispatch addressed a frame that is no longer on the resolution stack"
+        );
+    }
+
+    /// Whether `dispatch` still owns the resident top of its OWN frame.
+    pub(crate) fn post_replacement_dispatch_is_resident_top(
+        &self,
+        dispatch: IdentifiedPostReplacementDispatch,
+    ) -> bool {
+        let Some(index) = self.post_replacement_frame_index(dispatch.frame) else {
+            Self::report_missing_post_replacement_frame(dispatch);
+            return false;
+        };
+        match self.frames.get(index) {
+            Some(ResolutionFrame::PostReplacement(drains)) => {
+                drains.dispatch_is_resident_top(dispatch.dispatch)
+            }
+            Some(_) | None => unreachable!("checked post-replacement frame must match"),
+        }
+    }
+
+    /// Park `dispatch`'s exact entry within its own frame.
+    pub(crate) fn pause_post_replacement_dispatch(
+        &mut self,
+        dispatch: IdentifiedPostReplacementDispatch,
+    ) -> bool {
+        let Some(index) = self.post_replacement_frame_index(dispatch.frame) else {
+            Self::report_missing_post_replacement_frame(dispatch);
+            return false;
+        };
+        match self.frames.get_mut(index) {
+            Some(ResolutionFrame::PostReplacement(drains)) => {
+                drains.pause_dispatch(dispatch.dispatch)
+            }
+            Some(_) | None => unreachable!("checked post-replacement frame must match"),
+        }
+    }
+
+    /// Retire `dispatch`'s exact entry within its own frame.
+    ///
+    /// PURE delegation: it removes no frame. Folding frame removal in here would
+    /// silently narrow the shipped `GameState::remove_empty_active_post_replacement_frame`
+    /// from "any empty `PostReplacement` frame that is now the stack top" to
+    /// "the frame this dispatch addressed", which is a second, unrelated
+    /// behavioural delta. A buried empty frame is deliberately left in place —
+    /// removing a frame from under a live child reorders the stack — and is
+    /// removed by the existing `is_empty` block in the priority-boundary sweeper
+    /// once its children pop and it becomes the top.
+    pub(crate) fn finish_post_replacement_dispatch(
+        &mut self,
+        dispatch: IdentifiedPostReplacementDispatch,
+    ) -> Option<PostReplacementDrain> {
+        let Some(index) = self.post_replacement_frame_index(dispatch.frame) else {
+            Self::report_missing_post_replacement_frame(dispatch);
+            return None;
+        };
+        match self.frames.get_mut(index) {
+            Some(ResolutionFrame::PostReplacement(drains)) => {
+                drains.finish_dispatch(dispatch.dispatch)
+            }
+            Some(_) | None => unreachable!("checked post-replacement frame must match"),
+        }
+    }
+
     /// Returns the active ChangeZone frame, or its exact immediate parent
     /// while a post-replacement child raised by that zone change is active.
     /// This is the one Devour snapshot relationship that survives a paused
@@ -2644,6 +2910,7 @@ impl ResolutionStack {
         }
         let has_multi_draw = multi_draw_count == 1;
         let mut discard_ids = HashSet::new();
+        let mut post_replacement_ids = HashSet::new();
         let mut direct_choice_count = 0;
         let mut buried_direct_choice = None;
         for (index, frame) in self.frames.iter().enumerate() {
@@ -2684,6 +2951,32 @@ impl ResolutionStack {
                     });
                 }
             }
+            if let ResolutionFrame::PostReplacement(drains) = frame {
+                // An unstamped frame is legal in any number: legacy payloads,
+                // freshly minted sibling frames and journal-replayed frames all
+                // carry `None`, and `None` can never alias a handle's `Some(id)`.
+                if let Some(id) = drains.frame_id() {
+                    if !post_replacement_ids.insert(id) {
+                        return Err(ResolutionStackError::InvalidPayload {
+                            frame: FrameKind::PostReplacement,
+                            message: "duplicate post-replacement frame id".to_string(),
+                        });
+                    }
+                    // `>`, NOT `>=`. The Discard and MultiDraw blocks compare
+                    // `>=` because theirs are NEXT allocators whose valid range
+                    // is `0..next`; this is a LAST-allocated allocator whose
+                    // valid range is `1..=last`, so `>=` would reject every
+                    // legal payload — including the one this stack just wrote.
+                    if id.0 > self.last_post_replacement_frame_id {
+                        return Err(ResolutionStackError::InvalidPayload {
+                            frame: FrameKind::PostReplacement,
+                            message:
+                                "the resolution-stack post-replacement allocator is behind its active frame"
+                                    .to_string(),
+                        });
+                    }
+                }
+            }
             if has_multi_draw
                 && matches!(
                     frame,
@@ -2701,9 +2994,53 @@ impl ResolutionStack {
                             "a paused post-replacement drain has no immediate multi-draw child",
                         ))?;
                 validate_shipped_post_replacement_draw_pair(frame, child)?;
-                if index + 2 != self.frames.len() {
+                // CR 614.11a + CR 121.6b: when a replacement replaces a draw
+                // inside a draw sequence, ALL actions the replacement requires
+                // are completed before the sequence resumes. If one of those
+                // actions is a player's choice, the game necessarily rests on
+                // that choice with the draw sequence still parked beneath it —
+                // so the paired child is NOT always the stack top.
+                //
+                // For a SINGLE-card draw — which is what the shipped Zur's
+                // Weirding rows drive (`DebugAction::DrawCards { count: 1 }`) —
+                // the ordering basis is CR 614.6 + CR 608.2c: the draw never
+                // happens and a modified event occurs instead, whose
+                // instructions are followed in the order written, so the "may
+                // pay 2 life" offer is carried out before the bin-or-draw tail.
+                // CR 614.11a covers the multi-draw sequence this same arm also
+                // guards (CR 121.2: a multi-card draw is that many individual
+                // card draws).
+                //
+                // The one frame that may sit above it is the frame that owns
+                // that choice: `FrameGate::DirectChoice(_)`, the prompt-owning
+                // family. No separate citation is carried here: the CR 614.11a /
+                // CR 614.6 / CR 608.2c basis stated one paragraph above is what
+                // makes a mid-application choice ordinary and is the whole
+                // authority for this admission.
+                //
+                // The admission is bounded four ways, three of them by rules
+                // this function already enforces: exactly one frame may sit
+                // above the pair (checked here); it must be a direct-prompt
+                // owner (checked here); it must be the ONLY direct-choice owner
+                // (`MultipleDirectChoiceOwners`, below); and its gate must match
+                // the live `waiting_for` (`PromptMismatch`, below) — so the
+                // admitted shape cannot exist at a resting state, only while a
+                // player is being asked something. Every `FrameGate::AfterChild`
+                // frame is still rejected, which is the shape this guard was
+                // written to catch: the draw's own later instruction parked
+                // ABOVE the draw instead of outside the pair, where
+                // `insert_ability_continuation_outside_active_post_replacement_draw`
+                // puts it (CR 608.2c: instructions run in the order written).
+                let paired_child_is_reachable = match self.frames.get(index + 2) {
+                    None => true,
+                    Some(above) => {
+                        matches!(above.gate(), FrameGate::DirectChoice(_))
+                            && index + 3 == self.frames.len()
+                    }
+                };
+                if !paired_child_is_reachable {
                     return Err(ResolutionStackError::InvalidAdjacentPair(
-                        "a paired multi-draw child is not the active stack top",
+                        "a paired multi-draw child is buried below frames other than the active direct-choice owner",
                     ));
                 }
             }
@@ -3053,6 +3390,7 @@ impl ResolutionStateWire {
                     .map_err(|error| error.to_string())?;
                 frames.recover_draw_sequence_allocator();
                 frames.recover_discard_allocator();
+                frames.recover_post_replacement_frame_id_allocator();
 
                 let mut state_value = value;
                 let state_object = state_value.as_object_mut().expect("checked JSON object");
@@ -3731,6 +4069,14 @@ pub(crate) fn canonicalize_legacy_resolution_state(
     frames
         .restore_next_draw_sequence_frame_id(state.resolution_stack.next_draw_sequence_frame_id());
     frames.restore_next_discard_frame_id(state.resolution_stack.next_discard_frame_id());
+    // Threaded for the same reason as the two above: this function is both the
+    // WRITER's canonicalization (`ResolutionStateWire::to_value`) and the
+    // right-hand side of the v2 identity gate, and `ResolutionStack` derives
+    // `PartialEq`. Without this, every save in which a post-replacement dispatch
+    // ever occurred fails that gate on load.
+    frames.restore_last_post_replacement_frame_id(
+        state.resolution_stack.last_post_replacement_frame_id(),
+    );
 
     for frame in state.resolution_stack.iter() {
         if !frame.is_runtime_stack_resident() {
@@ -3756,6 +4102,14 @@ fn project_frames_into_legacy_state(
     projected
         .resolution_stack
         .restore_next_discard_frame_id(frames.next_discard_frame_id());
+    // The left-hand side of the v2 identity gate. `state` is materialized from a
+    // value with `resolution_frames` removed and `resolution_stack` forbidden,
+    // so its allocator is `Default` (0); without this restore the projection's
+    // allocator stays 0 while `frames` carries N, and the derived `PartialEq`
+    // comparison rejects the payload.
+    projected
+        .resolution_stack
+        .restore_last_post_replacement_frame_id(frames.last_post_replacement_frame_id());
     for frame in frames.iter() {
         match frame {
             ResolutionFrame::AbilityContinuation(frame) => {
@@ -5133,6 +5487,99 @@ mod tests {
         ));
     }
 
+    /// **U3-a — discriminating(U3).** CR 614.11a + CR 121.6b: a replaced draw
+    /// inside a draw sequence completes every action the replacement requires
+    /// before the sequence resumes. When one of those actions is a player's
+    /// choice, the game rests on that choice with the draw sequence still parked
+    /// beneath it — so the paired multi-draw child legitimately sits one below the
+    /// stack top while the frame that owns the live prompt sits on it.
+    ///
+    /// The paired negative is the shipped
+    /// `validation_rejects_a_paused_drain_pair_buried_below_another_frame`, which
+    /// buries the same pair below an `AbilityContinuation` (a
+    /// `FrameGate::AfterChild` frame) and must stay red — that is the shape this
+    /// guard exists to catch: the draw's own later instruction parked ABOVE the
+    /// draw instead of outside the pair.
+    #[test]
+    fn validation_admits_the_live_direct_choice_owner_above_a_paused_drain_pair() {
+        let optional_effect_frame = || {
+            ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+                ability: Box::new(resolved_draw(81)),
+                trigger_event: None,
+                trigger_events: Vec::new(),
+                trigger_match_count: None,
+            })
+        };
+        let opponent_may = WaitingFor::OpponentMayChoice {
+            player: PlayerId(1),
+            source_id: ObjectId(81),
+            description: None,
+            remaining: Vec::new(),
+        };
+
+        // (1) ACCEPT: the prompt owner directly above the paired child.
+        let mut admitted = ResolutionStack::default();
+        admitted
+            .install_adjacent_post_replacement_draw(
+                paused_post_replacement_frame(),
+                active_multi_draw_frame(),
+            )
+            .expect("pair installs");
+        admitted
+            .validate(&opponent_may)
+            .expect("reach-guard: the bare pair is well formed before anything is stacked on it");
+        admitted.push_inner(optional_effect_frame());
+        admitted
+            .validate(&opponent_may)
+            .expect("the live direct-choice owner may sit above the paused pair");
+
+        // (2) The admitted shape is bound to the LIVE prompt: at a resting
+        // `Priority` the same stack is still rejected, by `PromptMismatch`.
+        assert!(matches!(
+            admitted.validate(&WaitingFor::Priority {
+                player: PlayerId(0)
+            }),
+            Err(ResolutionStackError::PromptMismatch { .. })
+        ));
+
+        // (3) Exactly ONE frame is admitted, and only a direct-choice one. Both
+        // two-frame burials stay rejected, in either order.
+        let mut continuation_then_prompt = ResolutionStack::default();
+        continuation_then_prompt
+            .install_adjacent_post_replacement_draw(
+                paused_post_replacement_frame(),
+                active_multi_draw_frame(),
+            )
+            .expect("pair installs");
+        continuation_then_prompt.push_inner(continuation_frame(9));
+        continuation_then_prompt.push_inner(optional_effect_frame());
+        assert!(matches!(
+            continuation_then_prompt.validate(&opponent_may),
+            Err(ResolutionStackError::InvalidAdjacentPair(_))
+        ));
+
+        let mut prompt_then_continuation = ResolutionStack::default();
+        prompt_then_continuation
+            .install_adjacent_post_replacement_draw(
+                paused_post_replacement_frame(),
+                active_multi_draw_frame(),
+            )
+            .expect("pair installs");
+        prompt_then_continuation.push_inner(optional_effect_frame());
+        prompt_then_continuation.push_inner(continuation_frame(9));
+        assert!(matches!(
+            prompt_then_continuation.validate(&opponent_may),
+            Err(ResolutionStackError::InvalidAdjacentPair(_))
+        ));
+
+        // (4) The admitted shape also survives the v2 wire gate, which runs
+        // `canonicalize` + `validate` on BOTH the write and the read side.
+        let mut state = GameState::new_two_player(81);
+        state.waiting_for = opponent_may.clone();
+        serde_json::from_value::<ResolutionStateWire>(v2_fixture_with_frames(state, admitted))
+            .expect("the admitted arrangement round-trips through the v2 wire gate");
+    }
+
     #[test]
     fn validation_keeps_an_independent_paused_drain_without_a_draw_frame() {
         let mut stack = ResolutionStack::default();
@@ -5780,6 +6227,451 @@ mod tests {
         assert!(
             serde_json::from_value::<ResolutionStateWire>(duplicate_wire).is_err(),
             "a wire payload with duplicate discard frame ids must be rejected"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Identity-addressed post-replacement dispatch rows.
+    //
+    // HANDLE-PROVENANCE RULE, and it is load-bearing: these rows live inside the
+    // module that defines `IdentifiedPostReplacementDispatch`, so they COULD
+    // write a struct literal. They must not. Every handle below comes from
+    // `begin_active_post_replacement_dispatch`, because a hand-built literal
+    // bypasses the stamp and the allocator commit and would make the row green
+    // for the wrong reason under exactly the mutations it exists to catch.
+    // -----------------------------------------------------------------------
+
+    fn ready_post_replacement_frame() -> PostReplacementDrainStack {
+        let mut drains = PostReplacementDrainStack::default();
+        assert!(
+            drains.install(
+                PostReplacementDrain::ready(PostReplacementContinuation::Resolved(Box::new(
+                    resolved_draw(81)
+                ))),
+                ResidentDrainPolicy::KeepResident,
+            ),
+            "the fixture's ready drain installs"
+        );
+        drains
+    }
+
+    fn frame_id_at(stack: &ResolutionStack, index: usize) -> Option<PostReplacementFrameId> {
+        match stack.iter().nth(index) {
+            Some(ResolutionFrame::PostReplacement(drains)) => drains.frame_id(),
+            other => panic!("expected a post-replacement frame at {index}, got {other:?}"),
+        }
+    }
+
+    fn drain_count_at(stack: &ResolutionStack, index: usize) -> usize {
+        match stack.iter().nth(index) {
+            Some(ResolutionFrame::PostReplacement(drains)) => serde_json::to_value(drains)
+                .expect("a drain stack serializes")["drains"]
+                .as_array()
+                .map_or(0, Vec::len),
+            other => panic!("expected a post-replacement frame at {index}, got {other:?}"),
+        }
+    }
+
+    /// **G1 — discriminating(U2).** CR 616.1g: a live dispatch survives a
+    /// parent-of-active insert that slides a frame in ABOVE its own frame.
+    ///
+    /// This is the one shipped insert that genuinely defeats the two-deep
+    /// positional accessor. The `PostReplacement` frame's absolute index never
+    /// changes — it stays 0 throughout; what changes is its distance from the
+    /// top, from 1 to 2. Production route:
+    /// `effects::append_to_pending_continuation` / `prepend_to_pending_continuation`
+    /// branch 3 and `effects::counters`'s counter-additions insert →
+    /// `GameState::insert_ability_continuation_parent_of_active` /
+    /// `insert_counter_additions_parent_of_active` →
+    /// `ResolvedFrameTransition::InsertParentOfActive` →
+    /// `ResolutionStack::insert_parent_of_active`. The child frames here are
+    /// `AbilityContinuation` helpers while branch 3's production children are its
+    /// own gated kinds; the accessor's geometry is frame-kind-agnostic (it
+    /// `matches!`es only `PostReplacement` at both probes), so the child kind is
+    /// immaterial and this is a stack-primitive unit row.
+    ///
+    /// Revert-failing assertion: `finish_post_replacement_dispatch(handle)`
+    /// returns `Some`. Resolved positionally the lookup returns `None` — the row
+    /// itself asserts that, at step 5 — so the call removes nothing and the entry
+    /// stays `Dispatching`.
+    #[test]
+    fn g1_a_parent_of_active_insert_does_not_detach_a_live_dispatch() {
+        let mut stack = ResolutionStack::default();
+        assert_eq!(
+            stack.last_post_replacement_frame_id(),
+            0,
+            "a fresh stack has allocated nothing"
+        );
+
+        stack.push_post_replacement(ready_post_replacement_frame());
+        let (_, handle) = stack
+            .begin_active_post_replacement_dispatch()
+            .expect("ready drain begins dispatching");
+        assert_eq!(
+            frame_id_at(&stack, 0),
+            Some(PostReplacementFrameId(1)),
+            "pre-increment allocation gives the first frame id 1, with no recovery pass"
+        );
+        assert_eq!(stack.last_post_replacement_frame_id(), 1);
+
+        stack.push_inner(continuation_frame(1));
+        // Positive reach-guard: the POSITIONAL accessor still resolves here, so
+        // the row is not passing merely because positional addressing was
+        // already broken before the insert.
+        assert_eq!(
+            stack.active_post_replacement_parent_index(),
+            Some(0),
+            "reach-guard: distance from the top is 1 before the insert"
+        );
+
+        let frames_before = stack.len();
+        stack
+            .insert_parent_of_active(continuation_frame(2))
+            .expect("active child accepts an immediate parent");
+
+        // The three-part "distance changed while the absolute index did not"
+        // claim, asserted at the exact function a positional cleanup restores.
+        assert_eq!(stack.len(), frames_before + 1, "the insert added a frame");
+        assert_eq!(
+            frame_id_at(&stack, 0),
+            Some(PostReplacementFrameId(1)),
+            "the PostReplacement frame's ABSOLUTE index is still 0"
+        );
+        assert_eq!(
+            stack.active_post_replacement_parent_index(),
+            None,
+            "reach-guard: the frame has left the two-deep positional window"
+        );
+
+        let retired = stack.finish_post_replacement_dispatch(handle);
+        assert!(
+            retired.is_some(),
+            "CR 616.1g: the dispatch retires its exact entry wherever its frame now sits"
+        );
+        assert_eq!(
+            drain_count_at(&stack, 0),
+            0,
+            "the entry was removed from the ORIGINAL frame at index 0"
+        );
+        assert_eq!(
+            stack.len(),
+            frames_before + 1,
+            "a buried empty frame is left in place — removing it would reorder the stack"
+        );
+    }
+
+    /// **G2 — discriminating(U2).** On a FRESH stack that never restored, an
+    /// outer dispatch never resolves to a sibling `PostReplacement` frame.
+    ///
+    /// This is the Outcome-B aliasing shape: while an outer frame is buried,
+    /// `GameState::install_post_replacement_drain`'s accessor misses and mints a
+    /// SIBLING frame above it. Burying `F1` at least two deep first is what makes
+    /// production take that new-frame branch at all, and it is what makes a
+    /// positional cleanup resolve the outer handle to `F2`.
+    ///
+    /// Revert-failing assertion: the outer finish removes `F1`'s entry while
+    /// `F2`'s `Ready` drain is untouched. Resolved positionally the lookup lands
+    /// on `F2`, whose slot is `Ready` — and `finish_dispatch` removes only a
+    /// `Dispatching` slot — so it returns `None`, removes nothing, and `F1`'s
+    /// entry survives `Dispatching`.
+    #[test]
+    fn g2_an_outer_dispatch_never_aliases_a_sibling_post_replacement_frame() {
+        let mut stack = ResolutionStack::default();
+        assert_eq!(
+            stack.last_post_replacement_frame_id(),
+            0,
+            "no recovery pass ran: this is a fresh stack"
+        );
+
+        stack.push_post_replacement(ready_post_replacement_frame());
+        let (_, handle_outer) = stack
+            .begin_active_post_replacement_dispatch()
+            .expect("F1's ready drain begins dispatching");
+        assert_eq!(frame_id_at(&stack, 0), Some(PostReplacementFrameId(1)));
+        assert_eq!(stack.last_post_replacement_frame_id(), 1);
+
+        stack.push_inner(continuation_frame(1));
+        stack.push_inner(continuation_frame(2));
+        assert_eq!(
+            stack.active_post_replacement_parent_index(),
+            None,
+            "reach-guard: F1 is buried, which is the precondition under which \
+             install_post_replacement_drain mints a sibling in production"
+        );
+
+        // The new-frame branch's non-MultiDraw arm.
+        stack.push_post_replacement(ready_post_replacement_frame());
+        let sibling_index = stack.len() - 1;
+        assert_eq!(
+            frame_id_at(&stack, sibling_index),
+            None,
+            "a freshly minted sibling frame is unstamped and unaddressable by type"
+        );
+
+        let retired = stack.finish_post_replacement_dispatch(handle_outer);
+        assert!(
+            retired.is_some(),
+            "the outer dispatch retires ITS OWN entry, not the sibling's"
+        );
+        assert_eq!(drain_count_at(&stack, 0), 0, "F1's entry is gone");
+        assert_eq!(
+            drain_count_at(&stack, sibling_index),
+            1,
+            "F2's Ready drain is untouched"
+        );
+
+        let (_, handle_sibling) = stack
+            .begin_active_post_replacement_dispatch()
+            .expect("F2's ready drain begins dispatching");
+        assert_eq!(
+            handle_sibling.frame(),
+            PostReplacementFrameId(2),
+            "the sibling takes the NEXT id, distinct from F1's"
+        );
+    }
+
+    /// **H6(a) — legacy half.** Restored id-less `PostReplacement` frames read
+    /// `None`, the allocator stays 0, and the first mint yields `Some(1)` from
+    /// the PRE-INCREMENT — not from the recovery pass.
+    ///
+    /// Precondition: the TOP restored frame must hold a `Ready` drain, or
+    /// `begin_dispatch` declines and the "first mint yields 1" assertion is
+    /// vacuous.
+    #[test]
+    fn h6a_legacy_id_less_post_replacement_frames_restore_unstamped() {
+        let mut frames = ResolutionStack::default();
+        frames.push_post_replacement(PostReplacementDrainStack::default());
+        frames.push_post_replacement(ready_post_replacement_frame());
+
+        let wire = v2_fixture_with_frames(GameState::new_two_player(142), frames);
+        let mut restored = serde_json::from_value::<ResolutionStateWire>(wire)
+            .expect("a legacy id-less v2 payload decodes")
+            .into_game_state();
+
+        assert_eq!(restored.resolution_stack.len(), 2, "both frames restored");
+        assert_eq!(frame_id_at(&restored.resolution_stack, 0), None);
+        assert_eq!(frame_id_at(&restored.resolution_stack, 1), None);
+        assert_eq!(
+            restored.resolution_stack.last_post_replacement_frame_id(),
+            0,
+            "no persisted id means nothing for the recovery pass to raise"
+        );
+
+        let (_, handle) = restored
+            .resolution_stack
+            .begin_active_post_replacement_dispatch()
+            .expect("the top restored frame holds a Ready drain");
+        assert_eq!(handle.frame(), PostReplacementFrameId(1));
+        assert_eq!(
+            frame_id_at(&restored.resolution_stack, 1),
+            Some(PostReplacementFrameId(1)),
+            "the id landed on the TOP frame specifically"
+        );
+        assert_eq!(frame_id_at(&restored.resolution_stack, 0), None);
+    }
+
+    /// **H6(b) — recovery half.** A payload whose frames carry ids 4 and 7 with
+    /// the outer allocator absent decodes, and the allocator is raised to 7 so
+    /// the next mint cannot reuse a persisted id.
+    ///
+    /// The mint-yields-8 claim cannot be asserted against the restored frames
+    /// themselves: both their residents are `Paused`, so `begin_dispatch`
+    /// declines, and an already-stamped frame would return its own id WITHOUT
+    /// committing the allocator. So a fresh unstamped `Ready` frame is pushed and
+    /// the mint runs against that.
+    #[test]
+    fn h6b_the_v2_reader_recovers_the_post_replacement_allocator() {
+        let mut frames = ResolutionStack::default();
+        for id in [4u64, 7] {
+            let ResolutionFrame::PostReplacement(mut drains) = paused_post_replacement_frame()
+            else {
+                unreachable!("helper constructs a post-replacement frame")
+            };
+            assert_eq!(
+                drains.stamp_frame_id(PostReplacementFrameId(id)),
+                PostReplacementFrameId(id)
+            );
+            frames.push_post_replacement(drains);
+        }
+        // `stamp_frame_id` deliberately does not touch the allocator, which is
+        // exactly the payload this half needs — stamped frames, allocator 0.
+        assert_eq!(frames.last_post_replacement_frame_id(), 0);
+
+        let wire = v2_fixture_with_frames(GameState::new_two_player(143), frames);
+        let mut restored = serde_json::from_value::<ResolutionStateWire>(wire)
+            .expect("a stamped payload with an absent outer allocator decodes")
+            .into_game_state();
+        assert_eq!(
+            restored.resolution_stack.last_post_replacement_frame_id(),
+            7,
+            "the recovery pass raises the allocator to the maximum persisted id"
+        );
+        assert_eq!(
+            frame_id_at(&restored.resolution_stack, 0),
+            Some(PostReplacementFrameId(4))
+        );
+        assert_eq!(
+            frame_id_at(&restored.resolution_stack, 1),
+            Some(PostReplacementFrameId(7))
+        );
+
+        restored
+            .resolution_stack
+            .push_post_replacement(ready_post_replacement_frame());
+        let (_, handle) = restored
+            .resolution_stack
+            .begin_active_post_replacement_dispatch()
+            .expect("the fresh unstamped frame holds a Ready drain");
+        assert_eq!(
+            handle.frame(),
+            PostReplacementFrameId(8),
+            "the recovered allocator cannot reuse a persisted id"
+        );
+        assert_eq!(
+            restored.resolution_stack.last_post_replacement_frame_id(),
+            8
+        );
+    }
+
+    /// **H6(c) — validate half.** Duplicate ids are rejected; any number of
+    /// unstamped frames is legal; a stamped payload whose MAXIMUM id equals
+    /// the allocator is accepted — that assertion is what pins the
+    /// comparison as `>` rather than `>=`, because this allocator holds the LAST
+    /// id allocated, not the next — and a stamped id ABOVE the allocator is
+    /// rejected, which is the branch's own negative case and the only half that
+    /// fails if the comparison is deleted outright rather than merely loosened.
+    ///
+    /// Rejection expectations are matched by SUBSTRING: `InvalidPayload` Displays
+    /// as `"invalid embedded {frame:?} frame: {message}"`.
+    #[test]
+    fn h6c_validate_rejects_duplicate_post_replacement_ids_and_admits_legal_ones() {
+        let mut duplicates = ResolutionStack::default();
+        for _ in 0..2 {
+            let ResolutionFrame::PostReplacement(mut drains) = paused_post_replacement_frame()
+            else {
+                unreachable!("helper constructs a post-replacement frame")
+            };
+            drains.stamp_frame_id(PostReplacementFrameId(4));
+            duplicates.push_post_replacement(drains);
+        }
+        let wire = v2_fixture_with_frames(GameState::new_two_player(144), duplicates);
+        let error = serde_json::from_value::<ResolutionStateWire>(wire)
+            .expect_err("a payload with duplicate post-replacement frame ids is rejected")
+            .to_string();
+        assert!(
+            error.contains("duplicate post-replacement frame id"),
+            "unexpected rejection message: {error}"
+        );
+
+        let mut unstamped = ResolutionStack::default();
+        for _ in 0..3 {
+            unstamped.push_post_replacement(PostReplacementDrainStack::default());
+        }
+        let wire = v2_fixture_with_frames(GameState::new_two_player(145), unstamped);
+        assert!(
+            serde_json::from_value::<ResolutionStateWire>(wire).is_ok(),
+            "any number of unstamped frames is legal — that is the carve-out"
+        );
+
+        let mut at_the_allocator = ResolutionStack::default();
+        let ResolutionFrame::PostReplacement(mut drains) = paused_post_replacement_frame() else {
+            unreachable!("helper constructs a post-replacement frame")
+        };
+        drains.stamp_frame_id(PostReplacementFrameId(1));
+        at_the_allocator.push_post_replacement(drains);
+        at_the_allocator.restore_last_post_replacement_frame_id(1);
+        let wire = v2_fixture_with_frames(GameState::new_two_player(146), at_the_allocator);
+        assert!(
+            serde_json::from_value::<ResolutionStateWire>(wire).is_ok(),
+            "a LAST-allocated allocator's valid range is 1..=last: id == allocator is legal"
+        );
+
+        // The rejection half of that same `>`: a stamped id ABOVE the allocator.
+        //
+        // Driven at `validate` DIRECTLY, and that is not a shortcut — it is the
+        // only place the branch is reachable. Through the v2 READ path it is
+        // dead: `recover_post_replacement_frame_id_allocator` runs FIRST and
+        // raises the allocator to the maximum persisted id, so no decoded
+        // payload can present this shape. `validate` is still called with no
+        // such recovery in front of it by the runtime invariant check
+        // (`debug_assert_runtime_resolution_invariants`, after a restore and
+        // after every public action) and by the v2 WRITE side
+        // (`ResolutionStateWire::to_value`), which is what this exercises.
+        //
+        // Constructed identically to `at_the_allocator` above except that the
+        // allocator sits one BELOW the stamped id, so a failure here can only be
+        // this branch and not some unrelated structural check.
+        let mut behind_the_allocator = ResolutionStack::default();
+        let ResolutionFrame::PostReplacement(mut drains) = paused_post_replacement_frame() else {
+            unreachable!("helper constructs a post-replacement frame")
+        };
+        drains.stamp_frame_id(PostReplacementFrameId(1));
+        behind_the_allocator.push_post_replacement(drains);
+        behind_the_allocator.restore_last_post_replacement_frame_id(0);
+        let state = GameState::new_two_player(149);
+        let error = behind_the_allocator
+            .validate(&state.waiting_for)
+            .expect_err("a stamped id above the allocator is rejected")
+            .to_string();
+        assert!(
+            error.contains(
+                "the resolution-stack post-replacement allocator is behind its active frame"
+            ),
+            "unexpected rejection message: {error}"
+        );
+    }
+
+    /// **H6(d) — round-trip half.** The allocator survives the real v2 write →
+    /// read → identity-gate round trip.
+    ///
+    /// Deliberately goes through the WRITE side (`to_value` → `canonicalize` →
+    /// `validate`) rather than through `v2_fixture_with_frames`, because the
+    /// writer is half of what the round-trip threading breaks.
+    #[test]
+    fn h6d_the_post_replacement_allocator_survives_the_v2_round_trip() {
+        let mut state = GameState::new_two_player(147);
+        state
+            .resolution_stack
+            .push_post_replacement(ready_post_replacement_frame());
+        let (_, handle) = state
+            .resolution_stack
+            .begin_active_post_replacement_dispatch()
+            .expect("ready drain begins dispatching");
+        assert!(state
+            .resolution_stack
+            .pause_post_replacement_dispatch(handle));
+
+        // NON-VACUITY CONTROL. Without a NONZERO allocator and a STAMPED frame,
+        // this row round-trips cleanly even with the threading removed — a 0/0
+        // comparison passes the identity gate. It also catches the construction
+        // error of building the frame with a bare `drains.begin_dispatch()`,
+        // which does not stamp.
+        assert_eq!(
+            state.resolution_stack.last_post_replacement_frame_id(),
+            1,
+            "non-vacuity: the allocator must be nonzero before serializing"
+        );
+        assert_eq!(
+            frame_id_at(&state.resolution_stack, 0),
+            Some(PostReplacementFrameId(1)),
+            "non-vacuity: the frame must be stamped before serializing"
+        );
+
+        let v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+            .expect("stamped v2 fixture serializes");
+        let restored = serde_json::from_value::<ResolutionStateWire>(v2)
+            .expect("stamped v2 payload decodes")
+            .into_game_state();
+
+        assert_eq!(
+            restored.resolution_stack.last_post_replacement_frame_id(),
+            1,
+            "the allocator crossed the wire and both sides of the identity gate"
+        );
+        assert_eq!(
+            frame_id_at(&restored.resolution_stack, 0),
+            Some(PostReplacementFrameId(1)),
+            "the frame kept its identity across the round trip"
         );
     }
 

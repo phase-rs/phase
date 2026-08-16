@@ -2502,6 +2502,59 @@ pub(super) fn apply_post_replacement_effect(
     }
 }
 
+thread_local! {
+    /// Set while a post-replacement dispatch is live on THIS thread's call
+    /// stack. Deliberately not `GameState`: liveness describes the call stack,
+    /// not the game, and serializing it would make the very `Dispatching`
+    /// status this module forbids look legitimate across a round trip. Mirrors
+    /// `game::engine::IN_SIMULATION_PROBE`, whose doc records the properties
+    /// this relies on: engine game logic is single-threaded (no rayon /
+    /// par_iter / std::thread::spawn in the apply or legal_actions path),
+    /// `apply()` is fully synchronous, and the tokio server runs each apply
+    /// synchronously within one task on one thread.
+    ///
+    /// KNOWN RESIDUAL: the WASM release profile is `panic = 'abort'`
+    /// (Cargo.toml), so `Drop` does not run on a panic. A panic inside a
+    /// dispatch therefore leaves this set, and the priority-boundary sweep is
+    /// suppressed for the life of that module instance. The suppression is
+    /// reported by a `tracing::warn!` at the sweep site so the condition is
+    /// observable on the native build rather than silent. Native
+    /// (`server-release`) and every test build are `panic = 'unwind'` and are
+    /// unaffected. An unconditional reset at the `apply()` boundary was
+    /// rejected: `apply()` is re-entrant via `SimulationFilter`'s
+    /// clone-and-apply probe, so an ungated reset would clear a live outer
+    /// dispatch's flag inside the probe.
+    static POST_REPLACEMENT_DISPATCH_LIVE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// RAII: sets the flag, restores the PREVIOUS value on drop — nesting-correct,
+/// so the CR 616.1g nested same-frame dispatch (Jace/Swans) keeps it set for
+/// the outer dispatch after the inner one returns.
+#[must_use]
+struct LiveDispatchGuard(bool);
+
+impl LiveDispatchGuard {
+    fn enter() -> Self {
+        LiveDispatchGuard(POST_REPLACEMENT_DISPATCH_LIVE.with(|flag| flag.replace(true)))
+    }
+}
+
+impl Drop for LiveDispatchGuard {
+    fn drop(&mut self) {
+        POST_REPLACEMENT_DISPATCH_LIVE.with(|flag| flag.set(self.0));
+    }
+}
+
+/// True while any `apply_pending_post_replacement_effect` dispatch is between
+/// its `begin_dispatch` and its cleanup on this thread. The priority-boundary
+/// sweeper consults this before retiring a `Dispatching` resident: when it is
+/// false, "ownerless" is a definition rather than an inference, at any frame
+/// depth and at any drain depth.
+pub(crate) fn post_replacement_dispatch_is_live() -> bool {
+    POST_REPLACEMENT_DISPATCH_LIVE.with(std::cell::Cell::get)
+}
+
 pub(crate) fn apply_pending_post_replacement_effect(
     state: &mut GameState,
     object_id: Option<ObjectId>,
@@ -2537,9 +2590,14 @@ pub(crate) fn apply_pending_post_replacement_effect(
         .map(|drain| std::mem::take(&mut drain.applied))
         .unwrap_or_default();
 
-    let (continuation, dispatch) = state
-        .active_post_replacement_drains_mut()?
-        .begin_dispatch()?;
+    let (continuation, dispatch) = state.begin_post_replacement_dispatch()?;
+    // CR 603.3b + CR 608.2c: this dispatch is now live on this thread's call
+    // stack. Constructed AFTER the mint so the `?` early-return path never
+    // enters it, and dropped by RAII at every exit — the
+    // `capture_deferred_entry_events_if_mid_entry_choice` tail, every `?`, and
+    // (on unwind profiles) a panic. While it is held, the priority-boundary
+    // sweeper must not treat a `Dispatching` resident as ownerless.
+    let _live_dispatch = LiveDispatchGuard::enter();
     let waiting_for = match continuation {
         PostReplacementContinuation::Resolved(resolved) => {
             apply_post_replacement_resolved_effect(state, &resolved, replacement_applied, events)
@@ -2554,21 +2612,42 @@ pub(crate) fn apply_pending_post_replacement_effect(
             events,
         ),
     };
-    // CR 615.5: a direct pause retains this dispatch's context on its own entry.
-    // If a nested drain owns the prompt instead, this continuation has completed;
-    // retire its exact `Dispatching` entry below the nested top.
-    if waiting_for.is_some()
-        && state
-            .active_post_replacement_drains()
-            .is_some_and(|drains| drains.dispatch_is_resident_top(dispatch))
-    {
-        let _ = state
-            .active_post_replacement_drains_mut()
-            .is_some_and(|drains| drains.pause_dispatch(dispatch));
+    // CR 614.12a + CR 616.1g: classify by what OWNS the outstanding prompt, never
+    // by whether the two-deep positional accessor can currently see this frame.
+    // The predecessor asked `active_post_replacement_drains()`, which returns None
+    // as soon as this frame's DISTANCE FROM THE STACK TOP exceeds one — whether
+    // because the dispatched continuation raised two or more frames, or because a
+    // parent-of-active insert slid a frame in above it
+    // (`ResolutionStack::insert_parent_of_active`, reached from
+    // `effects::append_to_pending_continuation`). Note the frame need not have
+    // moved at all: `active_post_replacement_parent_index` looks only at the top
+    // and its immediate predecessor, by design. Both arms then degraded to no-ops
+    // and the entry was stranded `Dispatching` — unrecoverable, because every
+    // retirement path is keyed on `Ready`, on `Paused`, or on a handle that dies
+    // with this call. Worse, on the same miss
+    // `GameState::install_post_replacement_drain` mints a SIBLING PostReplacement
+    // frame, and the accessor then hands this cleanup that frame's drain vector —
+    // so the outer `finish_dispatch` could remove an unrelated frame's entry.
+    // The dispatch now names its frame by a stable `PostReplacementFrameId`, bound
+    // to the frame at most once, so both failure modes are closed: the lookup
+    // follows the frame through every `frames.insert` / `frames.swap`, never
+    // resolves to a sibling, and is not invalidated by a nested same-frame
+    // dispatch.
+    if waiting_for.is_some() && state.post_replacement_dispatch_is_resident_top(dispatch) {
+        // This dispatch's own work owns the prompt: park it so the paused-retire
+        // paths (`finish_active_paused_post_replacement_dispatch` and the
+        // `resume_resolution_frames` Paused branch) can finish it after the answer.
+        let _ = state.pause_post_replacement_dispatch(dispatch);
     } else {
-        let _ = state
-            .active_post_replacement_drains_mut()
-            .and_then(|drains| drains.finish_dispatch(dispatch));
+        // Either the continuation completed, or a NESTED drain above this entry
+        // owns the prompt (CR 616.1g) — in both cases this entry's work is done.
+        // Retire exactly `dispatch`, addressed by frame id, wherever that frame
+        // now sits.
+        let _ = state.finish_post_replacement_dispatch(dispatch);
+        // Unchanged from the predecessor, and deliberately NOT folded into the
+        // call above: this removes any empty PostReplacement frame that is now the
+        // stack top, which is a wider set than "the frame this dispatch
+        // addressed". Narrowing it would be a second, unrelated behavioural delta.
         state.remove_empty_active_post_replacement_frame();
     }
     // NOTE: the inherited token-choice applied seed is intentionally NOT cleared
@@ -7414,5 +7493,159 @@ mod tests {
             }
             other => panic!("expected CopyTargetChoice, got {other:?}"),
         }
+    }
+
+    /// Park a state on Priority whose single resolution frame is a
+    /// `PostReplacement` holding one `Dispatching` resident — the wedge shape,
+    /// reached the only way it can be reached without a live dispatcher: an
+    /// install followed by a direct `begin_dispatch` whose handle is then
+    /// dropped, exactly as a real dispatcher's handle dies with its call frame.
+    fn state_with_ownerless_dispatching_resident() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_player = PlayerId(0);
+
+        let mut drains = crate::types::game_state::PostReplacementDrainStack::default();
+        assert!(
+            drains.install(
+                crate::types::game_state::PostReplacementDrain::ready(
+                    PostReplacementContinuation::Resolved(Box::new(ResolvedAbility::new(
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                        Vec::new(),
+                        ObjectId(81),
+                        PlayerId(0),
+                    ))),
+                ),
+                crate::types::game_state::ResidentDrainPolicy::KeepResident,
+            ),
+            "the fixture's ready drain installs"
+        );
+        let (_continuation, _handle) = drains
+            .begin_dispatch()
+            .expect("a ready resident begins dispatching");
+        state.resolution_stack.push_post_replacement(drains);
+        state
+    }
+
+    fn resident_is_dispatching(state: &GameState) -> bool {
+        state
+            .active_post_replacement_drains()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::resident)
+            .is_some_and(|drain| {
+                matches!(
+                    drain.status,
+                    crate::types::game_state::DrainStatus::Dispatching
+                )
+            })
+    }
+
+    /// **H5 — discriminating(U1), two halves.** A `Dispatching` entry whose
+    /// dispatcher is still on this thread's call stack is live work, not a
+    /// strand, and the priority-boundary sweeper must leave it alone.
+    ///
+    /// Carried WITHOUT a CR citation, deliberately. This is an invariant of the
+    /// engine's own dispatch machinery — which in-flight work the sweeper may
+    /// retire — and no rule of the game speaks to it. It formerly cited
+    /// CR 615.5, which says a prevention effect may include an additional effect
+    /// referring to the amount of damage that was prevented, the rest of the
+    /// effect taking place immediately after the prevention itself.
+    ///
+    /// That rule is real authority for the PREVENTION family's additional-effect
+    /// reference, and it is why `begin_dispatch`
+    /// (`types/game_state.rs`) and `apply_pending_post_replacement_effect` above
+    /// both still cite it: the engine satisfies that reference by keeping the
+    /// drain resident with its event context readable, which is how
+    /// `PostReplacementSourceController` resolves Swans of Bryn Argoll. What
+    /// CR 615.5 does NOT speak to is dispatch LIVENESS — whether a `Dispatching`
+    /// entry is still on this thread's call stack — and that is this test's
+    /// actual subject. So the number is dropped HERE rather than swapped for a
+    /// guess. Do not read that omission as a reason to strip CR 615.5 from the
+    /// event-context sites, where it is the correct anchor.
+    ///
+    /// Half (i) holds a `LiveDispatchGuard` across the sweep and asserts the
+    /// drain SURVIVES. Hand-patching `post_replacement_dispatch_is_live()` to
+    /// return `false` turns half (i) red behaviourally — the sweep fires
+    /// mid-dispatch and destroys the event context the running continuation
+    /// reads.
+    ///
+    /// Half (ii) repeats the sweep with no guard held and asserts the drain IS
+    /// retired. It is half (i)'s positive control: without it, half (i) would be
+    /// satisfied by a sweep that never fires at all. Reverting the sweep turns
+    /// half (ii) red.
+    ///
+    /// Half (iii) tests the shared policy FUNCTION rather than one of its callers.
+    /// The guard is the only protection the new entry-side call site in
+    /// `engine::apply_action_boundary_core` has, so it is asserted at the function
+    /// both callers share. Half (iii)'s second call is its own positive control:
+    /// without it, a policy that never sweeps anything would pass.
+    ///
+    /// `LiveDispatchGuard::enter()` stays module-private deliberately — the
+    /// guard's soundness argument is "the dispatcher is the sole thing that can
+    /// make a dispatch live", and a `pub(crate) enter()` would downgrade that
+    /// from a compiler-enforced fact to a convention.
+    #[test]
+    fn h5_a_live_dispatch_suppresses_the_ownerless_sweep_and_its_absence_permits_it() {
+        // Half (i): a live dispatch is on this thread's call stack.
+        let mut state = state_with_ownerless_dispatching_resident();
+        assert!(
+            resident_is_dispatching(&state),
+            "reach-guard: the fixture parks a Dispatching resident"
+        );
+        let mut events = Vec::new();
+        {
+            let _live = LiveDispatchGuard::enter();
+            assert!(
+                post_replacement_dispatch_is_live(),
+                "reach-guard: the guard actually marks the dispatch live"
+            );
+            crate::game::effects::resume_resolution_frames(&mut state, &mut events);
+        }
+        assert!(
+            resident_is_dispatching(&state),
+            "a live dispatch's resident must survive the priority-boundary sweep"
+        );
+        assert_eq!(
+            state.resolution_stack.len(),
+            1,
+            "the frame that owns a live dispatch must survive too"
+        );
+
+        // Half (ii), the positive control: with no dispatch live, the same call
+        // retires the same entry — so half (i) is not passing on an inert sweep.
+        assert!(
+            !post_replacement_dispatch_is_live(),
+            "the guard restored the previous value on drop"
+        );
+        crate::game::effects::resume_resolution_frames(&mut state, &mut events);
+        assert!(
+            state.resolution_stack.is_empty(),
+            "CR 603.3b + CR 608.2c: an ownerless Dispatching resident and its emptied frame retire"
+        );
+
+        // Half (iii): the shared policy FUNCTION, called directly, is guard
+        // suppressed exactly as its `resume_resolution_frames` caller is.
+        let mut direct = state_with_ownerless_dispatching_resident();
+        assert!(
+            resident_is_dispatching(&direct),
+            "reach-guard: the fixture parks a Dispatching resident"
+        );
+        {
+            let _live = LiveDispatchGuard::enter();
+            crate::game::effects::sweep_ownerless_post_replacement_strand(&mut direct);
+        }
+        assert!(
+            resident_is_dispatching(&direct),
+            "a live dispatch's resident survives the shared policy function too"
+        );
+        crate::game::effects::sweep_ownerless_post_replacement_strand(&mut direct);
+        assert!(
+            !resident_is_dispatching(&direct),
+            "half (iii)'s own positive control: with no dispatch live the same direct call retires it"
+        );
     }
 }

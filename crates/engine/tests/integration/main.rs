@@ -1242,6 +1242,7 @@ mod momir_token_firebreathing_duration;
 mod moon_girl_second_draw_base_pt;
 mod mox_diamond_discard_cost_2853;
 mod multi_source_each_power_damage;
+mod mycoloth_devour_drain_strand;
 mod nadu_lavaspur_boots_max_times;
 mod najeela_extra_combat_grant_2898;
 mod no_top_level_test_binaries;

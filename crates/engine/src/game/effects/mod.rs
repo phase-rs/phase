@@ -889,6 +889,84 @@ fn clear_post_replacement_token_choice_seed_if_resolution_drained(state: &mut Ga
     }
 }
 
+/// CR 603.3 + CR 603.3b + CR 608.2c: retire every ownerless `Dispatching`
+/// post-replacement resident on the active frame.
+///
+/// `Dispatching` means "taken and running". The sole production dispatcher —
+/// `engine_replacement::apply_pending_post_replacement_effect` — is synchronous,
+/// and `engine_replacement::post_replacement_dispatch_is_live` reports whether
+/// any such dispatch is on this thread's call stack. When that predicate is
+/// false, a `Dispatching` entry has no owner AT ALL: `begin_dispatch` refuses
+/// it, `finish_paused_dispatch` pops only `Paused`, and `finish_dispatch` needs
+/// a handle that died with its call frame. Left behind it keeps
+/// `resolution_stack` non-empty forever, which makes
+/// `triggers::resolution_completion_can_settle` false forever: deferred
+/// triggered abilities can then never be put on the stack the next time a
+/// player would receive priority (CR 603.3 + CR 603.3b) and the resolving
+/// carrier can never settle (CR 608.2c).
+///
+/// The predicate is sound only because the dispatcher's cleanup leaves every
+/// returned dispatch either `Paused` (parked awaiting a player answer, CR
+/// 614.12a) or removed. A parked continuation therefore never presents as
+/// `Dispatching`, which is what the `h1_devour_...` row witnesses at an action
+/// boundary.
+///
+/// TWO CALL SITES, answering two different questions — this is deliberate, and
+/// neither is redundant:
+///   * `resume_resolution_frames` (below), at a priority boundary, for a strand
+///     THIS action just created. CR 603.3 requires the abilities it blocks to
+///     reach the stack the next time a player would receive priority in this
+///     same action, not one action later.
+///   * `engine::apply_action_boundary_core`, at the ENTRY of the outer action
+///     boundary, for a strand the engine FOUND rather than made — above all one
+///     that arrived through `PersistedGameState::into_game_state()`, which no
+///     in-action seam can observe because no engine write produced it.
+///
+/// Because the ownerless predicate is call-stack state rather than game state,
+/// it is equally valid at both, at any frame depth and any drain depth.
+///
+/// The loop handles a multi-entry strand (both drains in the turn-20 capture);
+/// it stops at the first `Ready` or `Paused` resident, which is live parked work.
+///
+/// RECOVERY LIMIT, stated rather than overclaimed: this reaches only the frame
+/// the two-deep positional accessor can see. A wedge whose `PostReplacement`
+/// frame is buried under a child frame that itself never drains is NOT
+/// recovered here; only identity-addressed dispatch prevents that shape.
+///
+/// This emits no `GameEvent`: removing an impossible state is not a game event.
+pub(crate) fn sweep_ownerless_post_replacement_strand(state: &mut GameState) {
+    if crate::game::engine_replacement::post_replacement_dispatch_is_live() {
+        // A live dispatch legitimately suppresses the sweep. In healthy play
+        // this branch is unreachable: this policy is entered only from
+        // `resume_resolution_frames` at a priority boundary and from
+        // `engine::apply_action_boundary_core` at an outer action boundary,
+        // never from inside a dispatch. It fires on every boundary forever if
+        // the guard flag has leaked, which is the WASM `panic='abort'` residual
+        // documented on `POST_REPLACEMENT_DISPATCH_LIVE` — this warn is what
+        // makes that observable instead of silent. It is visible only in the
+        // server-hosted native build; `engine-wasm` installs no `tracing`
+        // subscriber, and this does NOT close that gap.
+        if state
+            .active_post_replacement_drains()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::resident)
+            .is_some_and(|drain| {
+                matches!(
+                    drain.status,
+                    crate::types::game_state::DrainStatus::Dispatching
+                )
+            })
+        {
+            tracing::warn!("post-replacement sweep suppressed by a live dispatch");
+        }
+    } else if let Some(drains) = state.active_post_replacement_drains_mut() {
+        while drains.finish_ownerless_dispatching_resident().is_some() {
+            tracing::warn!(
+                "retired an ownerless Dispatching post-replacement drain at a rest boundary"
+            );
+        }
+    }
+}
+
 /// Resume the active typed resolution frame through its runtime stack authority.
 ///
 /// The dispatcher reads only the stack top. The one shipped coupled shape is
@@ -1009,6 +1087,7 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
                 let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
                     state, None, None, None, events,
                 );
+                sweep_ownerless_post_replacement_strand(state);
                 if state
                     .active_post_replacement_drains()
                     .is_some_and(crate::types::game_state::PostReplacementDrainStack::is_empty)

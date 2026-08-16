@@ -674,3 +674,327 @@ fn devour_food_3_sacrifices_only_food_subtype() {
         "Devour Food 3 + one Food → 3 +1/+1 counters"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Post-replacement drain-strand rows. The dispatcher these exercise is shared by
+// every as-enters replacement continuation, not by Devour alone; Devour is the
+// cheapest production driver for it that needs no card data.
+// ---------------------------------------------------------------------------
+
+/// Place a permanent under `controller` carrying the triggered abilities parsed
+/// from `oracle_text`, and index them so they can fire. Verbatim Oracle text is
+/// used rather than a hand-built `TriggerDefinition` so the fixture cannot take a
+/// different parser branch than the real card.
+fn battlefield_trigger_observer(
+    state: &mut GameState,
+    controller: PlayerId,
+    name: &str,
+    oracle_text: &str,
+) -> ObjectId {
+    let card_id = CardId(state.next_object_id);
+    let id = create_object(
+        state,
+        card_id,
+        controller,
+        name.to_string(),
+        Zone::Battlefield,
+    );
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        oracle_text,
+        name,
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    assert!(
+        !parsed.triggers.is_empty(),
+        "the observer fixture must parse at least one trigger from {oracle_text:?}"
+    );
+    let mut face = CardFace {
+        name: name.to_string(),
+        triggers: parsed.triggers,
+        ..CardFace::default()
+    };
+    face.card_type.core_types.push(CoreType::Enchantment);
+    {
+        let obj = state.objects.get_mut(&id).unwrap();
+        apply_card_face_to_object(obj, &face);
+    }
+    crate::game::trigger_index::reindex_object_triggers(state, id);
+    id
+}
+
+/// True when any `PostReplacement` frame in the stack still holds a
+/// `Dispatching` drain. Read back through the stack's own `Serialize` impl
+/// because `PostReplacementDrainStack` exposes only its resident, and a strand
+/// can sit below a nested entry.
+fn has_dispatching_drain(state: &GameState) -> bool {
+    let value =
+        serde_json::to_value(&state.resolution_stack).expect("the resolution stack serializes");
+    value["frames"].as_array().is_some_and(|frames| {
+        frames.iter().any(|frame| {
+            frame["type"] == "PostReplacement"
+                && frame["data"]["drains"].as_array().is_some_and(|drains| {
+                    drains.iter().any(|drain| drain["status"] == "Dispatching")
+                })
+        })
+    })
+}
+
+/// The per-`PostReplacement`-frame drain statuses of the runtime state, read
+/// back through the stack's own `Serialize` impl. `PostReplacementDrainStack`
+/// exposes only its resident, so this is how a test observes WHICH status a
+/// parked entry carries — and a multi-entry strand — without widening
+/// production API for a test's convenience. A verbatim port of the shipped
+/// helper of the same name in
+/// `crates/engine/tests/integration/mycoloth_devour_drain_strand.rs`.
+fn post_replacement_drain_statuses(state: &GameState) -> Vec<Vec<String>> {
+    let value =
+        serde_json::to_value(&state.resolution_stack).expect("the resolution stack serializes");
+    value["frames"]
+        .as_array()
+        .expect("frames is an array")
+        .iter()
+        .filter(|frame| frame["type"] == "PostReplacement")
+        .map(|frame| {
+            frame["data"]["drains"]
+                .as_array()
+                .expect("a post-replacement frame carries a drains array")
+                .iter()
+                .map(|drain| match &drain["status"] {
+                    serde_json::Value::String(status) => status.clone(),
+                    // `DrainStatus::Ready(_)` is externally tagged.
+                    serde_json::Value::Object(map) => {
+                        map.keys().next().cloned().unwrap_or_default()
+                    }
+                    other => other.to_string(),
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// **B2-devour — guard (relabelled).** The Devour producer path leaves no
+/// `Dispatching` drain behind.
+///
+/// This row DISCRIMINATES NOTHING and must not be read as evidence for the
+/// producer analysis. It was measured on a tree with U1 and U2 both absent and
+/// reported no strand at all, so it is green on `main` and must stay green under
+/// every discrimination patch in the plan's §5.8. It is kept as an honest
+/// regression witness for the reporter's own card class — Devour is what the
+/// reporter played — not as a red-capable row.
+///
+/// The discriminating producer row is
+/// `b2_zurs_weirding_replacement_leaves_no_dispatching_drain` in
+/// `tests/integration/mycoloth_devour_drain_strand.rs`, built on the Zur's
+/// Weirding draw-replacement path, which was MEASURED to strand at BASE_SHA.
+///
+/// CR 702.82a + CR 614.12a + CR 603.3b. Positive reach-guards, so no negative
+/// here can be satisfied vacuously: the prompt was actually raised, the counters
+/// landed (`p1p1 == 2 * n_sacrificed`), and both sacrificed creatures reached the
+/// graveyard so their observers really did fire.
+#[test]
+fn b2_devour_producer_path_leaves_no_dispatching_drain() {
+    let face = devour_face("Mycoloth", 2);
+    let mut fodder = Vec::new();
+    let (mut state, devour) = drive_devour_etb_with_battlefield(&face, PlayerId(0), |state| {
+        fodder.push(battlefield_creature(state, PlayerId(0), "Sac Fodder 0"));
+        fodder.push(battlefield_creature(state, PlayerId(0), "Sac Fodder 1"));
+        battlefield_trigger_observer(
+            state,
+            PlayerId(0),
+            "Bastion of Remembrance",
+            "Whenever a creature you control dies, each opponent loses 1 life and you gain 1 life.",
+        );
+        battlefield_trigger_observer(
+            state,
+            PlayerId(0),
+            "Sacrifice Ledger",
+            "Whenever you sacrifice a creature, draw a card.",
+        );
+    });
+
+    let WaitingFor::EffectZoneChoice { cards, .. } = &state.waiting_for else {
+        panic!(
+            "reach-guard: the Devour sacrifice prompt must be raised, got {:?}",
+            state.waiting_for
+        );
+    };
+    let chosen: Vec<ObjectId> = fodder
+        .iter()
+        .copied()
+        .filter(|id| cards.contains(id))
+        .collect();
+    assert_eq!(chosen.len(), 2, "both fodder creatures are eligible");
+
+    crate::game::engine::apply_as_current(
+        &mut state,
+        GameAction::SelectCards {
+            cards: chosen.clone(),
+        },
+    )
+    .unwrap();
+
+    // Positive reach-guards: the path really resolved.
+    assert_eq!(
+        p1p1(&state, devour),
+        4,
+        "Devour 2 x 2 sacrifices → 4 +1/+1 counters (CR 702.82a)"
+    );
+    for id in &chosen {
+        assert_eq!(
+            state.objects.get(id).unwrap().zone,
+            Zone::Graveyard,
+            "each sacrificed creature reached the graveyard, so its observers fired"
+        );
+    }
+
+    assert!(
+        !has_dispatching_drain(&state),
+        "no post-replacement drain may survive its own dispatch as Dispatching"
+    );
+}
+
+/// **H1 — guard.** *Hostile: the empty/decline path.* CR 702.82a: a Devour
+/// entry with ZERO creatures sacrificed still installs a continuation and still
+/// retires it, leaving no resolution frame behind.
+///
+/// Positive reach-guard: the prompt was genuinely raised before the empty
+/// submission, so `resolution_stack.is_empty()` cannot pass because nothing ever
+/// installed a drain.
+///
+/// **H7 — guard, the non-interference witness for the ENTRY call site.** The
+/// submission below routes `apply_as_current -> apply_as_current_with_mode ->
+/// apply_action_boundary -> apply_action_boundary_with_stack_limit ->
+/// apply_action_boundary_core`, so the entry-side sweep added at that function
+/// runs on THIS state — a healthy one, parked mid-prompt with a live owner.
+/// This row is therefore also the row that ESTABLISHES the premise §5.4's
+/// safety rests on: parked-awaiting-input work carries `Paused`, never
+/// `Dispatching` (CR 614.12a — the as-enters choice is still being made, so the
+/// drain is live rules work). The pre-submit `post_replacement_drain_statuses`
+/// assertion is the witness; the post-submit assertions are the survival proof.
+#[test]
+fn h1_devour_empty_sacrifice_retires_its_drain_and_frame() {
+    let face = devour_face("Gorger Wurm", 1);
+    let (mut state, devour) = drive_devour_etb_to_sacrifice_choice(&face, PlayerId(0), 2);
+
+    assert!(
+        matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
+        "reach-guard: a drain was installed and its prompt raised, got {:?}",
+        state.waiting_for
+    );
+
+    // NON-INTERFERENCE WITNESS for the entry-side sweep added at
+    // `engine::apply_action_boundary_core`. The submission below routes
+    // `apply_as_current -> apply_as_current_with_mode -> apply_action_boundary
+    //  -> apply_action_boundary_with_stack_limit -> apply_action_boundary_core`,
+    // so the entry sweep runs on THIS state — a healthy one, parked mid-prompt
+    // with a live owner. CR 614.12a: the as-enters choice is still being made,
+    // so the drain is live parked work and MUST survive the boundary. Its
+    // resident is `Paused`, never `Dispatching`, which is exactly the status the
+    // sweep's exhaustive match refuses to pop — and it is what makes the
+    // "Dispatching + no live dispatch => ownerless" predicate sound. A sweep
+    // written with a wildcard arm, or scoped to `!Paused`, destroys it here and
+    // reds the completion assertions below.
+    assert_eq!(
+        post_replacement_drain_statuses(&state),
+        vec![vec!["Paused".to_string()]],
+        "reach-guard: exactly one parked post-replacement drain, and it must be live parked \
+         work (`Paused`) so the entry sweep provably runs over a healthy resident"
+    );
+
+    crate::game::engine::apply_as_current(&mut state, GameAction::SelectCards { cards: vec![] })
+        .unwrap();
+
+    assert_eq!(
+        p1p1(&state, devour),
+        0,
+        "an empty Devour sacrifice places 0 counters (CR 702.82a)"
+    );
+    assert!(
+        !has_dispatching_drain(&state),
+        "the declined continuation must not leave a Dispatching drain"
+    );
+    assert!(
+        state.resolution_stack.is_empty(),
+        "the decline branch leaves no resolution frame behind, got {:?}",
+        state.resolution_stack.len()
+    );
+}
+
+/// **H4 — guard.** *Hostile: source/controller change.* CR 603.3b: a dies
+/// observer controlled by a DIFFERENT player than the devourer's controller
+/// still reaches the stack when the devoured creatures die.
+///
+/// Positive reach-guard: the observer's controller is asserted to differ from
+/// the devourer's controller, and the sacrificed creatures are asserted to have
+/// reached the graveyard — so "the trigger fired" is not satisfiable by an
+/// observer that never saw a death.
+#[test]
+fn h4_foreign_controller_dies_observer_still_reaches_the_stack() {
+    let face = devour_face("Mycoloth", 2);
+    let mut fodder = Vec::new();
+    let mut observer = ObjectId(0);
+    let (mut state, devour) = drive_devour_etb_with_battlefield(&face, PlayerId(0), |state| {
+        fodder.push(battlefield_creature(state, PlayerId(0), "Sac Fodder 0"));
+        fodder.push(battlefield_creature(state, PlayerId(0), "Sac Fodder 1"));
+        observer = battlefield_trigger_observer(
+            state,
+            PlayerId(1),
+            "Foreign Mourner",
+            "Whenever a creature dies, you gain 1 life.",
+        );
+    });
+
+    assert_ne!(
+        state.objects[&observer].controller, state.objects[&devour].controller,
+        "reach-guard: the observer must be controlled by the OTHER player"
+    );
+
+    let WaitingFor::EffectZoneChoice { cards, .. } = &state.waiting_for else {
+        panic!(
+            "reach-guard: the Devour sacrifice prompt must be raised, got {:?}",
+            state.waiting_for
+        );
+    };
+    let chosen: Vec<ObjectId> = fodder
+        .iter()
+        .copied()
+        .filter(|id| cards.contains(id))
+        .collect();
+    assert_eq!(chosen.len(), 2, "both fodder creatures are eligible");
+
+    crate::game::engine::apply_as_current(
+        &mut state,
+        GameAction::SelectCards {
+            cards: chosen.clone(),
+        },
+    )
+    .unwrap();
+
+    for id in &chosen {
+        assert_eq!(
+            state.objects.get(id).unwrap().zone,
+            Zone::Graveyard,
+            "reach-guard: the observer really did see a creature die"
+        );
+    }
+
+    let observer_fired = state.stack.iter().any(|entry| entry.source_id == observer)
+        || state
+            .deferred_triggers
+            .iter()
+            .any(|deferred| deferred.pending.source_id == observer)
+        || state.pending_trigger_order.as_ref().is_some_and(|order| {
+            order.groups.iter().any(|group| {
+                group
+                    .triggers
+                    .iter()
+                    .any(|pending| pending.pending.source_id == observer)
+            })
+        });
+    assert!(
+        observer_fired,
+        "CR 603.3b: the foreign-controller dies trigger must reach a stack destination"
+    );
+}

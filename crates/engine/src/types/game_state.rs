@@ -17501,6 +17501,15 @@ pub enum DrainStatus {
 /// the synchronous dispatcher finish or pause the entry it took after a nested
 /// replacement has pushed another drain above it. It is never serialized and
 /// introduces no cross-carrier reference.
+///
+/// It addresses an entry *within* one drain stack, and says nothing about WHICH
+/// frame that stack belongs to. `types::resolution::IdentifiedPostReplacementDispatch`
+/// is what pairs it with the identity of that frame, so a cleanup can find the
+/// frame wherever the stack has since moved it. This type is deliberately left
+/// unchanged by that pairing: widening it would change
+/// [`PostReplacementDrainStack::begin_dispatch`]'s signature, which every
+/// existing call site — including two bare-path `Option::and_then` uses in
+/// `game/elimination.rs` — depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PostReplacementDrainDispatch {
     depth: usize,
@@ -17640,6 +17649,14 @@ pub enum ResidentDrainPolicy {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PostReplacementDrainStack {
     drains: Vec<PostReplacementDrain>,
+    /// This frame's stable identity, bound at its first dispatch and never
+    /// rebound. Private, and reached only through [`Self::frame_id`] /
+    /// [`Self::stamp_frame_id`], so "assigned at most once" is a property of the
+    /// type rather than of any call site. `skip_serializing_if` keeps an
+    /// unstamped frame's wire shape byte-identical to what it was before this
+    /// field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    id: Option<PostReplacementFrameId>,
 }
 
 impl PostReplacementDrain {
@@ -17815,9 +17832,74 @@ impl PostReplacementDrainStack {
         None
     }
 
+    /// CR 603.3b + CR 608.2c: retire a resident whose dispatch is over.
+    ///
+    /// `Dispatching` means "taken and running" (see [`DrainStatus`]). The sole
+    /// production dispatcher — `engine_replacement::apply_pending_post_replacement_effect`
+    /// — is synchronous, and `engine_replacement::post_replacement_dispatch_is_live`
+    /// reports whether any such dispatch is on this thread's call stack. The
+    /// sweeper calls this ONLY when that predicate is false, so a `Dispatching`
+    /// entry reaching here has no owner at all: `begin_dispatch` refuses it,
+    /// `finish_paused_dispatch` pops only `Paused`, and `finish_dispatch` needs a
+    /// handle that died with its call frame. Left behind, it keeps
+    /// `resolution_stack` non-empty forever, which makes
+    /// `triggers::resolution_completion_can_settle` false forever: deferred
+    /// triggered abilities can then never be put on the stack (CR 603.3b) and the
+    /// resolving carrier can never settle (CR 608.2c).
+    ///
+    /// Scope is the RESIDENT only, and that is exact rather than conservative. A
+    /// `Dispatching` entry sitting BELOW a nested `Paused` one is never the
+    /// resident, so it is never reached here; it is retired later, after the
+    /// `Paused` entry above it retires and it becomes the resident at a boundary
+    /// where — again — no dispatch is live. A `Dispatching` entry below another
+    /// `Dispatching` one is reachable only after the caller's loop has popped the
+    /// one above it, and the ownerless predicate is stack-wide rather than
+    /// per-entry, so it is equally ownerless. A `Ready` or `Paused` resident is
+    /// live parked work and is returned untouched.
+    pub fn finish_ownerless_dispatching_resident(&mut self) -> Option<PostReplacementDrain> {
+        match self.drains.last()?.status {
+            DrainStatus::Dispatching => self.drains.pop(),
+            DrainStatus::Ready(_) | DrainStatus::Paused => None,
+        }
+    }
+
     /// CR 800.4a: abandon every pending continuation (player departure).
     pub fn abandon_all(&mut self) {
         self.drains.clear();
+    }
+
+    /// This frame's identity, or `None` if it has never been dispatched.
+    ///
+    /// "Unstamped" is carried by the type, not by a reserved value: a legacy
+    /// payload, a freshly minted sibling frame, and a journal-replayed frame are
+    /// all `None`, and `None` can never equal a handle's `Some(id)`.
+    pub(super) fn frame_id(&self) -> Option<PostReplacementFrameId> {
+        self.id
+    }
+
+    /// Bind identity exactly once, and return the EFFECTIVE id.
+    ///
+    /// If this frame is already stamped, `candidate` is discarded and the
+    /// existing id is returned. That is not an optimisation — it is the
+    /// invariant. A nested same-frame dispatch is the shipped CR 616.1g shape (a
+    /// running continuation draws, the draw is replaced, and the replacement
+    /// carries a mandatory post-effect — Jace, Wielder of Mysteries' win; see
+    /// [`Self::install`]'s doc). Re-stamping there would invalidate the OUTER
+    /// dispatch's still-live handle and strand its entry `Dispatching` forever —
+    /// the exact failure this identity exists to close. Keeping the rule inside
+    /// the type means no call site can violate it. The caller detects "was my
+    /// candidate consumed?" by comparing the returned id against the candidate,
+    /// and only then commits its allocator, so no id is burned.
+    ///
+    /// This writes ONLY the frame's own id. It deliberately does not touch
+    /// `ResolutionStack::last_post_replacement_frame_id`, which is the mint's
+    /// business — that asymmetry is what lets a test build a payload whose
+    /// frames carry ids while its allocator is still 0.
+    pub(super) fn stamp_frame_id(
+        &mut self,
+        candidate: PostReplacementFrameId,
+    ) -> PostReplacementFrameId {
+        *self.id.get_or_insert(candidate)
     }
 }
 
@@ -17839,6 +17921,25 @@ pub struct PendingMultiDraw {
 /// may have been pushed and popped above it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct DrawSequenceFrameId(pub u64);
+
+/// Identifies one `PostReplacement` frame within a [`ResolutionStack`].
+///
+/// Frames are addressed by ID, never by position, for the same reason
+/// [`DrawSequenceFrameId`] is: between a dispatch's mint and its cleanup the
+/// frame may have left the two-deep positional window the accessor can see —
+/// because a nested instruction (CR 616.1g) raised child frames above it, or
+/// because a parent-of-active continuation insert slid a frame in between. In
+/// neither case did the frame itself move; only its distance from the stack top
+/// changed, and that is the only thing positional addressing can observe.
+///
+/// Deliberately no `Default`: the field that holds one is
+/// `Option<PostReplacementFrameId>`, whose `Default` is `None` regardless of
+/// `T`, so "unstamped" is carried by the type rather than by a reserved zero id
+/// that could alias a real frame.
+///
+/// [`ResolutionStack`]: crate::types::resolution::ResolutionStack
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct PostReplacementFrameId(pub u64);
 
 /// The unbookkept suffix of one individual draw whose Library → Hand delivery
 /// parked on a replacement choice.
@@ -19518,6 +19619,54 @@ impl GameState {
                 .promote_ability_continuation_after_post_replacement_draw()?;
         }
         Ok(completed)
+    }
+
+    /// CR 614.12a + CR 616.1g: take the active frame's resident continuation and
+    /// return it paired with the identity of the frame it came from.
+    ///
+    /// Pure delegation to [`ResolutionStack::begin_active_post_replacement_dispatch`],
+    /// which is where the frame index, the id stamp and the allocator commit all
+    /// live. This exists so the dispatcher keeps talking to `GameState`.
+    ///
+    /// [`ResolutionStack::begin_active_post_replacement_dispatch`]: super::resolution::ResolutionStack::begin_active_post_replacement_dispatch
+    pub(crate) fn begin_post_replacement_dispatch(
+        &mut self,
+    ) -> Option<(
+        crate::types::ability::PostReplacementContinuation,
+        super::resolution::IdentifiedPostReplacementDispatch,
+    )> {
+        self.resolution_stack
+            .begin_active_post_replacement_dispatch()
+    }
+
+    /// Whether `dispatch` still owns the resident top of its OWN frame, found by
+    /// identity rather than by position. Pure delegation.
+    pub(crate) fn post_replacement_dispatch_is_resident_top(
+        &self,
+        dispatch: super::resolution::IdentifiedPostReplacementDispatch,
+    ) -> bool {
+        self.resolution_stack
+            .post_replacement_dispatch_is_resident_top(dispatch)
+    }
+
+    /// Park `dispatch`'s exact entry in its own frame. Pure delegation.
+    pub(crate) fn pause_post_replacement_dispatch(
+        &mut self,
+        dispatch: super::resolution::IdentifiedPostReplacementDispatch,
+    ) -> bool {
+        self.resolution_stack
+            .pause_post_replacement_dispatch(dispatch)
+    }
+
+    /// Retire `dispatch`'s exact entry in its own frame. Pure delegation — it
+    /// removes no frame; `remove_empty_active_post_replacement_frame` keeps that
+    /// job, and keeps its wider "any empty frame that is now the top" scope.
+    pub(crate) fn finish_post_replacement_dispatch(
+        &mut self,
+        dispatch: super::resolution::IdentifiedPostReplacementDispatch,
+    ) -> Option<PostReplacementDrain> {
+        self.resolution_stack
+            .finish_post_replacement_dispatch(dispatch)
     }
 
     /// Retires only the exact top general drain whose continuation paused and
@@ -24081,6 +24230,308 @@ mod drain_stack_reentrancy_tests {
              dispatching drain (CR 616.1g), not dropped"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Identity-addressed dispatch rows.
+    // -----------------------------------------------------------------------
+
+    fn resident_status(state: &GameState) -> Option<&DrainStatus> {
+        match state.resolution_stack.last() {
+            Some(crate::types::resolution::ResolutionFrame::PostReplacement(drains)) => {
+                drains.drains.first().map(|drain| &drain.status)
+            }
+            _ => None,
+        }
+        .or_else(|| {
+            state.resolution_stack.iter().find_map(|frame| match frame {
+                crate::types::resolution::ResolutionFrame::PostReplacement(drains) => {
+                    drains.drains.first().map(|drain| &drain.status)
+                }
+                _ => None,
+            })
+        })
+    }
+
+    /// **B1 — discriminating(U2).** CR 614.12a + CR 616.1g: a dispatch whose own
+    /// continuation BURIED its frame still addresses its exact entry.
+    ///
+    /// The continuation is an `Effect::Discard` carrying a sub-ability. Parking
+    /// on `DiscardChoice` raises a direct-choice frame, and the sub-ability then
+    /// takes `append_to_pending_continuation`'s parent-of-active branch, which
+    /// inserts an `AbilityContinuation` BETWEEN the `PostReplacement` frame and
+    /// the active child. The frame's absolute index never changes; its distance
+    /// from the top goes from 1 to 2, which is the only thing the two-deep
+    /// positional accessor can see.
+    ///
+    /// Revert-failing assertion: the entry reads `Paused`. With the cleanup
+    /// resolved positionally the accessor misses, both arms degrade to no-ops,
+    /// and the entry is left `Dispatching` — the strand.
+    #[test]
+    fn b1_a_dispatch_whose_continuation_buried_its_frame_still_parks_its_own_entry() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_player = PlayerId(0);
+        for index in 0..3u64 {
+            let id = crate::game::zones::create_object(
+                &mut state,
+                crate::types::identifiers::CardId(500 + index),
+                PlayerId(0),
+                format!("Hand Card {index}"),
+                crate::types::zones::Zone::Hand,
+            );
+            let _ = id;
+        }
+
+        let mut discard_with_tail = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Discard {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: crate::types::ability::TargetFilter::Controller,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                unless_filter: None,
+                filter: None,
+            },
+        );
+        discard_with_tail = discard_with_tail.sub_ability(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                    player: crate::types::ability::TargetFilter::Controller,
+                },
+            )
+            // CR 701.9a + CR 608.2c: a discard whose tail is gated on what was
+            // discarded raises a real `ResolutionFrame::Discard` for the operation
+            // (`effects/discard.rs::resolve` mints it on the PRESENCE of this
+            // condition variant, not on its contents). The parked tail then becomes a
+            // second frame above it, so the `PostReplacement` frame sits two deep and
+            // the two-deep positional accessor can no longer see it — which is the
+            // burial this row exists to measure.
+            .condition(
+                crate::types::ability::AbilityCondition::DiscardedCardMatchesFilter {
+                    filter: crate::types::ability::TargetFilter::Any,
+                },
+            ),
+        );
+
+        let mut drains = PostReplacementDrainStack::default();
+        assert!(drains.install(
+            PostReplacementDrain::ready(PostReplacementContinuation::Template(Box::new(
+                discard_with_tail
+            ))),
+            ResidentDrainPolicy::KeepResident,
+        ));
+        state.resolution_stack.push_post_replacement(drains);
+
+        // Reach-guard: the mint really handed out a pair — this row is not
+        // passing because no dispatch ever started.
+        assert!(
+            state
+                .active_post_replacement_drains()
+                .is_some_and(PostReplacementDrainStack::has_ready),
+            "the fixture parks a Ready drain reachable by the mint"
+        );
+
+        let mut events = Vec::new();
+        let waiting = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+            &mut state,
+            None,
+            None,
+            None,
+            &mut events,
+        );
+
+        // Reach-guard: the continuation ran AND buried its own frame.
+        assert!(
+            waiting.is_some(),
+            "the continuation must park on a prompt, got {:?}",
+            state.waiting_for
+        );
+        assert!(
+            state.resolution_stack.len() >= 3,
+            "the continuation must have raised two frames above its own, got {}",
+            state.resolution_stack.len()
+        );
+        assert!(
+            state.active_post_replacement_drains().is_none(),
+            "reach-guard: the two-deep positional accessor can no longer see the frame — \
+             without this the row measures nothing"
+        );
+
+        assert!(
+            matches!(resident_status(&state), Some(DrainStatus::Paused)),
+            "CR 614.12a: the dispatch parks its OWN entry wherever its frame now sits; \
+             a positional cleanup no-ops and leaves it Dispatching. got {:?}",
+            resident_status(&state)
+        );
+    }
+
+    /// **H2 — guard.** *Hostile: the negative sibling status.* A resident
+    /// `Ready` drain reached at a priority boundary must still be DISPATCHED,
+    /// never swept.
+    ///
+    /// This is `main`'s behaviour with no sweep at all, so it stays green under
+    /// a sweep revert — that is why it is a guard. Its assertion is
+    /// mutation-failing: a sweep written with a wildcard arm, or scoped to
+    /// `!Paused` rather than to `Dispatching` alone, swallows the `Ready`
+    /// continuation and turns this red.
+    ///
+    /// Positive control: the drain's effect is observed to have executed, so
+    /// "the drain is gone" cannot be satisfied by a sweep that discarded it.
+    #[test]
+    fn h2_a_ready_resident_is_dispatched_at_a_priority_boundary_never_swept() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_player = PlayerId(0);
+        let life_before = state.players[0].life;
+
+        let mut drains = PostReplacementDrainStack::default();
+        assert!(drains.install(
+            PostReplacementDrain::ready(PostReplacementContinuation::Template(Box::new(
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
+                        player: crate::types::ability::TargetFilter::Controller,
+                    },
+                )
+            ))),
+            ResidentDrainPolicy::KeepResident,
+        ));
+        state.resolution_stack.push_post_replacement(drains);
+
+        let mut events = Vec::new();
+        crate::game::effects::resume_resolution_frames(&mut state, &mut events);
+
+        assert_eq!(
+            state.players[0].life,
+            life_before + 3,
+            "positive control: the Ready continuation actually RAN — without this, \
+             'the drain is gone' would also be satisfied by a sweep that ate it"
+        );
+        assert!(
+            state.resolution_stack.is_empty(),
+            "the dispatched-and-finished drain leaves no frame behind"
+        );
+    }
+
+    /// **H3 — discriminating(U2).** *Hostile: multi-authority CR 616.1g
+    /// nesting.* One frame, an outer `Dispatching` entry below an inner `Paused`
+    /// one, with the frame buried two deep.
+    ///
+    /// Three claims:
+    ///  (i) the second (inner) mint against the same frame returns a pair whose
+    ///      `frame()` EQUALS the outer's — red under an overwriting stamp;
+    ///  (ii) the outer dispatch's finish removes ONLY depth 0; the inner `Paused`
+    ///      entry survives with its own `event_source` intact and the frame's id
+    ///      unchanged — red under a positional lookup;
+    ///  (iii) the ownerless sweep does not fire here, because the resident is
+    ///      `Paused`, which is live parked work.
+    #[test]
+    fn h3_nested_same_frame_dispatches_share_one_identity_and_retire_lifo() {
+        let mut stack = crate::types::resolution::ResolutionStack::default();
+        stack.push_post_replacement(PostReplacementDrainStack::default());
+
+        let mut outer = ready_drain("outer");
+        outer.event_source = Some(ObjectId(7));
+        assert!(stack
+            .active_post_replacement_or_paired_parent_mut()
+            .expect("frame is active")
+            .install(outer, ResidentDrainPolicy::KeepResident));
+        let (_, handle_outer) = stack
+            .begin_active_post_replacement_dispatch()
+            .expect("the outer ready drain begins dispatching");
+
+        let mut inner = ready_drain("inner");
+        inner.event_source = Some(ObjectId(9));
+        assert!(stack
+            .active_post_replacement_or_paired_parent_mut()
+            .expect("frame is active")
+            .install(inner, ResidentDrainPolicy::KeepResident));
+
+        // Positive control: two entries with DISTINCT event contexts exist.
+        match stack.last() {
+            Some(crate::types::resolution::ResolutionFrame::PostReplacement(drains)) => {
+                assert_eq!(drains.drains.len(), 2, "outer + inner both resident");
+                assert_eq!(drains.drains[0].event_source, Some(ObjectId(7)));
+                assert_eq!(drains.drains[1].event_source, Some(ObjectId(9)));
+                assert!(
+                    drains.frame_id().is_some(),
+                    "the outer mint stamped the frame"
+                );
+            }
+            other => panic!("expected the post-replacement frame, got {other:?}"),
+        }
+
+        let (_, handle_inner) = stack
+            .begin_active_post_replacement_dispatch()
+            .expect("the inner ready drain begins dispatching");
+
+        // (i) The re-stamp regression witness.
+        assert_eq!(
+            handle_inner.frame(),
+            handle_outer.frame(),
+            "CR 616.1g: a nested same-frame dispatch reuses the frame's identity; \
+             re-stamping invalidates the outer dispatch's still-live handle"
+        );
+        assert!(stack.pause_post_replacement_dispatch(handle_inner));
+
+        // Bury the frame two deep, out of the two-deep positional window.
+        stack.push_inner(crate::types::resolution::ResolutionFrame::PostReplacement(
+            PostReplacementDrainStack::default(),
+        ));
+        stack.push_inner(crate::types::resolution::ResolutionFrame::PostReplacement(
+            PostReplacementDrainStack::default(),
+        ));
+        let frames_before = stack.len();
+
+        // (ii) The outer finish retires exactly depth 0.
+        let retired = stack.finish_post_replacement_dispatch(handle_outer);
+        assert!(
+            retired.is_some_and(|drain| drain.event_source == Some(ObjectId(7))),
+            "the outer dispatch retires its OWN entry, identified by event context"
+        );
+        assert_eq!(
+            stack.len(),
+            frames_before,
+            "a buried frame is never removed by a finish — that would reorder the stack"
+        );
+        // Bound out as a statement so the `iter()` temporary (which holds the borrow
+        // of `stack`) drops here rather than after `stack` itself — a tail-expression
+        // `match stack.iter().next()` outlives its own receiver.
+        let bottom_frame = stack.iter().next();
+        match bottom_frame {
+            Some(crate::types::resolution::ResolutionFrame::PostReplacement(drains)) => {
+                assert_eq!(drains.drains.len(), 1, "only the inner entry survives");
+                assert_eq!(
+                    drains.drains[0].event_source,
+                    Some(ObjectId(9)),
+                    "CR 615.5: the surviving inner entry keeps its own prevented-event context"
+                );
+                assert!(
+                    matches!(drains.drains[0].status, DrainStatus::Paused),
+                    "the inner entry is still parked"
+                );
+                assert_eq!(
+                    drains.frame_id(),
+                    Some(handle_outer.frame()),
+                    "the frame's identity is unchanged by either dispatch"
+                );
+
+                // (iii) The ownerless sweep does not fire on a Paused resident.
+                let mut probe = drains.clone();
+                assert!(
+                    probe.finish_ownerless_dispatching_resident().is_none(),
+                    "a Paused resident is live parked work, never an ownerless strand"
+                );
+            }
+            other => panic!("expected the original post-replacement frame, got {other:?}"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -26765,6 +27216,18 @@ mod tests {
     /// intentionally outside the state-equality key just as it was before the
     /// ChangeZone frame migration. Replacing `game_state_eq` with derived stack
     /// equality makes this assertion fail.
+    ///
+    /// Exposure note for the per-frame `PostReplacementFrameId`: it DOES
+    /// participate in `GameState` equality, through `ResolutionStack::game_state_eq`'s
+    /// derived fall-through arm for `PostReplacement` — exactly the treatment
+    /// `DiscardFrame.id` already receives, and the direction that function's own
+    /// comment calls fail-safe (COMPARED is fail-safe; EXCLUSION is the
+    /// fail-DANGEROUS direction). Worst case: a repeating position that mints a
+    /// new frame id each iteration stops comparing equal, so the CR 104.4b
+    /// auto-pass window terminates on its iteration cap instead of on loop
+    /// detection. The ALLOCATOR is not exposed here at all — `game_state_eq`
+    /// compares `frames` only, the same treatment `next_draw_sequence_frame_id`
+    /// and `next_discard_frame_id` already get.
     #[test]
     fn game_state_equality_excludes_devour_only_change_zone_frame() {
         let state = GameState::new_two_player(7);
