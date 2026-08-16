@@ -3032,7 +3032,7 @@ pub fn submit_ai_action_proposal(token: &str, actor: u8, action: JsValue) -> JsV
 /// - Stack grows beyond the chunk-origin depth
 /// - An interactive `WaitingFor` appears (target selection, scry, etc.)
 /// - An unknown/non-requester human actor receives priority
-/// - AI has no action for its priority decision
+/// - AI declines to pass priority
 /// - Game ends
 /// - Safety cap reached (prevents infinite loops from cascading triggers)
 #[derive(serde::Deserialize)]
@@ -3062,7 +3062,14 @@ fn resolve_all_inner(
             let ai_difficulty = AiDifficulty::from_label(&seat.difficulty);
             let config =
                 create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
-            match choose_action_with_session(state, actor, &config, rng, &session) {
+            // Seeding asks whether a later seat will pass before the live
+            // `WaitingFor` advances to that seat. Give the AI the exact
+            // future priority prompt on a clone; its contract otherwise has
+            // an empty candidate domain and it cannot select PassPriority.
+            let mut decision_state = state.clone();
+            decision_state.waiting_for = WaitingFor::Priority { player: actor };
+            decision_state.priority_player = actor;
+            match choose_action_with_session(&decision_state, actor, &config, rng, &session) {
                 // `seed_remaining_priority_cycle_passes` asks about future
                 // priority seats before `WaitingFor` advances to them. A
                 // priority pass is the sole raw action the batch accepts, so
@@ -3070,22 +3077,7 @@ fn resolve_all_inner(
                 Some(GameAction::PassPriority) => {
                     ResolveAllCallbackDecision::Action(GameAction::PassPriority)
                 }
-                Some(action) => {
-                    let Some(semantic_owner) = state
-                        .waiting_for
-                        .acting_player()
-                        .or_else(|| state.waiting_for.acting_players().first().copied())
-                    else {
-                        return ResolveAllCallbackDecision::Stop;
-                    };
-                    let contract = AiDecisionContract::issue(state, semantic_owner);
-                    if contract.permits(state, actor, &action) {
-                        ResolveAllCallbackDecision::Proposal { contract, action }
-                    } else {
-                        ResolveAllCallbackDecision::Stop
-                    }
-                }
-                None => ResolveAllCallbackDecision::Stop,
+                Some(_) | None => ResolveAllCallbackDecision::Stop,
             }
         } else {
             ResolveAllCallbackDecision::Stop
