@@ -3062,19 +3062,30 @@ fn resolve_all_inner(
             let ai_difficulty = AiDifficulty::from_label(&seat.difficulty);
             let config =
                 create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
-            let Some(semantic_owner) = state
-                .waiting_for
-                .acting_player()
-                .or_else(|| state.waiting_for.acting_players().first().copied())
-            else {
-                return ResolveAllCallbackDecision::Stop;
-            };
-            let contract = AiDecisionContract::issue(state, semantic_owner);
-            match choose_action_with_session(state, semantic_owner, &config, rng, &session) {
-                Some(action) if contract.permits(state, actor, &action) => {
-                    ResolveAllCallbackDecision::Proposal { contract, action }
+            match choose_action_with_session(state, actor, &config, rng, &session) {
+                // `seed_remaining_priority_cycle_passes` asks about future
+                // priority seats before `WaitingFor` advances to them. A
+                // priority pass is the sole raw action the batch accepts, so
+                // it remains valid without fabricating a future contract.
+                Some(GameAction::PassPriority) => {
+                    ResolveAllCallbackDecision::Action(GameAction::PassPriority)
                 }
-                Some(_) | None => ResolveAllCallbackDecision::Stop,
+                Some(action) => {
+                    let Some(semantic_owner) = state
+                        .waiting_for
+                        .acting_player()
+                        .or_else(|| state.waiting_for.acting_players().first().copied())
+                    else {
+                        return ResolveAllCallbackDecision::Stop;
+                    };
+                    let contract = AiDecisionContract::issue(state, semantic_owner);
+                    if contract.permits(state, actor, &action) {
+                        ResolveAllCallbackDecision::Proposal { contract, action }
+                    } else {
+                        ResolveAllCallbackDecision::Stop
+                    }
+                }
+                None => ResolveAllCallbackDecision::Stop,
             }
         } else {
             ResolveAllCallbackDecision::Stop
@@ -3301,6 +3312,37 @@ mod resolve_all_tests {
         GAME_STATE.with(|cell| cell.set(Some(state)));
 
         let ai_seats: Vec<AiSeatConfig> = serde_json::from_str("[]").unwrap();
+        let result = with_state_mut(|state| {
+            let mut rng = ChaCha20Rng::seed_from_u64(13);
+            resolve_all_inner(state, PlayerId(0), &ai_seats, 0, &mut rng)
+        })
+        .unwrap();
+
+        assert_eq!(result.items_resolved, 1);
+        with_state(|state| assert!(state.stack.is_empty())).unwrap();
+        clear_game_state();
+    }
+
+    #[test]
+    fn resolve_all_tls_production_path_seeds_ai_priority_passes() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 7);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_player = PlayerId(0);
+        state.stack.push_back(no_op_entry(1, PlayerId(2)));
+        GAME_STATE.with(|cell| cell.set(Some(state)));
+
+        let ai_seats = vec![
+            AiSeatConfig {
+                player_id: 1,
+                difficulty: "Medium".to_string(),
+            },
+            AiSeatConfig {
+                player_id: 2,
+                difficulty: "Medium".to_string(),
+            },
+        ];
         let result = with_state_mut(|state| {
             let mut rng = ChaCha20Rng::seed_from_u64(13);
             resolve_all_inner(state, PlayerId(0), &ai_seats, 0, &mut rng)
