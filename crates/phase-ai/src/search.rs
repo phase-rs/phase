@@ -10,7 +10,7 @@ use std::io::BufReader;
 
 use engine::ai_support::{
     build_decision_context, build_decision_context_for_semantic_owner, certify_fetch_then_cast,
-    certify_pact_plan, is_pact_payment_cast, is_targeted_exchange_root,
+    certify_pact_plan, is_pact_payment_cast, is_targeted_exchange_root, retarget_actions,
     root_may_yield_adverse_exchange, targeted_exchange_verdict,
     validated_candidate_actions_for_semantic_owner, AiDecisionContract, TargetedExchangeVerdict,
 };
@@ -2014,12 +2014,50 @@ pub fn fallback_action(
             Some(GameAction::SubmitPayAmount { amount: *min })
         }
 
-        // Retarget: keep current targets.
+        // CR 115.7a: a retarget must change to ANOTHER legal target; keeping the
+        // current targets is rejected by `apply_retarget` whenever the current
+        // target is not in the pool. Share the engine's enumeration so this
+        // fallback and `candidate_actions` cannot drift.
+        //
+        // This arm can yield `None`, and that is deliberate: there is no
+        // submission to fall back to. Falling back
+        // to `current_targets` was tried and is WRONG — worked through, the empty
+        // case is reachable only under `Single` (the `All` arm always pushes the
+        // unchanged anchor, which `retarget_slot_violation` exempts; `ForcedTo`
+        // never parks a prompt at all), and empty under `Single` entails
+        // that the current target is NOT in `legal_new_targets`. `apply_retarget`'s
+        // `Single` arm rejects on precisely that condition — `!legal_new_targets
+        // .contains(&new_targets[0])` — and it runs BEFORE the per-slot authority,
+        // with no unchanged-position exemption. So the fallback is rejected over
+        // its whole live domain; row 2b of `retarget_fallback_action.rs` says the
+        // same thing about the pre-fix behaviour.
+        //
+        //   DEFERRED(out-of-run): a `Single`-scope prompt EVERY member of whose
+        //   stored pool fails the per-slot check has NO reducer-accepted
+        //   submission. (The pool merely excluding the current target is NOT
+        //   sufficient — row 2b of `retarget_fallback_action.rs` is exactly that
+        //   case and its submission IS accepted.) That is a reducer-level gap,
+        //   not an AI one, and it shares the upstream cause already carried
+        //   below — `FilterProp::HasSingleTarget` is permissive with no
+        //   resolution-time validation. `None` is the correct signal for it: the
+        //   AI reporting "I have no legal action" is honest, whereas submitting a
+        //   knowingly-rejected action would launder an engine gap into an AI
+        //   retry loop.
         WaitingFor::RetargetChoice {
-            current_targets, ..
-        } => Some(GameAction::RetargetSpell {
-            new_targets: current_targets.clone(),
-        }),
+            stack_entry_index,
+            scope,
+            current_targets,
+            legal_new_targets,
+            ..
+        } => retarget_actions(
+            state,
+            *stack_entry_index,
+            scope,
+            current_targets,
+            legal_new_targets,
+        )
+        .into_iter()
+        .next(),
 
         // Companion reveal: decline.
         WaitingFor::CompanionReveal { .. } => Some(GameAction::DeclareCompanion {

@@ -13352,26 +13352,20 @@ fn continue_with_prepared(
 /// `effects::matches_player_scope` authority filtered over APNAP order. In the
 /// 2-player engine this is unambiguous. Falls back to the controller if no
 /// player matches (defensive — cannot happen in a live 2-player game).
+///
+/// Spell announcement is single-valued by construction: it opens exactly one
+/// `WaitingFor::ModeChoice`, so it takes the first admitted candidate from the
+/// shared `ability_utils::modal_chooser_candidates` authority. Trigger
+/// construction consumes that same authority's full set.
 fn resolve_modal_chooser(
     state: &GameState,
     modal: &crate::types::ability::ModalChoice,
     controller: PlayerId,
     source_id: ObjectId,
 ) -> PlayerId {
-    if modal.chooser == crate::types::ability::PlayerFilter::Controller {
-        return controller;
-    }
-    crate::game::players::apnap_order(state)
-        .into_iter()
-        .find(|&p| {
-            crate::game::effects::matches_player_scope(
-                state,
-                p,
-                &modal.chooser,
-                controller,
-                source_id,
-            )
-        })
+    super::ability_utils::modal_chooser_candidates(state, modal, controller, source_id)
+        .first()
+        .copied()
         .unwrap_or(controller)
 }
 

@@ -819,6 +819,11 @@ fn client_state_wire_value(
     root.remove("stack_trigger_firings");
     root.remove("resolving_trigger_firing");
     root.remove("resolved_rules_journal");
+    // CR 605.4a + CR 117.3c: Defense in depth for direct `ClientGameStateRef`
+    // callers that did not first run `visibility::filter_state_for_viewer`.
+    // Both are trusted persistence authorities, never client schema.
+    root.remove("pending_triggered_mana_resume");
+    root.remove("pending_trigger_construction_priority_recipient");
 
     redact_private_trigger_firing(&mut value);
 
@@ -6173,6 +6178,136 @@ mod tests {
             }),
             "the rows are exactly what a client rebuilds from the filtered object's counters, its \
              loyalty, the battlefield set and the `∞` store — zero new information"
+        );
+    }
+
+    /// CR 605.4a + CR 117.3c (plan Step 6, boundary 2): `client_state_wire_value`
+    /// is the defence-in-depth boundary for direct `ClientGameStateRef::wrap`
+    /// callers that never ran `visibility::filter_state_for_viewer`.
+    ///
+    /// All four projections — direct `wrap` for the prompt owner and for an
+    /// opponent, and `wrap_filtered` over both filtered states — must omit both
+    /// root keys and every private sentinel, while the public prompt survives.
+    /// The structural half fails if either field is renamed without updating
+    /// `client_state_wire_value`: the trusted root must contain exactly the
+    /// snake-case key, the client root must not.
+    #[test]
+    fn triggered_mana_sidecar_and_construction_recipient_never_reach_the_client_envelope() {
+        use crate::types::ability::QuantityExpr;
+        use crate::types::game_state::{
+            ManaTriggerFixedPointResume, TriggeredManaResume, TriggeredManaStage,
+        };
+        use crate::types::resolved_commands::{RulesExecutionNodeRef, SettlementNodeOrdinal};
+
+        const MARKER: &str = "WIRE-PRIVATE-ORACLE-SENTINEL";
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let hidden = create_object(
+            &mut state,
+            CardId(70_601),
+            PlayerId(0),
+            "Hidden Wire Source".to_string(),
+            Zone::Battlefield,
+        );
+        let mut pending = PendingTrigger::ordinary(
+            hidden,
+            PlayerId(0),
+            None,
+            Box::new(ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                hidden,
+                PlayerId(0),
+            )),
+            1,
+        );
+        pending.description = Some(MARKER.to_string());
+        state.pending_triggered_mana_resume = Some(Box::new(TriggeredManaResume {
+            current: Box::new(PendingTriggerContext::single(pending)),
+            current_override: None,
+            rules_execution_node: RulesExecutionNodeRef::TriggeredMana(SettlementNodeOrdinal(5)),
+            accepted_tail: Vec::new(),
+            collected_batches: Vec::new(),
+            outer_resume: ManaTriggerFixedPointResume::Parent,
+            stage: TriggeredManaStage::ChoosingModes,
+        }));
+        state.pending_trigger_construction_priority_recipient = Some(PlayerId(1));
+        state.waiting_for = WaitingFor::AbilityModeChoice {
+            player: PlayerId(2),
+            modal: ModalChoice {
+                min_choices: 1,
+                max_choices: 1,
+                mode_count: 2,
+                ..Default::default()
+            },
+            source_id: hidden,
+            mode_abilities: Vec::new(),
+            is_activated: false,
+            ability_index: None,
+            ability_cost: None,
+            unavailable_modes: Vec::new(),
+        };
+
+        let trusted = serde_json::to_value(&state).expect("serialize trusted state");
+        let trusted_root = trusted.as_object().expect("trusted root object");
+        assert!(
+            trusted_root.contains_key("pending_triggered_mana_resume")
+                && trusted_root.contains_key("pending_trigger_construction_priority_recipient"),
+            "test precondition: trusted persistence keeps both authorities under their exact \
+             snake-case keys"
+        );
+
+        let owner_view = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(2));
+        let opponent_view = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(1));
+        let projections = [
+            serde_json::to_value(ClientGameStateRef::wrap(&state, Some(PlayerId(2))))
+                .expect("direct owner wrap serializes"),
+            serde_json::to_value(ClientGameStateRef::wrap(&state, Some(PlayerId(1))))
+                .expect("direct opponent wrap serializes"),
+            serde_json::to_value(ClientGameStateRef::wrap_filtered(
+                &state,
+                &owner_view,
+                Some(PlayerId(2)),
+            ))
+            .expect("filtered owner wrap serializes"),
+            serde_json::to_value(ClientGameStateRef::wrap_filtered(
+                &state,
+                &opponent_view,
+                Some(PlayerId(1)),
+            ))
+            .expect("filtered opponent wrap serializes"),
+        ];
+
+        for (index, projection) in projections.iter().enumerate() {
+            let client_state = &projection["state"];
+            assert!(
+                client_state.get("pending_triggered_mana_resume").is_none(),
+                "projection {index} leaked the triggered-mana continuation key"
+            );
+            assert!(
+                client_state
+                    .get("pending_trigger_construction_priority_recipient")
+                    .is_none(),
+                "projection {index} leaked the construction recipient key"
+            );
+            let text = serde_json::to_string(projection).expect("projection serializes");
+            assert!(
+                !text.contains(MARKER),
+                "projection {index} leaked the private sidecar payload"
+            );
+            assert!(
+                client_state["waiting_for"] != serde_json::Value::Null,
+                "projection {index} must retain the public prompt"
+            );
+        }
+
+        assert!(
+            state.pending_triggered_mana_resume.is_some()
+                && state.pending_trigger_construction_priority_recipient == Some(PlayerId(1)),
+            "projection must not alter the authoritative carriers"
         );
     }
 }

@@ -9,12 +9,12 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, AttackScope,
     AttackSubject, BounceSelection, CardSelectionMode, CastingPermission, ChosenAttribute,
     Comparator, ContinuousModification, ControllerRef, CopyChooseScope, CopyRetargetPermission,
-    CountScope, DamageChannel, DamageModification, DamageSource, DelayedTriggerCondition,
-    DiscardSelfScope, Duration, Effect, EffectScope, FilterProp, ManaContribution, ManaProduction,
-    ManaSpendPermission, ModalChoice, ObjectScope, PerpetualModification, PlayerFilter,
-    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, SeatDirection,
-    SharedQuality, SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter,
-    TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
+    CountScope, DamageAmountScope, DamageAmountThreshold, DamageChannel, DamageModification,
+    DamageSource, DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, EffectScope,
+    FilterProp, ManaContribution, ManaProduction, ManaSpendPermission, ModalChoice, ObjectScope,
+    PerpetualModification, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr,
+    QuantityRef, SeatDirection, SharedQuality, SiblingCondition, SubAbilityLink, TapStateChange,
+    TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -17034,8 +17034,10 @@ fn trigger_source_you_control_deals_damage_to_another_player() {
 // CR 603.2 + CR 120.1: "Whenever a source you control deals N or more
 // damage to <recipient>" — exercises the amount-threshold axis added for
 // Dragonborn Champion. Building-block test: it verifies the parser emits
-// `damage_amount = Some((GE, N))` together with the source/recipient
-// filters, regardless of the specific card.
+// `damage_amount = Some({GE, N, PerSource})` together with the source/recipient
+// filters, regardless of the specific card. CR 603.2: the source-led grammar
+// names its source, so the trigger event it matches is one source's damage —
+// the threshold is per-source, never whole-event.
 #[test]
 fn trigger_source_deals_n_or_more_damage_to_player() {
     let def = parse_trigger_line(
@@ -17044,7 +17046,14 @@ fn trigger_source_deals_n_or_more_damage_to_player() {
     );
     assert_eq!(def.mode, TriggerMode::DamageDone);
     assert_eq!(def.damage_kind, DamageKindFilter::Any);
-    assert_eq!(def.damage_amount, Some((Comparator::GE, 5)));
+    assert_eq!(
+        def.damage_amount,
+        Some(DamageAmountThreshold {
+            comparator: Comparator::GE,
+            threshold: 5,
+            scope: DamageAmountScope::PerSource,
+        })
+    );
     assert!(matches!(
         def.valid_source,
         Some(TargetFilter::Typed(TypedFilter {
@@ -17062,7 +17071,14 @@ fn trigger_source_deals_n_or_more_damage_without_recipient() {
         "Test",
     );
     assert_eq!(def.mode, TriggerMode::DamageDone);
-    assert_eq!(def.damage_amount, Some((Comparator::GE, 5)));
+    assert_eq!(
+        def.damage_amount,
+        Some(DamageAmountThreshold {
+            comparator: Comparator::GE,
+            threshold: 5,
+            scope: DamageAmountScope::PerSource,
+        })
+    );
     assert!(matches!(
         def.valid_source,
         Some(TargetFilter::Typed(TypedFilter {
@@ -17080,7 +17096,14 @@ fn trigger_creature_source_deals_n_or_more_damage_to_player() {
         "Test",
     );
     assert_eq!(def.mode, TriggerMode::DamageDone);
-    assert_eq!(def.damage_amount, Some((Comparator::GE, 5)));
+    assert_eq!(
+        def.damage_amount,
+        Some(DamageAmountThreshold {
+            comparator: Comparator::GE,
+            threshold: 5,
+            scope: DamageAmountScope::PerSource,
+        })
+    );
     match def.valid_source {
         Some(TargetFilter::Typed(TypedFilter {
             type_filters,
@@ -17099,7 +17122,14 @@ fn trigger_source_deals_exactly_n_damage_to_player() {
         "Test",
     );
     assert_eq!(def.mode, TriggerMode::DamageDone);
-    assert_eq!(def.damage_amount, Some((Comparator::EQ, 5)));
+    assert_eq!(
+        def.damage_amount,
+        Some(DamageAmountThreshold {
+            comparator: Comparator::EQ,
+            threshold: 5,
+            scope: DamageAmountScope::PerSource,
+        })
+    );
     assert_eq!(def.valid_target, Some(TargetFilter::Player));
 }
 
@@ -17122,7 +17152,14 @@ fn ghyrson_damage_trigger_parses_mixed_permanent_or_player_recipient() {
     );
     let trigger = parsed.triggers.first().expect("Ghyrson trigger parses");
     assert_eq!(trigger.mode, TriggerMode::DamageDone);
-    assert_eq!(trigger.damage_amount, Some((Comparator::EQ, 1)));
+    assert_eq!(
+        trigger.damage_amount,
+        Some(DamageAmountThreshold {
+            comparator: Comparator::EQ,
+            threshold: 1,
+            scope: DamageAmountScope::PerSource,
+        })
+    );
     assert_eq!(trigger.valid_target, None);
     match trigger.valid_source.as_ref() {
         Some(TargetFilter::Typed(TypedFilter {
@@ -29168,13 +29205,17 @@ fn event_source_lift_rewrites_inline_modal_tap_mode_roots() {
     ));
 }
 
-// CR 120.1 + CR 120.2a + CR 120.2b + CR 120.6 + CR 120.10: the passive-voice
+// CR 120.1 + CR 120.2a + CR 120.2b + CR 120.4b + CR 120.10: the passive-voice
 // damage-received axis grid. These test the parameterized combinator's AXES
-// (voice × channel × kind × amount), not any single card's replay — the four
-// former `tag()` cells are kept as explicit regression guards below. The amount
-// axis is exercised as a REFUSAL: the combinator parses a threshold, but the
-// consumer arm declines to emit one because whole-event aggregation is not yet
-// modeled, so the tests below pin `Unknown` rather than a shape.
+// (voice × channel × kind × amount × scope), not any single card's replay — the
+// four former `tag()` cells are kept as explicit regression guards below.
+//
+// The amount axis now emits a shape rather than a refusal, and it carries the
+// aggregation scope with it: absent a source tail the received-damage grammar
+// means the WHOLE simultaneous damage event (CR 120.4b), while an explicit
+// "…by a single source" tail narrows it to one source's share. The cell that
+// still cannot be modeled — a source tail with no amount to carry it — is left
+// unconsumed and stays honestly `Unknown` via the arm's tail guard.
 
 #[test]
 fn dealt_damage_axes_noncombat_total() {
@@ -29190,38 +29231,47 @@ fn dealt_damage_axes_noncombat_total() {
 }
 
 #[test]
-fn dealt_damage_axes_amount_threshold_is_refused() {
-    // CR 120.4b + CR 120.4d: simultaneous damage is one event, so a received-
-    // damage threshold reads the event total. Innocent Bystander is this cell's
-    // entire population and its ruling requires "3 or more damage all at once",
-    // which the per-`(source, amount)` matcher cannot express. The arm refuses
-    // rather than emit a def that would silently under-fire on two 2-damage
-    // sources. Asserting `Unknown` — not a shape — is what makes this test able
-    // to fail if the refusal is ever dropped.
+fn dealt_damage_axes_amount_threshold_is_whole_event() {
+    // V1 — CR 120.4b: simultaneous damage is one event, so an unscoped
+    // received-damage threshold reads the event total. Innocent Bystander is
+    // this cell's entire population and its ruling requires "3 or more damage
+    // all at once", which is exactly what `DamageAmountScope::WholeEvent`
+    // records for the runtime fold to honor.
+    //
+    // Revert-failing: restore the arm's `if amount.is_some() { return None; }`
+    // aggregation refusal and the mode falls back to `Unknown`.
     let def = parse_trigger_line(
         "Whenever ~ is dealt 3 or more damage, investigate.",
         "Some Card",
     );
-    assert!(
-        matches!(def.mode, TriggerMode::Unknown(_)),
-        "amount-bearing received-damage triggers must stay honestly unsupported \
-         until the aggregation axis is modeled, got {:?}",
-        def.mode
+    assert_eq!(def.mode, TriggerMode::DamageReceived);
+    assert_eq!(
+        def.damage_amount,
+        Some(DamageAmountThreshold {
+            comparator: Comparator::GE,
+            threshold: 3,
+            scope: DamageAmountScope::WholeEvent,
+        })
     );
 }
 
 #[test]
-fn dealt_damage_axes_amount_exactly_is_refused() {
-    // Same refusal on the tail's second comparator branch (`parse_exactly`):
-    // "exactly 2" is likewise a whole-event quantity.
+fn dealt_damage_axes_amount_exactly_is_whole_event() {
+    // V2 — the tail's second comparator branch (`parse_exactly`): "exactly 2"
+    // is likewise a whole-event quantity, proving the scope rides the comparator
+    // axis rather than being hard-coded to `GE`.
     let def = parse_trigger_line(
         "Whenever ~ is dealt exactly 2 damage, draw a card.",
         "Some Card",
     );
-    assert!(
-        matches!(def.mode, TriggerMode::Unknown(_)),
-        "exactly-N received-damage triggers must stay honestly unsupported, got {:?}",
-        def.mode
+    assert_eq!(def.mode, TriggerMode::DamageReceived);
+    assert_eq!(
+        def.damage_amount,
+        Some(DamageAmountThreshold {
+            comparator: Comparator::EQ,
+            threshold: 2,
+            scope: DamageAmountScope::WholeEvent,
+        })
     );
 }
 
@@ -29313,28 +29363,52 @@ fn dealt_damage_excess_with_threshold_is_rejected() {
 }
 
 #[test]
-fn dealt_damage_newly_opened_cell_rejects_unmodeled_tail() {
-    // CR 603.2: an ability triggers when a game event matches ITS trigger event.
-    // Pain Magnification's "by a single source" is a per-source aggregation
-    // constraint the engine cannot represent, so on this NEWLY-OPENED cell the
-    // arm refuses the def rather than asserting a different (over-firing)
-    // trigger event. Verbatim Oracle text.
+fn dealt_damage_newly_opened_cell_parses_single_source_tail() {
+    // V3 — CR 603.2: an ability triggers when a game event matches ITS trigger
+    // event. Pain Magnification's "by a single source" narrows the threshold's
+    // aggregation domain to one source's share, which the scope axis now
+    // represents, so this NEWLY-OPENED cell emits instead of refusing.
+    // Verbatim Oracle text.
+    //
+    // Revert-failing: drop `parse_single_source_scope` and the tail is left
+    // unconsumed, so the arm's tail guard refuses the line back to `Unknown`.
     let def = parse_trigger_line(
         "Whenever an opponent is dealt 3 or more damage by a single source, that player discards a card.",
         "Pain Magnification",
     );
+    assert_eq!(def.mode, TriggerMode::DamageReceived);
+    assert_eq!(
+        def.valid_target,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent)
+        ))
+    );
+    assert_eq!(
+        def.damage_amount,
+        Some(DamageAmountThreshold {
+            comparator: Comparator::GE,
+            threshold: 3,
+            scope: DamageAmountScope::PerSource,
+        })
+    );
+
+    // H3 — paired negative: a newly-opened cell whose trailing restriction is
+    // still unmodeled must STILL be refused. Without it the tail guard could be
+    // silently dead and no test would notice.
+    let unmodeled_tail = parse_trigger_line(
+        "Whenever ~ is dealt 3 or more damage by an attacking creature, draw a card.",
+        "Some Card",
+    );
     assert!(
-        matches!(def.mode, TriggerMode::Unknown(_)),
+        matches!(unmodeled_tail.mode, TriggerMode::Unknown(_)),
         "an unmodeled trailing restriction on a newly-opened cell must be refused, got {:?}",
-        def.mode
+        unmodeled_tail.mode
     );
 
     // Paired positive reach-guard — WITHOUT it the assertion above could pass
     // vacuously, from the arm reaching no newly-opened cell at all. The control
     // must therefore be a cell that is newly opened AND still emits: the
-    // noncombat/total cell, which no former `tag()` arm covered. It cannot be
-    // Innocent Bystander's `N or more` cell, which the amount guard now refuses
-    // for unmodelable whole-event aggregation (see `..._amount_threshold_is_refused`).
+    // noncombat/total cell, which no former `tag()` arm covered.
     // Verbatim Oracle text.
     let reachable = parse_trigger_line(
         "Whenever Smaug is dealt noncombat damage, create that many Treasure tokens.",
@@ -29360,4 +29434,186 @@ fn dealt_damage_previously_covered_cell_keeps_trailing_tail() {
     assert_eq!(def.mode, TriggerMode::DamageReceived);
     assert_eq!(def.damage_kind, DamageKindFilter::Any);
     assert_eq!(def.damage_amount, None);
+}
+
+#[test]
+fn dealt_damage_single_source_tail_without_amount_stays_unknown() {
+    // V3b / H3b — CR 120.4b: the source-scoping tail is carried on the amount
+    // threshold, so with no amount there is nowhere for it to live. The tail is
+    // therefore NOT consumed, and the arm's existing unconsumed-tail guard
+    // refuses this newly-opened cell — `(Total, NoncombatOnly, None)` is absent
+    // from `previously_covered`.
+    //
+    // Revert-failing: make the tail combinator unconditional (drop the
+    // `if amount.is_some()` gating) and the tail is consumed, `remaining`
+    // empties, and the line parses to `DamageReceived + NoncombatOnly` with the
+    // source restriction silently dropped.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt noncombat damage by a single source, draw a card.",
+        "Some Card",
+    );
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "a source tail with no amount to carry it must stay unconsumed and refused, got {:?}",
+        def.mode
+    );
+}
+
+#[test]
+fn dealt_damage_single_source_tail_with_amount_is_per_source() {
+    // V3 — the paired positive reach-guard for the test above: the SAME tail on
+    // the SAME grammar is consumed and yields `PerSource` once an amount exists
+    // to carry it. Without this, the negative above could pass because the whole
+    // cell stopped parsing.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt 3 or more damage by a single source, draw a card.",
+        "Some Card",
+    );
+    assert_eq!(def.mode, TriggerMode::DamageReceived);
+    assert_eq!(def.damage_kind, DamageKindFilter::Any);
+    assert_eq!(
+        def.damage_amount,
+        Some(DamageAmountThreshold {
+            comparator: Comparator::GE,
+            threshold: 3,
+            scope: DamageAmountScope::PerSource,
+        })
+    );
+}
+
+#[test]
+fn whole_event_trigger_is_not_subject_batched() {
+    // V14 / Guard 2 — CR 603.2c: whole-event damage aggregation must NOT set
+    // `batched`. That field additionally means "count subjects", and
+    // `subject_match_count` (a SUBJECT HEADCOUNT) outranks the triggering
+    // event's amount in the `EventContextAmount` cascade, so setting it here
+    // would fix the once-per-batch dedup and simultaneously corrupt "that much".
+    // Firing granularity is carried instead by `fires_once_per_batch` in
+    // `game/triggers.rs`, which reads the typed scope.
+    //
+    // Verbatim Oracle text (Innocent Bystander).
+    let def = parse_trigger_line(
+        "Whenever this creature is dealt 3 or more damage, investigate.",
+        "Innocent Bystander",
+    );
+    assert_eq!(
+        def.damage_amount.expect("threshold present").scope,
+        DamageAmountScope::WholeEvent
+    );
+    assert!(
+        !def.batched,
+        "whole-event damage aggregation must not set the subject-counting `batched` flag"
+    );
+
+    // Paired positive control: `batched` IS observable and CAN be true on this
+    // very grammar, so the negative above is not vacuous.
+    let batched = parse_trigger_line(
+        "Whenever one or more creatures you control are dealt noncombat damage, draw a card.",
+        "Some Card",
+    );
+    assert!(
+        batched.batched,
+        "control must prove `batched` is readable and reachable on this grammar"
+    );
+}
+
+#[test]
+fn source_led_damage_triggers_stay_per_source() {
+    // V10a + V10b — CR 603.2: the source-led `DamageDone` grammar names the
+    // damaging source, so its threshold reads that source's share and never
+    // aggregates. Two pins, one per construction family, because the two
+    // families are reached by different entry points.
+    //
+    // V10a — subject-led family (`~ deals …`), which is the family Deus of
+    // Calamity actually reaches: `parse_damage_source_subject` has no
+    // `~`/`SelfRef` branch, so the source-led parser bails and the subject-led
+    // site is what writes this def (`valid_source: SelfRef` confirms it).
+    // Revert-failing: change that site's constructed `scope:` to `WholeEvent`.
+    let deus = parse_trigger_line(
+        "Whenever this creature deals 6 or more damage to an opponent, destroy target land that player controls.",
+        "Deus of Calamity",
+    );
+    assert_eq!(deus.mode, TriggerMode::DamageDone);
+    assert_eq!(deus.valid_source, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        deus.damage_amount,
+        Some(DamageAmountThreshold {
+            comparator: Comparator::GE,
+            threshold: 6,
+            scope: DamageAmountScope::PerSource,
+        })
+    );
+
+    // V10b — source-led family (`a source you control deals …`), the five-site
+    // family Deus of Calamity never reaches. Dragonborn Champion's "to a player"
+    // recipient reaches the player-axis fall-through exit. Verbatim Oracle text.
+    // Revert-failing: change that family's constructed `scope:` to `WholeEvent`.
+    let champion = parse_trigger_line(
+        "Whenever a source you control deals 5 or more damage to a player, draw a card.",
+        "Dragonborn Champion",
+    );
+    assert_eq!(champion.mode, TriggerMode::DamageDone);
+    assert_eq!(
+        champion.damage_amount,
+        Some(DamageAmountThreshold {
+            comparator: Comparator::GE,
+            threshold: 5,
+            scope: DamageAmountScope::PerSource,
+        })
+    );
+}
+
+/// V12 / Guard 1 — CR 120.4b + CR 603.2c: grouping N damage events into one
+/// firing makes `state.current_trigger_event` the group's FIRST event, so an
+/// effect that reads `EventContextAmount` ("that much damage") would resolve to
+/// one source's share rather than the summed batch. No cascade tier sums
+/// `amount` across the group. This is latent, not live: the entire printed
+/// `WholeEvent` population is Innocent Bystander, whose effect is `investigate`
+/// and references no amount.
+///
+/// HONEST SCOPE: this covers today's population and proves the detector live.
+/// It does NOT police future printings — a corpus-wide census is deferred,
+/// because the only in-crate corpus (the shared card fixture) contains none of
+/// the cards this change touches and would be red on landing against its own
+/// non-emptiness precondition.
+#[test]
+fn whole_event_threshold_effect_does_not_read_event_context_amount() {
+    // Test-only structural probe over the serialized `execute` subtree — the
+    // same structural query the deferred-population measurement runs against
+    // `card-data.json`. Not parsing dispatch, so the nom mandate does not apply.
+    fn execute_reads_event_context_amount(def: &TriggerDefinition) -> bool {
+        serde_json::to_string(&def.execute)
+            .expect("serializes")
+            .contains("EventContextAmount")
+    }
+
+    // (a) The whole printed WholeEvent population today.
+    let bystander = parse_trigger_line(
+        "Whenever this creature is dealt 3 or more damage, investigate.",
+        "Innocent Bystander",
+    );
+    assert_eq!(
+        bystander.damage_amount.expect("threshold present").scope,
+        DamageAmountScope::WholeEvent
+    );
+    assert!(
+        !execute_reads_event_context_amount(&bystander),
+        "a WholeEvent trigger whose effect reads EventContextAmount would resolve \
+         to the first source's share, not the summed batch"
+    );
+
+    // (b) POSITIVE CONTROL — what makes (a) non-vacuous. If the detector is
+    // dead, (a) passes for the wrong reason and this turns that into a failure.
+    let reads_amount = parse_trigger_line(
+        "Whenever this creature is dealt 3 or more damage, draw that many cards.",
+        "Some Card",
+    );
+    assert_eq!(
+        reads_amount.damage_amount.expect("threshold present").scope,
+        DamageAmountScope::WholeEvent
+    );
+    assert!(
+        execute_reads_event_context_amount(&reads_amount),
+        "detector must fire on an effect that DOES read the event amount"
+    );
 }

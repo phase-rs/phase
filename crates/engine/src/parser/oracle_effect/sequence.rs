@@ -2,7 +2,7 @@ use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_till, take_until};
 use nom::character::complete::multispace1;
-use nom::combinator::{all_consuming, eof, map, opt, rest, value};
+use nom::combinator::{all_consuming, eof, map, map_opt, opt, rest, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -3627,8 +3627,8 @@ fn recognize_counter_spell_zone_redirect(lower: &str) -> Option<SpellStackToGrav
 /// copy the spell makes is retargetable), `false` for the singular "the copy" /
 /// "that copy" forms (Fork/Twincast; the Chain cycle).
 ///
-/// The leading `opt(parse_affirmative_reflexive_connector)` axis accepts the form
-/// where the grant is printed as the CONSEQUENT of a reflexive gate rather than as
+/// The leading optional connector accepts only the typed CR 608.2c `If` class
+/// where the grant is printed as the consequent of a continuation rather than as
 /// its own sentence — Spider-Verse's "you may copy it. IF YOU DO, you may choose new
 /// targets for the copy." (compare Spinerock Tyrant, which prints the same grant as a
 /// standalone sentence). Without it the clause reached the continuation recognizer
@@ -3636,18 +3636,26 @@ fn recognize_counter_spell_zone_redirect(lower: &str) -> Option<SpellStackToGrav
 /// to an honest `orphaned_copy_retarget` residual — the copy was modeled, but its
 /// controller could never retarget it.
 ///
-/// Folding the gate away is sound precisely BECAUSE it is affirmative and the copy it
+/// Folding the `If` gate away is sound precisely because the copy it
 /// rides is itself optional: "if you do" means "if you made the copy", and a retarget
 /// permission on a copy that was never made is unreachable. So the gate carries no
 /// information the `CopySpell`'s own optionality does not already carry, and CR 707.10c
-/// is satisfied without a separate condition node. This reasoning does NOT extend to
-/// the NEGATED connectors, which is exactly why the affirmative half is its own
-/// combinator (see `oracle_nom::condition`) rather than the whole set with the
-/// condition thrown away.
+/// is satisfied without a separate condition node. This reasoning does not extend to
+/// negated connectors or literal `When`, which creates a CR 603.12 reflexive trigger.
+/// The typed predicate below therefore accepts only
+/// `EffectOutcome::OptionalEffectPerformed` and fails closed for every other result.
+fn parse_inline_copy_retarget_connector(input: &str) -> OracleResult<'_, ()> {
+    map_opt(
+        crate::parser::oracle_nom::condition::parse_affirmative_reflexive_connector,
+        |condition| condition.is_optional_effect_performed().then_some(()),
+    )
+    .parse(input)
+}
+
 pub(super) fn parse_copy_retarget_clause(input: &str) -> OracleResult<'_, bool> {
     map(
         (
-            opt(crate::parser::oracle_nom::condition::parse_affirmative_reflexive_connector),
+            opt(parse_inline_copy_retarget_connector),
             opt(alt((tag(", and "), tag("and ")))),
             opt(tag("you ")),
             tag("may choose "),
@@ -9931,15 +9939,17 @@ mod tests {
             "may choose a new target for the creature"
         ));
 
-        // CR 707.10c + CR 603.12: the grant printed as the CONSEQUENT of an
-        // AFFIRMATIVE reflexive gate rather than as its own sentence (Spider-Verse's
+        // CR 707.10c + CR 608.2c: the grant printed as the consequent of an
+        // affirmative `If` continuation rather than as its own sentence (Spider-Verse's
         // "you may copy it. If you do, you may choose new targets for the copy.").
         // The gate is redundant on an already-optional copy — no copy, nothing to
         // retarget — so it folds into the same continuation.
         assert!(recognize_copy_retarget_clause(
             "if you do, you may choose new targets for the copy."
         ));
-        assert!(recognize_copy_retarget_clause(
+        // CR 603.12: literal `When` creates a reflexive trigger and cannot be
+        // folded into an inline copy-retarget permission.
+        assert!(!recognize_copy_retarget_clause(
             "when you do, you may choose new targets for the copies"
         ));
         assert_eq!(

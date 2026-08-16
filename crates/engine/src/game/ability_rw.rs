@@ -3915,6 +3915,7 @@ fn walk_ability(
         copy_count_status: _,
         forward_result: _,
         distribution: _,
+        distribute: _, // announcement unit, no state read/write axis
         chosen_x: _,
         cost_paid_object: _,
         noted_mana_payment: _, // concrete captured payment snapshot, no read/write effect
@@ -7071,6 +7072,18 @@ mod tests {
     // ---- builders ----
     fn ra(effect: Effect) -> ResolvedAbility {
         ResolvedAbility::new(effect, vec![], ObjectId(1), PlayerId(0))
+    }
+
+    #[test]
+    fn unassigned_distribution_unit_is_rw_inert() {
+        let base = ra(Effect::NoOp);
+        let mut divided = base.clone();
+        divided.distribute = Some(crate::types::game_state::DistributionUnit::Damage);
+
+        assert_eq!(
+            format!("{:?}", ability_rw_profile(&base)),
+            format!("{:?}", ability_rw_profile(&divided))
+        );
     }
     fn cond(mut a: ResolvedAbility, c: AbilityCondition) -> ResolvedAbility {
         a.condition = Some(c);

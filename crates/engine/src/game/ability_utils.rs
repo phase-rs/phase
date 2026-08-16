@@ -143,6 +143,9 @@ pub fn build_resolved_from_def_with_targets(
     resolved.description = def.description.clone();
     resolved.forward_result = def.forward_result;
     resolved.unless_pay = def.unless_pay.clone();
+    // CR 601.2d + CR 603.3d: Preserve the unassigned division unit until the
+    // ordinary stack-announcement authority assigns concrete portions.
+    resolved.distribute = def.distribute.clone();
     resolved.player_scope = def.player_scope.clone();
     // CR 101.4 + CR 800.4: Propagate the turn-order override for `player_scope`
     // iteration. The iteration driver in `effects/mod.rs` reads this and calls
@@ -169,7 +172,7 @@ pub fn build_resolved_from_def_with_targets(
     // keyword list collapses after the first false gate.
     resolved.sibling_condition = def.sibling_condition;
     // CR 700.2b + CR 603.3c: Carry the reflexive modal choice + per-mode abilities
-    // through so try_begin_reflexive_target_selection can route a gated modal
+    // through so try_materialize_reflexive_trigger can route a gated modal
     // trigger (Caesar) to AbilityModeChoice instead of resolving the modes
     // unconditionally.
     resolved.modal = def.modal.clone();
@@ -193,7 +196,8 @@ pub fn build_resolved_from_def_with_targets(
 /// Fields from `sub`: effect, duration, sub_ability, else_ability,
 /// player_scope, optional, optional_for, optional_targeting, multi_target,
 /// target_constraints, target_choice_timing, description, repeat_for,
-/// min_x_value, forward_result, unless_pay, distribution, target_selection_mode.
+/// min_x_value, forward_result, unless_pay, distribution, distribute,
+/// target_selection_mode.
 ///
 /// Fields preserved from `parent`: controller, source_id, kind, context,
 /// original_controller, scoped_player, chosen_x, cost_paid_object,
@@ -246,6 +250,7 @@ pub(crate) fn apply_instead_swap(
     overridden.forward_result = sub.forward_result;
     overridden.unless_pay = sub.unless_pay.clone();
     overridden.distribution = sub.distribution.clone();
+    overridden.distribute = sub.distribute.clone();
     overridden.target_selection_mode = sub.target_selection_mode;
     overridden.target_chooser = sub.target_chooser.clone();
     // CR 608.2b + CR 601.2c: a swapped-in effect with its own declared target
@@ -899,6 +904,35 @@ pub fn compute_unavailable_modes(
     unavailable.sort_unstable();
     unavailable.dedup();
     unavailable
+}
+
+/// CR 700.2a / CR 700.2e: every player the modal's `chooser` admits, in APNAP
+/// order.
+///
+/// `PlayerFilter::Controller` — every standard modal and the `you choose —`
+/// alias — is the controller alone, without consulting
+/// `effects::matches_player_scope`. Any other filter (CR 700.2e, "an opponent
+/// chooses …") is resolved through that canonical authority over APNAP order.
+///
+/// Spell announcement wants only the first admitted player, which is what
+/// `casting::resolve_modal_chooser` takes; trigger construction needs the whole
+/// set, because more than one non-controller candidate makes the controller's
+/// CR 700.2e chooser selection a real choice rather than a derivation.
+pub(crate) fn modal_chooser_candidates(
+    state: &GameState,
+    modal: &ModalChoice,
+    controller: PlayerId,
+    source_id: ObjectId,
+) -> Vec<PlayerId> {
+    if modal.chooser == PlayerFilter::Controller {
+        return vec![controller];
+    }
+    players::apnap_order(state)
+        .into_iter()
+        .filter(|&p| {
+            super::effects::matches_player_scope(state, p, &modal.chooser, controller, source_id)
+        })
+        .collect()
 }
 
 /// CR 700.2a-b: Mode indices a modal spell cannot choose — repeat constraints
@@ -7353,15 +7387,38 @@ fn chain_has_target_sink_after_deferred_effect(sub_ability: Option<&ResolvedAbil
 
 /// CR 115.7a: "each target can be changed only to another legal target." A
 /// multi-slot node's replacement targets are submitted positionally, but
-/// `legal_new_targets_for_stack_ability` can only return a FLAT union pool
+/// `legal_new_targets_for_stack_entry` can only return a FLAT union pool
 /// (one `Vec<TargetRef>`, no slot structure), so the union alone would let a
 /// count-source-legal player be assigned into the recipient slot. This is the
 /// seam where slot identity IS available: re-validate each submitted target
 /// against the filter of the slot it actually lands in.
 ///
-/// Returns `Some(slot_index)` for the first positionally-illegal submission.
-/// `None` = the submission is slot-legal, or this node declares no per-slot
-/// structure this function knows about.
+/// Takes the prompt's `current_targets` and **exempts positions whose submission
+/// is unchanged**: CR 115.7d ("the player may leave any number of the targets
+/// unchanged, even if those targets would be illegal") licenses this outright for
+/// the "choose new targets" scope. CR 115.7a does not grant an equivalent licence
+/// — its unchanged-target allowance is conditional ("if a target can't be changed
+/// to another legal target") — but it does not need to: it constrains only targets
+/// that ARE changed, so a slot already holding its own submission was never
+/// changed and "changed only to another legal target" has nothing to bite on.
+/// The exemption is therefore correct without a scope parameter, by licence under
+/// 115.7d and by non-application under 115.7a.
+///
+/// CR 115.7d's SECOND sentence — new targets "must not cause any unchanged targets
+/// to become illegal" — is vacuous under today's model and is deliberately not
+/// enforced here: `validate_targets_for_ability` evaluates each slot's filter
+/// against the state and the ability, never against a sibling slot's choice, so no
+/// submission can invalidate a neighbour. A future filter that reads sibling slots
+/// must revisit this.
+///
+/// Consumed by `engine::apply_retarget` AND by
+/// `ai_support::candidates::retarget_actions`, so the reducer and the AI
+/// generator cannot disagree about which submissions are legal.
+///
+/// Returns `Some(slot_index)` for the first positionally-illegal CHANGED
+/// submission. `None` = the submission is slot-legal, every illegal position was
+/// left unchanged, or this node declares no per-slot structure this function
+/// knows about.
 ///
 /// SCOPE: today this recognizes any node `mana_multi_role` admits — both the
 /// two-surfaced-slot `Both` and the one-surfaced-slot context-ref recipient
@@ -7373,19 +7430,47 @@ fn chain_has_target_sink_after_deferred_effect(sub_ability: Option<&ResolvedAbil
 pub fn retarget_slot_violation(
     state: &GameState,
     ability: &ResolvedAbility,
+    current_targets: &[TargetRef],
     new_targets: &[TargetRef],
 ) -> Option<usize> {
     let role = mana_multi_role(&ability.effect)?;
     role.surfaced_filters()
         .zip(new_targets.iter())
-        .position(|((_slot, filter), submitted)| {
-            targeting::validate_targets_for_ability(
+        .enumerate()
+        .find_map(|(slot, ((_slot, filter), submitted))| {
+            // CR 115.7d: "the player may leave any number of the targets
+            // unchanged, even if those targets would be illegal." CR 115.7a says
+            // the same thing for the other scope from the other direction: a
+            // target is "changed only to another legal target", and a slot
+            // already holding its own submission was not changed at all. So a
+            // position whose submission equals its current target is exempt
+            // under BOTH retarget scopes, which is why this authority needs no
+            // scope parameter.
+            //
+            // `apply_retarget`'s pool-membership stage already exempts exactly
+            // these positions (its `All` arm's `continue` on
+            // `current_targets.get(idx) == Some(target)`); before this, the
+            // per-slot stage re-rejected them, so the one submission CR 115.7d
+            // guarantees — leave everything unchanged — was refused for every
+            // node `mana_multi_role` admits whose current target had become
+            // slot-illegal. The forced seam
+            // (`change_targets::forced_retarget_targets`) has always conjoined
+            // "changes" with "legal", and its doc already claims parity with
+            // this function; this is that same conjunction, here.
+            //
+            // Index `current_targets` rather than zipping it: a third `.zip`
+            // would truncate the scan and silently skip validation for any
+            // position beyond `current_targets.len()`, where `get` correctly
+            // yields `None` (no current target cannot be "unchanged").
+            let changes = current_targets.get(slot) != Some(submitted);
+            let illegal = targeting::validate_targets_for_ability(
                 state,
                 std::slice::from_ref(submitted),
                 filter,
                 ability,
             )
-            .is_empty()
+            .is_empty();
+            (changes && illegal).then_some(slot)
         })
 }
 
@@ -7754,6 +7839,75 @@ fn build_mode_sequences(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+
+    /// CR 700.2a / CR 700.2e: `modal_chooser_candidates` is the one authority
+    /// both spell announcement and trigger construction read.
+    ///
+    /// Announcement is single-valued and takes `.first()`, so this row proves
+    /// the head of the returned order is byte-identical to the historic
+    /// `resolve_modal_chooser` result on both branches, and that the tail — the
+    /// part only trigger construction consumes — really is the complete
+    /// admitted set rather than that same single value. A regression that
+    /// truncates the extraction back to one candidate fails the three-player
+    /// length assertion while leaving both head assertions green.
+    #[test]
+    fn modal_chooser_candidates_are_the_complete_admitted_set_in_apnap_order() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 42);
+        state.active_player = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Modal chooser source".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut modal = ModalChoice {
+            min_choices: 1,
+            max_choices: 1,
+            mode_count: 2,
+            ..Default::default()
+        };
+
+        // CR 700.2a: the controller branch never consults `matches_player_scope`
+        // and never admits anyone else, in any seat count.
+        modal.chooser = PlayerFilter::Controller;
+        assert_eq!(
+            modal_chooser_candidates(&state, &modal, PlayerId(1), source),
+            vec![PlayerId(1)],
+            "the controller branch is the controller alone"
+        );
+
+        // CR 700.2e: "an opponent chooses —" with two opponents is a real
+        // choice, and APNAP order decides which one announcement would take.
+        modal.chooser = PlayerFilter::Opponent;
+        let candidates = modal_chooser_candidates(&state, &modal, PlayerId(0), source);
+        assert_eq!(
+            candidates,
+            vec![PlayerId(1), PlayerId(2)],
+            "every opponent is admitted, in APNAP order"
+        );
+        assert_eq!(
+            candidates.first().copied(),
+            Some(PlayerId(1)),
+            "announcement's single-valued head is the first APNAP opponent"
+        );
+
+        // Two-player: the same authority collapses to the unambiguous opponent.
+        let mut two = GameState::new_two_player(42);
+        two.active_player = PlayerId(0);
+        let two_source = create_object(
+            &mut two,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Modal chooser source".to_string(),
+            Zone::Battlefield,
+        );
+        assert_eq!(
+            modal_chooser_candidates(&two, &modal, PlayerId(0), two_source),
+            vec![PlayerId(1)]
+        );
+    }
 
     /// Matrix rows 5 + 6 — the slot/spec mirror must agree in COUNT **and**
     /// ORDER, and the context-ref skip must agree between the two sites.
@@ -8165,7 +8319,7 @@ mod tests {
     }
 
     /// Matrix row 8b — CR 115.7a: "each target can be changed only to another
-    /// legal target." A flat `legal_new_targets_for_stack_ability` union pool
+    /// legal target." A flat `legal_new_targets_for_stack_entry` union pool
     /// cannot express per-slot legality, so `retarget_slot_violation` re-checks
     /// each submission against the filter of the slot it actually lands in.
     #[test]
@@ -8197,11 +8351,17 @@ mod tests {
         assert_eq!(role.surfaced_filters().count(), 2);
 
         // Positive: a slot-legal submission is accepted. Without this the
-        // negative below could pass because EVERYTHING is rejected.
+        // negative below could pass because EVERYTHING is rejected. Both slots
+        // genuinely CHANGE against the current targets passed here, so this case
+        // proves legality rather than the CR 115.7d unchanged-position exemption.
         assert_eq!(
             retarget_slot_violation(
                 &state,
                 &ability,
+                &[
+                    TargetRef::Player(PlayerId(1)),
+                    TargetRef::Player(PlayerId(0)),
+                ],
                 &[
                     TargetRef::Player(PlayerId(0)),
                     TargetRef::Player(PlayerId(1)),
@@ -8212,11 +8372,17 @@ mod tests {
         );
 
         // Negative: P0 is in the flat union pool (legal for the recipient slot)
-        // but illegal in the COUNT SOURCE slot it was submitted into.
+        // but illegal in the COUNT SOURCE slot it was submitted into. Slot 1
+        // genuinely changes (P1 -> P0) against the current targets, so the
+        // exemption does not apply and the violation must be reported.
         assert_eq!(
             retarget_slot_violation(
                 &state,
                 &ability,
+                &[
+                    TargetRef::Player(PlayerId(1)),
+                    TargetRef::Player(PlayerId(1)),
+                ],
                 &[
                     TargetRef::Player(PlayerId(1)),
                     TargetRef::Player(PlayerId(0)),
@@ -8225,6 +8391,82 @@ mod tests {
             Some(1),
             "CR 115.7a: P0 is not an opponent, so it is illegal in slot 1 even though \
              the flat union pool contains it"
+        );
+    }
+
+    /// Matrix row 2d — CR 115.7d: "the player may leave any number of the
+    /// targets unchanged, even if those targets would be illegal." A submission
+    /// that changes nothing must never be rejected for slot legality, even when
+    /// its current target is illegal for the slot it sits in. CR 115.7a licenses
+    /// the same exemption for the "change the target(s)" scope: a slot already
+    /// holding its own submission was not changed at all.
+    #[test]
+    fn retarget_slot_violation_exempts_an_unchanged_illegal_target() {
+        use crate::types::ability::ManaTargetRole;
+
+        let mut state = GameState::new_two_player(24);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Retarget Mana Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Recipient: any player. Count source: an OPPONENT of P0 (i.e. P1 only).
+        // P0 is therefore legal for slot 0 and ILLEGAL for slot 1.
+        let role = ManaTargetRole::Both {
+            recipient: TargetFilter::Player,
+            count_source: TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            ),
+        };
+        let ability = mana_ability_with_role(role.clone(), source);
+
+        // Reach guard: the node is admitted and has two discriminable slots.
+        assert!(mana_multi_role(&ability.effect).is_some());
+        assert_eq!(role.surfaced_filters().count(), 2);
+
+        // Reach guard: the function still DISCRIMINATES. Slot 1 genuinely
+        // changes P1 -> P0 and is illegal there, so a violation is still
+        // reported. Without this, the exemption assertion below could pass in a
+        // world where this authority stopped rejecting anything at all.
+        assert_eq!(
+            retarget_slot_violation(
+                &state,
+                &ability,
+                &[
+                    TargetRef::Player(PlayerId(1)),
+                    TargetRef::Player(PlayerId(1)),
+                ],
+                &[
+                    TargetRef::Player(PlayerId(1)),
+                    TargetRef::Player(PlayerId(0)),
+                ],
+            ),
+            Some(1),
+            "reach guard: a CHANGED slot-illegal submission is still a violation"
+        );
+
+        // CR 115.7d: slot 1 holds P0, which is illegal for the opponent-only
+        // count-source slot — but the submission leaves it unchanged, so there
+        // is no violation to report.
+        assert_eq!(
+            retarget_slot_violation(
+                &state,
+                &ability,
+                &[
+                    TargetRef::Player(PlayerId(1)),
+                    TargetRef::Player(PlayerId(0)),
+                ],
+                &[
+                    TargetRef::Player(PlayerId(1)),
+                    TargetRef::Player(PlayerId(0)),
+                ],
+            ),
+            None,
+            "CR 115.7d: an unchanged position is exempt from slot legality even \
+             though P0 is illegal in slot 1"
         );
     }
 
@@ -9132,6 +9374,7 @@ mod tests {
         sub.player_scope = Some(crate::types::ability::PlayerFilter::Opponent);
         sub.optional = true;
         sub.description = Some("override description".to_string());
+        sub.distribute = Some(crate::types::game_state::DistributionUnit::Damage);
 
         let swapped = apply_instead_swap(&parent, &sub);
 
@@ -9147,6 +9390,11 @@ mod tests {
         );
         assert!(swapped.optional, "swap must preserve sub.optional");
         assert_eq!(swapped.description.as_deref(), Some("override description"));
+        assert_eq!(
+            swapped.distribute,
+            Some(crate::types::game_state::DistributionUnit::Damage),
+            "swap must preserve the sub-ability's unassigned distribution unit"
+        );
         // Identity / runtime-context fields come from parent.
         assert_eq!(
             swapped.controller,
@@ -9258,6 +9506,25 @@ mod tests {
             Some(crate::types::ability::PlayerFilter::Opponent),
             "player_scope must survive build_resolved_from_def — issue #310",
         );
+    }
+
+    #[test]
+    fn build_resolved_from_def_preserves_unassigned_distribution_unit() {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 4 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+        );
+        def.distribute = Some(crate::types::game_state::DistributionUnit::Damage);
+
+        let resolved = build_resolved_from_def(&def, ObjectId(1), PlayerId(0));
+
+        assert_eq!(resolved.distribute, def.distribute);
+        assert!(resolved.distribution.is_none());
     }
 
     #[test]

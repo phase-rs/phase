@@ -13641,6 +13641,33 @@ fn effect_create_colored_token() {
     ));
 }
 
+/// CR 111.4: Kher Keep's activated ability sets the created token's literal
+/// name. This exercises the public `parse_oracle_text` entry point, including
+/// self-reference normalization before token-description lowering.
+#[test]
+fn kher_keep_preserves_literal_created_token_name() {
+    let parsed = parse_oracle_text(
+        "{1}{R}, {T}: Create a 0/1 red Kobold creature token named Kobolds of Kher Keep.",
+        "Kher Keep",
+        &[],
+        &["Land".to_string()],
+        &[],
+    );
+
+    assert_eq!(
+        parsed.abilities.len(),
+        1,
+        "Kher Keep must lower its activated ability: {parsed:#?}"
+    );
+    let Effect::Token { name, .. } = parsed.abilities[0].effect.as_ref() else {
+        panic!(
+            "Kher Keep must lower its activated ability to Token, got {:?}",
+            parsed.abilities[0].effect
+        );
+    };
+    assert_eq!(name, "Kobolds of Kher Keep");
+}
+
 #[test]
 fn effect_chain_create_distinct_token_sequence_preserves_second_token() {
     let def = parse_effect_chain(

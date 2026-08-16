@@ -9815,19 +9815,16 @@ pub fn parse_you_draw_this_way_condition(input: &str) -> OracleResult<'_, Abilit
     ))
 }
 
-/// CR 603.12: the AFFIRMATIVE half of the reflexive-conditional connector set —
-/// "the preceding optional effect WAS performed" ("if you do, ", "when you do, ",
-/// "if they do, ", …).
+/// CR 603.12 + CR 608.2c: the affirmative connector set. Literal "when you do"
+/// creates a reflexive triggered ability; literal "if ... do" continues the
+/// resolving effect when its preceding instruction was performed.
 ///
 /// Split out from [`parse_reflexive_conditional_connector`] because the two halves
-/// are NOT interchangeable to a consumer that wants to fold the gate away. A gate
-/// that is redundant in the affirmative — a permission attached to an effect that
-/// only exists when the antecedent happened, e.g. CR 707.10c's "If you do, you may
-/// choose new targets for the copy" riding an already-optional `CopySpell` — is the
-/// exact OPPOSITE of redundant in the negative ("if they don't, …" gates a branch
-/// that runs precisely when the antecedent did NOT happen). A consumer must
-/// therefore be able to ask for the affirmative set ALONE; matching the whole set
-/// and discarding the condition would silently invert a negated clause.
+/// are NOT interchangeable to a consumer that wants to fold the gate away. Such a
+/// consumer must inspect the typed result: folding an already-proven
+/// `EffectOutcome::OptionalEffectPerformed` can be sound, while folding
+/// `WhenYouDo` would erase a CR 603.12 trigger. The negative set remains separate
+/// because discarding it would invert the branch.
 pub(crate) fn parse_affirmative_reflexive_connector(
     input: &str,
 ) -> OracleResult<'_, AbilityCondition> {
@@ -9889,7 +9886,7 @@ fn parse_discard_this_way_affirmative_connector(input: &str) -> OracleResult<'_,
     .parse(input)
 }
 
-/// CR 603.12: the NEGATED half — "the preceding optional effect was NOT performed".
+/// CR 608.2c: the negated half — the preceding optional effect was not performed.
 ///
 /// Kept disjoint from the affirmative half by construction, not by luck: each tag
 /// here ends in `n't, `, so no affirmative tag (which requires `, ` immediately
@@ -9949,15 +9946,14 @@ fn parse_discard_this_way_negated_connector(input: &str) -> OracleResult<'_, Abi
     .parse(input)
 }
 
-/// CR 603.12 + CR 608.2c: Recognize a leading reflexive-conditional connector
+/// CR 603.12 + CR 608.2c: Recognize a leading conditional connector
 /// and return the corresponding AbilityCondition with the connector consumed.
 /// Single authority for this set; consumed by both
 /// `oracle_effect::conditions::strip_if_you_do_conditional` and the
 /// `oracle_effect::sequence` chunk-splitter sticky-detection so they never drift.
 ///
-/// Composed from the affirmative + negated halves so a consumer that needs only one
-/// polarity (CR 707.10c copy-retarget) shares this exact tag set rather than
-/// re-spelling it.
+/// Composed from the affirmative + negated halves so consumers share this exact
+/// grammar while retaining the typed `When`/`If` distinction.
 pub(crate) fn parse_reflexive_conditional_connector(
     input: &str,
 ) -> OracleResult<'_, AbilityCondition> {

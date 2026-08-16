@@ -4063,6 +4063,135 @@ fn is_total_damage_channel(channel: &DamageChannel) -> bool {
     matches!(channel, DamageChannel::Total)
 }
 
+/// CR 120.4 + CR 120.4b: the aggregation domain a damage-amount threshold is
+/// evaluated over. CR 120.4 processes damage in one four-part sequence over a
+/// single damage event, and the worked examples printed under CR 120.4d state
+/// that event as one bracketed entry that can span two sources — two unblocked
+/// 5/5 creatures give "[10 damage is dealt to the defending player]" — so
+/// simultaneous damage to one recipient is summed within the event. CR 120.4b
+/// then puts damage triggers at that granularity ("Abilities that trigger when
+/// damage is dealt trigger now"). A threshold with no source scoping therefore
+/// reads that whole event; a threshold whose grammar names a single source
+/// reads only that source's share.
+///
+/// Typed rather than a `bool`: the two poles are named rules concepts, and a
+/// third domain (per-source-per-recipient, should a card ever need it) is a leaf
+/// addition here rather than a second flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum DamageAmountScope {
+    /// The threshold reads ONE source's share. The source-led grammar is
+    /// per-source by construction — authority is the Deus of Calamity ruling
+    /// ("6 damage to an opponent at one time… won't keep track of accumulated
+    /// damage") plus the siblings that make the aggregate reading untenable
+    /// (Dragonborn Champion would fire on two 3-damage sources; Ghyrson Starn's
+    /// "exactly 1" would break entirely). CR 120.9 is consistent but adjacent —
+    /// it governs what an EFFECT's "the damage dealt" means, not how a
+    /// threshold is scoped. "…by a single source" (Pain Magnification) selects
+    /// this pole explicitly on the received-damage grammar.
+    #[default]
+    PerSource,
+    /// CR 120.4 + CR 120.4b: damage is processed in one four-part sequence, so
+    /// simultaneous damage is dealt in ONE event and the threshold reads the
+    /// summed amount that event dealt to the recipient. The worked example
+    /// printed under CR 120.4d states the event as a list spanning more than
+    /// one source — "[3 damage is dealt to the 2/2 creature, 2 damage is dealt
+    /// to the 3/3 creature]" — and CR 120.4b puts damage triggers at that
+    /// granularity ("Abilities that trigger when damage is dealt trigger now").
+    /// Innocent Bystander — "3 or more damage all at once."
+    ///
+    /// NOT CR 120.10: that rule is the excess-damage computation (damage
+    /// "greater than lethal damage" on a creature/planeswalker/battle), which
+    /// is what `DamageChannel::Excess` cites two types up in this same file.
+    /// It says nothing about how a threshold is scoped.
+    WholeEvent,
+}
+
+/// Serde guard: the `PerSource` default scope is elided from serialized output.
+/// Elision alone keeps the object minimal; it is
+/// [`serialize_damage_amount_compat`] that preserves the pre-axis *shape*.
+/// Modeled on `is_total_damage_channel` above.
+fn is_per_source_damage_scope(scope: &DamageAmountScope) -> bool {
+    matches!(scope, DamageAmountScope::PerSource)
+}
+
+/// CR 603.2 + CR 120.1 + CR 120.4b: an amount threshold on a damage trigger,
+/// together with the domain it is evaluated over.
+///
+/// The scope is folded INTO the threshold rather than sitting beside it on
+/// `TriggerDefinition` so that "a scope with no amount to scope" is
+/// unrepresentable: a source restriction is only meaningful relative to an
+/// amount comparison, and the parser therefore has no correlation guard to get
+/// wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DamageAmountThreshold {
+    pub comparator: Comparator,
+    pub threshold: u32,
+    #[serde(default, skip_serializing_if = "is_per_source_damage_scope")]
+    pub scope: DamageAmountScope,
+}
+
+/// CR 603.2 + CR 120.1: Compatibility deserializer for `damage_amount`, which
+/// changed from the legacy tuple `["GE", 6]` to the object form
+/// `{"comparator":"GE","threshold":6}` when the scope axis was folded in.
+/// Accepts BOTH shapes, so data serialized before the migration reloads as a
+/// `PerSource` threshold (byte-identical behavior) instead of failing to
+/// deserialize. Modeled on `deserialize_damage_channel_compat` above.
+///
+/// This is not a speculative shim — three live consumers read the legacy shape:
+/// browser IndexedDB saved games (`client/src/services/gamePersistence.ts`,
+/// `saveGame` :147 / `loadGame` :181), the phase-server session store
+/// (`crates/phase-server/src/persistence.rs:488` deserializing a
+/// `PersistedSession` whose `state` is a `PersistedGameState`,
+/// `crates/server-core/src/persist.rs:23`), and the in-repo shared card fixture
+/// `crates/engine/tests/fixtures/integration_cards.json.gz`, which already
+/// carries legacy `["GE",5]` / `["EQ",1]` arrays.
+/// Write-side counterpart to [`deserialize_damage_amount_compat`]: `PerSource`
+/// is the pre-axis pole, so it is emitted as the legacy tuple `["GE", 6]` —
+/// the shape every reader that predates the scope axis accepts. Only
+/// `WholeEvent` emits the object form, and no pre-axis reader can represent
+/// that pole anyway.
+///
+/// Without this, the migration is one-way: the three consumers named on
+/// `deserialize_damage_amount_compat` read persisted state with no version
+/// gate, so a build carrying the axis writes an object where an older build
+/// still expects an array, and the older build fails the whole restore. Modeled
+/// on `serialize_multi_target_min` above, which collapses the same way.
+fn serialize_damage_amount_compat<S>(
+    value: &Option<DamageAmountThreshold>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(threshold) if is_per_source_damage_scope(&threshold.scope) => {
+            (threshold.comparator, threshold.threshold).serialize(serializer)
+        }
+        other => other.serialize(serializer),
+    }
+}
+
+fn deserialize_damage_amount_compat<'de, D>(d: D) -> Result<Option<DamageAmountThreshold>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    let raw = serde_json::Value::deserialize(d)?;
+    if raw.is_null() {
+        return Ok(None);
+    }
+    if let serde_json::Value::Array(_) = raw {
+        let (comparator, threshold): (Comparator, u32) =
+            serde_json::from_value(raw).map_err(serde::de::Error::custom)?;
+        return Ok(Some(DamageAmountThreshold {
+            comparator,
+            threshold,
+            scope: DamageAmountScope::PerSource,
+        }));
+    }
+    serde_json::from_value(raw).map_err(serde::de::Error::custom)
+}
+
 /// CR 120.2a: Back-compat serde default for `PlayerFilter::OpponentDealtDamage`'s
 /// `kind` field. Legacy data serialized before the field existed encoded the
 /// former `OpponentDealtCombatDamage` variant (combat-only semantics), so an
@@ -16483,8 +16612,8 @@ impl Effect {
             | Effect::PutSticker { target, .. }
             | Effect::ApplySticker { target, .. }
             | Effect::ProliferateTarget { target, .. }
-            // CR 115.7 + CR 115.1: "Change the target of target spell or ability"
-            // (Bolt Bend, Redirect, Misdirection) targets the stack spell/ability
+            // CR 115.7a + CR 115.1: "Change the target of target spell or ability"
+            // (Bolt Bend, Misdirection) targets the stack spell/ability
             // it will retarget. That target is chosen as the spell is cast (CR
             // 115.1), so it must be surfaced here — both to build the cast-time
             // target slot and so resolution-time re-validation (CR 608.2b) checks
@@ -21013,14 +21142,11 @@ pub enum AbilityCondition {
     /// state sources. Feeds `RepeatContinuation::WhileCondition` ("repeat this
     /// process") and any cross-sentence flip-result gate.
     CoinFlipOutcome { result: CoinFlipResult },
-    /// CR 603.12: "When you do" — reflexive trigger that fires based on whether the
-    /// parent's trigger event actually occurred. A mandatory non-cost parent (e.g.
-    /// a `BecomeCopy` reflexive or a copy/exile replacement sub-ability) always
-    /// occurred, while an optional non-cost parent must actually be performed.
-    /// For a cost-payment parent (`Effect::PayCost`), an unpayable or declined cost
-    /// is not an occurrence, so the reflexive sub-ability is skipped —
-    /// `evaluate_condition` gates on `cost_payment_failed_flag` for that case
-    /// (mirrors `IfYouDo`).
+    /// CR 603.12: "When you do" — a reflexive trigger based on whether the
+    /// parent event actually occurred. An optional non-cost parent must be
+    /// performed; an unpayable or declined `Effect::PayCost` is not an occurrence.
+    /// The runtime materializer consumes this root condition on the trigger clone
+    /// so the reflexive ability cannot recreate itself.
     WhenYouDo,
     /// CR 601.2a + CR 707.10: "if [this spell] was cast from [zone]" — sub_ability
     /// executes only if the spell was cast. `zone: None` = cast from any origin;
@@ -23138,14 +23264,27 @@ pub struct TriggerDefinition {
     /// CR 701.22a + CR 603.2: Optional completed-scry bottom-count predicate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scry_bottom_count: Option<(Comparator, u32)>,
-    /// CR 603.2 + CR 120.1: Per-event damage-amount threshold for damage triggers
-    /// ("…deals 5 or more damage to a player"). When `Some((cmp, n))`, the
-    /// matcher requires the `DamageDealt` event's `amount` to satisfy
-    /// `amount cmp n`. `None` means no amount restriction. Applies to all
-    /// damage-event trigger modes (`DamageDone`, `DamageDoneOnce`, `DamageAll`,
-    /// `DamageDealtOnce`, `DamageReceived`); ignored by other modes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub damage_amount: Option<(Comparator, u32)>,
+    /// CR 603.2 + CR 120.1 + CR 120.4b: damage-amount threshold for damage
+    /// triggers ("…deals 5 or more damage to a player"), together with the
+    /// aggregation domain it is evaluated over. When `Some(t)`, the matcher
+    /// requires the damage amount to satisfy `amount t.comparator t.threshold`.
+    /// `None` means no amount restriction. Applies to all damage-event trigger
+    /// modes (`DamageDone`, `DamageDoneOnce`, `DamageAll`, `DamageDealtOnce`,
+    /// `DamageReceived`); ignored by other modes.
+    ///
+    /// `scope` selects what "the amount" means: `PerSource` (the default, and
+    /// the behavior every card had before the axis existed) evaluates each
+    /// `DamageDealt` event on its own, while `WholeEvent` (CR 120.4b) sums the
+    /// simultaneous batch dealt to one recipient before comparing. Only the
+    /// received-damage grammar can produce `WholeEvent`; the source-led
+    /// grammar is per-source by construction (see `DamageAmountScope`).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_damage_amount_compat",
+        deserialize_with = "deserialize_damage_amount_compat"
+    )]
+    pub damage_amount: Option<DamageAmountThreshold>,
     /// CR 119.3: Per-event life-change-amount constraint for life triggers
     /// ("Whenever [a player] loses exactly N life" / "…loses N or more life").
     /// When `Some((cmp, n))`, the matcher requires the `LifeChanged` event's
@@ -25768,6 +25907,11 @@ pub struct ResolvedAbility {
     /// Each entry maps a target to its assigned portion. Read at resolution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distribution: Option<Vec<(TargetRef, u32)>>,
+    /// CR 601.2d + CR 603.3d: Unassigned division metadata carried from the
+    /// definition until this stack object's targets and portions are announced.
+    /// Distinct from `distribution`, which stores the completed assignment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distribute: Option<DistributionUnit>,
     /// Player scope for "each player/opponent [effect]" patterns.
     /// When set, the effect iterates over matching players (each becomes the acting player).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -25903,7 +26047,7 @@ pub struct ResolvedAbility {
     pub sibling_condition: SiblingCondition,
     /// CR 700.2b + CR 603.3c: Modal choice for a reflexive modal trigger whose modes
     /// are gated behind an optional cost (Caesar). Carried from the def so
-    /// try_begin_reflexive_target_selection can hand it to the PendingTrigger and
+    /// `try_materialize_reflexive_trigger` can hand it to the PendingTrigger and
     /// route to AbilityModeChoice. None for non-modal abilities.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modal: Option<ModalChoice>,
@@ -25961,6 +26105,7 @@ impl ResolvedAbility {
             forward_result: false,
             unless_pay: None,
             distribution: None,
+            distribute: None,
             player_scope: None,
             starting_with: None,
             chosen_x: None,
@@ -30698,6 +30843,87 @@ mod modal_ability_tests {
 
         assert!(def.modal.is_some());
         assert_eq!(def.mode_abilities.len(), 2);
+    }
+
+    /// V13 / H8 — CR 603.2 + CR 120.4b: `damage_amount` gained a scope axis, so
+    /// the object form `{"comparator":"GE","threshold":6,"scope":…}` had to
+    /// coexist with the legacy tuple `["GE", 6]`. The migration must be
+    /// two-way: both shapes deserialize, AND `PerSource` still *serializes* as
+    /// the tuple, so a build carrying the axis writes state that a build
+    /// predating it can still read. Only `WholeEvent` — a pole no pre-axis
+    /// reader can represent — emits the object.
+    ///
+    /// Revert-failing in both directions: drop the array arm from
+    /// `deserialize_damage_amount_compat` and the legacy read fails; drop
+    /// `serialize_damage_amount_compat` and the `PerSource` write reverts to an
+    /// object that older readers reject.
+    #[test]
+    fn damage_amount_threshold_serde_accepts_legacy_array_and_elides_default_scope() {
+        let mut def = TriggerDefinition::new(TriggerMode::DamageDone);
+        def.damage_amount = Some(DamageAmountThreshold {
+            comparator: Comparator::GE,
+            threshold: 6,
+            scope: DamageAmountScope::PerSource,
+        });
+
+        // PerSource serializes as the LEGACY TUPLE, byte-identically to what a
+        // build predating the scope axis would have written. This is what keeps
+        // the migration two-way for the three unversioned persistence consumers
+        // named on `deserialize_damage_amount_compat`.
+        let value = serde_json::to_value(&def).expect("serializes");
+        assert_eq!(
+            value["damage_amount"],
+            serde_json::json!(["GE", 6]),
+            "PerSource must serialize as the legacy tuple, or older readers reject the row"
+        );
+
+        // Legacy array shape (5 cards on disk, plus the shared card fixture)
+        // reloads as an explicit PerSource threshold.
+        let mut legacy = value.clone();
+        legacy["damage_amount"] = serde_json::json!(["GE", 6]);
+        let from_legacy: TriggerDefinition =
+            serde_json::from_value(legacy).expect("legacy array deserializes");
+        assert_eq!(from_legacy.damage_amount, def.damage_amount);
+
+        // Object shape with no `scope` key reads as the PerSource default. This
+        // pins `#[serde(default)]` on `DamageAmountThreshold::scope`: without
+        // it, such a row fails with a missing-field error. Reachable because a
+        // build between the axis landing and the tuple serializer wrote exactly
+        // this shape.
+        let mut scopeless = value.clone();
+        scopeless["damage_amount"] = serde_json::json!({ "comparator": "GE", "threshold": 6 });
+        let from_scopeless: TriggerDefinition =
+            serde_json::from_value(scopeless).expect("object without scope deserializes");
+        assert_eq!(from_scopeless.damage_amount, def.damage_amount);
+
+        // New object shape round-trips the non-default pole.
+        let mut whole_event = def.clone();
+        whole_event.damage_amount = Some(DamageAmountThreshold {
+            comparator: Comparator::GE,
+            threshold: 3,
+            scope: DamageAmountScope::WholeEvent,
+        });
+        let round_tripped: TriggerDefinition =
+            serde_json::from_str(&serde_json::to_string(&whole_event).expect("serializes"))
+                .expect("object shape deserializes");
+        assert_eq!(round_tripped.damage_amount, whole_event.damage_amount);
+        assert_eq!(
+            round_tripped
+                .damage_amount
+                .expect("threshold present")
+                .scope,
+            DamageAmountScope::WholeEvent
+        );
+
+        // An absent field stays None (the unquantified majority).
+        let mut absent = value;
+        absent
+            .as_object_mut()
+            .expect("object")
+            .remove("damage_amount");
+        let from_absent: TriggerDefinition =
+            serde_json::from_value(absent).expect("absent field deserializes");
+        assert_eq!(from_absent.damage_amount, None);
     }
 
     /// CR 118.1 (cost-payment unification Phase 4, risk R2): a saved

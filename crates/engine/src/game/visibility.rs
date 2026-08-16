@@ -251,6 +251,19 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // hidden card and target context. The projected WaitingFor is the only
     // viewer-facing interaction surface.
     filtered.pending_deferred_life_cost_resume = None;
+    // CR 605.4a: The triggered-mana continuation is trusted persistence
+    // authority. Its pending context can carry hidden object identities,
+    // last-known source snapshots, controller-only event batches, chosen
+    // players, legal-mode sets, the current rules-execution node, and a
+    // suspended parent/payment cursor. The projected WaitingFor is the complete
+    // public interaction surface, so this is cleared for every viewer —
+    // including the controller who owns the prompt — before the later
+    // per-controller pending-trigger redaction.
+    filtered.pending_triggered_mana_resume = None;
+    // CR 117.3c: The construction priority recipient is engine scheduling
+    // authority for who receives priority after the batch finishes announcing.
+    // No viewer projection carries it.
+    filtered.pending_trigger_construction_priority_recipient = None;
     // Resolution frames are server-authoritative continuations. They can carry
     // private object identities, trigger source contexts, and resolved ability
     // payloads; the separately projected `WaitingFor` prompt is the complete
@@ -6155,6 +6168,154 @@ mod tests {
             state.pending_deferred_life_cost_resume.is_some(),
             "filtering must not alter the authoritative deferred life-cost continuation"
         );
+    }
+
+    /// CR 605.4a + CR 117.3c (plan Step 6): the triggered-mana continuation and
+    /// the trigger-construction priority recipient are trusted persistence
+    /// authority. They must survive an authoritative round trip exactly, and
+    /// must be absent from **every** viewer projection — including the
+    /// projection of the player who owns the live prompt.
+    ///
+    /// Each carrier gets a distinct sentinel so the two redaction lines are
+    /// independently revert-sensitive: deleting either clearing statement leaves
+    /// its own sentinel (the private description string, or the exact nonactive
+    /// `PlayerId`) reachable in a viewer snapshot while the other row still
+    /// passes.
+    #[test]
+    fn triggered_mana_sidecar_and_construction_recipient_are_erased_from_every_viewer() {
+        let (state, marker) = triggered_mana_projection_fixture();
+
+        // Trusted persistence retains both authorities exactly, and the live
+        // public prompt is unchanged.
+        let trusted = serde_json::to_value(&state).expect("authoritative state serializes");
+        assert!(
+            trusted["pending_triggered_mana_resume"].is_object(),
+            "trusted persistence must retain the triggered-mana continuation"
+        );
+        assert_eq!(
+            trusted["pending_trigger_construction_priority_recipient"], 1,
+            "trusted persistence must retain the exact carried recipient"
+        );
+        let trusted_text = serde_json::to_string(&state).expect("authoritative state serializes");
+        assert!(
+            trusted_text.contains(marker),
+            "test precondition: the private sidecar payload is really present"
+        );
+        let restored: GameState =
+            serde_json::from_value(trusted).expect("the authoritative state round-trips");
+        assert_eq!(
+            restored.pending_triggered_mana_resume, state.pending_triggered_mana_resume,
+            "the sidecar and its rules-execution node must survive serde exactly"
+        );
+        assert_eq!(
+            restored.pending_trigger_construction_priority_recipient,
+            Some(PlayerId(1)),
+            "the carried recipient must survive serde exactly"
+        );
+
+        // The prompt owner is P0; P1 is the carried recipient; P2 is an
+        // unrelated opponent. None of them may receive either carrier.
+        for viewer in [PlayerId(0), PlayerId(1), PlayerId(2)] {
+            let filtered = filter_state_for_viewer(&state, viewer);
+            assert!(
+                filtered.pending_triggered_mana_resume.is_none(),
+                "viewer {viewer:?} must not receive the triggered-mana continuation"
+            );
+            assert!(
+                filtered
+                    .pending_trigger_construction_priority_recipient
+                    .is_none(),
+                "viewer {viewer:?} must not receive the construction priority recipient"
+            );
+            let wire = serde_json::to_string(&filtered).expect("the filtered snapshot serializes");
+            assert!(
+                !wire.contains(marker),
+                "viewer {viewer:?} snapshot leaked the private sidecar payload"
+            );
+            assert!(
+                !wire.contains("pending_triggered_mana_resume")
+                    && !wire.contains("pendingTriggeredManaResume")
+                    && !wire.contains("pending_trigger_construction_priority_recipient")
+                    && !wire.contains("pendingTriggerConstructionPriorityRecipient"),
+                "viewer {viewer:?} snapshot leaked a carrier field name"
+            );
+            assert!(
+                matches!(
+                    filtered.waiting_for,
+                    WaitingFor::OptionalEffectChoice { .. }
+                ),
+                "the public prompt remains the complete viewer-facing surface"
+            );
+        }
+
+        assert!(
+            state.pending_triggered_mana_resume.is_some()
+                && state.pending_trigger_construction_priority_recipient == Some(PlayerId(1)),
+            "filtering must not alter the authoritative carriers"
+        );
+    }
+
+    /// A three-player authoritative state carrying both Step-6 authorities:
+    /// a live `TriggeredManaResume` whose pending context holds a private
+    /// description sentinel and a real `TriggeredMana` rules-execution node plus
+    /// an accepted tail, and a construction recipient naming nonactive P1 while
+    /// P0 owns the live prompt. Returns the private sentinel.
+    fn triggered_mana_projection_fixture() -> (GameState, &'static str) {
+        use crate::game::triggers::{PendingTrigger, PendingTriggerContext};
+        use crate::types::ability::QuantityExpr;
+        use crate::types::game_state::{
+            ManaTriggerFixedPointResume, TriggeredManaResume, TriggeredManaStage,
+        };
+        use crate::types::resolved_commands::{RulesExecutionNodeRef, SettlementNodeOrdinal};
+
+        const MARKER: &str = "SIDECAR-PRIVATE-ORACLE-SENTINEL";
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        state.next_object_id = 70_501;
+        let hidden = create_object(
+            &mut state,
+            CardId(70_501),
+            PlayerId(0),
+            "Hidden Sidecar Source".to_string(),
+            Zone::Battlefield,
+        );
+        let work = |description: &str| {
+            let mut pending = PendingTrigger::ordinary(
+                hidden,
+                PlayerId(0),
+                None,
+                Box::new(ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    Vec::new(),
+                    hidden,
+                    PlayerId(0),
+                )),
+                1,
+            );
+            pending.description = Some(description.to_string());
+            PendingTriggerContext::single(pending)
+        };
+
+        state.pending_triggered_mana_resume = Some(Box::new(TriggeredManaResume {
+            current: Box::new(work(MARKER)),
+            current_override: None,
+            rules_execution_node: RulesExecutionNodeRef::TriggeredMana(SettlementNodeOrdinal(3)),
+            accepted_tail: vec![work("accepted tail")],
+            collected_batches: Vec::new(),
+            outer_resume: ManaTriggerFixedPointResume::Parent,
+            stage: TriggeredManaStage::ResolvingBody,
+        }));
+        state.pending_trigger_construction_priority_recipient = Some(PlayerId(1));
+        state.waiting_for = WaitingFor::OptionalEffectChoice {
+            player: PlayerId(0),
+            source_id: hidden,
+            description: Some("Accepted triggered mana may".to_string()),
+            may_trigger_key: None,
+        };
+        (state, MARKER)
     }
 
     #[test]

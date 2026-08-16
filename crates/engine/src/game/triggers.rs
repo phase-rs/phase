@@ -6,23 +6,24 @@ use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCostOrigin,
     BounceSelection, CardTypeSetSource, CastManaSpentMetric, ChosenAttribute, CommanderOwnership,
-    ControllerRef, CopyRetargetPermission, DamageKindFilter, DelayedTriggerCondition, Effect,
-    FilterProp, ModalChoice, ObjectScope, OriginConstraint, PlayerFilter, PlayerScope, PtValue,
-    QuantityExpr, QuantityRef, RenownSubject, ResolvedAbility, SacrificeCost, StaticCondition,
-    TargetFilter, TargetRef, TributeOutcome, TriggerCondition, TriggerConstraint,
-    TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry,
-    TriggerGrantProducerKey, TypeFilter, TypedFilter,
+    ControllerRef, CopyRetargetPermission, DamageAmountScope, DamageAmountThreshold,
+    DamageKindFilter, DelayedTriggerCondition, Effect, FilterProp, ModalChoice, ObjectScope,
+    OriginConstraint, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, RenownSubject,
+    ResolvedAbility, SacrificeCost, StaticCondition, TargetFilter, TargetRef, TributeOutcome,
+    TriggerCondition, TriggerConstraint, TriggerDefinition, TriggerDefinitionOccurrenceRef,
+    TriggerDefinitionRef, TriggerEntry, TriggerGrantProducerKey, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
-    AutoMayChoice, DamageRecord, DelayedTrigger, DistributionUnit, GameState,
-    LatchedBatchedTrigger, LatchedSuppressTrigger, LogicalZoneChangeGroup,
-    LogicalZoneChangeTerminalOutcome, MayTriggerAutoChoiceKey, MayTriggerOrigin, StackEntry,
-    StackEntryKind, SyntheticTriggerProvenance, TargetSelectionConstraint, TargetSelectionSlot,
-    TriggerObservationTime, TriggerSourceContext, WaitingFor,
+    AutoMayChoice, CollectedTriggerContextBatch, DamageRecord, DelayedTrigger, DistributionUnit,
+    GameState, LatchedBatchedTrigger, LatchedSuppressTrigger, LogicalZoneChangeGroup,
+    LogicalZoneChangeTerminalOutcome, MayTriggerAutoChoiceKey, MayTriggerOrigin,
+    ProductionOverride, StackEntry, StackEntryKind, SyntheticTriggerProvenance,
+    TargetSelectionConstraint, TargetSelectionSlot, TriggerObservationTime, TriggerSourceContext,
+    WaitingFor,
 };
 use crate::types::identifiers::{
     DelayedInstallIdentity, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
@@ -1168,6 +1169,130 @@ fn counter_added_fires_per_recipient(trig_def: &TriggerDefinition) -> bool {
     trig_def.batched && matches!(trig_def.mode, TriggerMode::CounterAdded)
 }
 
+/// CR 120.4b: a received-damage threshold with no source scoping reads the whole
+/// simultaneous damage event, so the trigger fires once per recipient with the
+/// batch summed — not once per damaging source. Class-level property of the
+/// trigger's typed scope, exactly like `counter_added_fires_per_recipient`.
+///
+/// Written as an exhaustive `match` with NO wildcard arm so a future third
+/// aggregation domain fails to compile here rather than silently defaulting to
+/// the per-event path.
+///
+/// This is the only production read that BRANCHES ON the aggregation domain to
+/// select runtime behavior. One other production site reads the scope without
+/// branching on its meaning: `is_per_source_damage_scope` in `types/ability.rs`,
+/// the `skip_serializing_if` guard that elides the default pole. That guard is a
+/// non-exhaustive `matches!`, so it will NOT fail to compile on a third variant
+/// — it would simply stop eliding, which is the correct default. Anyone adding a
+/// variant should still read it deliberately rather than trusting the compiler
+/// to surface every site.
+fn damage_received_aggregates_whole_event(trig_def: &TriggerDefinition) -> bool {
+    if !matches!(trig_def.mode, TriggerMode::DamageReceived) {
+        return false;
+    }
+    match trig_def.damage_amount {
+        None => false,
+        // PerSource: decided per event by `match_damage_received`; no fold.
+        // Authority is the source-led grammar's construction plus the Deus of
+        // Calamity ruling ("at one time… won't keep track of accumulated
+        // damage"), NOT CR 120.9, which governs what an EFFECT's "the damage
+        // dealt" reads rather than how a threshold is scoped.
+        Some(DamageAmountThreshold {
+            scope: DamageAmountScope::PerSource,
+            ..
+        }) => false,
+        // CR 120.4b: summed over the simultaneous batch.
+        Some(DamageAmountThreshold {
+            scope: DamageAmountScope::WholeEvent,
+            ..
+        }) => true,
+    }
+}
+
+/// CR 120.4b + CR 603.2c: group a simultaneous damage batch by recipient and
+/// keep only the recipients whose SUMMED damage satisfies the trigger's
+/// threshold. CR 120.4 processes damage in one four-part sequence, and the
+/// worked example printed under CR 120.4d states a multi-source event as a
+/// single bracketed entry, so two sources each dealing 2 to one recipient is one
+/// 4-damage event for threshold purposes. Innocent Bystander's ruling says the
+/// same in card terms — it "triggers only if it's dealt 3 or more damage all at
+/// once".
+///
+/// Modeled on `matching_counter_added_events_by_recipient`: identical filter
+/// chain via the shared `candidate_passes_batched_filters`, grouping by
+/// recipient preserving first-seen order, no empty inner batches. The two
+/// genuine deltas are the grouping key (`TargetRef`, which covers object and
+/// player recipients uniformly) and the amount fold.
+///
+/// The `matcher` passed to `candidate_passes_batched_filters` is
+/// `damage_received_filters_match`, NOT `match_damage_received` — and that
+/// substitution is the load-bearing detail of this whole function. The strict
+/// matcher would drop every below-threshold event before the sum is formed, so
+/// the sum could never reach the threshold and the fold would be a no-op.
+fn matching_damage_received_whole_event_events(
+    state: &GameState,
+    event_batch: &[GameEvent],
+    trig_def: &TriggerDefinition,
+    source_context: &TriggerSourceContext,
+    controller: PlayerId,
+    active_suppress_triggers: &[ActiveSuppressTriggerStatic],
+) -> Vec<Vec<GameEvent>> {
+    let Some(threshold) = trig_def.damage_amount else {
+        return Vec::new();
+    };
+    let mut groups: Vec<(TargetRef, Vec<GameEvent>)> = Vec::new();
+    for candidate in event_batch {
+        let GameEvent::DamageDealt { target, .. } = candidate else {
+            continue;
+        };
+        if !candidate_passes_batched_filters(
+            state,
+            candidate,
+            trig_def,
+            source_context,
+            controller,
+            super::trigger_matchers::damage_received_filters_match,
+            active_suppress_triggers,
+        ) {
+            continue;
+        }
+        match groups.iter_mut().find(|(recipient, _)| recipient == target) {
+            Some((_, events)) => events.push(candidate.clone()),
+            None => groups.push((target.clone(), vec![candidate.clone()])),
+        }
+    }
+    groups
+        .into_iter()
+        .filter(|(_, events)| {
+            let sum = events
+                .iter()
+                .map(|event| match event {
+                    GameEvent::DamageDealt { amount, .. } => *amount,
+                    _ => 0,
+                })
+                .fold(0u32, u32::saturating_add);
+            threshold
+                .comparator
+                .evaluate(sum as i32, threshold.threshold as i32)
+        })
+        .map(|(_, events)| events)
+        .collect()
+}
+
+/// CR 603.2c + CR 120.4b: firing granularity is once per simultaneous batch for
+/// BOTH "one or more" subject batching and whole-event damage aggregation.
+///
+/// Deliberately separate from `TriggerDefinition.batched`, which conflates two
+/// concerns: firing granularity (read at the batch-dedup skip) and subject
+/// counting (`subject_match_count`). Whole-event damage aggregation needs the
+/// former and must NOT have the latter — `current_trigger_match_count` holds a
+/// SUBJECT HEADCOUNT and outranks the event amount in the `EventContextAmount`
+/// cascade (`game/quantity.rs`). Setting `trig_def.batched = true` here would
+/// fix the dedup and simultaneously corrupt "that much".
+fn fires_once_per_batch(trig_def: &TriggerDefinition) -> bool {
+    trig_def.batched || damage_received_aggregates_whole_event(trig_def)
+}
+
 /// CR 508.1 + CR 603.2: Split an attack declaration into the singleton event
 /// contexts required by an event-referential attacker demonstrative. A plural
 /// declaration has no single object for "that Wolf" to bind.
@@ -2127,7 +2252,20 @@ fn collect_matching_triggers_inner(
         // Batched definitions are admitted exactly once during logical-owner
         // settlement. Segment collection must not reach matcher conditions or
         // fire-count ledgers for them first.
-        if collection.skips_batched_definitions() && trig_def.batched {
+        //
+        // Keyed on `fires_once_per_batch`, the SAME firing-granularity authority
+        // as the carrier below — not on `trig_def.batched`. A whole-event damage
+        // def has `batched == false` but fires once per batch, so keying this
+        // gate on `trig_def.batched` would let it reach settlement carrying
+        // `batched: true` and trip the `debug_assert!(!matched.batched)` there.
+        // Unreachable today, and for BOTH collections this gate covers
+        // (`skips_batched_definitions` is `Segment | Settlement`): segments are
+        // built only by `append_and_collect_logical_zone_trigger_segment`,
+        // which filters `events` to `ZoneChanged` before collecting, and
+        // settlement replays those same filtered occurrences. No `DamageDealt`
+        // event reaches either, so no whole-event damage def is skipped here
+        // today. The gate exists so it and the carrier below do not drift apart.
+        if collection.skips_batched_definitions() && fires_once_per_batch(trig_def) {
             continue;
         }
         if let LogicalZoneTriggerCollection::Settlement(group) = collection {
@@ -2151,8 +2289,11 @@ fn collect_matching_triggers_inner(
         }
         // CR 603.2c: "One or more" (batched) triggers fire once per batch of
         // simultaneous events, not once per individual event. Skip if already
-        // fired in this process_triggers pass.
-        if trig_def.batched && batched_this_pass.contains(&(obj_id, trig_idx)) {
+        // fired in this process_triggers pass. CR 120.4b puts whole-event damage
+        // aggregation at the same granularity, so both classes consult the one
+        // `fires_once_per_batch` authority here and at the `MatchedTrigger`
+        // carrier below — skip and insert are then definitionally identical.
+        if fires_once_per_batch(trig_def) && batched_this_pass.contains(&(obj_id, trig_idx)) {
             continue;
         }
         // CR 603.2 / CR 603.3: A single printed trigger definition fires at most
@@ -2170,7 +2311,27 @@ fn collect_matching_triggers_inner(
             continue;
         }
         if let Some(matcher) = trigger_matcher(trig_def.mode.clone()) {
-            if !matcher(event, trig_def, &source_context, state) {
+            // CR 120.4b: a WholeEvent threshold is a property of the SUMMED
+            // simultaneous event, so the per-event threshold cannot gate
+            // admission — a batch of two 2-damage events must reach the fold
+            // for a `>= 3` threshold. Every OTHER filter (event shape, kind,
+            // recipient, valid_source) still applies via
+            // `damage_received_filters_match`; satisfaction is decided by
+            // `matching_damage_received_whole_event_events` below.
+            // `match_damage_received` itself stays strictly per-event, so the
+            // fold-less registry consumers (`delayed_trigger_event_with_index`,
+            // the zone-change latch) are unaffected.
+            let admitted = if damage_received_aggregates_whole_event(trig_def) {
+                super::trigger_matchers::damage_received_filters_match(
+                    event,
+                    trig_def,
+                    &source_context,
+                    state,
+                )
+            } else {
+                matcher(event, trig_def, &source_context, state)
+            };
+            if !admitted {
                 continue;
             }
             if !check_trigger_constraint_with_ref(
@@ -2261,6 +2422,26 @@ fn collect_matching_triggers_inner(
                     &source_context,
                     controller,
                     matcher,
+                    active_suppress_triggers,
+                );
+                if batches.is_empty() {
+                    continue;
+                }
+                batches
+            } else if damage_received_aggregates_whole_event(trig_def) {
+                // CR 120.4b: an unscoped received-damage threshold reads the
+                // whole simultaneous damage event, so the batch is grouped by
+                // recipient and each group's amounts are summed before the
+                // threshold is applied. Placed BEFORE the `trig_def.batched`
+                // arm; `batched` is deliberately never set for this class, so
+                // `subject_match_count` stays `None` and "that much" cannot
+                // resolve to a source headcount.
+                let batches = matching_damage_received_whole_event_events(
+                    state,
+                    event_batch,
+                    trig_def,
+                    &source_context,
+                    controller,
                     active_suppress_triggers,
                 );
                 if batches.is_empty() {
@@ -2476,7 +2657,20 @@ fn collect_matching_triggers_inner(
                         provenance: None,
                     },
                     trigger_events,
-                    batched: trig_def.batched,
+                    // CR 603.2c + CR 120.4b: must consult the SAME
+                    // firing-granularity authority as the skip above. Note this
+                    // is deliberately NOT `trig_def.batched`, which additionally
+                    // means "count subjects" — see `fires_once_per_batch`.
+                    //
+                    // WIDENING THIS FIELD TOUCHES EIGHT CONSUMERS, not just the
+                    // `batched_this_pass` inserts: those five inserts, the
+                    // `RecordBatchedZoneChanges` gate, the batched zone-change
+                    // replay recorder, and the `debug_assert!(!matched.batched)`
+                    // on the settlement path. The two zone-change consumers are
+                    // additionally gated on `batched_zone_change_batch`, which is
+                    // false for a `DamageDealt` batch, so all eight are safe for
+                    // this axis today — but re-check every one before widening.
+                    batched: fires_once_per_batch(trig_def),
                     constraint: trig_def.constraint.clone(),
                 });
             }
@@ -6888,22 +7082,28 @@ pub(crate) fn park_observer_triggers_if_paused(
     events: &[GameEvent],
     slice_start: usize,
 ) {
+    if triggered_mana_sidecar_owns_local_collection(state) {
+        return;
+    }
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         return;
     }
-    let trigger_events: Vec<GameEvent> = events[slice_start..]
-        .iter()
-        .filter(|ev| {
-            // CR 707.10: `copy_spell` collects `SpellCopied` observers at
-            // announcement and drains them after CopyRetarget finalization.
-            // Re-parking the same event duplicates Magecraft (issue #2866).
-            !matches!(
-                ev,
-                GameEvent::PhaseChanged { .. } | GameEvent::SpellCopied { .. }
-            )
-        })
-        .cloned()
-        .collect();
+    let trigger_events: Vec<GameEvent> = filter_consumed_trigger_events_from(
+        events,
+        slice_start,
+        &state.consumed_before_priority_trigger_events,
+    )
+    .into_iter()
+    .filter(|ev| {
+        // CR 707.10: `copy_spell` collects `SpellCopied` observers at
+        // announcement and drains them after CopyRetarget finalization.
+        // Re-parking the same event duplicates Magecraft (issue #2866).
+        !matches!(
+            ev,
+            GameEvent::PhaseChanged { .. } | GameEvent::SpellCopied { .. }
+        )
+    })
+    .collect();
     if !trigger_events.is_empty() {
         collect_triggers_into_deferred(state, &trigger_events);
     }
@@ -6918,20 +7118,26 @@ pub(crate) fn collect_and_drain_observer_triggers_if_settled(
     events: &mut Vec<GameEvent>,
     slice_start: usize,
 ) {
+    if triggered_mana_sidecar_owns_local_collection(state) {
+        return;
+    }
     if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         park_observer_triggers_if_paused(state, events, slice_start);
         return;
     }
-    let trigger_events: Vec<GameEvent> = events[slice_start..]
-        .iter()
-        .filter(|ev| {
-            !matches!(
-                ev,
-                GameEvent::PhaseChanged { .. } | GameEvent::SpellCopied { .. }
-            )
-        })
-        .cloned()
-        .collect();
+    let trigger_events: Vec<GameEvent> = filter_consumed_trigger_events_from(
+        events,
+        slice_start,
+        &state.consumed_before_priority_trigger_events,
+    )
+    .into_iter()
+    .filter(|ev| {
+        !matches!(
+            ev,
+            GameEvent::PhaseChanged { .. } | GameEvent::SpellCopied { .. }
+        )
+    })
+    .collect();
     if !trigger_events.is_empty() {
         collect_triggers_into_deferred(state, &trigger_events);
     }
@@ -6940,8 +7146,46 @@ pub(crate) fn collect_and_drain_observer_triggers_if_settled(
     }
 }
 
-/// CR 106.6 + CR 603.3b: Queue a synthetic cost-payment trigger for the same
-/// post-announcement stack-placement path as event-collected cost triggers.
+/// CR 605.4a: Does the classifier-accepted triggered-mana occurrence own local
+/// event collection right now?
+///
+/// The two authorities are deliberately independent and either alone is
+/// sufficient. A scoped sidecar action may temporarily move the durable carrier
+/// out of `GameState` while it delegates to an existing handler, and there the
+/// live accepted-node marker is the only authority; at a resting pause the
+/// durable carrier is present while the lexical marker has already been
+/// restored by `with_rules_execution_node`.
+///
+/// Both observer helpers fail closed on this predicate *before* collecting or
+/// draining: they are collection and partial-release authorities, not readiness
+/// probes, and the fixed point — not a helper — owns every emitted event of an
+/// accepted occurrence.
+///
+/// It stores no boolean and recognizes no `WaitingFor`, card name, trigger
+/// mode, or event value.
+fn triggered_mana_sidecar_owns_local_collection(state: &GameState) -> bool {
+    let sidecar_node = state
+        .pending_triggered_mana_resume
+        .as_ref()
+        .map(|resume| resume.rules_execution_node);
+    let marker = state.active_accepted_triggered_mana_node;
+    if let (Some(sidecar_node), Some(marker)) = (sidecar_node, marker) {
+        debug_assert_eq!(
+            sidecar_node, marker,
+            "the live accepted-occurrence marker must name the sidecar's current node"
+        );
+        debug_assert_eq!(
+            state.active_rules_execution_node,
+            Some(marker),
+            "a live accepted-occurrence marker must equal the ambient rules-execution node"
+        );
+    }
+    sidecar_node.is_some() || marker.is_some()
+}
+
+/// CR 603.12 + CR 603.3b: Queue a synthetic reflexive or cost-payment trigger
+/// for the same post-announcement stack-placement path as event-collected
+/// triggers. This collector never drains or mutates trigger-construction state.
 pub(crate) fn defer_pending_trigger(state: &mut GameState, trigger: PendingTrigger) {
     state
         .deferred_triggers
@@ -7608,6 +7852,191 @@ fn dispatch_pending_trigger_context_with_origin(
     }
 }
 
+/// Where a dispatched trigger is placed once the common core has finished
+/// modal legality, target preparation, event binding, and the CR 603.4 recheck.
+///
+/// Private control flow, never a rules/data/wire enum: the two backends own
+/// exactly one decision between them — "push and journal a stack entry" versus
+/// "resolve without creating one".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TriggerPlacement {
+    /// The baseline CR 603.3 placement. Every existing caller uses this and its
+    /// behaviour is unchanged in every branch.
+    OrdinaryStack,
+    /// CR 605.4a stackless placement, reachable **only** for a context that
+    /// [`classify_pending_triggered_mana`] accepted. It never pushes an entry,
+    /// never writes `pending_trigger_entry` or a stack side table, and never
+    /// emits `StackPushed`.
+    TriggeredManaImmediate,
+}
+
+/// The typed accepted view produced by [`classify_pending_triggered_mana`].
+///
+/// Deliberately not a bare boolean: acceptance carries the exact source
+/// incarnation the one `RulesExecutionNodeKind::TriggeredMana` node must be
+/// begun from, which the classifier already had to prove exists.
+#[derive(Debug, Clone)]
+pub(crate) struct AcceptedTriggeredMana {
+    pub context: PendingTriggerContext,
+    /// Baseline's exact source derivation: the trigger-source incarnation
+    /// stamped at construction, else the still-live object incarnation.
+    pub source: ObjectIncarnationRef,
+}
+
+/// CR 605.1b partition of one complete `PendingTriggerContext`.
+#[derive(Debug, Clone)]
+pub(crate) enum PendingTriggeredManaClass {
+    /// Immediate stackless placement is proven safe for this exact context.
+    Accepted(Box<AcceptedTriggeredMana>),
+    /// Everything else. The complete context is preserved unchanged and goes to
+    /// the ordinary deferred batch.
+    Ordinary(Box<PendingTriggerContext>),
+}
+
+/// True iff any reachable `sub_ability` / `else_ability` link satisfies `pred`.
+fn any_reachable_link(ability: &ResolvedAbility, pred: &dyn Fn(&ResolvedAbility) -> bool) -> bool {
+    if pred(ability) {
+        return true;
+    }
+    if let Some(sub) = ability.sub_ability.as_deref() {
+        if any_reachable_link(sub, pred) {
+            return true;
+        }
+    }
+    if let Some(else_branch) = ability.else_ability.as_deref() {
+        if any_reachable_link(else_branch, pred) {
+            return true;
+        }
+    }
+    false
+}
+
+/// True iff any reachable link carries an `unless_pay` modifier
+/// (CR 118.12 / CR 608.2c).
+///
+/// Rejecting this structurally — rather than by card name or by trusting the
+/// current Oracle census — is what makes `UnlessPayment` and every nested cost
+/// prompt unreachable while the immediate path owns accepted work.
+fn chain_has_any_unless_payment(ability: &ResolvedAbility) -> bool {
+    any_reachable_link(ability, &|link| link.unless_pay.is_some())
+}
+
+/// True iff any reachable link can raise a repeat interaction from inside
+/// `effects::resolve_ability_chain` — either repeat form (`RepeatDecision` and
+/// its iteration frames).
+///
+/// `optional` (`OptionalEffectChoice`) and `optional_for` (`OpponentMayChoice`)
+/// were rejected here until their owning handler family — `engine_payment_choices`
+/// — gained the readiness hook; they are accepted now, and that widening owns a
+/// real behaviour delta of its own. It does **not** ride on the modal rejection's
+/// "baseline never inlines this anyway" argument: baseline `is_triggered_mana_ability`
+/// returns true for an all-mana `optional` body, so baseline resolves it inline
+/// today and leaves `waiting_for` set with no continuation. The accepted path now
+/// carries that pause instead.
+///
+/// The repeat forms stay rejected only because `engine_resolution_choices` has
+/// no readiness hook yet: deleting them here without one installs a carrier
+/// nothing can resume, which is the exact state this predicate exists to
+/// prevent.
+fn chain_can_pause_on_player_interaction(ability: &ResolvedAbility) -> bool {
+    any_reachable_link(ability, &|link| {
+        link.repeat_for.is_some() || link.repeat_until.is_some()
+    })
+}
+
+/// CR 605.1b + CR 605.4a: the single complete-context authority that decides
+/// whether one collected `PendingTriggerContext` may take stackless immediate
+/// placement.
+///
+/// `mana_abilities::is_triggered_mana_ability` remains the exact and
+/// authoritative acceptance-time gate and is called here, unmodified, on the
+/// unmodified carried graph and firing event. This function never reimplements
+/// that predicate, never clears a target to force a match, and never accepts a
+/// context the predicate rejects — it only *narrows* further, on the retained
+/// complete-context safety axes below.
+///
+/// Modal contexts are rejected in this revision. That is not a behaviour
+/// regression: baseline's modal branch in `dispatch_pending_trigger_context`
+/// pushes the entry to the stack *before* mode selection, so it never reaches
+/// baseline's inline classifier check at all — no modal trigger resolves inline
+/// today either. A stackless modal path is genuinely new machinery and is
+/// tracked separately.
+pub(crate) fn classify_pending_triggered_mana(
+    state: &mut GameState,
+    context: PendingTriggerContext,
+) -> PendingTriggeredManaClass {
+    let ordinary =
+        |context: PendingTriggerContext| PendingTriggeredManaClass::Ordinary(Box::new(context));
+    let trigger = &context.pending;
+
+    // Modal: rejected to ordinary stack announcement (see the doc comment).
+    if trigger.modal.is_some() {
+        return ordinary(context);
+    }
+    // CR 601.2d + CR 603.3d: announcement-time division and declared constraints
+    // belong to the stack announcement authority.
+    if !trigger.target_constraints.is_empty()
+        || trigger.distribute.is_some()
+        || trigger.ability.distribution.is_some()
+    {
+        return ordinary(context);
+    }
+    // Round-11 finding 2: reject `unless_pay` on every reachable link, so a live
+    // sidecar can never coincide with `UnlessPayment` or any nested cost prompt.
+    if chain_has_any_unless_payment(&trigger.ability) {
+        return ordinary(context);
+    }
+    // Pause-narrowing for this revision (see the predicate's doc comment).
+    if chain_can_pause_on_player_interaction(&trigger.ability) {
+        return ordinary(context);
+    }
+    // The exact baseline acceptance gate, on the unmodified carried graph and
+    // the carried authoritative firing event.
+    if !super::mana_abilities::is_triggered_mana_ability(
+        &trigger.ability,
+        trigger.trigger_event.as_ref(),
+    ) {
+        return ordinary(context);
+    }
+    // Definition-owned slot proof, under the pushed event/count context. This is
+    // deliberately stronger than inspecting `target_constraints`, `multi_target`,
+    // or `ability.targets` separately: it catches `Effect::Mana { target: Some(..) }`
+    // and every downstream definition slot even when all three are empty.
+    let snapshot = push_trigger_event_context(
+        state,
+        trigger.trigger_event.as_ref(),
+        &context.trigger_events,
+        trigger.subject_match_count,
+    );
+    let slots_are_empty = matches!(
+        super::ability_utils::build_target_slots(state, &trigger.ability),
+        Ok(slots) if slots.is_empty()
+    );
+    restore_trigger_event_context(state, snapshot);
+    if !slots_are_empty {
+        return ordinary(context);
+    }
+    // CR 605.4a: exactly one `TriggeredMana` node per accepted occurrence, begun
+    // from baseline's exact source derivation. A malformed synthetic/legacy
+    // context for which neither authority exists is rejected rather than given
+    // an ambient node.
+    let Some(source) = trigger
+        .ability
+        .trigger_source
+        .as_ref()
+        .map(|trigger_source| trigger_source.identity.reference)
+        .or_else(|| {
+            state
+                .objects
+                .get(&trigger.ability.source_id)
+                .map(ObjectIncarnationRef::from_object)
+        })
+    else {
+        return ordinary(context);
+    };
+    PendingTriggeredManaClass::Accepted(Box::new(AcceptedTriggeredMana { context, source }))
+}
+
 /// CR 113.2c + CR 603.2 + CR 603.3b: Drive a single collected trigger through
 /// its disposition. Returns a [`TriggerDispatchDisposition`] classifying the
 /// terminal outcome: [`Paused`](TriggerDispatchDisposition::Paused) when the
@@ -7631,6 +8060,21 @@ fn dispatch_pending_trigger_context(
     trigger_context: PendingTriggerContext,
     events_out: &mut Vec<GameEvent>,
 ) -> TriggerDispatchDisposition {
+    dispatch_pending_trigger_context_core(
+        state,
+        trigger_context,
+        TriggerPlacement::OrdinaryStack,
+        events_out,
+    )
+}
+
+fn dispatch_pending_trigger_context_core(
+    state: &mut GameState,
+    trigger_context: PendingTriggerContext,
+    placement: TriggerPlacement,
+    events_out: &mut Vec<GameEvent>,
+) -> TriggerDispatchDisposition {
+    let immediate = matches!(placement, TriggerPlacement::TriggeredManaImmediate);
     let PendingTriggerContext {
         pending: trigger,
         trigger_events,
@@ -7653,6 +8097,16 @@ fn dispatch_pending_trigger_context(
     // exists on the stack.
     if let Some(modal_ref) = trigger.modal.as_ref() {
         if !trigger.mode_abilities.is_empty() {
+            // The complete classifier rejects every modal context, so immediate
+            // placement can never reach the stack-pushing modal branch below.
+            if immediate {
+                debug_assert!(
+                    false,
+                    "classify_pending_triggered_mana must reject a modal context before \
+                     immediate placement; reaching the modal branch would push a stack entry"
+                );
+                return TriggerDispatchDisposition::DroppedNoLegalMode;
+            }
             // CR 603.3c + CR 603.3d: a triggered modal's mode choice is announced as
             // the ability is put on the stack, by the same process as casting a spell
             // (CR 601.2c-d). The triggering event must be live for the ENTIRE choice,
@@ -7771,7 +8225,35 @@ fn dispatch_pending_trigger_context(
         subject_match_count,
     );
 
-    match prepare_trigger_targets(state, &trigger) {
+    let prepared = prepare_trigger_targets(state, &trigger);
+
+    if immediate {
+        // CR 605.4a: the stackless backend. The classifier already proved an
+        // empty canonical slot set, so `NoTargets` is the only reachable
+        // preparation outcome; every other outcome is an invariant failure and
+        // must not fall through to a push or to the delayed re-push fallback.
+        let PreparedTriggerTargets::NoTargets {
+            trigger,
+            rng,
+            events,
+        } = prepared
+        else {
+            debug_assert!(
+                false,
+                "classify_pending_triggered_mana proved an empty canonical target-slot set, so \
+                 an accepted context cannot reach a target pause, drop, or fallback push"
+            );
+            restore_trigger_event_context(state, context_snapshot);
+            return TriggerDispatchDisposition::DroppedTargetUnresolved;
+        };
+        commit_prepared_trigger_targets(state, rng, events, events_out);
+        let disposition =
+            resolve_accepted_triggered_mana_body(state, &trigger, &trigger_events, events_out);
+        restore_trigger_event_context(state, context_snapshot);
+        return disposition;
+    }
+
+    match prepared {
         PreparedTriggerTargets::NoTargets {
             trigger,
             rng,
@@ -7905,6 +8387,487 @@ fn dispatch_pending_trigger_context(
     }
 }
 
+/// The exhaustive whitelist of existing interactions an accepted triggered-mana
+/// body may pause on (CR 605.4a).
+///
+/// A triggered-body colour choice and every unless/nested-cost prompt are
+/// deliberately absent: the classifier proved the graph choice-free at
+/// acceptance and rejected every `unless_pay` link, so encountering one is an
+/// invariant failure rather than a wait to serialize generically.
+fn is_accepted_triggered_mana_pause(waiting_for: &WaitingFor) -> bool {
+    matches!(
+        waiting_for,
+        WaitingFor::OptionalEffectChoice { .. }
+            | WaitingFor::OpponentMayChoice { .. }
+            | WaitingFor::RepeatDecision { .. }
+            | WaitingFor::ReplacementChoice { .. }
+    )
+}
+
+/// CR 605.4a: rebind one accepted occurrence's rules-execution node together
+/// with the equal accepted-occurrence marker and its occurrence-local
+/// production override, for exactly one lexical extent.
+///
+/// Both transient scopes are restored on every return, including a return
+/// caused by a prompt — which is precisely why a pause must copy the node into
+/// `TriggeredManaResume` rather than relying on either scope surviving it.
+pub(crate) fn with_triggered_mana_resolution_scope<T>(
+    state: &mut GameState,
+    node: crate::types::RulesExecutionNodeRef,
+    production_override: Option<ProductionOverride>,
+    operation: impl FnOnce(&mut GameState) -> T,
+) -> T {
+    state.with_rules_execution_node(node, |state| {
+        let previous_marker = state.active_accepted_triggered_mana_node.replace(node);
+        let previous_override = state.current_triggered_mana_override.take();
+        state.current_triggered_mana_override = production_override;
+        let result = operation(state);
+        state.current_triggered_mana_override = previous_override;
+        state.active_accepted_triggered_mana_node = previous_marker;
+        result
+    })
+}
+
+/// The stackless placement backend: bind the CR 603.4 scope through the shared
+/// binder, then run the body. No stack entry, stack event, stack side table, or
+/// stack journal is created on any path.
+fn resolve_accepted_triggered_mana_body(
+    state: &mut GameState,
+    trigger: &PendingTrigger,
+    trigger_events: &[GameEvent],
+    events_out: &mut Vec<GameEvent>,
+) -> TriggerDispatchDisposition {
+    let waiting_before = state.waiting_for.clone();
+    // CR 603.4 + CR 608.2k + CR 603.2c + CR 706.2, through the same binder stack
+    // resolution uses — immediate dispatch must not re-implement the recheck.
+    let bound = super::stack::bind_triggered_resolution_scope(
+        state,
+        Some(super::stack::TriggeredResolutionScope {
+            condition: trigger.condition.as_ref(),
+            controller: trigger.controller,
+            trigger_source: trigger.ability.trigger_source.as_ref(),
+            trigger_event: trigger.trigger_event.as_ref(),
+            subject_match_count: trigger.subject_match_count,
+            die_result: trigger.die_result,
+        }),
+        Some(trigger_events.to_vec()),
+    );
+    if !bound {
+        // CR 603.4: a false intervening-if is terminal with no effects at all.
+        return TriggerDispatchDisposition::ResolvedInline;
+    }
+    let _ = super::effects::resolve_ability_chain(state, &trigger.ability, events_out, 0);
+    if state.waiting_for != waiting_before && is_accepted_triggered_mana_pause(&state.waiting_for) {
+        return TriggerDispatchDisposition::Paused;
+    }
+    debug_assert!(
+        state.waiting_for == waiting_before,
+        "an accepted triggered-mana body may only pause on a whitelisted interaction; \
+         encountering a new pause is a stop condition, not a wait to serialize generically"
+    );
+    TriggerDispatchDisposition::ResolvedInline
+}
+
+/// The trigger-side immediate wrapper: mint the one `TriggeredMana` node for
+/// this accepted occurrence, then run the shared dispatcher core under that node
+/// and its equal accepted-occurrence marker.
+fn dispatch_accepted_triggered_mana(
+    state: &mut GameState,
+    accepted: AcceptedTriggeredMana,
+    production_override: Option<ProductionOverride>,
+    events_out: &mut Vec<GameEvent>,
+) -> (
+    TriggerDispatchDisposition,
+    crate::types::RulesExecutionNodeRef,
+) {
+    let AcceptedTriggeredMana { context, source } = accepted;
+    // Baseline's exact cause derivation for the node.
+    let caused_by = match context.pending.trigger_event.as_ref() {
+        Some(
+            GameEvent::ManaAdded { source_id, .. } | GameEvent::TappedForMana { source_id, .. },
+        ) => state
+            .resolved_rules_journal
+            .latest_mana_producer_for_source(*source_id),
+        _ => None,
+    };
+    let node = state.begin_triggered_mana_journal_node(
+        source,
+        context.pending.ability.trigger_definition_ref.clone(),
+        caused_by,
+    );
+    let disposition =
+        with_triggered_mana_resolution_scope(state, node, production_override, |state| {
+            dispatch_pending_trigger_context_core(
+                state,
+                context,
+                TriggerPlacement::TriggeredManaImmediate,
+                events_out,
+            )
+        });
+    (disposition, node)
+}
+
+/// Partition one already-collected context list into the members that may take
+/// stackless immediate placement and the members that stay on the ordinary
+/// authority, both in collection order.
+fn partition_collected_mana_frame_contexts(
+    state: &mut GameState,
+    contexts: Vec<PendingTriggerContext>,
+) -> (Vec<AcceptedTriggeredMana>, Vec<PendingTriggerContext>) {
+    let mut accepted = Vec::new();
+    let mut ordinary = Vec::new();
+    for context in contexts {
+        match classify_pending_triggered_mana(state, context) {
+            PendingTriggeredManaClass::Accepted(view) => accepted.push(*view),
+            PendingTriggeredManaClass::Ordinary(context) => ordinary.push(*context),
+        }
+    }
+    (accepted, ordinary)
+}
+
+/// CR 603.3b: queue every rejected context on `state.deferred_triggers`, in the
+/// combined APNAP order the shared collector already established, through the
+/// one journaled `ResolvedTriggerCollection::DeferPending` authority.
+///
+/// A completed mana frame is **not** a release boundary: it is a cost-payment
+/// micro-frame inside somebody else's action. Ordering and dispatching its
+/// ordinary observers here would form one release group per micro-frame and put
+/// CR 603.3b ordering in front of a player mid-payment. Deferring instead makes
+/// the owner's own boundary — the reducer epilogue, a cast/resolution finalizer,
+/// or the settled-Priority convergence wrapper — form exactly one release group
+/// over every micro-frame the action produced.
+///
+/// This is the plan's one-release-group behaviour and it is a deliberate
+/// corpus-visible change from baseline, which dispatched a completed mana
+/// frame's observers immediately from inside the payment.
+fn defer_rejected_mana_frame_contexts(state: &mut GameState, ordinary: Vec<PendingTriggerContext>) {
+    resolve_and_apply_trigger_collection(
+        state,
+        crate::types::resolved_commands::ResolvedTriggerCollection::DeferPending {
+            contexts: ordinary,
+        },
+    )
+    .expect("completed mana-frame deferred trigger collection cause must be live");
+}
+
+/// CR 603.3b + CR 605.4a: the one ordered driver for a completed mana frame.
+///
+/// It performs exactly one normal observation pass and one delayed match pass
+/// over `raw_batch`, durably owns the combined collection, partitions it through
+/// the one complete classifier, queues every ordinary context, and only then
+/// dispatches accepted work immediately. It deliberately never terminalizes an
+/// unmatched reflexive: a frame-local child batch is not the complete creating
+/// boundary of every live reflexive. It never calls `begin_trigger_ordering`,
+/// `dispatch_collected_triggers`, or either deferred drain.
+///
+/// Returns `Some(wait)` when an accepted body paused on a whitelisted
+/// interaction, after storing the complete `pending_triggered_mana_resume`.
+pub(crate) fn collect_mana_action_trigger_batch(
+    state: &mut GameState,
+    raw_batch: &[GameEvent],
+    outer_resume: crate::types::game_state::ManaTriggerFixedPointResume,
+) -> Option<WaitingFor> {
+    // The dispatch buffer is frame-local, exactly as baseline `process_triggers`
+    // keeps its own: events emitted while announcing or inline-resolving this
+    // batch are represented by the contexts and journal entries they produced,
+    // and are deliberately not given a live occurrence identity in the reducer's
+    // public event vector.
+    let events_out = &mut Vec::new();
+    let seed = collect_triggers_for_batch(state, raw_batch);
+    let collected = collect_pending_and_delayed_triggers_for_batch(
+        state,
+        seed,
+        raw_batch,
+        DelayedTriggerEventScope::Any,
+    );
+    let (accepted, ordinary) = partition_collected_mana_frame_contexts(state, collected.contexts);
+    let pause = run_accepted_triggered_mana_fixed_point(state, accepted, outer_resume, events_out);
+    defer_rejected_mana_frame_contexts(state, ordinary);
+    pause
+}
+
+/// CR 603.3b + CR 603.7 + CR 605.4a: materialize one **undispatched** combined
+/// normal-plus-delayed collection for the range an accepted occurrence emitted,
+/// for storage on the sidecar across a pause.
+///
+/// This is the durable form the plan requires: the raw emitted range dies with
+/// the frame that produced it, so a pause must persist *contexts*, not events.
+/// Nothing here is claimed, ordered, queued, or given a node — an accepted child
+/// discovered by this pass mints its node only when readiness makes it current,
+/// and a rejected sibling enters `state.deferred_triggers` only then too.
+///
+/// Returns `None` for an empty range or an empty collection so the sidecar never
+/// accumulates vacuous batches across repeated pauses.
+fn collect_undispatched_emission_batch(
+    state: &mut GameState,
+    emitted: &[GameEvent],
+) -> Option<CollectedTriggerContextBatch> {
+    if emitted.is_empty() {
+        return None;
+    }
+    let seed = collect_triggers_for_batch(state, emitted);
+    let batch = collect_pending_and_delayed_triggers_for_batch(
+        state,
+        seed,
+        emitted,
+        DelayedTriggerEventScope::Any,
+    );
+    (!batch.contexts.is_empty()).then_some(batch)
+}
+
+/// CR 605.4a fixed point: resolve each accepted occurrence under its own node,
+/// then collect the events it emitted and prepend any accepted children ahead of
+/// the prior simultaneous tail, until no accepted work remains.
+fn run_accepted_triggered_mana_fixed_point(
+    state: &mut GameState,
+    mut accepted: Vec<AcceptedTriggeredMana>,
+    outer_resume: crate::types::game_state::ManaTriggerFixedPointResume,
+    events_out: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
+    while !accepted.is_empty() {
+        let current = accepted.remove(0);
+        let context_for_resume = current.context.clone();
+        let emitted_start = events_out.len();
+        let (disposition, node) =
+            dispatch_accepted_triggered_mana(state, current, None, events_out);
+        if matches!(disposition, TriggerDispatchDisposition::Paused) {
+            let waiting_for = state.waiting_for.clone();
+            // CR 605.4a: the occurrence's own scopes have already restored (they
+            // restore on a prompt return exactly as on a synchronous one), so
+            // the range it emitted before pausing may be combined-collected
+            // here — and it MUST be, because `events_out` is frame-local and
+            // dies with this call. The batch is stored undispatched: no child
+            // node is minted and no ordinary context is queued while the current
+            // occurrence is unresolved.
+            debug_assert!(
+                state.active_accepted_triggered_mana_node.is_none(),
+                "a paused occurrence's marker must restore before its emission batch is collected"
+            );
+            let emitted: Vec<GameEvent> = events_out[emitted_start..].to_vec();
+            let collected_batches = collect_undispatched_emission_batch(state, &emitted)
+                .into_iter()
+                .collect();
+            state.pending_triggered_mana_resume =
+                Some(Box::new(crate::types::game_state::TriggeredManaResume {
+                    current: Box::new(context_for_resume),
+                    current_override: None,
+                    rules_execution_node: node,
+                    accepted_tail: accepted.into_iter().map(|view| view.context).collect(),
+                    collected_batches,
+                    outer_resume,
+                    stage: crate::types::game_state::TriggeredManaStage::ResolvingBody,
+                }));
+            return Some(waiting_for);
+        }
+        // CR 605.4a: the completed occurrence's own scopes have restored, so its
+        // emitted events may now be collected and any accepted child minted.
+        debug_assert!(
+            state.active_accepted_triggered_mana_node.is_none(),
+            "a completed occurrence's marker must restore before child discovery"
+        );
+        if events_out.len() > emitted_start {
+            let emitted: Vec<GameEvent> = events_out[emitted_start..].to_vec();
+            let seed = collect_triggers_for_batch(state, &emitted);
+            let child = collect_pending_and_delayed_triggers_for_batch(
+                state,
+                seed,
+                &emitted,
+                DelayedTriggerEventScope::Any,
+            );
+            let (mut children, child_ordinary) =
+                partition_collected_mana_frame_contexts(state, child.contexts);
+            defer_rejected_mana_frame_contexts(state, child_ordinary);
+            children.extend(accepted);
+            accepted = children;
+        }
+    }
+    None
+}
+
+/// CR 605.4a: the response-side counterpart to
+/// [`with_triggered_mana_resolution_scope`].
+///
+/// Every handler family that can re-enter a paused accepted occurrence's body
+/// runs its unmodified baseline work inside this scope, so the occurrence's own
+/// rules-execution node and the equal accepted-occurrence marker are ambient
+/// again. That is what makes both payment-choice observer helpers fail closed on
+/// [`triggered_mana_sidecar_owns_local_collection`] while the resumed body runs:
+/// the fixed point, never a helper, owns every event an accepted occurrence
+/// emits.
+///
+/// The durable carrier deliberately stays in `GameState` for the whole scope —
+/// it is the serde authority if the body pauses again inside it — so the
+/// predicate's two authorities agree rather than one covering for the other.
+///
+/// With no live carrier the operation runs bare and the hook is a no-op.
+pub(crate) fn with_accepted_triggered_mana_action_scope<T>(
+    state: &mut GameState,
+    operation: impl FnOnce(&mut GameState) -> T,
+) -> T {
+    let Some(carrier) = state.pending_triggered_mana_resume.as_ref() else {
+        return operation(state);
+    };
+    let node = carrier.rules_execution_node;
+    let production_override = carrier.current_override.clone();
+    with_triggered_mana_resolution_scope(state, node, production_override, operation)
+}
+
+/// CR 603.3b: claim every live occurrence in one resumed action's own emitted
+/// range, by full-action index, through the same journal authority a completed
+/// mana frame uses.
+///
+/// The observer helpers were suppressed for this range by the sidecar guard, so
+/// the combined collection above is its only collection; the journal is what
+/// stops the ordinary post-action pipeline rediscovering the same occurrences.
+fn claim_resumed_triggered_mana_events(
+    state: &mut GameState,
+    events: &[GameEvent],
+    event_start: usize,
+) {
+    if event_start >= events.len() {
+        return;
+    }
+    let occurrences = (event_start..events.len())
+        .map(|index| ConsumedTriggerEventOccurrence {
+            event: events[index].clone(),
+            occurrence: trigger_event_occurrence(events, index),
+        })
+        .collect();
+    resolve_and_apply_trigger_collection(
+        state,
+        crate::types::resolved_commands::ResolvedTriggerCollection::ConsumeBeforePriority {
+            occurrences,
+        },
+    )
+    .expect("resumed accepted triggered-mana consumed-before-priority journal cause must be live");
+}
+
+/// CR 605.4a: the one readiness authority for a resumed accepted triggered-mana
+/// occurrence. Called by every sidecar-aware handler family **after** the action
+/// scope has restored, and never from inside it.
+///
+/// In order: combine-collect the exact unclaimed suffix this action emitted and
+/// store it undispatched, claim that suffix's live identities, and then either
+/// keep the carrier (the current occurrence re-paused on a whitelisted
+/// interaction) or terminate it — partition every stored batch once, mint
+/// accepted children ahead of the prior simultaneous tail, run that tail, and
+/// resume the suspended mana frame exactly once.
+///
+/// [`TriggeredManaReadiness::Pending`] means "no carrier, or the carrier is
+/// still live": the handler returns its own unmodified result.
+/// [`TriggeredManaReadiness::Resumed`] carries the resumed mana frame's
+/// authoritative wait, which the handler must install and return.
+pub(crate) fn finish_accepted_triggered_mana_action(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    event_start: usize,
+) -> Result<TriggeredManaReadiness, super::engine::EngineError> {
+    if state.pending_triggered_mana_resume.is_none() {
+        return Ok(TriggeredManaReadiness::Pending);
+    }
+    debug_assert!(
+        state.active_accepted_triggered_mana_node.is_none(),
+        "readiness must run outside the resumed occurrence's own scope"
+    );
+    let emitted: Vec<GameEvent> = events[event_start.min(events.len())..].to_vec();
+    let batch = collect_undispatched_emission_batch(state, &emitted);
+    claim_resumed_triggered_mana_events(state, events, event_start);
+    let carrier = state
+        .pending_triggered_mana_resume
+        .as_mut()
+        .expect("the carrier was proven live above and collection never clears it");
+    carrier.collected_batches.extend(batch);
+    if is_accepted_triggered_mana_pause(&state.waiting_for) {
+        // A repeated pause of the same occurrence: the carrier keeps its node,
+        // its tail, and now one more undispatched batch.
+        return Ok(TriggeredManaReadiness::Pending);
+    }
+    let carrier = *state
+        .pending_triggered_mana_resume
+        .take()
+        .expect("the carrier was proven live above");
+    let crate::types::game_state::TriggeredManaResume {
+        accepted_tail,
+        collected_batches,
+        outer_resume,
+        ..
+    } = carrier;
+    let stored: Vec<PendingTriggerContext> = collected_batches
+        .into_iter()
+        .flat_map(|batch| batch.contexts)
+        .collect();
+    let (mut accepted, ordinary) = partition_collected_mana_frame_contexts(state, stored);
+    defer_rejected_mana_frame_contexts(state, ordinary);
+    // CR 605.4a: children go ahead of the prior simultaneous tail. The tail is
+    // reclassified rather than trusted: acceptance is a property of live state,
+    // and a tail member whose source left the battlefield during the pause
+    // belongs to the ordinary authority now.
+    let (tail_accepted, tail_ordinary) =
+        partition_collected_mana_frame_contexts(state, accepted_tail);
+    defer_rejected_mana_frame_contexts(state, tail_ordinary);
+    accepted.extend(tail_accepted);
+    // The tail's dispatch buffer is frame-local, exactly as the synchronous
+    // frame's is: an accepted body's own emissions are represented by the
+    // contexts and journal entries they produce, not by a live identity in this
+    // action's public event vector.
+    let tail_events = &mut Vec::new();
+    if run_accepted_triggered_mana_fixed_point(state, accepted, outer_resume.clone(), tail_events)
+        .is_some()
+    {
+        // A tail member paused and installed its own carrier naming the same
+        // outer continuation; that carrier is the authority now.
+        return Ok(TriggeredManaReadiness::Resumed {
+            wait: Box::new(state.waiting_for.clone()),
+            settled_direct_priority_root: false,
+        });
+    }
+    // CR 117.3c + CR 117.5: recognize the ONE consumed shape that may run full
+    // settled-Priority convergence, exhaustively and before the frame resumes:
+    // a direct `ManaAbilityResume::Priority` root, i.e. an activation that began
+    // at `WaitingFor::Priority` with nothing else owning the action. Every cast,
+    // payment, colour, unless and special-action owner is excluded here, not by
+    // the convergence wrapper.
+    let direct_priority_root = matches!(
+        outer_resume,
+        crate::types::game_state::ManaTriggerFixedPointResume::Root { ref resume, .. }
+            if matches!(**resume, crate::types::game_state::ManaAbilityResume::Priority)
+    );
+    let Some(wait) = super::mana_abilities::resume_settled_mana_frame(state, outer_resume, events)?
+    else {
+        return Ok(TriggeredManaReadiness::Pending);
+    };
+    let settled_direct_priority_root = direct_priority_root
+        && matches!(wait, WaitingFor::Priority { .. })
+        && state.pending_triggered_mana_resume.is_none()
+        && state.pending_cast.is_none()
+        && !super::casting::mana_ability_cost_payment_is_paused(state)
+        && resolution_completion_can_settle(state);
+    Ok(TriggeredManaReadiness::Resumed {
+        wait: Box::new(wait),
+        settled_direct_priority_root,
+    })
+}
+
+/// What one sidecar-aware handler's readiness hook concluded.
+pub(crate) enum TriggeredManaReadiness {
+    /// No carrier, or the carrier is still live after this action. The handler
+    /// returns its own unmodified result.
+    Pending,
+    /// The fixed point terminated and the suspended mana frame resumed exactly
+    /// once to `wait`.
+    ///
+    /// `settled_direct_priority_root` is true only for the single consumed shape
+    /// that may run full settled-Priority convergence — see the gate above. A
+    /// handler whose reducer arm returns its `ActionResult` directly (and so
+    /// never reaches the ordinary epilogue) uses it to decide whether to call
+    /// `run_post_action_pipeline_from_settled_priority`; every other owner
+    /// returns `wait` unchanged.
+    Resumed {
+        wait: Box<WaitingFor>,
+        settled_direct_priority_root: bool,
+    },
+}
+
 /// CR 608.2e + issue #1793: True end-of-resolution boundary for draining
 /// `deferred_triggers`. Mid-resolution `Priority` from player-scope iteration,
 /// `repeat_for`, or replacement continuations must not drain (or offer CR
@@ -7915,6 +8878,37 @@ fn dispatch_pending_trigger_context(
 /// resolution is complete.
 pub(crate) fn resolution_completion_can_settle(state: &GameState) -> bool {
     if is_pending_trigger_construction_active(state) {
+        return false;
+    }
+    // CR 601.2h + CR 602.2b: A parked cost-move continuation still owns the
+    // announcement or activation whose events created these observers. The
+    // complete typed enum is a release barrier until its exact resumer takes
+    // and completes that continuation.
+    if state.pending_cost_move_resume.is_some() {
+        return false;
+    }
+    // CR 118.3b + CR 119.4: Deferred life payment likewise retains its cast,
+    // mana-root, or pay-amount owner across replacement interaction.
+    if state.pending_deferred_life_cost_resume.is_some() {
+        return false;
+    }
+    // CR 605.4a: A classifier-accepted triggered mana ability paused
+    // mid-resolution owns its own emitted-event fixed point. Its carrier — and
+    // only that carrier — joins this owned-prompt guard.
+    //
+    // `pending_trigger_construction_priority_recipient` is deliberately absent.
+    // `can_drain_deferred_triggers` consults this predicate first, so a
+    // construction recipient here would reject the settled wrapper's own drain,
+    // the construction finisher's drain, and every deferred-sibling drain in the
+    // same batch — deadlocking the batch with its own recipient. What protects
+    // an in-flight construction batch instead is unchanged baseline ownership:
+    // `is_pending_trigger_construction_active` above, the empty deferred queue
+    // while `OrderTriggers` is open, and the reducer dispatching on the
+    // `(waiting_for, action)` pair. The only waiting-state-agnostic entries are
+    // concession/elimination and debug actions, which is why `elimination.rs`
+    // clears that recipient alongside the construction cursors it already
+    // clears.
+    if state.pending_triggered_mana_resume.is_some() {
         return false;
     }
     if !state.resolution_stack.is_empty() {
@@ -7936,14 +8930,49 @@ pub(crate) fn resolution_completion_can_settle(state: &GameState) -> bool {
     true
 }
 
-fn can_drain_deferred_triggers(state: &GameState, allow_spell_on_stack: bool) -> bool {
+/// Which deferred-trigger drain, if any, a post-action seam owns.
+///
+/// Every variant still goes through `resolution_completion_can_settle`, so the
+/// complete carrier census is shared; the policy decides only whether this seam
+/// drains at all and whether a `Spell` entry may remain on the stack while it
+/// does. Replacing the two historic booleans — `engine_priority`'s
+/// `skip_deferred_trigger_drain` and this module's `allow_spell_on_stack` —
+/// with one enum keeps those two independent axes from being recombined
+/// accidentally at a new seam.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DeferredTriggerDrainPolicy {
+    /// This seam owns no drain. Its caller has already drained the batch, or it
+    /// is a mid-continuation owner that must not.
+    Skip,
+    /// CR 603.3b + issue #1793: drain only once no `Spell` entry remains on the
+    /// stack, so parked observers cannot offer ordering mid-resolution.
+    ResolutionSafe,
+    /// CR 601.2h + CR 602.2b + CR 603.3: a passive announced stack object may
+    /// still be on the stack; its cost/cast observers, and the settled batch a
+    /// direct mana root converges into, drain above it.
+    SettledPriority,
+}
+
+impl DeferredTriggerDrainPolicy {
+    fn allows_spell_on_stack(self) -> bool {
+        match self {
+            DeferredTriggerDrainPolicy::Skip | DeferredTriggerDrainPolicy::ResolutionSafe => false,
+            DeferredTriggerDrainPolicy::SettledPriority => true,
+        }
+    }
+}
+
+fn can_drain_deferred_triggers(state: &GameState, policy: DeferredTriggerDrainPolicy) -> bool {
+    if matches!(policy, DeferredTriggerDrainPolicy::Skip) {
+        return false;
+    }
     if state.deferred_triggers.is_empty() || !resolution_completion_can_settle(state) {
         return false;
     }
     // CR 603.3b + issue #1793: observer triggers parked during a spell's
     // resolution must wait until that spell leaves the stack — draining while
     // a `Spell` entry remains would offer ordering mid player_scope iteration.
-    if !allow_spell_on_stack
+    if !policy.allows_spell_on_stack()
         && state
             .stack
             .iter()
@@ -7955,7 +8984,22 @@ fn can_drain_deferred_triggers(state: &GameState, allow_spell_on_stack: bool) ->
 }
 
 pub(crate) fn should_drain_deferred_triggers_now(state: &GameState) -> bool {
-    can_drain_deferred_triggers(state, false)
+    can_drain_deferred_triggers(state, DeferredTriggerDrainPolicy::ResolutionSafe)
+}
+
+/// Policy-parameterized form of [`drain_deferred_trigger_queue`] for the shared
+/// post-action pipeline core, whose drain slot is owned by its caller's policy
+/// rather than by a fixed boundary.
+pub(super) fn drain_deferred_trigger_queue_with_policy(
+    state: &mut GameState,
+    events_out: &mut Vec<GameEvent>,
+    policy: DeferredTriggerDrainPolicy,
+) -> Option<crate::types::game_state::WaitingFor> {
+    if !can_drain_deferred_triggers(state, policy) {
+        return None;
+    }
+
+    drain_deferred_trigger_queue_unchecked(state, events_out)
 }
 
 /// CR 113.2c + CR 603.2 + CR 603.3b: Drain the deferred-trigger queue after
@@ -7991,6 +9035,43 @@ pub(crate) fn drain_deferred_triggers_after_stack_object_announcement(
     state: &mut GameState,
     events_out: &mut Vec<GameEvent>,
 ) -> Option<crate::types::game_state::WaitingFor> {
+    // CR 601.2c + CR 601.2d + CR 601.2h: the EXTERNAL pending-cast carrier has
+    // not completed announcement yet. Cost observers wait until the finalizer
+    // consumes that exact cast root.
+    //
+    // The companion INLINE `WaitingFor` carrier check is deliberately NOT here,
+    // and that placement is load-bearing rather than an omission. Most callers
+    // of this helper run INSIDE a reducer action, before `apply_action` assigns
+    // the handler's returned wait — so `state.waiting_for` is the wait the
+    // action STARTED from, not the one the announcement is installing. Reading
+    // it here blocks the exact drain this helper exists to perform: the
+    // additional-sacrifice cast that pauses on `TargetSelection` (whose
+    // `CostResume::Spell` carries the cast inline) still holds that stale wait
+    // when `casting_targets` finalizes the announcement and calls in, so the
+    // cost-sacrifice observers stay parked behind the announced spell forever.
+    //
+    // Every post-announcement boundary already excludes an inline carrier
+    // STRUCTURALLY, which is why dropping the read loses no protection:
+    //
+    //   * the `casting_costs`/`casting_targets` wrapper returns early unless the
+    //     wait it is ABOUT to install is `Priority`, and a `Priority` wait
+    //     carries no cast by construction;
+    //   * `engine_priority`'s post-action call sits behind
+    //     `settle_pending_resolution_completion`, which itself requires
+    //     `state.waiting_for` to be `Priority`;
+    //   * the copy-announcement callers (`engine.rs` copy-target choice,
+    //     `effects/copy_spell.rs`) drain for a COPY, which is put on the stack
+    //     without being cast, so no announcement is in flight;
+    //   * `drain_deferred_triggers_after_trigger_construction` runs after a
+    //     TRIGGER finished construction; a cast paused around it lives in the
+    //     external `pending_cast` carrier this function does read.
+    //
+    // The live discriminator for this placement is
+    // `casting_costs::tests::cost_paid_multi_sacrifice_kicker_paused_under_observes`:
+    // restoring the `state.waiting_for.has_pending_cast()` read fails it.
+    if state.pending_cast.is_some() {
+        return None;
+    }
     // CR 603.3b + CR 608.2g: terminal Ripple settlement owns this exact
     // post-announcement boundary. It must first collect the current final
     // cast's SpellCast event with earlier accepted casts, then drain one batch.
@@ -7999,7 +9080,7 @@ pub(crate) fn drain_deferred_triggers_after_stack_object_announcement(
     if state.pending_resolution_completion.is_some() {
         return None;
     }
-    if !can_drain_deferred_triggers(state, true) {
+    if !can_drain_deferred_triggers(state, DeferredTriggerDrainPolicy::SettledPriority) {
         return None;
     }
 
@@ -8028,6 +9109,144 @@ pub(crate) fn drain_deferred_triggers_after_trigger_construction(
     } else {
         drain_deferred_triggers_after_stack_object_announcement(state, events_out)
     }
+}
+
+/// CR 117.3c + CR 117.5 + CR 605.4a: record the player who must receive
+/// priority once a settled trigger batch has finished announcing, when that
+/// player is not the active player.
+///
+/// The recipient is installed only from the settled-Priority convergence core's
+/// own exhaustively validated `WaitingFor::Priority { player }`, before any
+/// ordered or singleton construction step can pause. Reinstalling the same
+/// player is idempotent; observing a *different* player while the field is live
+/// is an internal invariant error. The one carved-out rewrite is
+/// `elimination.rs`'s CR 800.4a re-point past a departed recipient, which does
+/// not come through here.
+pub(crate) fn preserve_trigger_construction_priority_recipient(
+    state: &mut GameState,
+    player: PlayerId,
+) {
+    debug_assert!(
+        state
+            .pending_trigger_construction_priority_recipient
+            .is_none_or(|live| live == player),
+        "a second settled batch installed a different construction priority recipient",
+    );
+    state.pending_trigger_construction_priority_recipient = Some(player);
+}
+
+/// The closed census of trigger-construction prompts that may be returned to a
+/// player while a construction priority recipient stays installed.
+///
+/// Any other wait shape at a finisher seam means a seam was added that the
+/// Round-20 closure map does not cover, which is an invariant error rather than
+/// something to coerce.
+pub(super) fn is_trigger_construction_prompt(
+    waiting_for: &crate::types::game_state::WaitingFor,
+) -> bool {
+    matches!(
+        waiting_for,
+        WaitingFor::OrderTriggers { .. }
+            | WaitingFor::NamedChoice { .. }
+            | WaitingFor::OptionalEffectChoice { .. }
+            | WaitingFor::AbilityModeChoice { .. }
+            | WaitingFor::TriggerTargetSelection { .. }
+            | WaitingFor::DistributeAmong { .. }
+    )
+}
+
+/// Close out one reducer action that may have been a trigger-construction step.
+///
+/// This is the single authority that decides whether a construction wait is
+/// really terminal, and it is deliberately event-aware: a `Priority` produced by
+/// a successful announcement, a dangling-cursor recovery, or an optional decline
+/// is only terminal once the *whole* deferred tail behind it has announced.
+/// Baseline's `abandon_ceased_pending_trigger` deliberately leaves deferred
+/// siblings installed, and both dangling recoveries return `Priority` without
+/// draining, so the drain has to live here rather than at each return.
+///
+/// Contract:
+///
+/// 1. With no recipient installed, return `produced` byte-for-byte and perform
+///    no drain. This is the entire ordinary-caller contract — every existing
+///    controller/active-player fallback at the seams stays exactly baseline.
+/// 2. With a recipient and one of the six approved construction prompts, return
+///    the real prompt and leave the recipient installed for the next step.
+/// 3. With a recipient and a `Priority` of any player, run the bounded
+///    construction drain, return an approved prompt it surfaces with the
+///    recipient retained, and otherwise consume the recipient and return
+///    `Priority { player }` — never leaving a durable recipient installed across
+///    an action that returns ordinary priority.
+/// 4. With a recipient and any other wait shape, this is an invariant error: do
+///    not coerce, do not consume, do not invent a recipient.
+///
+/// Applied exactly once per reducer action, at the outermost handler return of
+/// each enumerated seam — never inside trigger dispatch, where a `Priority`
+/// result is discarded by the dispatcher and the recipient would be lost
+/// mid-batch.
+pub(crate) fn finish_trigger_construction_action(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    produced: crate::types::game_state::WaitingFor,
+) -> crate::types::game_state::WaitingFor {
+    debug_assert!(
+        !state.trigger_construction_finisher_ran_this_action,
+        "the trigger-construction finisher ran twice in one reducer action",
+    );
+    state.trigger_construction_finisher_ran_this_action = true;
+
+    let Some(player) = state.pending_trigger_construction_priority_recipient else {
+        return produced;
+    };
+
+    if is_trigger_construction_prompt(&produced) {
+        return produced;
+    }
+
+    if !matches!(produced, WaitingFor::Priority { .. }) {
+        debug_assert!(
+            false,
+            "trigger-construction finisher reached a wait outside the closed \
+             construction/priority census: {produced:?}",
+        );
+        return produced;
+    }
+
+    // CR 113.2c + CR 603.2 + CR 603.3b: announce the rest of the batch before
+    // priority is really handed over. The existing selector picks the
+    // post-announcement boundary whenever no ability continuation or spell
+    // resolution is active, which is exactly the settled-batch case and the only
+    // drain that may place newly announced triggers above a passive spell.
+    let bound = state.deferred_triggers.len();
+    let mut iterations = 0usize;
+    while !state.deferred_triggers.is_empty()
+        && state.pending_trigger.is_none()
+        && state.pending_trigger_entry.is_none()
+        && state.pending_trigger_order.is_none()
+    {
+        let queued_before = state.deferred_triggers.len();
+        if let Some(waiting_for) = drain_deferred_triggers_after_trigger_construction(state, events)
+        {
+            debug_assert!(
+                is_trigger_construction_prompt(&waiting_for),
+                "the construction drain surfaced a wait outside the closed census: {waiting_for:?}",
+            );
+            return waiting_for;
+        }
+        if state.deferred_triggers.len() >= queued_before {
+            // Undrainable queue: an ineligible drain state the settled-root gate
+            // proves absent upstream. Fall through and consume rather than leak.
+            break;
+        }
+        iterations += 1;
+        debug_assert!(
+            iterations <= bound,
+            "construction drain loop exceeded its queued-context bound",
+        );
+    }
+
+    state.pending_trigger_construction_priority_recipient = None;
+    WaitingFor::Priority { player }
 }
 
 fn drain_deferred_trigger_queue_unchecked(
@@ -8534,8 +9753,13 @@ pub fn check_state_triggers(state: &mut GameState) {
 /// One-shot triggers are removed after firing; multi-fire (WheneverEvent) triggers
 /// persist until end-of-turn cleanup (CR 603.7c).
 pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Vec<GameEvent> {
+    // CR 603.7 + CR 603.12: this is a closing `Any` boundary. Its contract is
+    // "match, then terminalize, then dispatch": the unmatched-reflexive pass must
+    // precede the empty-batch early return, so a complete boundary with zero
+    // firing contexts still expires a reflexive that this batch did not satisfy.
     let (pending, _) =
         collect_matching_delayed_triggers(state, events, DelayedTriggerEventScope::Any);
+    terminalize_unmatched_reflexives_for_closed_batch(state, events, DelayedTriggerEventScope::Any);
     if pending.is_empty() {
         return vec![];
     }
@@ -9536,6 +10760,19 @@ fn delayed_trigger_to_context(
     )
 }
 
+/// CR 603.7 + CR 603.7b: Match-only delayed-trigger collection. It fires
+/// matching instances, removes fired one-shots, keeps duration-bearing
+/// multi-fire sources installed, synthesizes Epic upkeep copies, records
+/// delayed-due provenance and consumed raw identities, and returns the batch in
+/// APNAP order.
+///
+/// It deliberately performs no unmatched-reflexive lifetime closure. CR 603.12
+/// expires a reflexive against its *creating* resolution/batch, so a partial
+/// frame-local batch — for example the micro-batch of a nested mana payment
+/// inside an outer resolution — must be able to run this collector without
+/// terminating an outer reflexive that its own boundary has not yet closed.
+/// Closing boundaries call [`terminalize_unmatched_reflexives_for_closed_batch`]
+/// immediately afterwards.
 fn collect_matching_delayed_triggers(
     state: &mut GameState,
     events: &[GameEvent],
@@ -9552,20 +10789,6 @@ fn collect_matching_delayed_triggers(
     // One-shot triggers are removed; multi-fire triggers are cloned and left in place.
     let mut to_fire: Vec<(DelayedTrigger, usize, GameEvent, bool)> = Vec::new();
     let mut to_remove: Vec<(usize, usize, GameEvent)> = Vec::new();
-
-    // CR 603.12: A reflexive delayed trigger ("when you [do X] this way, ...",
-    // including "when you win/lose the flip") is checked immediately after
-    // creation and triggers only on the event(s) that occurred earlier during the
-    // creating resolution. It gets exactly one shot on that creation batch: if it
-    // did not match on this first check, it must be discarded rather than left to
-    // fire on a later same-turn matching event (which a bare CR 603.7b
-    // `WhenNextEvent` would do). The phase-only path keeps the historical
-    // narrower coin-flip discard gate because it filters non-phase matches out of
-    // the candidate batch.
-    //
-    // Each entry pairs the index with the terminal disposition to record for it,
-    // so a discarded reflexive (CR 603.12) and a CR 603.4 intervening-`if`
-    // failure stay distinguishable in the lifecycle ledger.
     let mut to_discard: Vec<(usize, super::lifecycle::DelayedTerminalDisposition)> = Vec::new();
 
     for (idx, delayed) in state.delayed_triggers.iter().enumerate() {
@@ -9646,21 +10869,6 @@ fn collect_matching_delayed_triggers(
                     to_fire.push((delayed.clone(), occ_index, occurrence, false));
                 }
             }
-        } else if match scope {
-            DelayedTriggerEventScope::Any => is_reflexive_lifetime(&delayed.condition),
-            DelayedTriggerEventScope::PhaseChangedOnly => {
-                reflexive_coin_flip_resolved_without_match(
-                    &delayed.condition,
-                    events,
-                    state,
-                    delayed.ability.trigger_source.as_ref(),
-                )
-            }
-        } {
-            to_discard.push((
-                idx,
-                super::lifecycle::DelayedTerminalDisposition::ReflexiveUnmatched,
-            ));
         }
     }
 
@@ -9684,14 +10892,12 @@ fn collect_matching_delayed_triggers(
         }
     }
 
-    // Remove fired one-shot triggers AND every one-shot dropped without firing
-    // from `delayed_triggers` in a single descending-index pass so every index
-    // stays valid. Fired one-shots are collected into `to_fire`; the unfired set
-    // is dropped with its own recorded disposition — `ReflexiveUnmatched` for a
-    // CR 603.12 reflexive that never matched, `InterveningIfFalse` for a
-    // CR 603.4 gate that was false when the trigger event occurred. The two
-    // index sets are disjoint — a trigger either fired, or was dropped
-    // unfired, never both.
+    // Remove fired one-shot triggers from `delayed_triggers` in a descending-index
+    // pass so every index stays valid. Unmatched-reflexive lifetime closure is
+    // deliberately NOT performed here: it belongs to the batch's creating
+    // resolution boundary and is owned by
+    // `terminalize_unmatched_reflexives_for_closed_batch`, so a partial
+    // frame-local batch (a nested mana payment) cannot expire an outer reflexive.
     let mut fired_events: std::collections::HashMap<usize, (usize, GameEvent)> = to_remove
         .iter()
         .map(|(idx, event_index, event)| (*idx, (*event_index, event.clone())))
@@ -9762,6 +10968,71 @@ fn collect_matching_delayed_triggers(
     (pending, consumed_events)
 }
 
+/// CR 603.12: Close the lifetime of every reflexive delayed trigger that did not
+/// match this *complete* event batch.
+///
+/// A reflexive delayed trigger ("when you [do X] this way, ...", including "when
+/// you win/lose the flip") is checked immediately after creation and triggers
+/// only on the event(s) that occurred earlier during the creating resolution. It
+/// gets exactly one shot on that creation batch: if it did not match, it is
+/// discarded rather than left to fire on a later same-turn matching event (which
+/// a bare CR 603.7b `WhenNextEvent` would do). The `PhaseChangedOnly` path keeps
+/// the historical narrower coin-flip discard gate because it filters non-phase
+/// matches out of the candidate batch.
+///
+/// This runs only at a boundary that owns the complete batch. It constructs no
+/// firing context, never touches Epic effects, and cannot remove a trigger that
+/// [`collect_matching_delayed_triggers`] already fired and removed, because that
+/// collector has already taken those instances out of `state.delayed_triggers`.
+fn terminalize_unmatched_reflexives_for_closed_batch(
+    state: &mut GameState,
+    events: &[GameEvent],
+    scope: DelayedTriggerEventScope,
+) {
+    if state.delayed_triggers.is_empty() {
+        return;
+    }
+    let mut to_discard: Vec<usize> = Vec::new();
+    for (idx, delayed) in state.delayed_triggers.iter().enumerate() {
+        if delayed_trigger_event_with_index(
+            &delayed.condition,
+            events,
+            state,
+            delayed.source_id,
+            delayed.controller,
+            delayed.ability.trigger_source.as_ref(),
+        )
+        .is_some()
+        {
+            // A matched instance is owned by the match collector: it either fired
+            // and was removed, was retained as duration-bearing, or was filtered
+            // out of this scope. None of those is an unmatched reflexive.
+            continue;
+        }
+        let expires = match scope {
+            DelayedTriggerEventScope::Any => is_reflexive_lifetime(&delayed.condition),
+            DelayedTriggerEventScope::PhaseChangedOnly => {
+                reflexive_coin_flip_resolved_without_match(
+                    &delayed.condition,
+                    events,
+                    state,
+                    delayed.ability.trigger_source.as_ref(),
+                )
+            }
+        };
+        if expires {
+            to_discard.push(idx);
+        }
+    }
+    for idx in to_discard.into_iter().rev() {
+        let trigger = state.delayed_triggers.remove(idx);
+        super::lifecycle::record_delayed_terminal(
+            trigger.provenance.firing(),
+            super::lifecycle::DelayedTerminalDisposition::ReflexiveUnmatched,
+        );
+    }
+}
+
 pub(crate) fn collect_triggers_for_batch(
     state: &mut GameState,
     events: &[GameEvent],
@@ -9769,10 +11040,64 @@ pub(crate) fn collect_triggers_for_batch(
     collect_pending_triggers(state, events)
 }
 
+/// CR 603.3b + CR 603.7: Combine an already-observed normal seed with every
+/// delayed trigger matching the same raw batch under an explicit scope, then
+/// stable-sort the combined vector once by the existing APNAP rank/timestamp
+/// key.
+///
+/// `normal_pending` is a seed, never raw normal events: callers that own raw
+/// normal events call [`collect_triggers_for_batch`] exactly once before entry,
+/// so there is only ever one normal observation pass. `delayed_events` remains an
+/// independent raw slice and `delayed_scope` is passed to the delayed matcher
+/// unchanged. This authority is collection-only — it never terminalizes an
+/// unmatched reflexive, so a partial frame-local batch can use it safely.
+fn collect_pending_and_delayed_triggers_for_batch(
+    state: &mut GameState,
+    normal_pending: Vec<PendingTriggerContext>,
+    delayed_events: &[GameEvent],
+    delayed_scope: DelayedTriggerEventScope,
+) -> CollectedTriggerContextBatch {
+    let normal_was_non_empty = !normal_pending.is_empty();
+    let (delayed_pending, delayed_consumed) =
+        collect_matching_delayed_triggers(state, delayed_events, delayed_scope);
+    let mut contexts = normal_pending;
+    contexts.extend(delayed_pending);
+    contexts.sort_by_key(|ctx| {
+        (
+            trigger_apnap_rank(state, ctx.pending.controller),
+            ctx.pending.timestamp,
+        )
+    });
+    CollectedTriggerContextBatch {
+        contexts,
+        delayed_events: delayed_events.to_vec(),
+        delayed_consumed,
+        normal_was_non_empty,
+    }
+}
+
+/// CR 603.3d: the prompt currently OWED by the trigger machinery, or `None`.
+///
+/// `active_trigger_prompt` echoes `state.waiting_for` only while a trigger is
+/// genuinely mid-construction (`pending_trigger`), because in that case the
+/// live prompt IS that trigger's own target/mode/distribute choice. A merely
+/// PARKED `deferred_triggers` batch owns no prompt: CR 603.3 says such
+/// abilities are put on the stack at the next priority point, which
+/// `turns::process_phase_triggers` now does via `drain_deferred_trigger_queue`.
+/// Echoing on a parked queue instead re-asserted an unrelated prompt — the seam
+/// that pinned a CR 508.1 `DeclareAttackers` prompt across the CR 508.8 advance
+/// to `Phase::EndCombat`, and made the state absorbing (a non-`Priority` return
+/// skips both `apply_action`'s post-action pipeline gate and that pipeline's own
+/// `Priority`-gated deferred drain, so the queue could never leave).
+///
+/// A queue that legitimately cannot drain is still reported through `fired`,
+/// which keeps its own `!deferred_triggers.is_empty()` disjunct at both call
+/// sites, and — where the prompt genuinely changed — through
+/// `inline_resolution_prompt` below.
 fn current_trigger_prompt(state: &GameState, waiting_before: &WaitingFor) -> Option<WaitingFor> {
     let order_triggers_prompt = build_next_order_triggers_prompt_public(state);
     let active_trigger_prompt = (order_triggers_prompt.is_none()
-        && (state.pending_trigger.is_some() || !state.deferred_triggers.is_empty()))
+        && state.pending_trigger.is_some())
     .then(|| state.waiting_for.clone());
     let inline_resolution_prompt = (order_triggers_prompt.is_none()
         && active_trigger_prompt.is_none()
@@ -9828,11 +11153,21 @@ fn process_collected_triggers_with_delayed_events_scoped(
 ) -> TriggerBatchOutcome {
     let stack_before = state.stack.len();
     let waiting_before = state.waiting_for.clone();
-    let normal_was_non_empty = !normal_pending.is_empty();
-    let (delayed_pending, consumed_events) =
-        collect_matching_delayed_triggers(state, delayed_events, delayed_scope);
-    let mut pending = normal_pending;
-    pending.extend(delayed_pending);
+    // CR 603.7 + CR 603.12: this is a closing boundary — match first, then expire
+    // every reflexive that this complete batch did not satisfy, before the
+    // empty-batch prompt recovery below can return.
+    let CollectedTriggerContextBatch {
+        contexts: pending,
+        delayed_events: _,
+        delayed_consumed: consumed_events,
+        normal_was_non_empty,
+    } = collect_pending_and_delayed_triggers_for_batch(
+        state,
+        normal_pending,
+        delayed_events,
+        delayed_scope,
+    );
+    terminalize_unmatched_reflexives_for_closed_batch(state, delayed_events, delayed_scope);
 
     // CR 603.3b (issue #770 cluster): a truly-empty batch for *this* event
     // must still surface an orphaned `pending_trigger`/`deferred_triggers`
@@ -9854,13 +11189,8 @@ fn process_collected_triggers_with_delayed_events_scoped(
         };
     }
 
-    pending.sort_by_key(|ctx| {
-        (
-            trigger_apnap_rank(state, ctx.pending.controller),
-            ctx.pending.timestamp,
-        )
-    });
-
+    // The combined batch was stable-sorted exactly once by the shared collection
+    // authority above; do not re-sort it here.
     match begin_trigger_ordering(state, pending) {
         TriggerOrderingDisposition::PromptForChoice(wf) => {
             state.waiting_for = *wf;
@@ -12942,8 +14272,9 @@ pub mod tests {
     use crate::types::counter::CounterType;
     use crate::types::events::{GameEvent, ManaTapState};
     use crate::types::game_state::{
-        DamageRecord, DelayedTrigger, DistributionUnit, GameState, LayersDirty, LoopDetectionMode,
-        NamedChoiceSourceBinding, SpellCastRecord, StackEntry, StackEntryKind,
+        DamageRecord, DeferredLifeCostResume, DelayedTrigger, DistributionUnit, GameState,
+        LayersDirty, LoopDetectionMode, NamedChoiceSourceBinding, PendingCast,
+        PendingCostMoveResume, SpellCastRecord, StackEntry, StackEntryKind,
         TransientContinuousEffect, WaitingFor, ZoneChangeRecord,
     };
     use crate::types::identifiers::{
@@ -32460,6 +33791,503 @@ pub mod tests {
         assert_eq!(state.deferred_triggers.len(), 2);
     }
 
+    fn reflexive_delayed_trigger(
+        state: &mut GameState,
+        name: &str,
+        mode: crate::types::triggers::TriggerMode,
+        token: u64,
+    ) -> (ObjectId, DelayedTriggerOrigin) {
+        use crate::types::ability::{DelayedTriggerCondition, DelayedTriggerLifetime};
+        let card_id = CardId(state.next_object_id);
+        let source_id = create_object(
+            state,
+            card_id,
+            PlayerId(0),
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let origin = DelayedTriggerOrigin {
+            token: DelayedTriggerToken(token),
+            instance: DelayedTriggerInstanceId(token),
+            source_id,
+        };
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        ability.description = Some(name.to_string());
+        let is_phase = matches!(mode, crate::types::triggers::TriggerMode::Phase);
+        let mut definition = crate::types::ability::TriggerDefinition::new(mode);
+        if is_phase {
+            definition.phase = Some(crate::types::phase::Phase::Upkeep);
+        }
+        state.delayed_triggers.push(DelayedTrigger {
+            condition: DelayedTriggerCondition::WhenNextEvent {
+                trigger: Box::new(definition),
+                or_trigger: None,
+                lifetime: DelayedTriggerLifetime::Reflexive,
+            },
+            ability: Box::new(ability),
+            controller: PlayerId(0),
+            source_id,
+            one_shot: true,
+            provenance: DelayedInstallIdentity::ReceiptEligible(origin),
+        });
+        (source_id, origin)
+    }
+
+    /// CR 603.12: `check_delayed_triggers` is a *closing* `Any` boundary. Its
+    /// contract is match, then terminalize, then dispatch — so a complete batch
+    /// with zero firing contexts must still expire an unmatched reflexive before
+    /// the empty early return. Moving terminalization below `pending.is_empty()`
+    /// leaves the instance installed and fails this row.
+    #[test]
+    fn direct_delayed_check_closes_unmatched_reflexive_before_empty_return() {
+        let mut state = setup();
+        let (_, origin) = reflexive_delayed_trigger(
+            &mut state,
+            "Unmatched reflexive",
+            crate::types::triggers::TriggerMode::SpellCast,
+            60_312,
+        );
+        assert_eq!(state.delayed_triggers.len(), 1);
+
+        // A complete `Any` batch that this reflexive's condition does not match.
+        let batch = vec![GameEvent::PhaseChanged {
+            phase: crate::types::phase::Phase::Upkeep,
+        }];
+
+        let guard = super::super::lifecycle::enter_action_frame();
+        let fired = check_delayed_triggers(&mut state, &batch);
+        let facts = guard
+            .take_outer_facts()
+            .expect("outer action owns lifecycle facts");
+
+        assert!(
+            fired.is_empty(),
+            "no delayed context fires on a non-matching batch"
+        );
+        assert!(
+            state.delayed_triggers.is_empty(),
+            "CR 603.12: the unmatched reflexive must be removed at its closing boundary"
+        );
+        assert!(
+            facts.receipt_terminalized(origin),
+            "the closing boundary must record exactly one ReflexiveUnmatched terminal"
+        );
+        assert!(
+            state.stack.is_empty(),
+            "an unmatched reflexive never reaches the stack"
+        );
+    }
+
+    /// **CR 605.1b + CR 605.4a — the complete-context partition at the mana
+    /// settlement seam, driven through the real `collect_mana_action_trigger_batch`
+    /// authority rather than by calling the classifier alone.**
+    ///
+    /// One completed mana frame emits one `ManaAdded` event that every candidate
+    /// below is coupled to. Exactly one of them may take stackless immediate
+    /// placement; every other one must be preserved unchanged and appended once
+    /// to the ordinary deferred batch. Rows:
+    ///
+    /// * **(a) targetless nonmodal all-mana** — ACCEPTED. Positive reach guard:
+    ///   its mana is in the pool when the driver returns, with no stack entry,
+    ///   no `pending_trigger*` cursor, and no deferred-queue member for it.
+    /// * **(b) `unless_pay` on the root** — rejected structurally, so a live
+    ///   sidecar can never coincide with `UnlessPayment`.
+    /// * **(c) modal** — rejected. Baseline pushes a modal trigger to the stack
+    ///   *before* mode selection, so it never reached the inline classifier
+    ///   either; this cut keeps it on the ordinary announcement authority.
+    /// * **(d) `optional`** — rejected by this revision's pause-narrowing. This
+    ///   one is an honest behaviour delta, not a no-op: baseline's
+    ///   `is_triggered_mana_ability` returns **true** here.
+    /// * **(e) a target already present at classification time** — rejected by
+    ///   the exact baseline predicate, with its referent preserved.
+    /// * **(f) `Effect::Mana { target: Some(..) }` with empty
+    ///   `target_constraints` and empty runtime `targets`** — rejected only by
+    ///   the canonical definition-owned slot proof. This is the row a predicate
+    ///   that inspects `target_constraints`/`multi_target`/`ability.targets`
+    ///   cannot fail on.
+    /// * **(g) an all-mana body with a non-CR-605.1b firing event** (the
+    ///   Firebending shape) — rejected on the event axis.
+    ///
+    /// The deferral assertions are the reach guard that rejection means
+    /// "ordinary deferred dispatch", not "dropped": every rejected context is in
+    /// `deferred_triggers` exactly once and none of them reached the stack.
+    ///
+    /// REVERT-PROBES. Delete the modal guard ⇒ (c) is accepted and its stackless
+    /// dispatch trips the core's modal invariant. Delete the `unless_pay` walk ⇒
+    /// (b) is accepted. Delete the slot proof ⇒ (f) is accepted. Replace the
+    /// baseline-predicate call with a hand-rolled all-mana check ⇒ (e) and (g)
+    /// are accepted. Any of those flips the exact-one-accepted count below.
+    #[test]
+    fn the_completed_mana_frame_classifier_accepts_only_the_stackless_safe_context() {
+        use crate::types::ability::{ManaProduction, UnlessPayModifier};
+        use crate::types::game_state::ManaTriggerFixedPointResume;
+        use crate::types::mana::ManaType;
+
+        let mut state = setup();
+        let producer_card = CardId(state.next_object_id);
+        let producer = create_object(
+            &mut state,
+            producer_card,
+            PlayerId(0),
+            "Mana producer".to_string(),
+            Zone::Battlefield,
+        );
+        let firing = GameEvent::ManaAdded {
+            player_id: PlayerId(0),
+            mana_type: ManaType::Green,
+            source_id: producer,
+            tap_state: ManaTapState::default(),
+        };
+
+        let mana_effect = |target: Option<crate::types::ability::ManaTargetRole>| Effect::Mana {
+            produced: ManaProduction::Colorless {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target,
+        };
+
+        let mut contexts = Vec::new();
+        let candidate =
+            |state: &mut GameState, label: &str, configure: &dyn Fn(&mut PendingTrigger)| {
+                let card_id = CardId(state.next_object_id);
+                let source_id = create_object(
+                    state,
+                    card_id,
+                    PlayerId(0),
+                    label.to_string(),
+                    Zone::Battlefield,
+                );
+                let mut ability =
+                    ResolvedAbility::new(mana_effect(None), vec![], source_id, PlayerId(0));
+                ability.description = Some(label.to_string());
+                let mut pending = PendingTrigger::ordinary(
+                    source_id,
+                    PlayerId(0),
+                    None,
+                    Box::new(ability),
+                    state.next_timestamp() as u32,
+                );
+                pending.trigger_event = Some(firing.clone());
+                configure(&mut pending);
+                PendingTriggerContext::single(pending)
+            };
+
+        contexts.push(candidate(&mut state, "(a) accepted", &|_| {}));
+        contexts.push(candidate(&mut state, "(b) unless_pay", &|pending| {
+            pending.ability.unless_pay = Some(UnlessPayModifier {
+                cost: AbilityCost::Mana {
+                    cost: crate::types::mana::ManaCost::zero(),
+                },
+                payer: TargetFilter::Controller,
+            });
+        }));
+        contexts.push(candidate(&mut state, "(c) modal", &|pending| {
+            pending.modal = Some(ModalChoice::default());
+            pending.mode_abilities = vec![AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )];
+        }));
+        // The surviving pause narrowing is the repeat family only: `optional`
+        // and `optional_for` are accepted now that `engine_payment_choices`
+        // carries their readiness hook, and `engine_resolution_choices` does not
+        // yet carry `RepeatDecision`'s.
+        contexts.push(candidate(&mut state, "(d) repeat", &|pending| {
+            pending.ability.repeat_until =
+                Some(crate::types::ability::RepeatContinuation::ControllerChoice);
+        }));
+        contexts.push(candidate(&mut state, "(e) inherited target", &|pending| {
+            pending.ability.targets = vec![TargetRef::Player(PlayerId(1))];
+        }));
+        let slot_effect = mana_effect(Some(crate::types::ability::ManaTargetRole::Recipient {
+            recipient: TargetFilter::Player,
+        }));
+        contexts.push(candidate(&mut state, "(f) definition slot", &|pending| {
+            pending.ability.effect = slot_effect.clone();
+        }));
+        contexts.push(candidate(
+            &mut state,
+            "(g) wrong firing event",
+            &|pending| {
+                pending.trigger_event = Some(GameEvent::AttackersDeclared {
+                    attacker_ids: Vec::new(),
+                    defending_player: PlayerId(1),
+                    attacks: Vec::new(),
+                });
+            },
+        ));
+
+        // Positive reach guard: every candidate really is coupled to the frame
+        // and really would qualify structurally but for its one distinguishing
+        // axis — (a) proves the accepted shape exists at all.
+        let accepted_labels: Vec<_> = contexts
+            .iter()
+            .filter(|context| {
+                matches!(
+                    classify_pending_triggered_mana(&mut state.clone(), (*context).clone()),
+                    PendingTriggeredManaClass::Accepted(_)
+                )
+            })
+            .filter_map(|context| context.pending.ability.description.clone())
+            .collect();
+        let accepted_count = accepted_labels.len();
+        assert_eq!(
+            accepted_count, 1,
+            "exactly one of the seven complete contexts may take stackless placement; \
+             accepted = {accepted_labels:?}"
+        );
+
+        let pool_before = state.players[0].mana_pool.total();
+        let mut events = Vec::new();
+        let (accepted, ordinary) =
+            partition_collected_mana_frame_contexts(&mut state, contexts.clone());
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(
+            ordinary.len(),
+            6,
+            "every rejected context is preserved for the ordinary authority exactly once"
+        );
+        assert_eq!(
+            accepted[0].context.pending.ability.description.as_deref(),
+            Some("(a) accepted"),
+            "the accepted view must carry the complete context unchanged"
+        );
+        let pause = run_accepted_triggered_mana_fixed_point(
+            &mut state,
+            accepted,
+            ManaTriggerFixedPointResume::Parent,
+            &mut events,
+        );
+
+        assert!(pause.is_none(), "a pause-free accepted body settles inline");
+        assert!(
+            state.players[0].mana_pool.total() > pool_before,
+            "(a) CR 605.4a: the accepted body's mana is in the pool before the frame returns"
+        );
+        assert!(
+            state.stack.is_empty(),
+            "CR 605.4a: immediate placement creates no stack object for any context"
+        );
+        assert!(
+            state.pending_trigger.is_none() && state.pending_trigger_entry.is_none(),
+            "immediate placement never writes a construction cursor"
+        );
+        assert!(
+            state.pending_triggered_mana_resume.is_none()
+                && state.active_accepted_triggered_mana_node.is_none(),
+            "a synchronous occurrence leaves no sidecar and restores its marker"
+        );
+        assert!(
+            state.deferred_triggers.is_empty(),
+            "the driver itself neither queues nor drains: rejected contexts are returned to \
+             the caller's ordinary authority"
+        );
+        let deferred_labels: Vec<_> = ordinary
+            .iter()
+            .filter_map(|context| context.pending.ability.description.clone())
+            .collect();
+        for label in [
+            "(b) unless_pay",
+            "(c) modal",
+            "(d) repeat",
+            "(e) inherited target",
+            "(f) definition slot",
+            "(g) wrong firing event",
+        ] {
+            assert!(
+                deferred_labels.iter().any(|found| found == label),
+                "{label} must be preserved for ordinary dispatch rather than dropped"
+            );
+        }
+        let inherited = ordinary
+            .iter()
+            .find(|context| {
+                context.pending.ability.description.as_deref() == Some("(e) inherited target")
+            })
+            .expect("(e) is preserved for ordinary dispatch");
+        assert_eq!(
+            inherited.pending.ability.targets,
+            vec![TargetRef::Player(PlayerId(1))],
+            "a rejected context's pre-existing referent is preserved, never purged"
+        );
+    }
+
+    /// Positive control for the rows above: the extraction must not have broken
+    /// ordinary delayed matching. A matching one-shot still fires, is removed
+    /// exactly once by the match collector, and is never recorded as a terminal
+    /// by the separated unmatched-reflexive pass.
+    #[test]
+    fn closing_boundary_still_fires_and_removes_a_matching_one_shot_once() {
+        use crate::types::ability::DelayedTriggerCondition;
+
+        let mut state = setup();
+        let card_id = CardId(state.next_object_id);
+        let source_id = create_object(
+            &mut state,
+            card_id,
+            PlayerId(0),
+            "Matching delayed source".to_string(),
+            Zone::Battlefield,
+        );
+        let victim = make_creature(&mut state, PlayerId(0), "Victim", 1, 1);
+        let origin = DelayedTriggerOrigin {
+            token: DelayedTriggerToken(60_313),
+            instance: DelayedTriggerInstanceId(60_313),
+            source_id,
+        };
+        state.delayed_triggers.push(DelayedTrigger {
+            condition: DelayedTriggerCondition::WhenDies {
+                filter: TargetFilter::Any,
+            },
+            ability: Box::new(ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source_id,
+                PlayerId(0),
+            )),
+            controller: PlayerId(0),
+            source_id,
+            one_shot: true,
+            provenance: DelayedInstallIdentity::ReceiptEligible(origin),
+        });
+
+        let batch = vec![zone_changed_event(
+            victim,
+            Zone::Battlefield,
+            Zone::Graveyard,
+            vec![CoreType::Creature],
+            vec![],
+        )];
+
+        let guard = super::super::lifecycle::enter_action_frame();
+        check_delayed_triggers(&mut state, &batch);
+        let facts = guard
+            .take_outer_facts()
+            .expect("outer action owns lifecycle facts");
+
+        assert!(
+            state.delayed_triggers.is_empty(),
+            "a matched one-shot is removed exactly once by the match collector"
+        );
+        assert!(
+            !facts.receipt_terminalized(origin),
+            "a matched instance must never reach the unmatched-reflexive terminalizer"
+        );
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "the matched delayed trigger reaches the stack through the ordinary dispatcher"
+        );
+    }
+
+    /// CR 603.12: a *partial* frame-local batch must be able to run the shared
+    /// match-only collector without ending an outer reflexive's lifetime. Only a
+    /// closing boundary terminalizes.
+    #[test]
+    fn match_only_collection_leaves_an_unmatched_reflexive_installed() {
+        let mut state = setup();
+        let (_, origin) = reflexive_delayed_trigger(
+            &mut state,
+            "Outer reflexive",
+            crate::types::triggers::TriggerMode::SpellCast,
+            60_314,
+        );
+
+        let child_batch = vec![GameEvent::PhaseChanged {
+            phase: crate::types::phase::Phase::Upkeep,
+        }];
+
+        let guard = super::super::lifecycle::enter_action_frame();
+        let batch = collect_pending_and_delayed_triggers_for_batch(
+            &mut state,
+            Vec::new(),
+            &child_batch,
+            DelayedTriggerEventScope::Any,
+        );
+        let facts = guard
+            .take_outer_facts()
+            .expect("outer action owns lifecycle facts");
+
+        assert!(batch.contexts.is_empty());
+        assert!(!batch.normal_was_non_empty);
+        assert_eq!(
+            state.delayed_triggers.len(),
+            1,
+            "a frame-local micro-batch must not expire an outer reflexive"
+        );
+        assert!(
+            !facts.receipt_terminalized(origin),
+            "collection-only must record no terminal disposition"
+        );
+    }
+
+    /// The phase closing processor must keep its narrow `PhaseChangedOnly` scope
+    /// for both matching and unmatched-reflexive cleanup: an unrelated non-phase
+    /// reflexive stays installed even though the batch also carries its event.
+    #[test]
+    fn phase_scope_stays_narrow_for_matching_and_terminalization() {
+        let mut state = setup();
+        let (_, unrelated) = reflexive_delayed_trigger(
+            &mut state,
+            "Unrelated non-phase reflexive",
+            crate::types::triggers::TriggerMode::SpellCast,
+            60_315,
+        );
+        let seed = vec![make_draw_pending_trigger(&mut state, "Seed", PlayerId(0))];
+
+        let batch = vec![GameEvent::PhaseChanged {
+            phase: crate::types::phase::Phase::Upkeep,
+        }];
+
+        let guard = super::super::lifecycle::enter_action_frame();
+        let mut events_out = Vec::new();
+        let outcome = process_collected_triggers_with_delayed_phase_events(
+            &mut state,
+            seed,
+            &batch,
+            &mut events_out,
+        );
+        let facts = guard
+            .take_outer_facts()
+            .expect("outer action owns lifecycle facts");
+
+        assert!(
+            outcome.fired,
+            "the pre-collected normal seed still dispatches"
+        );
+        assert_eq!(
+            state.delayed_triggers.len(),
+            1,
+            "PhaseChangedOnly must not expire an unrelated non-phase reflexive"
+        );
+        assert!(
+            !facts.receipt_terminalized(unrelated),
+            "widening the phase scope to Any would terminalize this row"
+        );
+    }
+
     #[test]
     fn resolution_completion_requires_an_empty_resolution_stack() {
         let mut state = setup();
@@ -32473,6 +34301,770 @@ pub mod tests {
             !resolution_completion_can_settle(&state),
             "deferred triggers cannot settle while any resolution frame remains active"
         );
+    }
+
+    #[test]
+    fn pending_cost_move_and_deferred_life_owners_block_until_released() {
+        let mut state = setup();
+        state.deferred_triggers = vec![
+            make_draw_pending_trigger(&mut state, "Watcher A", PlayerId(0)),
+            make_draw_pending_trigger(&mut state, "Watcher B", PlayerId(0)),
+        ];
+        state.pending_cost_move_resume = Some(PendingCostMoveResume::Foretell {
+            player: PlayerId(0),
+            object_id: ObjectId(100),
+            cost: ManaCost::NoCost,
+            turn_foretold: 1,
+        });
+        assert!(!resolution_completion_can_settle(&state));
+
+        state.pending_cost_move_resume = None;
+        state.pending_deferred_life_cost_resume = Some(DeferredLifeCostResume::PayAmount {
+            player: PlayerId(0),
+            total: 3,
+            resume_at_resolution_depth: 0,
+        });
+        assert!(!resolution_completion_can_settle(&state));
+
+        state.pending_deferred_life_cost_resume = None;
+        assert!(resolution_completion_can_settle(&state));
+        let mut events = Vec::new();
+        assert!(matches!(
+            drain_deferred_trigger_queue(&mut state, &mut events),
+            Some(WaitingFor::OrderTriggers { .. })
+        ));
+    }
+
+    /// Build a `TriggeredManaResume` naming `node`, with an otherwise inert
+    /// accepted work item. The row-level assertions never read its body; what
+    /// matters is that the durable carrier exists and names a node.
+    fn triggered_mana_sidecar(
+        state: &mut GameState,
+        node: crate::types::resolved_commands::RulesExecutionNodeRef,
+    ) -> Box<crate::types::game_state::TriggeredManaResume> {
+        let source = create_object(
+            state,
+            CardId(state.next_object_id),
+            PlayerId(0),
+            "Accepted triggered mana source".to_string(),
+            Zone::Battlefield,
+        );
+        let pending = PendingTrigger::ordinary(
+            source,
+            PlayerId(0),
+            None,
+            Box::new(ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                source,
+                PlayerId(0),
+            )),
+            state.turn_number,
+        );
+        Box::new(crate::types::game_state::TriggeredManaResume {
+            current: Box::new(PendingTriggerContext::single(pending)),
+            current_override: None,
+            rules_execution_node: node,
+            accepted_tail: Vec::new(),
+            collected_batches: Vec::new(),
+            outer_resume: crate::types::game_state::ManaTriggerFixedPointResume::Parent,
+            stage: crate::types::game_state::TriggeredManaStage::ResolvingBody,
+        })
+    }
+
+    /// Round-20 closure map, "Why the carrier is not part of
+    /// `resolution_completion_can_settle`": the settlement predicate takes the
+    /// triggered-mana sidecar **and only that carrier**.
+    ///
+    /// The construction priority recipient is deliberately excluded.
+    /// `can_drain_deferred_triggers` consults this predicate first, so putting
+    /// the recipient in it would reject the settled wrapper's own drain, the
+    /// construction finisher's drain, and every deferred-sibling drain in the
+    /// same batch — the batch would deadlock on its own recipient. The third
+    /// assertion below is that revert discriminator: a regression that adds the
+    /// recipient to the predicate turns the `OrderTriggers` drain into `None`.
+    #[test]
+    fn settlement_predicate_takes_the_mana_sidecar_and_never_the_construction_recipient() {
+        let mut state = setup();
+        state.deferred_triggers = vec![
+            make_draw_pending_trigger(&mut state, "Watcher A", PlayerId(0)),
+            make_draw_pending_trigger(&mut state, "Watcher B", PlayerId(0)),
+        ];
+        let baseline = resolution_completion_can_settle(&state);
+        assert!(
+            baseline,
+            "positive reach guard: the batch settles at baseline"
+        );
+
+        state.pending_trigger_construction_priority_recipient = Some(PlayerId(1));
+        assert_eq!(
+            resolution_completion_can_settle(&state),
+            baseline,
+            "a live construction recipient must not change the settlement result"
+        );
+
+        let mut events = Vec::new();
+        assert!(
+            matches!(
+                drain_deferred_trigger_queue(&mut state, &mut events),
+                Some(WaitingFor::OrderTriggers { .. })
+            ),
+            "a settled batch must still drain with the construction recipient installed"
+        );
+        assert_eq!(
+            state.pending_trigger_construction_priority_recipient,
+            Some(PlayerId(1)),
+            "the predicate must not consume or rewrite the recipient"
+        );
+
+        // Rebuild the batch the drain just consumed, then prove the other side.
+        let mut state = setup();
+        state.deferred_triggers = vec![
+            make_draw_pending_trigger(&mut state, "Watcher A", PlayerId(0)),
+            make_draw_pending_trigger(&mut state, "Watcher B", PlayerId(0)),
+        ];
+        let node = crate::types::resolved_commands::RulesExecutionNodeRef::TriggeredMana(
+            crate::types::resolved_commands::SettlementNodeOrdinal(7),
+        );
+        state.pending_triggered_mana_resume = Some(triggered_mana_sidecar(&mut state, node));
+        assert!(
+            !resolution_completion_can_settle(&state),
+            "an accepted triggered-mana occurrence owns its own emitted-event fixed point"
+        );
+        let mut events = Vec::new();
+        assert!(
+            drain_deferred_trigger_queue(&mut state, &mut events).is_none(),
+            "no ordinary drain may run while the sidecar is live"
+        );
+
+        state.pending_triggered_mana_resume = None;
+        assert!(
+            resolution_completion_can_settle(&state),
+            "removing the sidecar restores the baseline result exactly"
+        );
+    }
+
+    /// One instance of each of the six approved trigger-construction prompts,
+    /// in the census order of `is_trigger_construction_prompt`.
+    fn approved_construction_prompts() -> Vec<WaitingFor> {
+        vec![
+            WaitingFor::OrderTriggers {
+                player: PlayerId(0),
+                triggers: Vec::new(),
+            },
+            WaitingFor::NamedChoice {
+                player: PlayerId(0),
+                choice_type: crate::types::ability::ChoiceType::Player {
+                    distinctness: Default::default(),
+                },
+                options: vec!["P2".to_string()],
+                source: None,
+                persist_player: None,
+                free_entry: None,
+            },
+            WaitingFor::OptionalEffectChoice {
+                player: PlayerId(0),
+                source_id: ObjectId(1),
+                description: None,
+                may_trigger_key: None,
+            },
+            WaitingFor::AbilityModeChoice {
+                player: PlayerId(0),
+                modal: crate::types::ability::ModalChoice {
+                    min_choices: 1,
+                    max_choices: 1,
+                    mode_count: 2,
+                    ..Default::default()
+                },
+                source_id: ObjectId(1),
+                mode_abilities: Vec::new(),
+                is_activated: false,
+                ability_index: None,
+                ability_cost: None,
+                unavailable_modes: Vec::new(),
+            },
+            WaitingFor::TriggerTargetSelection {
+                player: PlayerId(0),
+                trigger_controller: Some(PlayerId(0)),
+                trigger_event: None,
+                trigger_events: Vec::new(),
+                target_slots: Vec::new(),
+                mode_labels: Vec::new(),
+                target_constraints: Vec::new(),
+                selection: Default::default(),
+                source_id: None,
+                description: None,
+            },
+            WaitingFor::DistributeAmong {
+                player: PlayerId(0),
+                total: 2,
+                targets: Vec::new(),
+                unit: crate::types::game_state::DistributionUnit::Damage,
+            },
+        ]
+    }
+
+    /// Round-20 closure map, "Exact preserve/finish contract" clause 1: with no
+    /// recipient installed, the finisher returns `produced` byte-for-byte and
+    /// performs no drain.
+    ///
+    /// This is the entire ordinary-caller contract. Every existing
+    /// controller/active-player fallback at the seven seams depends on it, so
+    /// the row includes a terminal `Priority` with a *drainable* queue behind it
+    /// — exactly the shape clause 3 would drain — and requires the queue to be
+    /// left untouched.
+    #[test]
+    fn construction_finisher_is_a_no_op_without_a_construction_recipient() {
+        for produced in approved_construction_prompts()
+            .into_iter()
+            .chain([WaitingFor::Priority {
+                player: PlayerId(0),
+            }])
+        {
+            let mut state = drain_policy_fixture(false);
+            state.trigger_construction_finisher_ran_this_action = false;
+            let mut events = Vec::new();
+            let returned =
+                finish_trigger_construction_action(&mut state, &mut events, produced.clone());
+            assert_eq!(returned, produced, "the ordinary contract is byte-for-byte");
+            assert_eq!(
+                state.deferred_triggers.len(),
+                2,
+                "an ordinary caller performs no drain: {produced:?}"
+            );
+            assert!(events.is_empty());
+            assert!(state
+                .pending_trigger_construction_priority_recipient
+                .is_none());
+        }
+    }
+
+    /// Clause 2: with a recipient installed and one of the six approved
+    /// construction prompts, the finisher returns the real prompt and leaves the
+    /// recipient installed for the next construction step.
+    #[test]
+    fn construction_finisher_retains_the_recipient_across_every_approved_prompt() {
+        for produced in approved_construction_prompts() {
+            let mut state = drain_policy_fixture(false);
+            state.trigger_construction_finisher_ran_this_action = false;
+            preserve_trigger_construction_priority_recipient(&mut state, PlayerId(1));
+            let mut events = Vec::new();
+            let returned =
+                finish_trigger_construction_action(&mut state, &mut events, produced.clone());
+            assert_eq!(returned, produced, "the real prompt is surfaced unchanged");
+            assert_eq!(
+                state.pending_trigger_construction_priority_recipient,
+                Some(PlayerId(1)),
+                "the recipient is retained across {produced:?}"
+            );
+            assert_eq!(
+                state.deferred_triggers.len(),
+                2,
+                "an intermediate prompt does not drain the tail"
+            );
+        }
+    }
+
+    /// Clause 3: a `Priority` produced by a successful announcement, a dangling
+    /// recovery, or an optional decline is only terminal once the whole deferred
+    /// tail behind it has announced.
+    ///
+    /// Baseline's `abandon_ceased_pending_trigger` deliberately leaves deferred
+    /// siblings installed and both dangling recoveries return `Priority` without
+    /// draining, which is exactly why this drain lives in the finisher rather
+    /// than at each return. The row proves both halves: a queue that still owes
+    /// an ordering choice surfaces `OrderTriggers` with the recipient retained,
+    /// and only an exhausted tail consumes the recipient and returns
+    /// `Priority { player }` — the carried player, not the produced one.
+    #[test]
+    fn construction_finisher_drains_the_tail_before_consuming_the_recipient() {
+        let mut state = drain_policy_fixture(false);
+        state.trigger_construction_finisher_ran_this_action = false;
+        preserve_trigger_construction_priority_recipient(&mut state, PlayerId(1));
+        let mut events = Vec::new();
+        let returned = finish_trigger_construction_action(
+            &mut state,
+            &mut events,
+            WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+        );
+        assert!(
+            matches!(returned, WaitingFor::OrderTriggers { .. }),
+            "a queued same-controller batch is not terminal: {returned:?}"
+        );
+        assert_eq!(
+            state.pending_trigger_construction_priority_recipient,
+            Some(PlayerId(1)),
+            "the drain's own prompt retains the recipient"
+        );
+
+        // Exhausted tail: the recipient is consumed and the returned wait names
+        // the carried player rather than the produced one.
+        let mut state = setup();
+        state.trigger_construction_finisher_ran_this_action = false;
+        preserve_trigger_construction_priority_recipient(&mut state, PlayerId(1));
+        let mut events = Vec::new();
+        let returned = finish_trigger_construction_action(
+            &mut state,
+            &mut events,
+            WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+        );
+        assert_eq!(
+            returned,
+            WaitingFor::Priority {
+                player: PlayerId(1)
+            },
+            "an exhausted tail hands priority to the carried recipient"
+        );
+        assert!(
+            state
+                .pending_trigger_construction_priority_recipient
+                .is_none(),
+            "no durable recipient may survive an action returning ordinary priority"
+        );
+    }
+
+    /// Round-20 audit class (b), "Finisher branch: carrier live, queue
+    /// non-empty, drain ineligible."
+    ///
+    /// The settled-root gate proves this state absent upstream, so this is a
+    /// defensive unit proof and never action coverage. What it must show is that
+    /// the finisher consumes the recipient rather than leaking it: an
+    /// undrainable queue is not a reason to leave a durable recipient installed
+    /// across an action that returns ordinary priority.
+    #[test]
+    fn construction_finisher_consumes_rather_than_leaks_an_undrainable_queue() {
+        let mut state = drain_policy_fixture(false);
+        state.trigger_construction_finisher_ran_this_action = false;
+        preserve_trigger_construction_priority_recipient(&mut state, PlayerId(1));
+        // A live terminal-resolution marker is one of the three states the plan
+        // names for this branch: the post-announcement drain returns early on
+        // `pending_resolution_completion` before it ever reaches the policy.
+        state.pending_resolution_completion =
+            Some(crate::types::game_state::PendingResolutionCompletion {
+                player: PlayerId(0),
+                source_id: ObjectId(1),
+                final_cast: None,
+            });
+        let mut probe = Vec::new();
+        assert!(
+            drain_deferred_triggers_after_trigger_construction(&mut state, &mut probe).is_none(),
+            "positive reach guard: the construction drain really is ineligible"
+        );
+        assert_eq!(state.deferred_triggers.len(), 2);
+        let mut events = Vec::new();
+        let returned = finish_trigger_construction_action(
+            &mut state,
+            &mut events,
+            WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+        );
+        assert_eq!(
+            returned,
+            WaitingFor::Priority {
+                player: PlayerId(1)
+            }
+        );
+        assert!(state
+            .pending_trigger_construction_priority_recipient
+            .is_none());
+        assert_eq!(
+            state.deferred_triggers.len(),
+            2,
+            "the undrainable queue is left exactly as found"
+        );
+    }
+
+    /// Round-20 audit class (b), "Finisher branch: carrier live, non-`Priority`,
+    /// non-approved wait." The six approved prompts are the closed census of
+    /// what the seven seams can produce, so anything else means a seam was added
+    /// below dispatch. Do not coerce, do not consume, do not invent a recipient.
+    #[test]
+    #[should_panic(expected = "outside the closed")]
+    fn construction_finisher_rejects_a_wait_outside_the_closed_census() {
+        let mut state = setup();
+        state.trigger_construction_finisher_ran_this_action = false;
+        preserve_trigger_construction_priority_recipient(&mut state, PlayerId(1));
+        let mut events = Vec::new();
+        let _ = finish_trigger_construction_action(
+            &mut state,
+            &mut events,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(0)),
+            },
+        );
+    }
+
+    /// The install rule: reinstalling the same player is idempotent, and
+    /// observing a different player while the field is live is an internal
+    /// invariant error rather than a silent overwrite. (`elimination.rs`'s
+    /// CR 800.4a re-point past a departed recipient deliberately does not come
+    /// through this authority.)
+    #[test]
+    fn preserving_the_same_construction_recipient_twice_is_idempotent() {
+        let mut state = setup();
+        preserve_trigger_construction_priority_recipient(&mut state, PlayerId(1));
+        preserve_trigger_construction_priority_recipient(&mut state, PlayerId(1));
+        assert_eq!(
+            state.pending_trigger_construction_priority_recipient,
+            Some(PlayerId(1))
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "different construction priority recipient")]
+    fn preserving_a_different_construction_recipient_while_live_is_an_invariant_error() {
+        let mut state = setup();
+        preserve_trigger_construction_priority_recipient(&mut state, PlayerId(1));
+        preserve_trigger_construction_priority_recipient(&mut state, PlayerId(0));
+    }
+
+    /// Build a two-observer batch that raises `OrderTriggers` when it drains,
+    /// optionally under a passive announced spell.
+    fn drain_policy_fixture(spell_on_stack: bool) -> GameState {
+        let mut state = setup();
+        state.deferred_triggers = vec![
+            make_draw_pending_trigger(&mut state, "Watcher A", PlayerId(0)),
+            make_draw_pending_trigger(&mut state, "Watcher B", PlayerId(0)),
+        ];
+        if spell_on_stack {
+            let card_id = CardId(state.next_object_id);
+            let spell = create_object(
+                &mut state,
+                card_id,
+                PlayerId(0),
+                "Passive announced spell".to_string(),
+                Zone::Stack,
+            );
+            state.stack.push_back(StackEntry {
+                id: spell,
+                source_id: spell,
+                controller: PlayerId(0),
+                kind: StackEntryKind::Spell {
+                    card_id: CardId(2),
+                    ability: None,
+                    casting_variant: Default::default(),
+                    actual_mana_spent: 0,
+                },
+            });
+        }
+        state
+    }
+
+    /// Plan v23 Step 5, "replace the existing two drain booleans inside the
+    /// shared core with private `DeferredTriggerDrainPolicy`".
+    ///
+    /// `engine_priority`'s `skip_deferred_trigger_drain` and this module's
+    /// `allow_spell_on_stack` were two independent axes carried as two
+    /// unrelated booleans. The enum has to keep them independent — collapsing
+    /// them (making `Skip` drain, or letting `ResolutionSafe` tolerate a
+    /// `Spell` entry) flips exactly one assertion below — while leaving the
+    /// shared carrier census in `resolution_completion_can_settle` in front of
+    /// every variant.
+    #[test]
+    fn deferred_trigger_drain_policy_separates_the_skip_and_spell_on_stack_axes() {
+        // Positive reach guard: with no spell on the stack, the resolution-safe
+        // policy really drains this batch.
+        let mut state = drain_policy_fixture(false);
+        let mut events = Vec::new();
+        assert!(
+            matches!(
+                drain_deferred_trigger_queue_with_policy(
+                    &mut state,
+                    &mut events,
+                    DeferredTriggerDrainPolicy::ResolutionSafe,
+                ),
+                Some(WaitingFor::OrderTriggers { .. })
+            ),
+            "positive reach guard: ResolutionSafe drains an unobstructed batch"
+        );
+        assert!(state.deferred_triggers.is_empty());
+
+        // `Skip` owns no drain at all, and leaves the queue exactly as it found it.
+        let mut state = drain_policy_fixture(false);
+        let mut events = Vec::new();
+        assert!(
+            drain_deferred_trigger_queue_with_policy(
+                &mut state,
+                &mut events,
+                DeferredTriggerDrainPolicy::Skip,
+            )
+            .is_none(),
+            "Skip must not drain even when every other gate is open"
+        );
+        assert_eq!(
+            state.deferred_triggers.len(),
+            2,
+            "Skip must leave the queue intact for its owning caller"
+        );
+        assert!(events.is_empty());
+
+        // CR 603.3b + issue #1793: a `Spell` entry blocks the resolution-safe
+        // policy and only the resolution-safe policy.
+        let mut state = drain_policy_fixture(true);
+        let mut events = Vec::new();
+        assert!(
+            drain_deferred_trigger_queue_with_policy(
+                &mut state,
+                &mut events,
+                DeferredTriggerDrainPolicy::ResolutionSafe,
+            )
+            .is_none(),
+            "ResolutionSafe must refuse to order observers above a spell on the stack"
+        );
+        assert_eq!(state.deferred_triggers.len(), 2);
+
+        // CR 601.2h + CR 602.2b: the post-announcement policy drains the same
+        // batch above the same spell.
+        let mut state = drain_policy_fixture(true);
+        let mut events = Vec::new();
+        assert!(
+            matches!(
+                drain_deferred_trigger_queue_with_policy(
+                    &mut state,
+                    &mut events,
+                    DeferredTriggerDrainPolicy::SettledPriority,
+                ),
+                Some(WaitingFor::OrderTriggers { .. })
+            ),
+            "SettledPriority drains above the passive announced spell"
+        );
+
+        // Every policy still runs behind the shared carrier census: a live
+        // triggered-mana sidecar rejects both draining variants.
+        for policy in [
+            DeferredTriggerDrainPolicy::ResolutionSafe,
+            DeferredTriggerDrainPolicy::SettledPriority,
+        ] {
+            let mut state = drain_policy_fixture(false);
+            let node = crate::types::resolved_commands::RulesExecutionNodeRef::TriggeredMana(
+                crate::types::resolved_commands::SettlementNodeOrdinal(3),
+            );
+            state.pending_triggered_mana_resume = Some(triggered_mana_sidecar(&mut state, node));
+            let mut events = Vec::new();
+            assert!(
+                drain_deferred_trigger_queue_with_policy(&mut state, &mut events, policy).is_none(),
+                "{policy:?} must still consult resolution_completion_can_settle"
+            );
+            assert_eq!(state.deferred_triggers.len(), 2);
+        }
+    }
+
+    /// Round-18 closure, "Baseline bypass and exact ownership guard": both
+    /// observer helpers are collection and partial-release authorities, so they
+    /// must fail closed on sidecar ownership *before* collecting or draining.
+    ///
+    /// Either authority alone suffices, and the row proves both independently:
+    /// a scoped sidecar action can move the durable carrier out of `GameState`
+    /// (leaving only the live accepted-node marker), and at a resting pause the
+    /// durable carrier is present while the lexical marker has been restored.
+    #[test]
+    fn both_observer_helpers_are_no_ops_under_either_triggered_mana_authority() {
+        let node = crate::types::resolved_commands::RulesExecutionNodeRef::TriggeredMana(
+            crate::types::resolved_commands::SettlementNodeOrdinal(11),
+        );
+
+        // Positive reach guard: with neither authority, each helper really
+        // collects this event.
+        for settled in [false, true] {
+            let (mut state, events) = observer_helper_fixture(settled);
+            let mut events = events;
+            if settled {
+                collect_and_drain_observer_triggers_if_settled(&mut state, &mut events, 0);
+            } else {
+                park_observer_triggers_if_paused(&mut state, &events, 0);
+            }
+            assert!(
+                !state.deferred_triggers.is_empty() || !state.stack.is_empty(),
+                "positive reach guard (settled={settled}): the ordinary helper collects"
+            );
+        }
+
+        // Durable carrier only (resting pause).
+        for settled in [false, true] {
+            let (mut state, mut events) = observer_helper_fixture(settled);
+            state.pending_triggered_mana_resume = Some(triggered_mana_sidecar(&mut state, node));
+            if settled {
+                collect_and_drain_observer_triggers_if_settled(&mut state, &mut events, 0);
+            } else {
+                park_observer_triggers_if_paused(&mut state, &events, 0);
+            }
+            assert!(
+                state.deferred_triggers.is_empty() && state.stack.is_empty(),
+                "durable sidecar (settled={settled}): the helper must collect nothing"
+            );
+        }
+
+        // Live marker only (scoped sidecar action).
+        for settled in [false, true] {
+            let (mut state, mut events) = observer_helper_fixture(settled);
+            state.active_accepted_triggered_mana_node = Some(node);
+            state.active_rules_execution_node = Some(node);
+            if settled {
+                collect_and_drain_observer_triggers_if_settled(&mut state, &mut events, 0);
+            } else {
+                park_observer_triggers_if_paused(&mut state, &events, 0);
+            }
+            assert!(
+                state.deferred_triggers.is_empty() && state.stack.is_empty(),
+                "live accepted marker (settled={settled}): the helper must collect nothing"
+            );
+        }
+    }
+
+    /// Round-18 closure: the ordinary (no-sidecar) branch of both helpers now
+    /// derives its suffix through `filter_consumed_trigger_events_from`, so an
+    /// exact occurrence already claimed by `ConsumeBeforePriority` cannot be
+    /// recollected — while an equal-looking *unclaimed* occurrence still is.
+    ///
+    /// The journal is borrowed, never taken: unrelated callers with an empty
+    /// journal stay behaviour-identical, which the positive reach guard in the
+    /// row above asserts.
+    #[test]
+    fn ordinary_observer_helpers_filter_one_preclaimed_occurrence_out_of_two_equal_events() {
+        for settled in [false, true] {
+            let (mut state, mut events) = observer_helper_fixture(settled);
+            // Two equal-looking full-buffer occurrences of the same event.
+            let repeated = events[0].clone();
+            events.push(repeated.clone());
+            state.consumed_before_priority_trigger_events = vec![ConsumedTriggerEventOccurrence {
+                event: repeated.clone(),
+                occurrence: trigger_event_occurrence(&events, 0),
+            }];
+
+            if settled {
+                collect_and_drain_observer_triggers_if_settled(&mut state, &mut events, 0);
+            } else {
+                park_observer_triggers_if_paused(&mut state, &events, 0);
+            }
+
+            let collected = state.deferred_triggers.len() + state.stack.len();
+            assert_eq!(
+                collected, 1,
+                "settled={settled}: exactly the unclaimed second occurrence is collected"
+            );
+            assert_eq!(
+                state.consumed_before_priority_trigger_events.len(),
+                1,
+                "settled={settled}: the helper borrows the journal, it never takes it"
+            );
+        }
+    }
+
+    /// One battlefield observer whose `Taps` trigger fires on the single event
+    /// in the returned buffer. `settled` selects the wait each helper requires
+    /// to reach its collecting branch.
+    fn observer_helper_fixture(settled: bool) -> (GameState, Vec<GameEvent>) {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let observer = make_creature(&mut state, PlayerId(0), "Tap observer", 2, 2);
+        let observer_trigger = TriggerDefinition::new(TriggerMode::Taps)
+            .valid_card(TargetFilter::Typed(TypedFilter::creature()))
+            .execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            ));
+        let object = state.objects.get_mut(&observer).expect("observer exists");
+        object.trigger_definitions.push(observer_trigger.clone());
+        std::sync::Arc::make_mut(&mut object.base_trigger_definitions).push(observer_trigger);
+        object.materialize_base_trigger_definitions();
+
+        let tapper = make_creature(&mut state, PlayerId(0), "Tapper", 2, 2);
+        let victim = make_creature(&mut state, PlayerId(1), "Tapped victim", 2, 2);
+        let events = vec![GameEvent::PermanentTapped {
+            object_id: victim,
+            caused_by: Some(tapper),
+        }];
+
+        state.waiting_for = if settled {
+            WaitingFor::Priority {
+                player: PlayerId(0),
+            }
+        } else {
+            WaitingFor::OptionalEffectChoice {
+                player: PlayerId(0),
+                source_id: observer,
+                description: Some("paused".to_string()),
+                may_trigger_key: None,
+            }
+        };
+        (state, events)
+    }
+
+    /// CR 601.2h + CR 602.2b: the post-announcement drain's cast guard reads the
+    /// EXTERNAL `pending_cast` carrier, and deliberately does NOT read
+    /// `state.waiting_for`.
+    ///
+    /// The second leg is the load-bearing one. `state.waiting_for` is the wait
+    /// the current reducer action STARTED from — `apply_action` assigns the
+    /// handler's returned wait only after the handler returns — so an inline
+    /// carrier read here is a read of the past. The concrete casualty is an
+    /// additional-sacrifice cast that paused on `TargetSelection`: its
+    /// `CostResume::Spell` still holds that stale wait while `casting_targets`
+    /// finalizes the announcement and calls in, so the cost-sacrifice observers
+    /// would stay parked behind the announced spell forever
+    /// (`casting_costs::tests::cost_paid_multi_sacrifice_kicker_paused_under_observes`
+    /// is that row, and it is what fails if the read is restored). Every real
+    /// boundary excludes an inline carrier structurally instead — see the
+    /// contract comment on the function.
+    #[test]
+    fn the_external_pending_cast_carrier_blocks_the_post_announcement_drain() {
+        let mut state = setup();
+        state.deferred_triggers = vec![
+            make_draw_pending_trigger(&mut state, "Watcher A", PlayerId(0)),
+            make_draw_pending_trigger(&mut state, "Watcher B", PlayerId(0)),
+        ];
+        let ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), ObjectId(101), PlayerId(0));
+        let pending = PendingCast::new(ObjectId(101), CardId(101), ability, ManaCost::NoCost);
+        state.pending_cast = Some(Box::new(pending.clone()));
+        let mut events = Vec::new();
+        assert!(
+            drain_deferred_triggers_after_stack_object_announcement(&mut state, &mut events)
+                .is_none(),
+            "an unconsumed external cast root blocks the drain"
+        );
+
+        // A STALE inline carrier must not block: this is the exact state the
+        // mid-action callers are in when they finalize an announcement.
+        state.pending_cast = None;
+        state.waiting_for = WaitingFor::ModeChoice {
+            player: PlayerId(0),
+            modal: ModalChoice::default(),
+            pending_cast: Box::new(pending),
+            unavailable_modes: Vec::new(),
+        };
+        assert!(
+            matches!(
+                drain_deferred_triggers_after_stack_object_announcement(&mut state, &mut events),
+                Some(WaitingFor::OrderTriggers { .. })
+            ),
+            "the drain reads the external carrier, never the action's incoming wait"
+        );
+
+        // Positive reach guard for the first leg: the same queue drains once the
+        // external carrier is gone.
+        state.deferred_triggers = vec![
+            make_draw_pending_trigger(&mut state, "Watcher C", PlayerId(0)),
+            make_draw_pending_trigger(&mut state, "Watcher D", PlayerId(0)),
+        ];
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        assert!(matches!(
+            drain_deferred_triggers_after_stack_object_announcement(&mut state, &mut events),
+            Some(WaitingFor::OrderTriggers { .. })
+        ));
     }
 
     /// Issue #1793: at a true resolution boundary, 2+ same-controller deferred
@@ -35041,6 +37633,45 @@ pub mod tests {
         panic!("stack did not settle: waiting_for={:?}", state.waiting_for);
     }
 
+    /// CR 603.3b + CR 603.12: drive to the next REAL player decision, answering
+    /// any CR 603.3b ordering prompt along the way in the order the engine
+    /// offered.
+    ///
+    /// A materialized reflexive trigger is an ordinary member of the deferred
+    /// APNAP batch, so a same-controller batch that previously held only the
+    /// co-triggered observer now also holds the reflexive and surfaces an
+    /// ordering prompt that the inline-resolution flow never showed.
+    /// [`resolve_stack_until_paused`] treats that prompt as a terminal pause and
+    /// returns without resolving anything, which is correct for its other ~30
+    /// callers and wrong for the reflexive rows — hence a separate driver rather
+    /// than a change to the shared one.
+    ///
+    /// Returns as soon as a non-ordering wait is reached (a genuine choice) or
+    /// the stack empties at `Priority`.
+    fn settle_answering_trigger_order(state: &mut GameState) {
+        for _ in 0..30 {
+            match &state.waiting_for {
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    let order: Vec<usize> = (0..triggers.len()).collect();
+                    crate::game::engine::apply_as_current(
+                        state,
+                        GameAction::OrderTriggers { order },
+                    )
+                    .expect("submit the CR 603.3b ordering prompt");
+                }
+                WaitingFor::Priority { .. } if !state.stack.is_empty() => {
+                    crate::game::engine::apply_as_current(state, GameAction::PassPriority)
+                        .expect("pass priority");
+                }
+                _ => return,
+            }
+        }
+        panic!(
+            "did not settle while answering trigger order: waiting_for={:?}",
+            state.waiting_for
+        );
+    }
+
     /// CR 702.93a + issue #423 (4a, B1 baseline): an Undying creature with zero
     /// +1/+1 counters sacrificed inside the `EffectZoneChoice` resolution
     /// handler must still fire its dies-trigger and return to the battlefield
@@ -35110,7 +37741,14 @@ pub mod tests {
 
         // The Undying trigger must have been collected and dispatched; resolve
         // whatever reached the stack.
-        resolve_stack_until_paused(&mut state);
+        //
+        // CR 603.12 + CR 603.3b: the reflexive `Destroy SelfRef` is now a
+        // CREATED reflexive trigger rather than an inline continuation, so it is
+        // an ordinary member of the same same-controller deferred batch as the
+        // Undying dies-trigger and the batch opens a CR 603.3b ordering prompt.
+        // Answer it and keep going; the row's claim (Undying fires and returns
+        // the creature) is unchanged.
+        settle_answering_trigger_order(&mut state);
 
         let obj = state.objects.get(&young_wolf).expect("object tracked");
         assert_eq!(
@@ -35454,59 +38092,45 @@ pub mod tests {
         )
         .expect("select Young Wolf to sacrifice");
 
-        // (ii) The reflexive `WhenYouDo` continuation was NOT dropped — it
-        // resolved into a second `EffectZoneChoice` (the opponent sacrifice).
-        assert!(
-            matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
-            "the reflexive opponent Sacrifice must raise an EffectZoneChoice, got {:?}",
-            state.waiting_for
-        );
-
-        // The Undying dies-trigger and the co-triggered observer trigger were
-        // batched into the deferred queue — they would be lost pre-fix.
-        assert_eq!(
-            state.deferred_triggers.len(),
-            2,
-            "the Undying dies-trigger and the targeted observer trigger must \
-             both be batched into deferred_triggers (issue #423)"
-        );
-
-        // Resolve the reflexive opponent sacrifice → the handler settles to
-        // `Priority` and drains the deferred queue.
-        crate::game::engine::apply_as_current(
-            &mut state,
-            GameAction::SelectCards { cards: vec![opp_a] },
-        )
-        .expect("opponent sacrifices a creature");
-
-        // #1793: the deferred flush now routes through `begin_trigger_ordering`,
-        // so the two same-controller deferred triggers (Undying dies-trigger +
-        // targeted observer) surface a CR 603.3b ordering prompt before
-        // dispatch. Order the no-input Undying trigger first so it reaches the
-        // stack, leaving the targeted observer to pause on its own target
-        // selection.
+        // (ii) CR 603.12 + CR 603.3b: the reflexive `WhenYouDo` opponent
+        // Sacrifice was NOT dropped — but it is no longer an inline continuation
+        // that pauses the parent resolution on a second `EffectZoneChoice`. It
+        // is a CREATED reflexive trigger, so the parent resolution RUNS TO
+        // COMPLETION and the reflexive joins the very same same-controller
+        // deferred batch as the two dies-triggers. That is what structurally
+        // removes this row's original blocker: a reflexive can no longer strand
+        // a co-triggered batch by pausing mid-resolution, because it never
+        // pauses mid-resolution.
         let WaitingFor::OrderTriggers {
             triggers: order_choices,
             ..
         } = &state.waiting_for
         else {
             panic!(
-                "the two same-controller deferred triggers must surface a CR 603.3b \
-                 ordering prompt after the deferred flush, got {:?}",
+                "the co-triggered batch (Undying dies-trigger + targeted observer + \
+                 the materialized reflexive) must surface one CR 603.3b ordering \
+                 prompt, got {:?}",
                 state.waiting_for
             );
         };
-        // The reflexive opponent sacrifice itself kills a creature, so the
-        // dies-observer fires again for that death: the co-triggered group is
-        // the Undying dies-trigger plus one targeted observer per creature that
-        // died (Young Wolf + the sacrificed opponent). All are P0-controlled and
-        // ordered together (CR 603.3b).
-        assert!(
-            order_choices.len() >= 2,
-            "the co-triggered group (Undying dies-trigger + targeted dies-observers) \
-             must be ordered together (issue #423), got {}",
-            order_choices.len()
+        let names: Vec<&str> = order_choices
+            .iter()
+            .map(|t| t.source_name.as_str())
+            .collect();
+        assert_eq!(
+            order_choices.len(),
+            3,
+            "exactly three P0-controlled triggers are co-ordered, got {names:?}"
         );
+        for expected in ["Young Wolf", "Grim Observer", "Grist Stand-In"] {
+            assert!(
+                names.contains(&expected),
+                "{expected} must be in the co-triggered group, got {names:?}"
+            );
+        }
+
+        // Order the no-input Undying trigger first so it reaches the stack, and
+        // leave the targeted observer and the reflexive behind it.
         let undying_idx = order_choices
             .iter()
             .position(|t| t.source_name == "Young Wolf")
@@ -35522,7 +38146,8 @@ pub mod tests {
         )
         .expect("submit deferred-trigger order");
 
-        // (iii) The drained targeted observer reached its own target selection.
+        // (iii) The drained targeted observer reached its own target selection
+        // as it was put on the stack (CR 603.3d).
         assert!(
             matches!(state.waiting_for, WaitingFor::TriggerTargetSelection { .. }),
             "the targeted dies-observer must reach TriggerTargetSelection after the \
@@ -35538,15 +38163,20 @@ pub mod tests {
             "the Undying dies-trigger must have reached the stack via the deferred flush"
         );
 
-        // Drive the flush to completion: each targeted dies-observer picks a
-        // legal Tap target (opp_b is always a legal creature target), and the
-        // stack resolves. The #423 invariant: nothing is dropped and Undying
-        // returns its creature to the battlefield.
+        // Drive the whole batch to completion. Each targeted dies-observer picks
+        // a legal Tap target (`opp_b` is always a legal creature target), each
+        // CR 603.3b ordering prompt is answered in engine order, and the
+        // reflexive opponent Sacrifice raises its `EffectZoneChoice` when IT
+        // resolves from the stack — answered with `opp_a`. The #423 invariant is
+        // unchanged: nothing is dropped, and Undying returns its creature.
+        let mut saw_reflexive_sacrifice_choice = false;
         let mut guard = 0;
-        while state.objects.get(&young_wolf).map(|o| o.zone) != Some(Zone::Battlefield) {
+        while state.objects.get(&young_wolf).map(|o| o.zone) != Some(Zone::Battlefield)
+            || !state.stack.is_empty()
+        {
             guard += 1;
             assert!(
-                guard < 16,
+                guard < 32,
                 "issue #423 deferred flush failed to settle (state: {:?})",
                 state.waiting_for
             );
@@ -35560,12 +38190,28 @@ pub mod tests {
                     )
                     .expect("choose observer Tap target");
                 }
-                _ => {
-                    resolve_stack_until_paused(&mut state);
+                WaitingFor::EffectZoneChoice { .. } => {
+                    saw_reflexive_sacrifice_choice = true;
+                    crate::game::engine::apply_as_current(
+                        &mut state,
+                        GameAction::SelectCards { cards: vec![opp_a] },
+                    )
+                    .expect("the reflexive opponent Sacrifice picks its victim");
                 }
+                _ => settle_answering_trigger_order(&mut state),
             }
         }
 
+        assert!(
+            saw_reflexive_sacrifice_choice,
+            "the materialized reflexive must resolve from the stack and raise its own \
+             opponent-Sacrifice EffectZoneChoice"
+        );
+        assert_eq!(
+            state.objects.get(&opp_a).map(|o| o.zone),
+            Some(Zone::Graveyard),
+            "the reflexive opponent Sacrifice must actually sacrifice its victim"
+        );
         let wolf = state.objects.get(&young_wolf).expect("wolf tracked");
         assert_eq!(
             wolf.zone,
@@ -35736,7 +38382,10 @@ pub mod tests {
             },
         )
         .expect("select Plain Bear to sacrifice");
-        resolve_stack_until_paused(&mut state);
+        // CR 603.12 + CR 603.3b: the reflexive `Destroy SelfRef` joins the same
+        // same-controller deferred batch as the Blood Artist-class observer, so
+        // the flush opens an ordering prompt before either can dispatch.
+        settle_answering_trigger_order(&mut state);
 
         assert_eq!(
             state.players[0].life, 21,

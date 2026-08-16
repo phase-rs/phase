@@ -265,6 +265,17 @@ fn decide(runner: &mut GameRunner, accept: bool) -> bool {
         .is_ok()
 }
 
+/// CR 603.12 + CR 603.3b: a `When you do` body is a CREATED reflexive TRIGGERED
+/// ABILITY. Accepting the gate creates it; it does nothing until it is put on
+/// the stack at the next priority point and resolves there. Every row that
+/// measures the BODY's board effect must therefore drive that window, exactly as
+/// an `If you do` row does not (an inline CR 608.2c continuation has already run
+/// when the deciding action returns). Answering the ordering prompt with
+/// identity is handled inside `advance_until_stack_empty`.
+fn settle_reflexive_body(runner: &mut GameRunner) {
+    runner.advance_until_stack_empty();
+}
+
 /// Answer a sub-clause's `TriggerTargetSelection` prompt and let the resulting
 /// stack object resolve. Used where the targeted clause is NOT the chain's head
 /// (North Pole's `SetTapState`, Ratonhnhaké꞉ton's `ChangeZone`), so its target
@@ -333,6 +344,7 @@ fn iroh_reflexive_body_counter_binds_created_token() {
         vec![TargetRef::Object(bear), TargetRef::Player(P1)],
     );
     assert!(decide(&mut runner, true), "the reflexive gate was accepted");
+    settle_reflexive_body(&mut runner);
 
     let ally = token_named(&runner, decoy, "Ally");
     assert_eq!(
@@ -1419,6 +1431,7 @@ fn drive_clone(text: &str, types: &[&str], funded: bool) -> CloneRow {
     let def = parse_trigger(text, "Synth", types, 0);
     resolve_def(&mut runner, &def, source, vec![]);
     decide(&mut runner, true);
+    settle_reflexive_body(&mut runner);
 
     let live = live_tokens(&runner, decoy);
     CloneRow {

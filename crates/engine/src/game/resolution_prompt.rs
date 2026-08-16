@@ -554,6 +554,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         multi_target: _, // announce-time variable-count bounds (Resolution case caught by timing)
         target_constraints: _, // announce-time cross-target legality, no resolution prompt
         distribution: _, // CR 601.2d concrete pre-assigned portions (announce-time)
+        distribute: _, // CR 601.2d/603.3d unassigned division is an announce-time choice
         targets: _,   // concrete announced target refs (already resolved)
         source_id: _, // object id
         source_incarnation: _, // self-transform epoch latch, no resolution-time choice
@@ -713,6 +714,40 @@ mod tests {
 
     fn budget() -> ProbeBudget {
         ProbeBudget::for_test(PROBE_BUDGET)
+    }
+
+    /// CR 601.2d + CR 603.3d: an unassigned division UNIT is announcement metadata.
+    /// The division itself is answered while the object is announced (the trigger's
+    /// `DistributeAmong` prompt), never during resolution, so toggling only
+    /// `distribute` may not move the resolution-choice verdict.
+    ///
+    /// The base ability must be an ALLOW-LISTED choice-free effect with a fixed
+    /// quantity. `Effect::NoOp` is NOT one: `effect_offers_choice` fail-closes every
+    /// unclassified variant to `true`, so a `NoOp` base reports `MayPrompt` before
+    /// `distribute` is even read and the row would pass for the wrong reason in the
+    /// negative direction and fail outright in the positive one.
+    #[test]
+    fn unassigned_distribution_unit_is_not_a_resolution_choice() {
+        let base = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: fixed(3),
+                target: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+                damage_source: None,
+                excess: None,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        assert!(
+            !chain_offers_choice(&base),
+            "reach guard: the undivided base must already be choice-free, otherwise the \
+             divided clone below proves nothing"
+        );
+
+        let mut divided = base.clone();
+        divided.distribute = Some(crate::types::game_state::DistributionUnit::Damage);
+        assert!(!chain_offers_choice(&divided));
     }
 
     /// Snapshot every axis the witness reads.

@@ -3170,8 +3170,9 @@ fn parse_clone_replacement(
     // BecomeCopy replacement still registers — dropping the entire replacement
     // for an unparsed suffix would lose the clone behaviour entirely.
     //
-    // The suffix may also carry a trailing "When you do, ..." reflexive trigger
-    // clause past the sentence boundary — parsed separately into a sub_ability.
+    // The suffix may also carry a trailing post-replacement rider past the
+    // sentence boundary — literal `When` remains a reflexive trigger, while an
+    // accepted-branch `If` remains an inline continuation.
     let (mana_value_limit, duration, additional_modifications, post_period) =
         parse_clone_suffix(suffix.trim(), card_name);
 
@@ -3192,13 +3193,11 @@ fn parse_clone_replacement(
     )
     .description(original_text.to_string());
 
-    // CR 603.12: "When you do, ..." — reflexive trigger that fires when the
-    // clone replacement's choose-and-copy action was performed. Parsed as a
-    // sub_ability with condition `WhenYouDo`; the parent's targets (the copied
-    // source card) are forwarded so "that card" (`TargetFilter::TriggeringSource`)
-    // resolves to the chosen card for e.g. "exile that card".
-    if let Some(reflexive) = parse_when_you_do_reflexive(post_period) {
-        copy_effect = copy_effect.sub_ability(reflexive);
+    // CR 603.12 + CR 608.2c: Preserve literal `When` as a reflexive trigger and
+    // consume literal `If` only at this accepted replacement branch. The parent's
+    // copied-card referent is forwarded to either rider.
+    if let Some(rider) = parse_post_replacement_rider(post_period) {
+        copy_effect = copy_effect.sub_ability(rider);
     }
 
     // CR 614.1c: When the verb phrase includes "tapped" ("enter tapped as a copy
@@ -3378,20 +3377,20 @@ fn attach_zone_to_filter(filter: TargetFilter, zone: Zone) -> TargetFilter {
     }
 }
 
-/// Parse a trailing "When you do, ..." / "If you do, ..." reflexive trigger clause.
+/// Parse a trailing "When you do, ..." / "If you do, ..." post-replacement rider.
 ///
 /// Delegates to the existing effect-chain parser. The "when you do" connector
 /// maps to `AbilityCondition::WhenYouDo`; the "if you do" connector maps to
-/// `AbilityCondition::EffectOutcome { OptionalEffectPerformed }`. On the
-/// clone-replacement path the parent "do" is the optional copy, applied via the
-/// copy-target-choice completion (a non-cost `BecomeCopy` parent), so the
-/// condition is normalized to `WhenYouDo` (CR 603.12) — see the normalization
-/// note below. Returns None when the text doesn't start with a "when you do" /
-/// "if you do" phrase or the chain parser produces an unimplemented effect (so
+/// `AbilityCondition::EffectOutcome { OptionalEffectPerformed }`.
+/// At this owning accepted-branch seam, literal `When` keeps its CR 603.12
+/// `WhenYouDo` creation gate, while literal `If` has its CR 608.2c performed gate
+/// consumed because reaching the replacement's execute branch proves acceptance.
+/// Any other condition fails closed. Returns None when the text doesn't start
+/// with a connector or the chain parser produces an unimplemented effect (so
 /// the caller can fall back to the plain BecomeCopy replacement without a
 /// reflexive trigger).
-fn parse_when_you_do_reflexive(post_period: &str) -> Option<AbilityDefinition> {
-    use crate::types::ability::{AbilityCondition, EffectOutcomeSignal};
+fn parse_post_replacement_rider(post_period: &str) -> Option<AbilityDefinition> {
+    use crate::types::ability::AbilityCondition;
 
     // Strip the sentence terminator / separator space preceding the reflexive
     // clause. These are structural punctuation, not parsing dispatch.
@@ -3404,8 +3403,8 @@ fn parse_when_you_do_reflexive(post_period: &str) -> Option<AbilityDefinition> {
     // seam for future reflexive-clause variants ("when that happens", etc.)
     // without reshaping the guard.
     let lower = trimmed.to_lowercase();
-    // CR 603.12: both reflexive connectors — "when you do" (Superior Spider-Man)
-    // and "if you do" (The Fourteenth Doctor).
+    // CR 603.12 + CR 608.2c: admit the two typed connector classes;
+    // classification remains owned by the shared effect-chain parser below.
     nom_on_lower(trimmed, &lower, |i| {
         value(
             (),
@@ -3423,24 +3422,12 @@ fn parse_when_you_do_reflexive(post_period: &str) -> Option<AbilityDefinition> {
     if matches!(*def.effect, Effect::Unimplemented { .. }) {
         return None;
     }
-    // CR 603.12: The reflexive parent here is the optional enter-as-a-copy
-    // replacement, resolved via the copy-target-choice completion — a non-cost
-    // `BecomeCopy` parent, NOT an `Effect::OptionalEffect` resolution. The engine
-    // gates `BecomeCopy` / copy-replacement reflexives on `WhenYouDo`, which is
-    // unconditionally true when the sub-ability is reached (the copy having been
-    // performed is guaranteed by the CopyTargetChoice completion path; a declined
-    // copy never reaches the sub-ability). The generic "if you do" mapping to
-    // `EffectOutcome { OptionalEffectPerformed }` reads a resolution-context flag
-    // that this replacement path never sets, so it would silently never fire.
-    // Normalize it to the `WhenYouDo` contract (Superior Spider-Man's "when you
-    // do" already lands there).
-    if matches!(
-        def.condition,
-        Some(AbilityCondition::EffectOutcome {
-            signal: EffectOutcomeSignal::OptionalEffectPerformed,
-        })
-    ) {
-        def.condition = Some(AbilityCondition::WhenYouDo);
+    match def.condition.take() {
+        Some(AbilityCondition::WhenYouDo) => {
+            def.condition = Some(AbilityCondition::WhenYouDo);
+        }
+        Some(condition) if condition.is_optional_effect_performed() => {}
+        Some(_) | None => return None,
     }
     Some(def)
 }
@@ -7629,7 +7616,7 @@ fn strip_optional_draw_skip<'a>(lower_body: &str, original_body: &'a str) -> Opt
     Some(rest.trim_start())
 }
 
-/// CR 603.12 + issue #5655: Attach an optional `"if you do, …"` rider to an
+/// CR 608.2c + issue #5655: Attach an optional `"if you do, …"` rider to an
 /// optional draw-skip replacement. Returns `None` when non-empty rider text is
 /// present but cannot be lowered to a typed effect — fail closed rather than
 /// report the card as supported with a silently discarded rider (Island
@@ -7642,7 +7629,7 @@ fn attach_optional_draw_skip_rider(
     if trimmed.is_empty() {
         return Some(def);
     }
-    let rider = parse_when_you_do_reflexive(remainder)?;
+    let rider = parse_post_replacement_rider(remainder)?;
     Some(def.execute(rider))
 }
 
@@ -19630,7 +19617,7 @@ mod tests {
     /// graveyard zone + ZoneChangedThisTurn predicate + "if you do" connector.
     #[test]
     fn fourteenth_doctor_graveyard_copy_with_zone_change_predicate_and_haste() {
-        use crate::types::ability::{AbilityCondition, Effect, FilterProp, TypeFilter};
+        use crate::types::ability::{Effect, FilterProp, TypeFilter};
 
         let def = parse_replacement_line(
             "You may have The Fourteenth Doctor enter as a copy of a Doctor card in your graveyard that was put there from your library this turn. If you do, it gains haste until end of turn.",
@@ -19693,19 +19680,18 @@ mod tests {
             other => panic!("expected Typed filter, got {other:?}"),
         }
 
-        // Reflexive "If you do, it gains haste until end of turn." attaches as a
-        // sub-ability. CR 603.12: normalized to `WhenYouDo` because the parent is
-        // a non-cost BecomeCopy replacement (the copy-completion path the engine
-        // gates on `WhenYouDo`), not an `Effect::OptionalEffect` resolution.
+        // CR 608.2c: literal "If you do" is an inline continuation. Reaching the
+        // accepted replacement execute branch proves the copy occurred, so the
+        // owning parser seam consumes the performed gate instead of fabricating
+        // a CR 603.12 `WhenYouDo` trigger.
         let sub = execute
             .sub_ability
             .as_ref()
             .expect("reflexive haste sub_ability");
         assert_eq!(
+            sub.condition, None,
+            "accepted-branch If rider must be conditionless and inline, got {:?}",
             sub.condition,
-            Some(AbilityCondition::WhenYouDo),
-            "reflexive haste must gate on WhenYouDo (the BecomeCopy reflexive contract), got {:?}",
-            sub.condition
         );
         assert!(
             !matches!(*sub.effect, Effect::Unimplemented { .. }),
