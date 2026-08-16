@@ -430,9 +430,10 @@ fn a3_wedged_turn15_capture_settles_its_stale_resolving_carrier() {
 /// many boundaries offered it the chance.
 ///
 /// What this row therefore claims is still strand removal, plus the drain the
-/// strand was blocking. It pins NOTHING about the terminal `waiting_for` — that
-/// shape is recorded above, not asserted, because it is produced by a seam this
-/// change does not own.
+/// strand was blocking — including the ARRIVAL half of that drain, since an
+/// emptied queue alone is equally satisfied by a discarded one. It pins NOTHING
+/// about the terminal `waiting_for` — that shape is recorded above, not
+/// asserted, because it is produced by a seam this change does not own.
 #[test]
 fn a4_wedged_turn20_capture_retires_both_stranded_drains() {
     let mut state = load_turn20();
@@ -448,8 +449,18 @@ fn a4_wedged_turn20_capture_retires_both_stranded_drains() {
     assert!(
         state.deferred_triggers.is_empty(),
         "CR 603.3 + CR 603.3b: with the strand gone, `resolution_completion_can_settle` is true \
-         again and the parked abilities must reach the stack, still parked: {:?}",
+         again and the parked abilities must LEAVE the deferred queue, still parked: {:?}",
         deferred_sources(&state)
+    );
+    // The paired positive, which A2 already carries for turn-15. Emptiness alone
+    // is satisfied by a queue that was DISCARDED as well as by one that drained,
+    // and discarding is a CR 603.3b violation that this row would otherwise pass.
+    // Non-vacuous by construction: `assert_turn20_wedge_present` pins the input
+    // queue to exactly these two sources before the action runs.
+    assert_eq!(
+        triggers_reaching_the_stack(&state),
+        vec![157, 199],
+        "CR 603.3b: both parked abilities must ARRIVE on the stack, not merely leave the queue"
     );
 }
 

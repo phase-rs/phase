@@ -2442,18 +2442,71 @@ impl ResolutionStack {
         ))
     }
 
-    /// Identity-addressed frame lookup.
+    /// The SINGLE identity-addressed search over `frames`, and the only place in
+    /// this module licensed to search the frame vector at all.
     ///
-    /// This does not violate this module's "no general frame search" rule: that
-    /// prohibition is on POSITIONAL or adjacency-inferred searches that guess a
-    /// structural relationship. This is the opposite — an identity-addressed
-    /// lookup, licensed and precedented by `DrawSequenceFrameId`'s own doc,
-    /// which exists for exactly this reason. Unstamped frames carry `None` and
-    /// can never match.
+    /// `scripts/check-resolution-frame-boundaries.sh` anchors its exemption to
+    /// this function BY NAME. The rule the guard enforces is "one search, here",
+    /// not "any search that looks identity-shaped": a second search anywhere in
+    /// this file — including a verbatim copy of the expression below — still
+    /// fails the guard. Move this function and the guard fails loudly rather
+    /// than silently widening.
+    ///
+    /// The distinction the guard draws is between POSITIONAL or
+    /// adjacency-inferred access, which guesses a structural relationship the
+    /// stack does not guarantee, and identity-addressed access, which asserts
+    /// one. The latter is an established access mode in this codebase, not a
+    /// carve-out invented here: [`DrawSequenceStack`]'s `frame_mut` / `active_if`
+    /// / `pop` address their frames the same way, resting on the same
+    /// monotonic-allocator property — an id is never reissued, so a stale id
+    /// matches nothing rather than aliasing a later frame. Unstamped frames
+    /// carry `None` and can never match.
+    ///
+    /// Both halves of that soundness argument are pinned by existing rows rather
+    /// than asserted here: `h6a_legacy_id_less_post_replacement_frames_restore_unstamped`
+    /// for the unstamped case, and
+    /// `v2_reader_recovers_discard_allocator_and_rejects_duplicate_frame_ids`
+    /// for the no-reissue case. If either is deleted, this exemption loses its
+    /// basis.
+    ///
+    /// [`DrawSequenceStack`]: crate::types::game_state::DrawSequenceStack
     fn post_replacement_frame_index(&self, id: PostReplacementFrameId) -> Option<usize> {
         self.frames.iter().position(|frame| {
             matches!(frame, ResolutionFrame::PostReplacement(drains) if drains.frame_id() == Some(id))
         })
+    }
+
+    /// The drain stack of the frame `id` names, if that frame is still resident.
+    ///
+    /// The index does NOT escape this accessor pair. Handing a position to
+    /// callers would reintroduce exactly the positional coupling this change
+    /// exists to remove, which is why the three operations below take the
+    /// payload rather than an index.
+    fn post_replacement_frame(
+        &self,
+        id: PostReplacementFrameId,
+    ) -> Option<&PostReplacementDrainStack> {
+        let index = self.post_replacement_frame_index(id)?;
+        match self.frames.get(index) {
+            Some(ResolutionFrame::PostReplacement(drains)) => Some(drains),
+            Some(_) | None => {
+                unreachable!("the index came from a matched post-replacement frame")
+            }
+        }
+    }
+
+    /// The mutable twin of [`Self::post_replacement_frame`].
+    fn post_replacement_frame_mut(
+        &mut self,
+        id: PostReplacementFrameId,
+    ) -> Option<&mut PostReplacementDrainStack> {
+        let index = self.post_replacement_frame_index(id)?;
+        match self.frames.get_mut(index) {
+            Some(ResolutionFrame::PostReplacement(drains)) => Some(drains),
+            Some(_) | None => {
+                unreachable!("the index came from a matched post-replacement frame")
+            }
+        }
     }
 
     /// Report a lookup that found no frame. The frame was consumed by
@@ -2504,16 +2557,11 @@ impl ResolutionStack {
         &self,
         dispatch: IdentifiedPostReplacementDispatch,
     ) -> bool {
-        let Some(index) = self.post_replacement_frame_index(dispatch.frame) else {
+        let Some(drains) = self.post_replacement_frame(dispatch.frame) else {
             Self::report_missing_post_replacement_frame(dispatch);
             return false;
         };
-        match self.frames.get(index) {
-            Some(ResolutionFrame::PostReplacement(drains)) => {
-                drains.dispatch_is_resident_top(dispatch.dispatch)
-            }
-            Some(_) | None => unreachable!("checked post-replacement frame must match"),
-        }
+        drains.dispatch_is_resident_top(dispatch.dispatch)
     }
 
     /// Park `dispatch`'s exact entry within its own frame.
@@ -2521,16 +2569,11 @@ impl ResolutionStack {
         &mut self,
         dispatch: IdentifiedPostReplacementDispatch,
     ) -> bool {
-        let Some(index) = self.post_replacement_frame_index(dispatch.frame) else {
+        let Some(drains) = self.post_replacement_frame_mut(dispatch.frame) else {
             Self::report_missing_post_replacement_frame(dispatch);
             return false;
         };
-        match self.frames.get_mut(index) {
-            Some(ResolutionFrame::PostReplacement(drains)) => {
-                drains.pause_dispatch(dispatch.dispatch)
-            }
-            Some(_) | None => unreachable!("checked post-replacement frame must match"),
-        }
+        drains.pause_dispatch(dispatch.dispatch)
     }
 
     /// Retire `dispatch`'s exact entry within its own frame.
@@ -2547,16 +2590,11 @@ impl ResolutionStack {
         &mut self,
         dispatch: IdentifiedPostReplacementDispatch,
     ) -> Option<PostReplacementDrain> {
-        let Some(index) = self.post_replacement_frame_index(dispatch.frame) else {
+        let Some(drains) = self.post_replacement_frame_mut(dispatch.frame) else {
             Self::report_missing_post_replacement_frame(dispatch);
             return None;
         };
-        match self.frames.get_mut(index) {
-            Some(ResolutionFrame::PostReplacement(drains)) => {
-                drains.finish_dispatch(dispatch.dispatch)
-            }
-            Some(_) | None => unreachable!("checked post-replacement frame must match"),
-        }
+        drains.finish_dispatch(dispatch.dispatch)
     }
 
     /// Returns the active ChangeZone frame, or its exact immediate parent

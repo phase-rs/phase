@@ -980,21 +980,33 @@ fn h4_foreign_controller_dies_observer_still_reaches_the_stack() {
         );
     }
 
-    let observer_fired = state.stack.iter().any(|entry| entry.source_id == observer)
-        || state
-            .deferred_triggers
-            .iter()
-            .any(|deferred| deferred.pending.source_id == observer)
-        || state.pending_trigger_order.as_ref().is_some_and(|order| {
-            order.groups.iter().any(|group| {
-                group
-                    .triggers
-                    .iter()
-                    .any(|pending| pending.pending.source_id == observer)
-            })
-        });
-    assert!(
-        observer_fired,
-        "CR 603.3b: the foreign-controller dies trigger must reach a stack destination"
+    // Pin WHICH destination, not merely that one of them holds. A disjunction over
+    // {stack, deferred, pending order} is satisfied by a trigger that fired and then
+    // parked forever — the exact failure this change repairs — so it cannot witness
+    // CR 603.3b for a guard row whose claim is arrival. `assert_eq!` on the observed
+    // destination reports the actual one when it moves.
+    let destination = if state.stack.iter().any(|entry| entry.source_id == observer) {
+        "stack"
+    } else if state
+        .deferred_triggers
+        .iter()
+        .any(|deferred| deferred.pending.source_id == observer)
+    {
+        "deferred"
+    } else if state.pending_trigger_order.as_ref().is_some_and(|order| {
+        order.groups.iter().any(|group| {
+            group
+                .triggers
+                .iter()
+                .any(|pending| pending.pending.source_id == observer)
+        })
+    }) {
+        "pending_order"
+    } else {
+        "nowhere"
+    };
+    assert_eq!(
+        destination, "stack",
+        "CR 603.3b: the foreign-controller dies trigger must reach the stack"
     );
 }
