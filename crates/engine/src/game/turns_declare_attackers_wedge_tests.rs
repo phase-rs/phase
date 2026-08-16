@@ -353,11 +353,17 @@ fn two_parked_triggers_surface_cr_603_3b_ordering() {
     assert_eq!(state.phase, Phase::EndCombat, "CR 508.8");
     // CR 603.3b: two simultaneous triggers under one controller — that player
     // chooses the order they go on the stack.
-    assert!(
-        matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }),
-        "CR 603.3b: expected an ordering prompt, got {:?}",
-        state.waiting_for
-    );
+    match &state.waiting_for {
+        WaitingFor::OrderTriggers { player, triggers } => {
+            assert_eq!(
+                *player,
+                PlayerId(0),
+                "CR 603.3b: the controller of the triggers chooses their order"
+            );
+            assert_eq!(triggers.len(), 2, "both parked contexts must be offered");
+        }
+        other => panic!("CR 603.3b: expected an ordering prompt, got {other:?}"),
+    }
 }
 
 /// **Row A11 — Unit A's discriminating test. This is the test the A-1 drain
@@ -463,11 +469,23 @@ fn two_parked_triggers_from_start_game_surface_cr_603_3b_ordering() {
 
     let result = engine::start_game_skip_mulligan(runner.state_mut());
 
-    assert!(
-        matches!(result.waiting_for, WaitingFor::OrderTriggers { .. }),
-        "CR 603.3b: the pipeline-free consumer must surface a real ordering prompt, got {:?}",
-        result.waiting_for
-    );
+    match &result.waiting_for {
+        WaitingFor::OrderTriggers { player, triggers } => {
+            assert_eq!(
+                *player,
+                PlayerId(0),
+                "CR 603.3b: the controller of the triggers chooses their order"
+            );
+            assert_eq!(
+                triggers.len(),
+                2,
+                "the pipeline-free consumer must offer both parked contexts"
+            );
+        }
+        other => panic!(
+            "CR 603.3b: the pipeline-free consumer must surface a real ordering prompt, got {other:?}"
+        ),
+    }
 }
 
 /// **Row A12 — Unit A2's discriminating test. The brief's second required
