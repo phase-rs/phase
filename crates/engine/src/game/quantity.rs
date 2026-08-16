@@ -972,6 +972,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::TrackedSetAggregate { .. }
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::PreviousEffectCount
         | QuantityRef::LifeLostThisTurn { .. }
         | QuantityRef::PartySize { .. }
         | QuantityRef::Speed { .. }
@@ -1301,6 +1302,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::TrackedSetAggregate { .. }
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::PreviousEffectCount
         | QuantityRef::LifeLostThisTurn { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::EventContextAmount
@@ -1596,6 +1598,7 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         | QuantityRef::TrackedSetSize
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::PreviousEffectCount
         | QuantityRef::LifeLostThisTurn { .. }
         | QuantityRef::UnspentMana { .. }
         | QuantityRef::Speed { .. }
@@ -1860,6 +1863,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::TrackedSetAggregate { .. }
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::PreviousEffectCount
         | QuantityRef::LifeLostThisTurn { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::EventContextAmount
@@ -3990,6 +3994,9 @@ fn resolve_ref(
             // (Contest of Claws). 0 when the preceding effect dealt no excess.
             DamageChannel::Excess => state.last_effect_excess_amount.unwrap_or(0),
         },
+        // CR 608.2c: Reads the preceding resolution-local choice count directly;
+        // unlike EventContextAmount, an enclosing trigger cannot shadow it.
+        QuantityRef::PreviousEffectCount => state.last_effect_count.unwrap_or(0),
         // CR 608.2c: "for each [thing] this way" — read the most recent tracked set size.
         QuantityRef::TrackedSetSize => state
             .tracked_object_sets

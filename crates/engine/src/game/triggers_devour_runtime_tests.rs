@@ -5,8 +5,8 @@
 //! `PostReplacementContinuation` and drains it after the move completes,
 //! raising a ranged sacrifice `EffectZoneChoice`. The Sacrifice
 //! completion stamps `state.last_effect_count`, which the chained
-//! `PutCounter` sub-ability's `QuantityRef::EventContextAmount` reads via
-//! its `.or(last_effect_count)` fallback.
+//! `PutCounter` sub-ability reads directly through
+//! `QuantityRef::PreviousEffectCount`.
 //!
 //! Lives in `game/triggers.rs` rather than `database/synthesis.rs::tests`
 //! so it can reach the `pub(super)` post-replacement-continuation drain
@@ -16,11 +16,15 @@
 use crate::database::synthesis::synthesize_all;
 use crate::game::printed_cards::apply_card_face_to_object;
 use crate::game::zones::{create_object, move_to_zone};
-use crate::types::ability::{EffectKind, PtValue, TargetFilter, TypeFilter};
+use crate::types::ability::{
+    EffectKind, PtValue, QuantityExpr, QuantityModification, QuantityRef, ReplacementDefinition,
+    TargetFilter, TypeFilter,
+};
 use crate::types::actions::GameAction;
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
+use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -214,6 +218,28 @@ fn p1p1(state: &GameState, id: ObjectId) -> u32 {
         .unwrap_or(0)
 }
 
+/// Install the AddCounter quantity replacement used by Doubling Season-class
+/// effects without depending on a particular card's parser output.
+fn install_counter_doubler(state: &mut GameState, controller: PlayerId) {
+    let card_id = CardId(state.next_object_id);
+    let id = create_object(
+        state,
+        card_id,
+        controller,
+        "Counter Doubler".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&id)
+        .expect("counter doubler exists")
+        .replacement_definitions
+        .push(
+            ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                .quantity_modification(QuantityModification::DOUBLE),
+        );
+}
+
 /// Drive a Devour creature's Hand→Battlefield ZoneChange through the
 /// replacement pipeline, then drain the post-replacement continuation —
 /// the same call `stack.rs:575` makes during real spell resolution.
@@ -331,7 +357,7 @@ fn devour_etb_raises_ranged_sacrifice_prompt() {
 /// two creatures to Devour 1 places exactly two +1/+1 counters on the
 /// entering permanent. Under v1's `PreviousEffectAmount` route this would
 /// resolve to 0 (the ranged Sacrifice never stamps `last_effect_amount`);
-/// under v2's `EventContextAmount` it reads `last_effect_count = 2`.
+/// under the direct `PreviousEffectCount` route it reads `last_effect_count = 2`.
 #[test]
 fn devour_1_full_sacrifice_places_one_counter_per_creature() {
     let face = devour_face("Gorger Wurm", 1);
@@ -375,7 +401,7 @@ fn devour_1_full_sacrifice_places_one_counter_per_creature() {
 
 /// CR 702.82a: an empty sacrifice is legal — the Devour creature enters
 /// with 0 counters. NOTE: this case alone does NOT discriminate the v1
-/// linkage bug (both `PreviousEffectAmount` and `EventContextAmount`
+/// linkage bug (both `PreviousEffectAmount` and `PreviousEffectCount`
 /// resolve to 0 here). It is paired with the full-sacrifice test above —
 /// that test is the true linkage-bug discriminator.
 #[test]
@@ -405,7 +431,7 @@ fn devour_1_empty_sacrifice_enters_with_zero_counters() {
 /// CR 702.82a: Devour 2 places N=2 counters per creature sacrificed.
 /// One sacrifice → 2 counters, via the synthesizer's
 /// `QuantityExpr::Multiply { factor: 2, .. }` wrapping
-/// `EventContextAmount`.
+/// `PreviousEffectCount`.
 #[test]
 fn devour_2_one_sacrifice_places_two_counters() {
     let face = devour_face("Mycoloth", 2);
@@ -423,6 +449,93 @@ fn devour_2_one_sacrifice_places_two_counters() {
         p1p1(&state, devour),
         2,
         "Devour 2 + one creature sacrificed → 2 +1/+1 counters (N per sacrifice)"
+    );
+}
+
+/// CR 702.82a + CR 614.1c + CR 122.1: Devour's continuation count is distinct
+/// from a concurrently live enclosing event amount. Two sacrifices for Mycoloth
+/// (Devour 2) make four counters, then the AddCounter doubler makes eight.
+#[test]
+fn devour_uses_previous_effect_count_not_outer_event_amount() {
+    let face = devour_face("Mycoloth", 2);
+    let (mut state, devour) = drive_devour_etb_with_battlefield(&face, PlayerId(0), |state| {
+        battlefield_creature(state, PlayerId(0), "Sac Fodder 0");
+        battlefield_creature(state, PlayerId(0), "Sac Fodder 1");
+        install_counter_doubler(state, PlayerId(0));
+    });
+    state.current_trigger_event = Some(GameEvent::DamageDealt {
+        source_id: ObjectId(999),
+        target: crate::types::ability::TargetRef::Player(PlayerId(1)),
+        amount: 1,
+        is_combat: false,
+        excess: 0,
+    });
+    let event_amount = QuantityExpr::Ref {
+        qty: QuantityRef::EventContextAmount,
+    };
+    assert_eq!(
+        crate::game::quantity::resolve_quantity(&state, &event_amount, PlayerId(0), devour),
+        1,
+        "reach-guard: the generic event-context ref still sees the outer scalar event"
+    );
+
+    let WaitingFor::EffectZoneChoice { cards, .. } = &state.waiting_for else {
+        panic!("expected the Devour sacrifice choice");
+    };
+    let chosen: Vec<ObjectId> = cards.iter().copied().take(2).collect();
+    assert_eq!(chosen.len(), 2, "two creatures must be eligible for Devour");
+    crate::game::engine::apply_as_current(&mut state, GameAction::SelectCards { cards: chosen })
+        .unwrap();
+
+    assert_eq!(
+        p1p1(&state, devour),
+        8,
+        "2 sacrifices × Devour 2 × doubler = 8"
+    );
+    let previous_count = QuantityExpr::Ref {
+        qty: QuantityRef::PreviousEffectCount,
+    };
+    assert_eq!(
+        crate::game::quantity::resolve_quantity(&state, &previous_count, PlayerId(0), devour),
+        2,
+        "the direct continuation-local count remains the two selected creatures"
+    );
+    assert_eq!(
+        crate::game::quantity::resolve_quantity(&state, &event_amount, PlayerId(0), devour),
+        1,
+        "reach-guard: EventContextAmount must retain its outer-event precedence"
+    );
+
+    let (mut empty, empty_devour) =
+        drive_devour_etb_with_battlefield(&face, PlayerId(0), |state| {
+            battlefield_creature(state, PlayerId(0), "Declined Fodder 0");
+            battlefield_creature(state, PlayerId(0), "Declined Fodder 1");
+            install_counter_doubler(state, PlayerId(0));
+        });
+    empty.current_trigger_event = Some(GameEvent::DamageDealt {
+        source_id: ObjectId(999),
+        target: crate::types::ability::TargetRef::Player(PlayerId(1)),
+        amount: 1,
+        is_combat: false,
+        excess: 0,
+    });
+    crate::game::engine::apply_as_current(&mut empty, GameAction::SelectCards { cards: vec![] })
+        .unwrap();
+
+    assert_eq!(
+        p1p1(&empty, empty_devour),
+        0,
+        "an empty Devour choice stays zero despite the outer event"
+    );
+    assert_eq!(
+        crate::game::quantity::resolve_quantity(&empty, &previous_count, PlayerId(0), empty_devour),
+        0,
+        "the direct continuation-local count records the empty selection"
+    );
+    assert_eq!(
+        crate::game::quantity::resolve_quantity(&empty, &event_amount, PlayerId(0), empty_devour),
+        1,
+        "reach-guard: the generic event-context ref still sees the outer scalar event"
     );
 }
 

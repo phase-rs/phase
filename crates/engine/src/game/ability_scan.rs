@@ -2170,6 +2170,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         },
         QuantityRef::ExiledFromHandThisResolution => Axes::NONE,
         QuantityRef::PreviousEffectAmount { .. } => Axes::NONE,
+        QuantityRef::PreviousEffectCount => Axes::NONE,
         QuantityRef::LifeLostThisTurn { player } => {
             let mut acc = Axes {
                 event: false,

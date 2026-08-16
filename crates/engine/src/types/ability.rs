@@ -6927,6 +6927,12 @@ pub enum QuantityRef {
         #[serde(default, skip_serializing_if = "is_total_damage_channel")]
         channel: DamageChannel,
     },
+    /// CR 608.2c: Number of objects chosen by the immediately preceding
+    /// resolution-local effect. This reads `GameState::last_effect_count`
+    /// directly, without consulting the generic event-context cascade, so an
+    /// enclosing trigger's scalar amount cannot shadow a continuation's count.
+    /// Used by Devour's counter placement after its ranged sacrifice choice.
+    PreviousEffectCount,
     /// CR 118.4 + CR 119.3: Amount of life lost this turn, scoped by `player`
     /// per the workspace "Parameterize, don't proliferate" principle (Round Π-3).
     ///
@@ -7454,6 +7460,7 @@ impl QuantityRef {
             | QuantityRef::TrackedSetAggregate { .. }
             | QuantityRef::ExiledFromHandThisResolution
             | QuantityRef::PreviousEffectAmount { .. }
+            | QuantityRef::PreviousEffectCount
             | QuantityRef::UnspentMana { .. }
             | QuantityRef::EventContextAmount
             | QuantityRef::EventContextPlayerCount { .. }
