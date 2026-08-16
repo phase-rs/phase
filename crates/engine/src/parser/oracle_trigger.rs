@@ -47,17 +47,18 @@ use super::oracle_util::{
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::ManaProduction;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AdditionalCostOrigin,
-    AdditionalCostPaymentSource, AggregateFunction, AttachmentKind, AttackersDeclaredCountSubject,
-    CardSelectionMode, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, CoinFlipResult,
-    Comparator, ControllerRef, CountScope, CounterTriggerFilter, DamageAmountScope,
-    DamageAmountThreshold, DamageChannel, DamageKindFilter, DestinationConstraint, DieResultFilter,
-    Effect, EffectScope, FilterProp, ManaAbilityProducedFilter, ObjectScope, OriginConstraint,
-    ParsedCondition, PlayerFilter, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef,
-    RenownSubject, SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality,
-    StaticCondition, SubAbilityLink, TapCreaturesRequirement, TapStateChange, TargetFilter,
-    TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessPayModifier, ZoneChangeClause,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
+    AdditionalCostOrigin, AdditionalCostPaymentSource, AggregateFunction, AttachmentKind,
+    AttackersDeclaredCountSubject, CardSelectionMode, CastManaObjectScope, CastManaSpentMetric,
+    CastVariantPaid, CoinFlipResult, Comparator, ControllerRef, CountScope, CounterTriggerFilter,
+    DamageAmountScope, DamageAmountThreshold, DamageChannel, DamageKindFilter,
+    DestinationConstraint, DieResultFilter, Effect, EffectScope, FilterProp,
+    ManaAbilityProducedFilter, ObjectScope, OriginConstraint, ParsedCondition, PlayerFilter,
+    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
+    SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality, StaticCondition,
+    SubAbilityLink, TapCreaturesRequirement, TapStateChange, TargetFilter, TriggerCondition,
+    TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+    ZoneChangeClause,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
@@ -11291,7 +11292,7 @@ fn try_parse_event(
             let mut def = make_base();
             def.mode = TriggerMode::DamageDone;
             def.damage_kind = kind;
-            // CR 120.9: the SOURCE-led grammar names the damaging source, so its
+            // CR 120.4b: the SOURCE-led grammar names the damaging source, so its
             // threshold reads that source's share and never aggregates across
             // simultaneous sources. Deus of Calamity's ruling is explicit ("6
             // damage to an opponent at one time … won't keep track of
@@ -11864,7 +11865,7 @@ fn try_parse_event(
         }
         Ok((rest, SimpleEvent::BecomesUnattached(Some(filter))))
     }
-    /// CR 120.4b + CR 120.9: the source-scoping tail on the received-damage
+    /// CR 120.4 + CR 120.4b: the source-scoping tail on the received-damage
     /// grammar — `"…by a single source"` (Pain Magnification). It narrows the
     /// threshold's aggregation domain from the whole simultaneous damage event
     /// (the grammar's default, CR 120.4b) to one source's share.
@@ -12885,7 +12886,7 @@ fn try_parse_source_deals_damage_trigger(lower: &str) -> Option<(TriggerMode, Tr
 
     // Shared predicate tail: optional kind, optional "N or more", "damage".
     let (after_damage, (damage_kind, threshold)) = parse_damage_predicate_tail(rest).ok()?;
-    // CR 120.9: this grammar is SOURCE-led — it names the damaging source, so
+    // CR 120.4b: this grammar is SOURCE-led — it names the damaging source, so
     // its threshold reads only that source's share and never aggregates across
     // simultaneous sources (Dragonborn Champion must not fire on two 3-damage
     // sources; Ghyrson Starn's "exactly 1" would break entirely under an

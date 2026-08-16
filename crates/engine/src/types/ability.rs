@@ -4144,9 +4144,7 @@ pub struct DamageAmountThreshold {
 /// `crates/server-core/src/persist.rs:23`), and the in-repo shared card fixture
 /// `crates/engine/tests/fixtures/integration_cards.json.gz`, which already
 /// carries legacy `["GE",5]` / `["EQ",1]` arrays.
-fn deserialize_damage_amount_compat<'de, D>(
-    d: D,
-) -> Result<Option<DamageAmountThreshold>, D::Error>
+fn deserialize_damage_amount_compat<'de, D>(d: D) -> Result<Option<DamageAmountThreshold>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {

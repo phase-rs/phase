@@ -17035,7 +17035,7 @@ fn trigger_source_you_control_deals_damage_to_another_player() {
 // damage to <recipient>" — exercises the amount-threshold axis added for
 // Dragonborn Champion. Building-block test: it verifies the parser emits
 // `damage_amount = Some({GE, N, PerSource})` together with the source/recipient
-// filters, regardless of the specific card. CR 120.9: the source-led grammar
+// filters, regardless of the specific card. CR 120.4b: the source-led grammar
 // names its source, so the threshold is per-source, never whole-event.
 #[test]
 fn trigger_source_deals_n_or_more_damage_to_player() {
@@ -29363,7 +29363,7 @@ fn dealt_damage_excess_with_threshold_is_rejected() {
 
 #[test]
 fn dealt_damage_newly_opened_cell_parses_single_source_tail() {
-    // V3 — CR 120.9: an ability triggers when a game event matches ITS trigger
+    // V3 — CR 603.2: an ability triggers when a game event matches ITS trigger
     // event. Pain Magnification's "by a single source" narrows the threshold's
     // aggregation domain to one source's share, which the scope axis now
     // represents, so this NEWLY-OPENED cell emits instead of refusing.
@@ -29518,7 +29518,7 @@ fn whole_event_trigger_is_not_subject_batched() {
 
 #[test]
 fn source_led_damage_triggers_stay_per_source() {
-    // V10a + V10b — CR 120.9: the source-led `DamageDone` grammar names the
+    // V10a + V10b — CR 120.4b: the source-led `DamageDone` grammar names the
     // damaging source, so its threshold reads that source's share and never
     // aggregates. Two pins, one per construction family, because the two
     // families are reached by different entry points.

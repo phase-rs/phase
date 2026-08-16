@@ -1176,7 +1176,16 @@ fn counter_added_fires_per_recipient(trig_def: &TriggerDefinition) -> bool {
 ///
 /// Written as an exhaustive `match` with NO wildcard arm so a future third
 /// aggregation domain fails to compile here rather than silently defaulting to
-/// the per-event path. This is the only production read of `DamageAmountScope`.
+/// the per-event path.
+///
+/// This is the only production read that BRANCHES ON the aggregation domain to
+/// select runtime behavior. One other production site reads the scope without
+/// branching on its meaning: `is_per_source_damage_scope` in `types/ability.rs`,
+/// the `skip_serializing_if` guard that elides the default pole. That guard is a
+/// non-exhaustive `matches!`, so it will NOT fail to compile on a third variant
+/// — it would simply stop eliding, which is the correct default. Anyone adding a
+/// variant should still read it deliberately rather than trusting the compiler
+/// to surface every site.
 fn damage_received_aggregates_whole_event(trig_def: &TriggerDefinition) -> bool {
     if !matches!(trig_def.mode, TriggerMode::DamageReceived) {
         return false;
@@ -2243,7 +2252,15 @@ fn collect_matching_triggers_inner(
         // Batched definitions are admitted exactly once during logical-owner
         // settlement. Segment collection must not reach matcher conditions or
         // fire-count ledgers for them first.
-        if collection.skips_batched_definitions() && trig_def.batched {
+        //
+        // Keyed on `fires_once_per_batch`, the SAME firing-granularity authority
+        // as the carrier below — not on `trig_def.batched`. A whole-event damage
+        // def has `batched == false` but fires once per batch, so keying this
+        // gate on `trig_def.batched` would let it reach settlement carrying
+        // `batched: true` and trip the `debug_assert!(!matched.batched)` there.
+        // Unreachable today (settlement carries only `ZoneChanged` occurrences),
+        // but the two gates must not drift apart.
+        if collection.skips_batched_definitions() && fires_once_per_batch(trig_def) {
             continue;
         }
         if let LogicalZoneTriggerCollection::Settlement(group) = collection {
@@ -2635,11 +2652,19 @@ fn collect_matching_triggers_inner(
                         provenance: None,
                     },
                     trigger_events,
-                    // CR 603.2c + CR 120.4b: this field drives the
-                    // `batched_this_pass` insert, so it must consult the SAME
+                    // CR 603.2c + CR 120.4b: must consult the SAME
                     // firing-granularity authority as the skip above. Note this
                     // is deliberately NOT `trig_def.batched`, which additionally
                     // means "count subjects" — see `fires_once_per_batch`.
+                    //
+                    // WIDENING THIS FIELD TOUCHES EIGHT CONSUMERS, not just the
+                    // `batched_this_pass` inserts: those five inserts, the
+                    // `RecordBatchedZoneChanges` gate, the batched zone-change
+                    // replay recorder, and the `debug_assert!(!matched.batched)`
+                    // on the settlement path. The two zone-change consumers are
+                    // additionally gated on `batched_zone_change_batch`, which is
+                    // false for a `DamageDealt` batch, so all eight are safe for
+                    // this axis today — but re-check every one before widening.
                     batched: fires_once_per_batch(trig_def),
                     constraint: trig_def.constraint.clone(),
                 });

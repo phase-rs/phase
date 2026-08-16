@@ -1,4 +1,4 @@
-//! CR 120.9: per-SOURCE damage aggregation — Pain Magnification, "Whenever an
+//! CR 120.4 + CR 120.4b: per-SOURCE damage aggregation — Pain Magnification, "Whenever an
 //! opponent is dealt 3 or more damage by a single source, that player discards
 //! a card."
 //!

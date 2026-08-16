@@ -174,7 +174,8 @@ fn damage_at_different_times_does_not_fire() {
         "indestructible recipient must survive both damage sub-steps"
     );
     assert_eq!(
-        runner.state().objects[&bystander].damage_marked, 4,
+        runner.state().objects[&bystander].damage_marked,
+        4,
         "both 2-damage instances must actually land — this is what makes the 0 below non-vacuous"
     );
 
@@ -209,7 +210,8 @@ fn damage_at_different_times_control_same_event_does_fire() {
     runner.advance_until_stack_empty();
 
     assert_eq!(
-        runner.state().objects[&bystander].damage_marked, 4,
+        runner.state().objects[&bystander].damage_marked,
+        4,
         "same total damage as the different-times row"
     );
     assert_eq!(
@@ -255,11 +257,13 @@ fn two_bystanders_each_fire_once() {
     runner.advance_until_stack_empty();
 
     assert_eq!(
-        runner.state().objects[&bystander_a].damage_marked, 4,
+        runner.state().objects[&bystander_a].damage_marked,
+        4,
         "first Bystander must take its whole batch"
     );
     assert_eq!(
-        runner.state().objects[&bystander_b].damage_marked, 4,
+        runner.state().objects[&bystander_b].damage_marked,
+        4,
         "second Bystander must take its whole batch"
     );
     assert_eq!(
