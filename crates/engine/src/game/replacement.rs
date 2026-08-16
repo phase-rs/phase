@@ -1823,13 +1823,109 @@ fn redirect_chosen_object_for_rid(state: &GameState, rid: ReplacementId) -> Opti
     }
 }
 
-/// CR 614.9: Read back the `redirect_target` filter stored on the matched
-/// replacement. Mirrors `redirect_chosen_object_for_rid`'s repl-lookup shape,
-/// but `TargetFilter` (unlike the `Copy` `ShieldKind`) is not `Copy`, so the
-/// stored filter is cloned. Used by the continuous `ShieldKind::Prevention`
-/// path to detect a `TargetFilter::SelfRef` redirect (Palisade Giant, Veteran
-/// Bodyguard, Weathered Bodyguards) and reuse the shared redirection mechanics.
-fn redirect_target_for_rid(state: &GameState, rid: ReplacementId) -> Option<TargetFilter> {
+/// CR 614.9 vs CR 615.1a: what a `ShieldKind::Prevention` shield actually does.
+///
+/// The durable redirection spine stores its recipient in
+/// `ReplacementDefinition::redirect_target` on a shield whose `ShieldKind` is
+/// still `Prevention`, so "does this shield prevent?" is NOT answerable from the
+/// shield kind alone. This enum is the answer, and [`prevention_shield_route`]
+/// is its single authority — consulted by BOTH the CR 615.12 suppression gate
+/// (`is_damage_prevention_replacement`) and the apply-time route
+/// (`damage_done_applier`'s Branch 2), so the two can never disagree about
+/// whether a given shield prevents or redirects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreventionShieldRoute {
+    /// CR 614.9: a recognized `redirect_target` plus an amount the redirection
+    /// mechanics own — the damage MOVES to this recipient. CR 615.12 ("damage
+    /// can't be prevented") must NOT suppress this: nothing is prevented.
+    Redirect(DamageRedirectTarget),
+    /// CR 615: an ordinary prevention shield — the damage is PREVENTED, and
+    /// CR 615.12 suppresses it. Also the route for the two non-redirecting
+    /// shapes that legitimately reach this gate: a `SpecificObject` recipient
+    /// (owned by the effect-created one-shot path, Branch 1b) and the
+    /// `AllBut`/`Next` amounts the redirection mechanics do not own.
+    Prevent,
+    /// CR 614.9: a `redirect_target` with NO mapping onto a
+    /// [`DamageRedirectTarget`]. Fails CLOSED in every build profile — the
+    /// replacement does not apply at all. Neither fallback is acceptable:
+    /// redirecting needs a recipient we do not have, and preventing would DELETE
+    /// the damage this spine exists to MOVE.
+    Unmapped,
+}
+
+/// CR 614.9: Map a DURABLE redirection shield's stored `redirect_target` filter
+/// onto the recipient authority `redirect_damage_event` consumes.
+///
+/// Every meaningful arm is written out. The only producer of this field on a
+/// `ShieldKind::Prevention` shield is the parser's
+/// `parse_durable_redirect_recipient_filter`; a recipient added there without a
+/// mapping here lands in the residual arm and FAILS CLOSED rather than silently
+/// degrading a CR 614.9 redirection into a CR 615 prevention (damage deleted
+/// rather than moved) — the exact defect the anchored redirection spine exists
+/// to eliminate. `durable_redirect_route_is_total_over_parser_recipients` drives
+/// this function with the parser's own accepted phrasings, so the residual arm
+/// cannot become reachable without a test failure in every build profile.
+fn durable_redirect_route_for_filter(filter: &TargetFilter) -> PreventionShieldRoute {
+    match filter {
+        // "...is dealt to ~ instead" — the shield host itself.
+        TargetFilter::SelfRef => {
+            PreventionShieldRoute::Redirect(DamageRedirectTarget::SourceObject)
+        }
+        // CR 303.4b + CR 301.5a: "...is dealt to enchanted/equipped creature
+        // instead" — the host the shield's source is attached to.
+        TargetFilter::AttachedTo => {
+            PreventionShieldRoute::Redirect(DamageRedirectTarget::AttachedToSource)
+        }
+        // CR 614.9: a concrete object recipient belongs exclusively to the
+        // EFFECT-CREATED path — `create_damage_replacement::resolve` writes
+        // `SpecificObject { id }` alongside a `ShieldKind::Redirection` (of
+        // either `RedirectionLifetime`), and `redirect_chosen_object_for_rid` is
+        // its reader. Such a shield is claimed by Branch 1b and never reaches
+        // this Prevention-shield gate; routing it to `Redirect` here would
+        // resurrect a consumed one-shot as a durable shield.
+        TargetFilter::SpecificObject { .. } => PreventionShieldRoute::Prevent,
+        _ => PreventionShieldRoute::Unmapped,
+    }
+}
+
+/// CR 614.9 + CR 615.1a: the SINGLE authority for whether a
+/// `ShieldKind::Prevention` shield prevents, redirects, or must fail closed.
+///
+/// Takes the definition rather than looking it up: `is_damage_prevention_replacement`
+/// (on `find_applicable_replacements`' per-candidate loop, i.e. the damage hot
+/// path) already holds it, and borrows the stored filter rather than cloning, so
+/// the CR 615.12 gate adds neither a second map lookup nor an allocation.
+fn prevention_shield_route_for_def(
+    repl: &ReplacementDefinition,
+    amount: PreventionAmount,
+) -> PreventionShieldRoute {
+    // CR 615.1a: no recipient stored — an ordinary "prevent" shield.
+    let Some(filter) = repl.redirect_target.as_ref() else {
+        return PreventionShieldRoute::Prevent;
+    };
+    match durable_redirect_route_for_filter(filter) {
+        // CR 615.7: `redirect_damage_event` treats `PreventionAmount::AllBut` as
+        // `unreachable!()` — an invariant of `ShieldKind::Redirection`, not of
+        // `ShieldKind::Prevention`, which legitimately uses `AllBut` for Temple
+        // Altisaur. Only `All` is owned by the redirection mechanics; every other
+        // amount stays on the CR 615 prevention arms, and therefore stays
+        // suppressible by CR 615.12.
+        PreventionShieldRoute::Redirect(_) if !matches!(amount, PreventionAmount::All) => {
+            PreventionShieldRoute::Prevent
+        }
+        route => route,
+    }
+}
+
+/// `ReplacementId`-keyed wrapper over [`prevention_shield_route_for_def`] for the
+/// apply-time call site, which has only the `Copy` `ShieldKind` in scope. A
+/// missing definition cannot redirect, so it routes to `Prevent` (the pre-existing
+/// behavior for an unresolvable rid).
+fn prevention_shield_route(
+    state: &GameState,
+    rid: ReplacementId,
+    amount: PreventionAmount,
+) -> PreventionShieldRoute {
     let repl = if rid.source == ObjectId(0) {
         state.pending_damage_replacements.get(rid.index)
     } else {
@@ -1838,45 +1934,9 @@ fn redirect_target_for_rid(state: &GameState, rid: ReplacementId) -> Option<Targ
             .get(&rid.source)
             .and_then(|obj| obj.replacement_definitions.get(rid.index))
     };
-    repl.and_then(|repl| repl.redirect_target.clone())
-}
-
-/// CR 614.9: Map a DURABLE redirection shield's stored `redirect_target` filter
-/// onto the recipient authority `redirect_damage_event` consumes.
-///
-/// Every meaningful arm is written out. The only producer of this field on a
-/// `ShieldKind::Prevention` shield is the parser's
-/// `parse_durable_redirect_recipient_filter`, which emits exactly `SelfRef` and
-/// `AttachedTo`; if a recipient is added there without a mapping here, the
-/// residual arm's `debug_assert!` fires instead of the shield silently falling
-/// through to the ordinary CR 615 prevention arms below — which would degrade a
-/// CR 614.9 redirection into a CR 615 prevention (damage deleted rather than
-/// moved), the exact defect the anchored redirection spine exists to eliminate.
-fn durable_redirect_recipient(filter: &TargetFilter) -> Option<DamageRedirectTarget> {
-    match filter {
-        // "...is dealt to ~ instead" — the shield host itself.
-        TargetFilter::SelfRef => Some(DamageRedirectTarget::SourceObject),
-        // CR 303.4b + CR 301.5a: "...is dealt to enchanted/equipped creature
-        // instead" — the host the shield's source is attached to.
-        TargetFilter::AttachedTo => Some(DamageRedirectTarget::AttachedToSource),
-        // CR 614.9: a concrete object recipient belongs exclusively to the
-        // EFFECT-CREATED path — `create_damage_replacement::resolve` writes
-        // `SpecificObject { id }` alongside a `ShieldKind::Redirection` (of
-        // either `RedirectionLifetime`), and `redirect_chosen_object_for_rid` is
-        // its reader. Such a shield is claimed by Branch 1b and never reaches
-        // this Prevention-shield gate; mapping it here would resurrect a consumed
-        // one-shot as a durable shield. `None` by intent.
-        TargetFilter::SpecificObject { .. } => None,
-        other => {
-            debug_assert!(
-                false,
-                "CR 614.9: unmapped durable redirect recipient {other:?} — a recipient was added \
-                 to parse_durable_redirect_recipient_filter without a mapping here; it would \
-                 silently degrade to a CR 615 prevention"
-            );
-            None
-        }
-    }
+    repl.map_or(PreventionShieldRoute::Prevent, |repl| {
+        prevention_shield_route_for_def(repl, amount)
+    })
 }
 
 /// CR 614.9: Resolve and apply a damage redirection. Shared by the
@@ -1966,6 +2026,18 @@ fn redirect_damage_event(
             unreachable!("PreventionAmount::AllBut is never assigned to a ShieldKind::Redirection")
         }
         PreventionAmount::Next(n) => {
+            // CR 614.5: "the next N damage" is one-opportunity grammar, and the
+            // depletion bookkeeping below runs only under `consume_after_redirect`.
+            // A `Continuous` shield would therefore never spend `n` and would
+            // redirect up to N damage from EVERY event in its window. No parser
+            // path produces that pairing (the durable Prevention gate always
+            // passes `All`), but the type permits it and the failure is silent —
+            // so it is asserted rather than assumed, mirroring the `AllBut` arm.
+            debug_assert!(
+                consume_after_redirect,
+                "CR 614.5: PreventionAmount::Next must not pair with \
+                 RedirectionLifetime::Continuous — the amount would never deplete"
+            );
             let redirected_amount = damage_amount.min(n);
             let remaining_amount = damage_amount.saturating_sub(redirected_amount);
             if consume_after_redirect {
@@ -2306,33 +2378,47 @@ fn damage_done_applier(
             // `RedirectionLifetime::Continuous` so the durable shield re-fires
             // for every damage event within its lifetime, and skip the
             // DamagePrevented / `combat_prevention_tally` bookkeeping entirely
-            // (no damage is prevented — it is dealt to a new recipient). The
-            // `matches!(amount, PreventionAmount::All)` conjunct is required:
-            // `redirect_damage_event`'s body treats `PreventionAmount::AllBut` as
-            // `unreachable!()` (an invariant of `ShieldKind::Redirection`, not of
-            // `ShieldKind::Prevention`, which legitimately uses `AllBut` for
-            // Temple Altisaur), so any `AllBut`/`Next` prevention shield — even a
-            // hypothetical future one carrying a `redirect_target` — falls
-            // through to the ordinary prevention arms below rather than reaching
-            // that dead code.
-            if let Some(recipient) = redirect_target_for_rid(state, rid)
-                .as_ref()
-                .and_then(durable_redirect_recipient)
-                .filter(|_| matches!(amount, PreventionAmount::All))
-            {
-                return redirect_damage_event(
-                    state,
-                    rid,
-                    recipient,
-                    PreventionAmount::All,
-                    source_id,
-                    target,
-                    dmg,
-                    is_combat,
-                    applied,
-                    RedirectionLifetime::Continuous,
-                    events,
-                );
+            // (no damage is prevented — it is dealt to a new recipient).
+            //
+            // `prevention_shield_route` is the SAME authority the CR 615.12
+            // suppression gate (`is_damage_prevention_replacement`) consults, so
+            // a shield can never be classified as prevention there and applied as
+            // a redirection here. It also owns the amount gate: `AllBut`/`Next`
+            // shields route to `Prevent` and fall through to the ordinary
+            // prevention arms below.
+            match prevention_shield_route(state, rid, amount) {
+                PreventionShieldRoute::Redirect(recipient) => {
+                    return redirect_damage_event(
+                        state,
+                        rid,
+                        recipient,
+                        PreventionAmount::All,
+                        source_id,
+                        target,
+                        dmg,
+                        is_combat,
+                        applied,
+                        RedirectionLifetime::Continuous,
+                        events,
+                    );
+                }
+                // CR 614.9: fail CLOSED. The shield carries a recipient this
+                // build cannot map, so it can neither redirect (no recipient) nor
+                // fall through to the CR 615 arms (which would DELETE the damage
+                // rather than move it). Return the event unmodified so the damage
+                // is dealt exactly as proposed — the only outcome that loses no
+                // damage. `mark_applied(rid)` already ran before this applier, so
+                // declining here cannot re-enter the same shield.
+                PreventionShieldRoute::Unmapped => {
+                    return ApplyResult::Modified(ProposedEvent::Damage {
+                        source_id,
+                        target,
+                        amount: dmg,
+                        is_combat,
+                        applied,
+                    });
+                }
+                PreventionShieldRoute::Prevent => {}
             }
 
             let prevented_amount;
@@ -5412,11 +5498,28 @@ fn is_damage_prevention_replacement(
         return false;
     }
 
-    // Check for ShieldKind::Prevention or description-based prevention patterns
-    // CR 615: Prevention shields created by prevent_damage.rs
-    matches!(repl.shield_kind, ShieldKind::Prevention { .. })
+    // CR 615: Prevention shields created by prevent_damage.rs.
+    //
+    // CR 614.9 + CR 615.1a: a Prevention-SHAPED shield that carries a
+    // `redirect_target` is a CR 614.9 REDIRECTION, not a CR 615 prevention — its
+    // Oracle grammar never says "prevent" (CR 615.1a), and no damage is prevented
+    // when it applies (the damage is dealt to a new recipient). CR 615.12
+    // therefore must NOT suppress it; classifying it as prevention here made
+    // Pariah, Pariah's Shield, With Great Power . . ., Palisade Giant and Ancient
+    // Adamantoise silently stop redirecting under any "damage can't be prevented"
+    // effect. `prevention_shield_route` is the SAME authority
+    // `damage_done_applier`'s Branch 2 consults, so this gate and the apply-time
+    // route cannot drift apart (an `Unmapped` shield stays classified as
+    // prevention here and fails closed there — either way it does nothing).
+    if let ShieldKind::Prevention { amount } = repl.shield_kind {
+        return !matches!(
+            prevention_shield_route_for_def(repl, amount),
+            PreventionShieldRoute::Redirect(_)
+        );
+    }
+
     // Legacy: description-based prevention from parsed replacement definitions
-    || repl.description.as_ref().is_some_and(|d| {
+    repl.description.as_ref().is_some_and(|d| {
         let lower = d.to_lowercase();
         lower.contains("prevent") && lower.contains("damage")
     })
@@ -5482,7 +5585,7 @@ fn matches_damage_target_filter(
             // sentinel `ObjectId(0)`, which matches no permanent, so the
             // exclusion is correctly inert there.
             TargetRef::Object(oid) => {
-                (!source_scope.excludes_source() || *oid != repl_source)
+                (!source_scope.is_exclude() || *oid != repl_source)
                     && state.objects.get(oid).is_some_and(|obj| {
                         player_scope_matches(
                             player,
@@ -10079,9 +10182,9 @@ mod tests {
     use crate::game::game_object::{AttachTarget, GameObject};
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, CastManaObjectScope, CastManaSpentMetric,
-        ChosenAttribute, Comparator, ControlledPermanentsScope, ControllerRef, Effect, EffectScope,
-        FilterProp, OriginConstraint, PlayerFilter, PtValue, QuantityExpr, QuantityModification,
-        QuantityRef, ReplacementDefinition, ReplacementMode, ReplacementPlayerScope,
+        ChosenAttribute, Comparator, ControllerRef, Effect, EffectScope, FilterProp,
+        OriginConstraint, PlayerFilter, PtValue, QuantityExpr, QuantityModification, QuantityRef,
+        ReplacementDefinition, ReplacementMode, ReplacementPlayerScope, SourceExclusion,
         TapStateChange, TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
@@ -10102,32 +10205,60 @@ mod tests {
     }
 
     /// CR 614.9: the durable-redirection recipient mapping is TOTAL over every
-    /// filter the parser's `parse_durable_redirect_recipient_filter` can emit. An
-    /// unmapped recipient would fall through to the ordinary CR 615 prevention
-    /// arms and DELETE the damage instead of moving it.
+    /// filter the parser's `parse_durable_redirect_recipient_filter` can emit.
+    /// An unmapped recipient makes the shield fail closed (the damage is dealt
+    /// as proposed instead of being moved), which is safe but silently drops the
+    /// card's whole ability — so the mapping must never have a hole.
     ///
-    /// The residual arm's `debug_assert!` is the loud-failure guard for a future
-    /// recipient added to the parser without a mapping here; it is deliberately
-    /// NOT exercised by a test (tripping it would abort the test binary) — the
-    /// assert itself is the assertion.
+    /// The cases are driven through the REAL grammar rather than a hand-written
+    /// list of `TargetFilter`s: a recipient phrasing added to
+    /// `parse_durable_redirect_recipient_filter` without a matching arm in
+    /// `durable_redirect_route_for_filter` fails here, in every build profile.
+    /// The previous hard-coded version could not catch that — it restated the
+    /// mapping's own arms back to it.
     #[test]
-    fn durable_redirect_recipient_maps_every_parser_producible_filter() {
-        assert_eq!(
-            durable_redirect_recipient(&TargetFilter::SelfRef),
-            Some(DamageRedirectTarget::SourceObject),
-            "\"...is dealt to ~ instead\" redirects onto the shield host"
-        );
-        assert_eq!(
-            durable_redirect_recipient(&TargetFilter::AttachedTo),
-            Some(DamageRedirectTarget::AttachedToSource),
-            "\"...is dealt to enchanted/equipped creature instead\" redirects onto the host"
-        );
+    fn durable_redirect_route_is_total_over_parser_recipients() {
+        use crate::parser::oracle_replacement::parse_durable_redirect_recipient_filter;
+
+        // Every recipient phrasing the "... is dealt to <recipient> instead"
+        // tail accepts, in the normalized (`~`-substituted, lowercased) form the
+        // spine sees. Each must route to `Redirect`.
+        let phrasings = [
+            ("~", DamageRedirectTarget::SourceObject),
+            ("equipped creature", DamageRedirectTarget::AttachedToSource),
+            ("enchanted creature", DamageRedirectTarget::AttachedToSource),
+        ];
+        for (phrase, expected) in phrasings {
+            let (rest, filter) = parse_durable_redirect_recipient_filter(phrase)
+                .unwrap_or_else(|_| panic!("the spine's recipient slot must accept {phrase:?}"));
+            assert!(
+                rest.is_empty(),
+                "{phrase:?} must be fully consumed by the recipient slot, left {rest:?}"
+            );
+            assert_eq!(
+                durable_redirect_route_for_filter(&filter),
+                PreventionShieldRoute::Redirect(expected),
+                "{phrase:?} parsed to {filter:?}, which has no redirection mapping — it would \
+                 fail closed and silently drop the card's redirection"
+            );
+        }
+
         // Owned by the ONE-SHOT path (`redirect_chosen_object_for_rid`), which
-        // reads it off a `ShieldKind::Redirection` shield — never this gate.
+        // reads it off a `ShieldKind::Redirection` shield — never this gate. Not
+        // parser-producible here, so it is asserted directly.
         assert_eq!(
-            durable_redirect_recipient(&TargetFilter::SpecificObject { id: ObjectId(7) }),
-            None,
+            durable_redirect_route_for_filter(&TargetFilter::SpecificObject { id: ObjectId(7) }),
+            PreventionShieldRoute::Prevent,
             "a captured chosen object belongs to the one-shot redirection shield"
+        );
+
+        // The fail-closed residual arm, asserted rather than assumed: an
+        // unmapped recipient must NOT reach the CR 615 prevention arms, where it
+        // would delete the damage instead of moving it.
+        assert_eq!(
+            durable_redirect_route_for_filter(&TargetFilter::Any),
+            PreventionShieldRoute::Unmapped,
+            "an unmapped recipient must fail closed, not degrade into a CR 615 prevention"
         );
     }
 
@@ -13822,6 +13953,123 @@ mod tests {
         );
     }
 
+    /// CR 614.9 + CR 615.12: "damage can't be prevented" suppresses PREVENTION
+    /// effects only. A durable redirection (Palisade Giant, Ancient Adamantoise,
+    /// Pariah, Pariah's Shield, With Great Power . . .) is stored as a
+    /// `ShieldKind::Prevention` shield carrying a `redirect_target`, but it
+    /// prevents nothing — it moves the damage — so it must keep applying.
+    ///
+    /// Discriminating: reverting the `redirect_target` guard in
+    /// `is_damage_prevention_replacement` re-classifies this shield as a
+    /// prevention, `find_applicable_replacements` drops it, and the redirect
+    /// assertion below fails with an empty candidate list.
+    #[test]
+    fn restriction_does_not_block_durable_redirect_shields() {
+        use crate::types::ability::{
+            GameRestriction, PreventionAmount, ReplacementDefinition, RestrictionExpiry,
+        };
+
+        // Palisade Giant's shape: "all damage that would be dealt to you and
+        // other permanents you control is dealt to ~ instead".
+        let giant = ObjectId(1);
+        let redirect_repl = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .prevention_shield(PreventionAmount::All)
+            .redirect_target(TargetFilter::SelfRef);
+        let mut state = test_state_with_object(giant, Zone::Battlefield, vec![redirect_repl]);
+        // CR 614.9: the recipient must still be a creature on the battlefield, or
+        // the redirection legitimately does nothing.
+        state
+            .objects
+            .get_mut(&giant)
+            .expect("fixture object")
+            .card_types
+            .core_types = vec![crate::types::card_type::CoreType::Creature];
+        state
+            .restrictions
+            .push(GameRestriction::DamagePreventionDisabled {
+                source: ObjectId(99),
+                expiry: RestrictionExpiry::EndOfTurn,
+                scope: None, // Global
+            });
+
+        let proposed = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+
+        let registry = build_replacement_registry();
+        let candidates = find_applicable_replacements(&state, &proposed, &registry);
+        assert!(
+            !candidates.is_empty(),
+            "CR 615.12 suppresses prevention, not CR 614.9 redirection — the shield must survive"
+        );
+
+        // Reach guard + behavior: the surviving candidate must actually MOVE the
+        // damage onto the Giant, not merely be offered. An `is_empty()` check
+        // alone would still pass if the shield were applied as a prevention.
+        let rid = candidates[0];
+        let mut events = Vec::new();
+        let result = damage_done_applier(proposed, rid, &mut state, &mut events);
+        match result {
+            ApplyResult::Modified(ProposedEvent::Damage { target, amount, .. }) => {
+                assert_eq!(
+                    target,
+                    TargetRef::Object(giant),
+                    "CR 614.9: the damage is dealt to the redirection host instead"
+                );
+                assert_eq!(amount, 3, "CR 615.12: a redirection prevents no damage");
+            }
+            other => panic!("expected the damage to be redirected, got {other:?}"),
+        }
+    }
+
+    /// CR 614.9: a durable shield whose `redirect_target` has no mapping FAILS
+    /// CLOSED — the damage is dealt as proposed. It must never fall through to
+    /// the CR 615 prevention arms, which would delete the damage entirely.
+    ///
+    /// Discriminating: routing `Unmapped` to the prevention arms instead makes
+    /// this return `ApplyResult::Prevented`.
+    #[test]
+    fn unmapped_durable_redirect_recipient_fails_closed_instead_of_preventing() {
+        use crate::types::ability::{PreventionAmount, ReplacementDefinition};
+
+        let host = ObjectId(1);
+        // `TargetFilter::Any` is not a recipient the spine can produce; it stands
+        // in for a future parser recipient added without a mapping.
+        let repl = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .prevention_shield(PreventionAmount::All)
+            .redirect_target(TargetFilter::Any);
+        let mut state = test_state_with_object(host, Zone::Battlefield, vec![repl]);
+
+        let proposed = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        let rid = ReplacementId {
+            source: host,
+            index: 0,
+        };
+        let mut events = Vec::new();
+        let result = damage_done_applier(proposed, rid, &mut state, &mut events);
+        match result {
+            ApplyResult::Modified(ProposedEvent::Damage { target, amount, .. }) => {
+                assert_eq!(
+                    target,
+                    TargetRef::Player(PlayerId(0)),
+                    "the damage stays on its original recipient"
+                );
+                assert_eq!(amount, 3, "no damage may be deleted by an unmapped shield");
+            }
+            other => panic!("an unmapped recipient must fail closed, got {other:?}"),
+        }
+    }
+
     // ── destination_zone filter tests (CR 614.6) ──
 
     fn rip_replacement() -> ReplacementDefinition {
@@ -15058,7 +15306,7 @@ mod tests {
             .damage_target_filter(DamageTargetFilter::PlayerOrPermanentsControlledBy {
                 player: DamageTargetPlayerScope::Opponent,
                 permanent_type: None,
-                source_scope: ControlledPermanentsScope::IncludingSource,
+                source_scope: SourceExclusion::Include,
             });
 
         // Hawkeye = ObjectId(10), controlled by P0, power 2.
@@ -15478,7 +15726,7 @@ mod tests {
         .damage_target_filter(DamageTargetFilter::PlayerOrPermanentsControlledBy {
             player: DamageTargetPlayerScope::Opponent,
             permanent_type: None,
-            source_scope: ControlledPermanentsScope::IncludingSource,
+            source_scope: SourceExclusion::Include,
         });
         // Replacement on P0's object
         let state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
@@ -15504,7 +15752,7 @@ mod tests {
         .damage_target_filter(DamageTargetFilter::PlayerOrPermanentsControlledBy {
             player: DamageTargetPlayerScope::Opponent,
             permanent_type: None,
-            source_scope: ControlledPermanentsScope::IncludingSource,
+            source_scope: SourceExclusion::Include,
         });
         let state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
 
@@ -15530,7 +15778,7 @@ mod tests {
         .damage_target_filter(DamageTargetFilter::PlayerOrPermanentsControlledBy {
             player: DamageTargetPlayerScope::Opponent,
             permanent_type: None,
-            source_scope: ControlledPermanentsScope::IncludingSource,
+            source_scope: SourceExclusion::Include,
         });
         let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
 
@@ -15567,7 +15815,7 @@ mod tests {
             DamageTargetFilter::PlayerOrPermanentsControlledBy {
                 player: DamageTargetPlayerScope::SourceChosenPlayer,
                 permanent_type: None,
-                source_scope: ControlledPermanentsScope::IncludingSource,
+                source_scope: SourceExclusion::Include,
             },
         );
         let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
@@ -15610,7 +15858,7 @@ mod tests {
             DamageTargetFilter::PlayerOrPermanentsControlledBy {
                 player: DamageTargetPlayerScope::SourceChosenPlayer,
                 permanent_type: None,
-                source_scope: ControlledPermanentsScope::IncludingSource,
+                source_scope: SourceExclusion::Include,
             },
         );
         let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);

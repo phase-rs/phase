@@ -17,8 +17,8 @@ use super::primitives::{
 };
 use super::quantity::{parse_quantity_expr_number, parse_quantity_ref};
 use crate::types::ability::{
-    AggregateFunction, Comparator, ControlledPermanentsScope, ControllerRef, FilterProp,
-    ObjectProperty, PtStat, PtValueScope, QuantityExpr,
+    AggregateFunction, Comparator, ControllerRef, FilterProp, ObjectProperty, PtStat, PtValueScope,
+    QuantityExpr, SourceExclusion,
 };
 use crate::types::card_type::CoreType;
 #[cfg(test)]
@@ -512,7 +512,7 @@ pub struct ControlledPermanentsConjunct {
     pub permanent_type: Option<CoreType>,
     /// CR 109.1: whether the leading "other" article excluded the ability's own
     /// source object.
-    pub source_scope: ControlledPermanentsScope,
+    pub source_scope: SourceExclusion,
 }
 
 /// CR 614.1a + CR 109.1: SINGLE AUTHORITY for the "\[other\] `<plural-type>` you
@@ -554,8 +554,8 @@ pub fn parse_controlled_permanents_conjunct(
         ControlledPermanentsConjunct {
             permanent_type,
             source_scope: match other {
-                Some(_) => ControlledPermanentsScope::ExcludingSource,
-                None => ControlledPermanentsScope::IncludingSource,
+                Some(_) => SourceExclusion::Exclude,
+                None => SourceExclusion::Include,
             },
         },
     ))
@@ -584,7 +584,7 @@ mod tests {
             assert_eq!(plain.permanent_type, expected_type);
             assert_eq!(
                 plain.source_scope,
-                ControlledPermanentsScope::IncludingSource,
+                SourceExclusion::Include,
                 "no \"other\" article means the source is included"
             );
 
@@ -595,7 +595,7 @@ mod tests {
             assert_eq!(excluded.permanent_type, expected_type);
             assert_eq!(
                 excluded.source_scope,
-                ControlledPermanentsScope::ExcludingSource,
+                SourceExclusion::Exclude,
                 "the \"other\" article must reach the caller, not be opt()-discarded"
             );
         }

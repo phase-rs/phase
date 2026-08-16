@@ -2,8 +2,8 @@ use crate::game::effects::choose_damage_source;
 use crate::game::effects::prevent_damage::resolve_source_filter;
 use crate::game::game_object::AttachTarget;
 use crate::types::ability::{
-    DamageRedirectTarget, Effect, EffectError, EffectKind, PreventionAmount, ReplacementDefinition,
-    ResolvedAbility, TargetFilter, TargetRef,
+    DamageRedirectTarget, Effect, EffectError, EffectKind, PreventionAmount, RedirectionLifetime,
+    ReplacementDefinition, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -140,8 +140,17 @@ pub fn resolve(
         other => other.clone(),
     };
 
+    // CR 614.5 vs CR 611.2a: label the shield by its actual lifetime.
+    // `replacement_choice_label` falls back to `description` for any shield whose
+    // `execute` shape it doesn't recognize, so a CR 616.1 ordering prompt renders
+    // this string verbatim — a `Continuous` shield (Heroic Sacrifice, Gideon's
+    // Sacrifice) must not announce itself as one-shot.
+    let description = match redirect_lifetime {
+        RedirectionLifetime::OneOpportunity => "One-shot damage replacement",
+        RedirectionLifetime::Continuous => "Continuous damage replacement",
+    };
     let mut shield = ReplacementDefinition::new(ReplacementEvent::DamageDone)
-        .description("One-shot damage replacement".to_string());
+        .description(description.to_string());
 
     // CR 614.1a: Match filters — which damage source / recipient / kind this
     // one-shot replaces. SelfRef ("it"/"~"/"this creature") matches the host;
@@ -375,8 +384,8 @@ mod tests {
     use crate::game::effects::deal_damage;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ControlledPermanentsScope, DamageModification, DamageTargetFilter, DamageTargetPlayerScope,
-        RedirectionLifetime, ShieldKind, TargetFilter,
+        DamageModification, DamageTargetFilter, DamageTargetPlayerScope, RedirectionLifetime,
+        ShieldKind, SourceExclusion, TargetFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
@@ -672,7 +681,7 @@ mod tests {
                 target_filter: Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
                     player: DamageTargetPlayerScope::Controller,
                     permanent_type: Some(CoreType::Creature),
-                    source_scope: ControlledPermanentsScope::IncludingSource,
+                    source_scope: SourceExclusion::Include,
                 }),
                 modification: None,
                 redirect_to: Some(DamageRedirectTarget::ChosenObjectTarget),
@@ -820,7 +829,7 @@ mod tests {
                 target_filter: Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
                     player: DamageTargetPlayerScope::Controller,
                     permanent_type: Some(CoreType::Creature),
-                    source_scope: ControlledPermanentsScope::IncludingSource,
+                    source_scope: SourceExclusion::Include,
                 }),
                 modification: None,
                 redirect_to: Some(DamageRedirectTarget::ChosenObjectTarget),

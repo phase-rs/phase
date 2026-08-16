@@ -631,7 +631,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
             permanent_type,
             source_scope,
         } => {
-            let other = if source_scope.excludes_source() {
+            let other = if source_scope.is_exclude() {
                 "other "
             } else {
                 ""

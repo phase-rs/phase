@@ -16,11 +16,12 @@
 //!
 //! All Oracle text is verbatim / Scryfall-verified.
 
+use super::rules::damage_ability;
 use engine::game::effects::attach::attach_to;
 use engine::game::effects::deal_damage;
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef};
+use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
@@ -46,21 +47,6 @@ const EMPYRIAL_ARCHANGEL_TEXT: &str =
 /// than install a global prevention field.
 const TREACHEROUS_LINK_TEXT: &str = "Enchant creature\nAll damage that would be dealt to enchanted creature is dealt to its controller instead.";
 
-/// A non-combat damage source dealing `amount` to `target`, controlled by P1.
-fn damage_ability(source_id: ObjectId, target: TargetRef, amount: i32) -> ResolvedAbility {
-    ResolvedAbility::new(
-        Effect::DealDamage {
-            amount: QuantityExpr::Fixed { value: amount },
-            target: TargetFilter::Any,
-            damage_source: None,
-            excess: None,
-        },
-        vec![target],
-        source_id,
-        P1,
-    )
-}
-
 /// CR 701.3a/b/c + CR 613.7e: Attach through the engine's SINGLE ATTACH
 /// AUTHORITY, `effects::attach::attach_to`, rather than hand-wiring
 /// `attached_to` / `attachments`.
@@ -71,10 +57,12 @@ fn damage_ability(source_id: ObjectId, target: TargetRef, amount: i32) -> Resolv
 /// A future change that makes redirection depend on attachment legality or
 /// timestamp would pass a hand-wired fixture while breaking real games.
 ///
-/// `attach_to` returns `None` when the gate refuses, which would leave the
-/// fixture silently unattached and turn every downstream assertion vacuous, so
-/// the gate result is asserted rather than discarded. (Not
-/// `attach_as_bestowed_aura` — Pariah is a printed Aura, not a bestowed
+/// `attach_to`'s return value is deliberately DISCARDED: it yields the PREVIOUS
+/// host (`old_target`), not a success flag, so a first attach returns `None`
+/// precisely when it succeeded — asserting `.is_some()` on it would fail every
+/// fixture here. A refused CR 701.3b gate is instead caught by the wired-state
+/// assertions below, which is the only signal that actually discriminates.
+/// (Not `attach_as_bestowed_aura` — Pariah is a printed Aura, not a bestowed
 /// creature.)
 fn attach(runner: &mut GameRunner, attachment: ObjectId, host: ObjectId) {
     attach_to(runner.state_mut(), attachment, host);

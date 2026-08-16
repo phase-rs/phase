@@ -5394,8 +5394,8 @@ pub enum TargetFilter {
     /// leg can exclude the ability's own source.
     ControllerAndControlledPermanents {
         permanent_type: Option<CoreType>,
-        #[serde(default)]
-        source_scope: ControlledPermanentsScope,
+        #[serde(default, skip_serializing_if = "SourceExclusion::is_include")]
+        source_scope: SourceExclusion,
     },
     /// CR 102.2 + CR 102.3 + CR 601.2c: A player reference to an opponent of the
     /// ability's controller, used as the announcing player (`target_chooser`) for
@@ -23969,42 +23969,6 @@ pub enum DamageTargetPlayerScope {
     Specific(PlayerId),
 }
 
-/// CR 109.1 (cited as identity foundation — the CR has no dedicated "another"
-/// entry; mirrors the citation on [`FilterProp::Another`]): whether the
-/// controlled-permanents leg of a compound "`<player>` and \[other\] `<plural
-/// type>` you control" recipient includes the object the ability is printed on.
-///
-/// This is the typed home of the "OTHER" article that the phrase grammar reads.
-/// It is a genuine rules axis, not a cosmetic one: Palisade Giant, Ancient
-/// Adamantoise and The Wanderer say "other permanents you control", so their own
-/// shield must NOT claim damage dealt to the shield host, while Comeuppance,
-/// Channel Harm, Blessed Sanctuary and Heroic Sacrifice say "permanents/creatures
-/// you control" with no exclusion.
-///
-/// CR 614.5 ("a replacement effect gets only one opportunity to affect an
-/// event") makes the distinction invisible for a LONE self-recipient shield, but
-/// not once a second applicable replacement exists: under CR 616.1 the affected
-/// player is offered every applicable replacement, and offering a self-no-op
-/// burns the CR 614.5 opportunity on the wrong shield.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum ControlledPermanentsScope {
-    /// "…and permanents you control" — no exclusion stated; every permanent the
-    /// scoped player controls, including the ability's own source.
-    #[default]
-    IncludingSource,
-    /// "…and OTHER permanents you control" — the object this ability is printed
-    /// on is excluded from the permanent leg.
-    ExcludingSource,
-}
-
-impl ControlledPermanentsScope {
-    /// True when the permanent leg excludes the ability's own source object.
-    pub fn excludes_source(self) -> bool {
-        matches!(self, ControlledPermanentsScope::ExcludingSource)
-    }
-}
-
 /// CR 614.1a: Restricts which damage targets a replacement applies to.
 /// Dedicated enum because `TargetRef` can be `Player` (not handled by `matches_target_filter`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24025,12 +23989,30 @@ pub enum DamageTargetFilter {
     ///
     /// CR 109.1: `source_scope` carries the "OTHER" article — Palisade Giant's
     /// "you and OTHER permanents you control" excludes the shield host itself
-    /// from the permanent leg. See [`ControlledPermanentsScope`].
+    /// from the permanent leg, while Comeuppance, Channel Harm, Blessed Sanctuary
+    /// and Heroic Sacrifice state no exclusion.
+    ///
+    /// The CR has no dedicated "other"/"another" entry; CR 109.1 (object
+    /// identity) is cited as the foundation for the same-object comparison the
+    /// article implies, matching how the rest of the engine annotates `another`
+    /// exclusions (`FilterProp::Another`, `with_own_cast_exclusion`,
+    /// `restrictions.rs`, `trigger_matchers.rs`). It is a convention, not a
+    /// verbatim rule — do not read it as "CR 109.1 defines `other`".
+    ///
+    /// It is a genuine rules axis, not a cosmetic one. CR 614.5 ("a replacement
+    /// effect gets only one opportunity to affect an event") makes the
+    /// distinction invisible for a LONE self-recipient shield, but not once a
+    /// second applicable replacement exists: under CR 616.1 the affected player
+    /// is offered every applicable replacement, and offering a self-no-op burns
+    /// the CR 614.5 opportunity on the wrong shield.
+    ///
+    /// Reuses [`SourceExclusion`] — the existing "does this predicate include the
+    /// ability's own source object" axis — rather than a parallel vocabulary.
     PlayerOrPermanentsControlledBy {
         player: DamageTargetPlayerScope,
         permanent_type: Option<CoreType>,
-        #[serde(default)]
-        source_scope: ControlledPermanentsScope,
+        #[serde(default, skip_serializing_if = "SourceExclusion::is_include")]
+        source_scope: SourceExclusion,
     },
 }
 

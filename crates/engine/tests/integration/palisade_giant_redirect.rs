@@ -16,16 +16,16 @@
 
 use engine::game::effects::deal_damage;
 use engine::game::sba::check_state_based_actions;
-use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::process_triggers;
-use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef};
+use engine::types::ability::{Effect, ShieldKind, TargetFilter, TargetRef};
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
-use super::rules::run_combat;
+use super::rules::{damage_ability, run_combat};
 
 /// Verbatim Palisade Giant redirection text (Scryfall-verified). Byte-identical
 /// to Ancient Adamantoise's redirection line, so both cards are covered by the
@@ -40,20 +40,32 @@ const PALISADE_GIANT_TEXT: &str =
 const WEATHERED_BODYGUARDS_TEXT: &str = "As long as this creature is untapped, all combat damage \
     that would be dealt to you by unblocked creatures is dealt to this creature instead.";
 
-/// A non-combat damage source dealing `amount` to `target`, controlled by P1
-/// (the opponent of the shield's controller in these fixtures).
-fn damage_ability(source_id: ObjectId, target: TargetRef, amount: i32) -> ResolvedAbility {
-    ResolvedAbility::new(
-        Effect::DealDamage {
-            amount: QuantityExpr::Fixed { value: amount },
-            target: TargetFilter::Any,
-            damage_source: None,
-            excess: None,
-        },
-        vec![target],
-        source_id,
-        P1,
-    )
+/// Structural reach-guard: the redirection line really parsed and really
+/// installed a CR 614.9 shield on this object.
+///
+/// Required by any fixture whose only assertion is a value that would also hold
+/// if the code under test were never reached — notably
+/// `palisade_giant_self_damage_is_marked_once_not_doubled_or_prevented`, where
+/// `damage_marked == 5` is equally true when the line regressed to
+/// `Effect::Unimplemented` and no shield exists at all.
+fn assert_redirect_shield_installed(runner: &GameRunner, obj: ObjectId, name: &str) {
+    let object = &runner.state().objects[&obj];
+    assert!(
+        !object
+            .abilities
+            .iter()
+            .any(|a| matches!(&*a.effect, Effect::Unimplemented { .. })),
+        "{name} must parse with zero Effect::Unimplemented, got {:?}",
+        object.abilities
+    );
+    assert!(
+        object.replacement_definitions.iter_unchecked().any(|def| {
+            matches!(def.shield_kind, ShieldKind::Prevention { .. })
+                && def.redirect_target == Some(TargetFilter::SelfRef)
+        }),
+        "{name} must install a CR 614.9 self-recipient redirection shield, got {:?}",
+        object.replacement_definitions
+    );
 }
 
 /// CR 614.9: Palisade Giant redirects damage that would be dealt to its
@@ -348,6 +360,10 @@ fn palisade_giant_self_damage_is_marked_once_not_doubled_or_prevented() {
         .id();
     let source = scenario.add_creature(P1, "Damage Source", 5, 5).id();
     let mut runner = scenario.build();
+
+    // Positive reach guard: `damage_marked == 5` below also holds when no shield
+    // exists at all, so prove the shield is installed before relying on it.
+    assert_redirect_shield_installed(&runner, giant, "Palisade Giant");
 
     let mut events = Vec::new();
     deal_damage::resolve(

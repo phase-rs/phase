@@ -21447,7 +21447,7 @@ mod tests {
     /// restriction (Channel Harm).
     #[test]
     fn prevent_compound_recipient_you_and_controlled_permanents() {
-        use crate::types::ability::ControlledPermanentsScope;
+        use crate::types::ability::SourceExclusion;
         use crate::types::card_type::CoreType;
 
         let planeswalker_text =
@@ -21460,7 +21460,7 @@ mod tests {
             target,
             TargetFilter::ControllerAndControlledPermanents {
                 permanent_type: Some(CoreType::Planeswalker),
-                source_scope: ControlledPermanentsScope::IncludingSource,
+                source_scope: SourceExclusion::Include,
             }
         );
 
@@ -21474,7 +21474,7 @@ mod tests {
             target,
             TargetFilter::ControllerAndControlledPermanents {
                 permanent_type: None,
-                source_scope: ControlledPermanentsScope::IncludingSource,
+                source_scope: SourceExclusion::Include,
             }
         );
 
@@ -21501,7 +21501,7 @@ mod tests {
             target,
             TargetFilter::ControllerAndControlledPermanents {
                 permanent_type: None,
-                source_scope: ControlledPermanentsScope::ExcludingSource,
+                source_scope: SourceExclusion::Exclude,
             },
             "The Wanderer must exclude itself from its own noncombat-damage shield"
         );

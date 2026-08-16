@@ -37,14 +37,14 @@ use super::oracle_util::{
 use crate::types::ability::CastingPermission;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, CombatDamageScope,
-    Comparator, ContinuousModification, ControlledPermanentsScope, ControllerRef,
-    CopyManaValueLimit, CountScope, CounterReplacementSubject, DamageModification,
-    DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope, DrawReplacementScope,
-    Duration, Effect, EffectScope, FilterProp, LibraryPosition, ManaModification,
-    ManaReplacementScope, ManaSpendPermission, PermissionGrantee, PlayerFilter, PreventionAmount,
-    QuantityExpr, QuantityModification, QuantityRef, RedirectionLifetime, ReplacementCondition,
-    ReplacementDefinition, ReplacementMode, ReplacementPlayerScope, StaticCondition,
-    StaticDefinition, TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
+    Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit, CountScope,
+    CounterReplacementSubject, DamageModification, DamageRedirectTarget, DamageTargetFilter,
+    DamageTargetPlayerScope, DrawReplacementScope, Duration, Effect, EffectScope, FilterProp,
+    LibraryPosition, ManaModification, ManaReplacementScope, ManaSpendPermission,
+    PermissionGrantee, PlayerFilter, PreventionAmount, QuantityExpr, QuantityModification,
+    QuantityRef, RedirectionLifetime, ReplacementCondition, ReplacementDefinition, ReplacementMode,
+    ReplacementPlayerScope, SourceExclusion, StaticCondition, StaticDefinition, TapStateChange,
+    TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -7514,7 +7514,7 @@ fn damage_target_opponent_or_permanents() -> DamageTargetFilter {
     DamageTargetFilter::PlayerOrPermanentsControlledBy {
         player: DamageTargetPlayerScope::Opponent,
         permanent_type: None,
-        source_scope: ControlledPermanentsScope::IncludingSource,
+        source_scope: SourceExclusion::Include,
     }
 }
 
@@ -7524,7 +7524,7 @@ fn damage_target_source_chosen_player_or_permanents() -> DamageTargetFilter {
     DamageTargetFilter::PlayerOrPermanentsControlledBy {
         player: DamageTargetPlayerScope::SourceChosenPlayer,
         permanent_type: None,
-        source_scope: ControlledPermanentsScope::IncludingSource,
+        source_scope: SourceExclusion::Include,
     }
 }
 
@@ -9957,7 +9957,15 @@ fn parse_damage_noun_with_scope(input: &str) -> OracleResult<'_, Option<CombatDa
 /// defect this spine exists to remove: CR 615.1a prevention effects "use the word
 /// 'prevent'", and this grammar never says "prevent". A prevention shield with no
 /// recipient DELETES the damage instead of moving it.
-fn parse_durable_redirect_recipient_filter(input: &str) -> OracleResult<'_, TargetFilter> {
+///
+/// `pub(crate)` solely so `game::replacement`'s
+/// `durable_redirect_route_is_total_over_parser_recipients` can drive the real
+/// grammar rather than restating an inevitably-drifting hand-written list of the
+/// filters it emits. That test is what keeps
+/// `durable_redirect_route_for_filter`'s residual (fail-closed) arm unreachable.
+pub(crate) fn parse_durable_redirect_recipient_filter(
+    input: &str,
+) -> OracleResult<'_, TargetFilter> {
     alt((
         value(TargetFilter::SelfRef, tag::<_, _, OracleError<'_>>("~")),
         // CR 301.5a ("equipped creature") + CR 303.4b ("enchanted") — Pariah,
@@ -14041,7 +14049,7 @@ mod tests {
             *target,
             TargetFilter::ControllerAndControlledPermanents {
                 permanent_type: Some(CoreType::Planeswalker),
-                source_scope: ControlledPermanentsScope::IncludingSource,
+                source_scope: SourceExclusion::Include,
             }
         );
         assert!(matches!(
@@ -14118,7 +14126,7 @@ mod tests {
             *target,
             TargetFilter::ControllerAndControlledPermanents {
                 permanent_type: None,
-                source_scope: ControlledPermanentsScope::IncludingSource,
+                source_scope: SourceExclusion::Include,
             },
             "Channel Harm's \"you and permanents you control\" is unrestricted"
         );
@@ -19496,7 +19504,7 @@ mod tests {
             Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
                 player: DamageTargetPlayerScope::Controller,
                 permanent_type: None,
-                source_scope: ControlledPermanentsScope::ExcludingSource,
+                source_scope: SourceExclusion::Exclude,
             }),
             "the \"and other permanents you control\" conjunct must be carried, not dropped"
         );
@@ -19593,7 +19601,7 @@ mod tests {
                 player: DamageTargetPlayerScope::Controller,
                 permanent_type: Some(CoreType::Creature),
                 // No "other" article on this card.
-                source_scope: ControlledPermanentsScope::IncludingSource,
+                source_scope: SourceExclusion::Include,
             })
         );
         // CR 614.9: the recipient is the permanent the parent "Choose target
@@ -19677,7 +19685,7 @@ mod tests {
             Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
                 player: DamageTargetPlayerScope::Controller,
                 permanent_type: None,
-                source_scope: ControlledPermanentsScope::IncludingSource,
+                source_scope: SourceExclusion::Include,
             })
         );
         assert_eq!(*redirect_to, Some(DamageRedirectTarget::ChosenObjectTarget));
@@ -19898,7 +19906,7 @@ mod tests {
                 permanent_type: None,
                 // CR 109.1: the "other" article must reach the filter, not be
                 // opt()-discarded.
-                source_scope: ControlledPermanentsScope::ExcludingSource,
+                source_scope: SourceExclusion::Exclude,
             }
         );
         assert!(rest.is_empty());
@@ -19911,7 +19919,7 @@ mod tests {
             DamageTargetFilter::PlayerOrPermanentsControlledBy {
                 player: DamageTargetPlayerScope::Controller,
                 permanent_type: Some(CoreType::Creature),
-                source_scope: ControlledPermanentsScope::IncludingSource,
+                source_scope: SourceExclusion::Include,
             }
         );
         assert_eq!(
@@ -19921,7 +19929,7 @@ mod tests {
             DamageTargetFilter::PlayerOrPermanentsControlledBy {
                 player: DamageTargetPlayerScope::Controller,
                 permanent_type: Some(CoreType::Planeswalker),
-                source_scope: ControlledPermanentsScope::IncludingSource,
+                source_scope: SourceExclusion::Include,
             }
         );
 
@@ -19939,7 +19947,7 @@ mod tests {
                 DamageTargetFilter::PlayerOrPermanentsControlledBy {
                     player: DamageTargetPlayerScope::Controller,
                     permanent_type: Some(expected),
-                    source_scope: ControlledPermanentsScope::IncludingSource,
+                    source_scope: SourceExclusion::Include,
                 },
                 "{phrase} must reach the shared conjunct authority"
             );
@@ -20025,7 +20033,7 @@ mod tests {
             Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
                 player: DamageTargetPlayerScope::Controller,
                 permanent_type: None,
-                source_scope: ControlledPermanentsScope::ExcludingSource,
+                source_scope: SourceExclusion::Exclude,
             }),
             "\"you and OTHER permanents you control\" must carry both the permanent leg and the self-exclusion"
         );

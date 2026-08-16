@@ -25,10 +25,10 @@
 //! stray draw is inert, and deliberately assert NOTHING about the draw — pinning
 //! the wrong placement would bless it.
 
+use super::rules::damage_ability;
 use engine::game::effects::deal_damage;
 use engine::game::scenario::{GameScenario, P0, P1};
-use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef};
-use engine::types::identifiers::ObjectId;
+use engine::types::ability::TargetRef;
 use engine::types::phase::Phase;
 
 /// Verbatim Heroic Sacrifice (Scryfall-verified).
@@ -37,21 +37,6 @@ const HEROIC_SACRIFICE_TEXT: &str = "Choose target creature you control. Until e
 /// Verbatim Gideon's Sacrifice (Scryfall-verified) — the inline "this turn"
 /// duration spelling with an untyped permanent leg.
 const GIDEONS_SACRIFICE_TEXT: &str = "Choose a creature or planeswalker you control. All damage that would be dealt this turn to you and permanents you control is dealt to the chosen permanent instead (if it's still on the battlefield).";
-
-/// A non-combat damage source dealing `amount` to `target`, controlled by P1.
-fn damage_ability(source_id: ObjectId, target: TargetRef, amount: i32) -> ResolvedAbility {
-    ResolvedAbility::new(
-        Effect::DealDamage {
-            amount: QuantityExpr::Fixed { value: amount },
-            target: TargetFilter::Any,
-            damage_source: None,
-            excess: None,
-        },
-        vec![target],
-        source_id,
-        P1,
-    )
-}
 
 /// CR 611.2a + CR 614.9 + CR 614.1a: the whole card, through the production
 /// cast pipeline.

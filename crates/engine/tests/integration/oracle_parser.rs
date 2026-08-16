@@ -1,7 +1,7 @@
 use engine::parser::oracle::{keyword_display_name, parse_oracle_text};
 use engine::types::ability::{
-    ChosenSubtypeKind, ContinuousModification, ControlledPermanentsScope, ControllerRef,
-    DamageModification, DamageTargetFilter, DamageTargetPlayerScope, Effect, FilterProp,
+    ChosenSubtypeKind, ContinuousModification, ControllerRef, DamageModification,
+    DamageTargetFilter, DamageTargetPlayerScope, Effect, FilterProp, SourceExclusion,
     StaticCondition, TargetFilter, TypeFilter,
 };
 use engine::types::keywords::Keyword;
@@ -521,7 +521,7 @@ fn sawhorn_nemesis_damage_replacement_scopes_to_source_chosen_player() {
         Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
             player: DamageTargetPlayerScope::SourceChosenPlayer,
             permanent_type: None,
-            source_scope: ControlledPermanentsScope::IncludingSource,
+            source_scope: SourceExclusion::Include,
         })
     );
 }
