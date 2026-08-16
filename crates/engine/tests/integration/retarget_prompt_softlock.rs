@@ -752,19 +752,32 @@ fn assert_multi_role_entry_is_live(runner: &GameRunner) {
 ///
 /// SCOPE OF THE CLAIM — read before citing this row. It pins SLOT LEGALITY: that
 /// the generator filters the flat pool through the same authority the reducer
-/// applies. It does NOT claim the submission it accepts is CR-115.7b-legal, and
-/// must not be cited as if it did.
+/// applies. It does NOT claim the submission it accepts is CR-115.7a /
+/// CR-115.7b-legal, and must not be cited as if it did.
 ///
 /// This fixture's `current_targets` has LENGTH 2 and the accepted submission has
 /// LENGTH 1, because the reducer's `Single` arm hard-requires exactly one target.
 /// Applying it assigns `ability.targets = [P1]` and TRUNCATES the count-source
-/// slot. CR 115.7b says the opposite — "only one of those targets may be
-/// changed", following CR 115.7a's process, so every other declared target stays
-/// in place. The length-1 acceptance is recorded here as OBSERVED CURRENT
-/// BEHAVIOUR, deliberately NOT endorsed:
+/// slot. Both subrules that reach this arm say otherwise, and they prescribe
+/// DIFFERENT remedies — `RetargetScope::Single` is produced by two oracle
+/// templates (`try_parse_change_targets`, parser/oracle_effect/mod.rs), so the
+/// deferred fix must DISPATCH ON THE TEMPLATE rather than apply CR 115.7b's
+/// remedy uniformly:
+///   - "change a target of " → CR 115.7b: "the process described in rule 115.7a
+///     is followed, except that only one of those targets may be changed (rather
+///     than all of them or none of them)". Remedy: one slot changes, every other
+///     declared target stays in place.
+///   - "change the target of " → CR 115.7a, which ends: "If all the targets
+///     aren't changed to other legal targets, none of them are changed." Remedy
+///     for a multi-target entry: ALL-OR-NONE, not one-changes-rest-stay. This is
+///     Bolt Bend's and Redirect's wording.
+///
+/// Under neither remedy may an undisturbed slot simply be dropped. The length-1
+/// acceptance is recorded here as OBSERVED CURRENT BEHAVIOUR, deliberately NOT
+/// endorsed:
 ///
 ///   DEFERRED(out-of-run): interactive Single-scope retarget collapses
-///   multi-target lists (CR 115.7b) — upstream cause filter.rs
+///   multi-target lists (CR 115.7a / CR 115.7b) — upstream cause filter.rs
 ///   FilterProp::HasSingleTarget is permissive with no resolution-time
 ///   validation; fix needs filter.rs + interaction.rs, both outside phase 1's
 ///   frozen scope.
@@ -773,9 +786,10 @@ fn assert_multi_role_entry_is_live(runner: &GameRunner) {
 /// on this class — the generator's sole proposal was rejected, so no actor could
 /// discharge the prompt. AFTER this change it PROGRESSES and TRUNCATES. Progress
 /// with a corrupted target list is the trade; it is not a claim that the result
-/// is rules-correct. A genuinely CR-115.7b-correct submission is not expressible
-/// against today's reducer contract at all, which is why the deferral above
-/// names two paths outside this run's frozen scope rather than a local repair.
+/// is rules-correct. A genuinely CR-115.7a / CR-115.7b-correct submission is not
+/// expressible against today's reducer contract at all, which is why the
+/// deferral above names two paths outside this run's frozen scope rather than a
+/// local repair.
 #[test]
 fn multi_role_mana_single_retarget_candidates_are_slot_legal() {
     let mut runner = GameScenario::new().build();
@@ -826,7 +840,8 @@ fn multi_role_mana_single_retarget_candidates_are_slot_legal() {
     //
     // "Accepted by the reducer" is the WHOLE claim here — acceptance, not
     // rules-correctness. Applying this length-1 submission to a length-2 target
-    // list truncates the count-source slot, contrary to CR 115.7b. See this
+    // list truncates the count-source slot, contrary to CR 115.7a / CR 115.7b
+    // alike — neither remedy permits dropping an undisturbed slot. See this
     // row's SCOPE note and the DEFERRED(out-of-run) entry it carries; that
     // truncation is why this loop deliberately asserts only that the submission
     // is accepted, and never asserts the resulting `ability.targets`.

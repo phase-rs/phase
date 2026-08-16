@@ -129,6 +129,29 @@ fn fallback_retarget_action_is_legal() {
 /// Row 2f — CR 115.7a, at the `phase-ai` seam: a flat pool member legal only for
 /// another slot must never be proposed, because `apply_retarget` re-checks each
 /// changed submission against its own slot filter.
+///
+/// SCOPE OF THE CLAIM — read before citing this row. It pins SLOT LEGALITY at the
+/// `phase-ai` fallback seam: that the fallback filters the flat pool through the
+/// same authority the reducer applies. It does NOT claim the submission it
+/// accepts is CR-115.7a / CR-115.7b-legal, and must not be cited as if it did.
+///
+/// This fixture is the same shape as `retarget_prompt_softlock.rs` row 2e:
+/// `current_targets` has LENGTH 2 while the accepted submission has LENGTH 1,
+/// because the reducer's `Single` arm hard-requires exactly one target. Applying
+/// it assigns `ability.targets = [P1]` and TRUNCATES the count-source slot.
+/// Neither subrule that reaches this arm permits dropping an undisturbed slot:
+/// CR 115.7b changes one target and leaves every other declared target in place,
+/// and CR 115.7a is all-or-none. Because the two prescribe DIFFERENT remedies and
+/// `RetargetScope::Single` is produced by both oracle templates, the deferred fix
+/// must dispatch on the template; row 2e's SCOPE note carries the full
+/// two-template analysis. The length-1 acceptance asserted below is recorded as
+/// OBSERVED CURRENT BEHAVIOUR, deliberately NOT endorsed:
+///
+///   DEFERRED(out-of-run): interactive Single-scope retarget collapses
+///   multi-target lists (CR 115.7a / CR 115.7b) — upstream cause filter.rs
+///   FilterProp::HasSingleTarget is permissive with no resolution-time
+///   validation; fix needs filter.rs + interaction.rs, both outside phase 1's
+///   frozen scope.
 #[test]
 fn fallback_multi_role_retarget_action_is_slot_legal() {
     let mut runner = GameScenario::new().build();
@@ -222,7 +245,16 @@ fn fallback_multi_role_retarget_action_is_slot_legal() {
 
     // Discriminating: at base the action is `[P1, P0]` (length 2), which the
     // `Single` arm rejects outright.
-    runner
-        .act(action.unwrap())
-        .expect("the fallback's action must be accepted by the reducer");
+    //
+    // "Accepted by the reducer" is the WHOLE claim here — acceptance, not
+    // rules-correctness. Applying this length-1 submission to the length-2
+    // target list truncates the count-source slot, contrary to CR 115.7a /
+    // CR 115.7b alike. See this row's SCOPE note and the DEFERRED(out-of-run)
+    // entry it carries; that truncation is why this row deliberately asserts
+    // only that the submission is accepted, and never asserts the resulting
+    // `ability.targets`.
+    runner.act(action.unwrap()).expect(
+        "the fallback's action must be ACCEPTED by the reducer — acceptance only, not a \
+         claim of CR-115.7a / CR-115.7b legality; see this row's SCOPE note",
+    );
 }

@@ -3595,15 +3595,30 @@ pub fn retarget_actions(
         // because `apply_retarget`'s `Single` arm hard-requires exactly one
         // target. When the parked entry's `current_targets` has MORE than one
         // element, applying such a proposal assigns `ability.targets` that
-        // one-element list and TRUNCATES the remaining slots — contrary to CR
-        // 115.7b, under which only one target changes and the others stay in
-        // place. `change_targets::forced_retarget_targets` already implements
-        // that slot preservation on the FORCED path; the interactive path has no
+        // one-element list and TRUNCATES the remaining slots — contrary to BOTH
+        // subrules that reach this arm (CR 115.7a / CR 115.7b), neither of which
+        // permits an undisturbed slot to be dropped.
+        // `change_targets::forced_retarget_targets` already implements that slot
+        // preservation on the FORCED path; the interactive path has no
         // equivalent, and cannot have one while the reducer's arm rejects any
         // length but 1.
         //
+        // TWO TEMPLATES, TWO REMEDIES. `try_parse_change_targets`
+        // (parser/oracle_effect/mod.rs) maps two oracle wordings governed by
+        // DIFFERENT subrules onto this one `RetargetScope::Single` variant, so
+        // the deferred fix must DISPATCH ON THE TEMPLATE rather than apply CR
+        // 115.7b's remedy uniformly:
+        //   - "change a target of " → CR 115.7b: "the process described in rule
+        //     115.7a is followed, except that only one of those targets may be
+        //     changed (rather than all of them or none of them)". Remedy: one
+        //     slot changes, every other declared target stays in place.
+        //   - "change the target of " → CR 115.7a, which ends: "If all the
+        //     targets aren't changed to other legal targets, none of them are
+        //     changed." Remedy for a multi-target entry: ALL-OR-NONE, not
+        //     one-changes-rest-stay. This is Bolt Bend's and Redirect's wording.
+        //
         //   DEFERRED(out-of-run): interactive Single-scope retarget collapses
-        //   multi-target lists (CR 115.7b) — upstream cause filter.rs
+        //   multi-target lists (CR 115.7a / CR 115.7b) — upstream cause filter.rs
         //   FilterProp::HasSingleTarget is permissive with no resolution-time
         //   validation; fix needs filter.rs + interaction.rs, both outside phase
         //   1's frozen scope.
@@ -3611,9 +3626,10 @@ pub fn retarget_actions(
         // Behavioural delta this phase knowingly takes: at base the AI FROZE on
         // this class (its sole proposal was rejected, so nothing could discharge
         // the prompt); now it PROGRESSES and TRUNCATES. Pinned by
-        // `retarget_prompt_softlock.rs` row 2e, whose SCOPE note records the
-        // acceptance as observed behaviour and explicitly not as CR-115.7b
-        // legality.
+        // `retarget_prompt_softlock.rs` row 2e and `phase-ai`'s
+        // `retarget_fallback_action.rs` row 2f, whose SCOPE notes record the
+        // acceptance as observed behaviour and explicitly not as CR-115.7a /
+        // CR-115.7b legality.
         RetargetScope::Single => legal_new_targets
             .iter()
             .map(|target| vec![target.clone()])

@@ -10,7 +10,7 @@ use std::io::BufReader;
 
 use engine::ai_support::{
     build_decision_context, build_decision_context_for_semantic_owner, certify_fetch_then_cast,
-    certify_pact_plan, is_pact_payment_cast, is_targeted_exchange_root,
+    certify_pact_plan, is_pact_payment_cast, is_targeted_exchange_root, retarget_actions,
     root_may_yield_adverse_exchange, targeted_exchange_verdict,
     validated_candidate_actions_for_semantic_owner, AiDecisionContract, TargetedExchangeVerdict,
 };
@@ -2024,7 +2024,7 @@ pub fn fallback_action(
             current_targets,
             legal_new_targets,
             ..
-        } => engine::ai_support::retarget_actions(
+        } => retarget_actions(
             state,
             *stack_entry_index,
             scope,
