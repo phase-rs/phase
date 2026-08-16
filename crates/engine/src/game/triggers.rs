@@ -2264,7 +2264,7 @@ fn collect_matching_triggers_inner(
         // which filters `events` to `ZoneChanged` before collecting, and
         // settlement replays those same filtered occurrences. No `DamageDealt`
         // event reaches either, so no whole-event damage def is skipped here
-        // today. The gate exists so the two do not drift apart.
+        // today. The gate exists so it and the carrier below do not drift apart.
         if collection.skips_batched_definitions() && fires_once_per_batch(trig_def) {
             continue;
         }

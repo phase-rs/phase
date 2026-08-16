@@ -1,20 +1,23 @@
-//! CR 603.2c + CR 120.4b: per-SOURCE damage aggregation — Pain Magnification,
-//! "Whenever an opponent is dealt 3 or more damage by a single source, that
-//! player discards a card."
+//! CR 603.2c + CR 120.4 + CR 120.4b: per-SOURCE damage aggregation — Pain
+//! Magnification, "Whenever an opponent is dealt 3 or more damage by a single
+//! source, that player discards a card."
 //!
 //! CR 603.2c is the operative rule for the two-attackers row: an ability
 //! triggers once per occurrence of its trigger event, and "can trigger
 //! repeatedly if one event contains multiple occurrences" — so one damage
 //! event carrying two qualifying sources is two occurrences, not one summed
-//! one. CR 120.4b names the whole-event default that the "…by a single
-//! source" tail narrows away from.
+//! one. CR 120.4 names the whole-event default that the "…by a single source"
+//! tail narrows away from: damage is processed in one four-part sequence over a
+//! single damage event, and the worked example printed under CR 120.4d states a
+//! multi-source event as one bracketed entry. CR 120.4b then puts damage
+//! triggers at that granularity.
 //!
 //! The "…by a single source" tail narrows the threshold's aggregation domain
 //! from the whole simultaneous damage event (the received-damage grammar's
-//! default, CR 120.4b) to one source's share. So two attackers each dealing 2
-//! to the same player must NOT fire, even though the event total is 4; and two
-//! attackers each dealing 3 must fire TWICE, once per qualifying source.
-//! The card's own ruling states the per-source reading directly.
+//! default, CR 120.4 + CR 120.4b) to one source's share. So two attackers each
+//! dealing 2 to the same player must NOT fire, even though the event total is
+//! 4; and two attackers each dealing 3 must fire TWICE, once per qualifying
+//! source. The card's own ruling states the per-source reading directly.
 //!
 //! These rows are the runtime carriers of the scope axis. Both are broken by
 //! the same single mutation: make `parse_single_source_scope` emit
