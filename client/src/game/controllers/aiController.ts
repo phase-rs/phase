@@ -156,9 +156,8 @@ export function createAIController(config: AIControllerConfig): AIController {
       return null;
     }
     if (waitingFor.type === "ResolveAllConsent") {
-      return waitingFor.data.representative === PLAYER_ID
-        ? null
-        : waitingFor.data.representative;
+      const { representative } = waitingFor.data;
+      return aiPlayerIds.has(representative) ? representative : null;
     }
     if (
       !("data" in waitingFor) ||
@@ -417,7 +416,7 @@ export function createAIController(config: AIControllerConfig): AIController {
         if (
           proposal.action.type === "RespondResolveAllConsent" &&
           proposal.action.data.decision.type === "Grant" &&
-          useGameStore.getState().gameState?.waiting_for?.type === "ResolveAllReady"
+          useGameStore.getState().waitingFor?.type === "ResolveAllReady"
         ) {
           void dispatchResolveAll(playerId, config.seats);
         }

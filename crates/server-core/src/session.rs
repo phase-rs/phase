@@ -6,9 +6,8 @@ use engine::ai_support::{auto_pass_recommended, legal_actions_full as engine_leg
 use engine::database::legality::{validate_cedh_bracket, CedhBracketError};
 use engine::database::CardDatabase;
 use engine::game::deck_loading::{DeckPayload, PlayerDeckPayload};
-use engine::game::engine::{apply, start_game};
-use engine::game::engine_resolve_batch::{
-    resolve_all_ready_prefix, resolve_all_ready_requester_is_authorized,
+use engine::game::engine::{
+    apply, resolve_all_ready_is_authorized, resolve_all_ready_prefix, start_game,
 };
 use engine::game::interaction::{bind_interaction_authority, submit_interaction};
 use engine::game::layers::flush_layers;
@@ -1572,9 +1571,11 @@ impl SessionManager {
         ))
     }
 
-    /// Consumes an engine-issued Resolve All consent run for an authenticated
-    /// player. Every priority representative has already granted consent, so
-    /// the state must be `WaitingFor::ResolveAllReady`.
+    /// Consumes an engine-issued unanimous Resolve All consent run for an
+    /// authenticated player. AI seats do not authorize future priority passes;
+    /// each representative grants through the engine's consent protocol first.
+    /// `max_resolutions` remains range-checked for wire compatibility, while
+    /// the already-issued consent run owns the resolution cap.
     pub fn resolve_all_for_player(
         &mut self,
         game_code: &str,
@@ -1602,16 +1603,8 @@ impl SessionManager {
             );
         }
 
-        if !matches!(
-            &session.state.waiting_for,
-            engine::types::game_state::WaitingFor::ResolveAllReady { .. }
-        ) {
+        if !resolve_all_ready_is_authorized(&session.state, requester) {
             return Err("Resolve All consent is not ready".to_string());
-        }
-        if !resolve_all_ready_requester_is_authorized(&session.state, requester) {
-            return Err(
-                "Resolve All requester is not authorized by the active consent".to_string(),
-            );
         }
 
         session.state.log_player_names = session.display_names.clone();

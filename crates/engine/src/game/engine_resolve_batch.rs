@@ -130,7 +130,7 @@ pub fn resolve_all_ready_prefix(
     // Authorization is one run only. Once the proved prefix ends (including
     // a zero-length or cap boundary), return the remaining stack to ordinary
     // priority; no later stack entry inherits this consent.
-    state.resolve_all_consent_run = None;
+    turn_control::invalidate_resolve_all_consent(state);
     finalize_display_state(state);
     interaction::ensure_interaction_authority(state);
 
@@ -155,6 +155,10 @@ pub fn resolve_all_ready_requester_is_authorized(state: &GameState, requester: P
 /// Validates the frozen Phase-1 consent against the live topology before the
 /// Ready state is materialized. A changed controller, eliminated player, or
 /// stale requester fails closed without invoking a speculative callback.
+pub fn resolve_all_ready_is_authorized(state: &GameState, requester: PlayerId) -> bool {
+    ready_consent_run(state, requester).is_some()
+}
+
 fn ready_consent_run(state: &GameState, requester: PlayerId) -> Option<&ResolveAllConsentRun> {
     let WaitingFor::ResolveAllReady { epoch } = &state.waiting_for else {
         return None;
@@ -186,14 +190,11 @@ fn consent_authorization_matches(state: &GameState, run: &ResolveAllConsentRun) 
     };
     representatives.rotate_left(current_index);
     representatives.len() == run.participants.len()
-        && representatives
-            .iter()
-            .zip(&run.participants)
-            .all(|(live, frozen)| {
-                *live == frozen.representative
-                    && turn_control::authorized_submitter_for_player(state, *live)
-                        == frozen.authorized_submitter
-            })
+        && run.participants.iter().all(|frozen| {
+            representatives.contains(&frozen.representative)
+                && turn_control::authorized_submitter_for_player(state, frozen.representative)
+                    == frozen.authorized_submitter
+        })
 }
 
 /// Performs exactly one actual priority cycle on a proof clone. Every seeded

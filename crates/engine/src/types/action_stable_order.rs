@@ -1860,5 +1860,29 @@ mod tests {
                 response: PrecastCopyShortcutResponse::Accept,
             },
         );
+        assert_distinct_order(
+            GameAction::BeginResolveAll { max_resolutions: 1 },
+            GameAction::BeginResolveAll { max_resolutions: 2 },
+        );
+        assert_distinct_order(
+            GameAction::RespondResolveAllConsent {
+                epoch: 1,
+                decision: ResolveAllConsentDecision::Grant,
+            },
+            GameAction::RespondResolveAllConsent {
+                epoch: 1,
+                decision: ResolveAllConsentDecision::Decline,
+            },
+        );
+        assert_distinct_order(
+            GameAction::RevokeResolveAllConsent {
+                epoch: 1,
+                representative: PlayerId(0),
+            },
+            GameAction::RevokeResolveAllConsent {
+                epoch: 1,
+                representative: PlayerId(1),
+            },
+        );
     }
 }

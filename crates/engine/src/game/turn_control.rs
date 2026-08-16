@@ -407,6 +407,12 @@ pub fn invalidate_resolve_all_consent(state: &mut GameState) {
     if state.resolve_all_consent_run.take().is_none() {
         return;
     }
+    if !matches!(
+        state.waiting_for,
+        WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. }
+    ) {
+        return;
+    }
     let preferred = super::topology::priority_pass_representative(state, state.active_player);
     let player = super::players::is_alive(state, preferred)
         .then_some(preferred)

@@ -436,9 +436,13 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
             None,
             Some(InteractionSlotKind::Single),
         ),
+        WaitingFor::ResolveAllConsent { .. } => (
+            InteractionWaitingForCode::Shortcut,
+            Some(SimultaneousDecisionKind::ResolveAllConsent),
+            Some(InteractionSlotKind::Single),
+        ),
         WaitingFor::LoopShortcut { .. }
         | WaitingFor::RespondToShortcut { .. }
-        | WaitingFor::ResolveAllConsent { .. }
         | WaitingFor::ResolveAllReady { .. } => (
             InteractionWaitingForCode::Shortcut,
             None,

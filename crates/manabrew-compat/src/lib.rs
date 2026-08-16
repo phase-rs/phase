@@ -2860,7 +2860,10 @@ pub fn convert_available_action(
         GameAction::DeclareShortcut { .. }
         | GameAction::RespondToShortcut { .. }
         | GameAction::DeclineShortcut
-        | GameAction::PrecastCopyShortcut { .. } => {
+        | GameAction::PrecastCopyShortcut { .. }
+        | GameAction::BeginResolveAll { .. }
+        | GameAction::RespondResolveAllConsent { .. }
+        | GameAction::RevokeResolveAllConsent { .. } => {
             AvailableActionConversion::Unsupported("local.loop-shortcut-unsupported")
         }
     }

@@ -180,6 +180,58 @@ fn queued_response_and_candidate_keep_the_frozen_submitter_after_control_changes
         },
     )
     .expect("frozen submitter, not the new live controller, answers the prompt");
+    assert!(apply(
+        &mut state,
+        P0,
+        GameAction::RespondResolveAllConsent {
+            epoch,
+            decision: ResolveAllConsentDecision::Grant,
+        },
+    )
+    .is_err());
+}
+
+#[test]
+fn rotated_three_player_consent_reaches_the_ready_prefix() {
+    let mut state = GameState::new(FormatConfig::free_for_all(), 3, 49);
+    let entry = StackEntry {
+        id: ObjectId(1),
+        source_id: ObjectId(1),
+        controller: P0,
+        kind: StackEntryKind::ActivatedAbility {
+            source_id: ObjectId(1),
+            ability: Box::new(ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), P0)),
+        },
+    };
+    state.stack.push_back(entry);
+    let epoch = begin(&mut state);
+
+    apply(
+        &mut state,
+        P1,
+        GameAction::RespondResolveAllConsent {
+            epoch,
+            decision: ResolveAllConsentDecision::Grant,
+        },
+    )
+    .expect("first queued representative grants");
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::ResolveAllConsent { representative, .. } if representative == P2
+    ));
+    apply(
+        &mut state,
+        P2,
+        GameAction::RespondResolveAllConsent {
+            epoch,
+            decision: ResolveAllConsentDecision::Grant,
+        },
+    )
+    .expect("second queued representative grants");
+
+    let result = resolve_all_ready_prefix(&mut state, P0);
+    assert_eq!(result.items_resolved, 1);
+    assert!(state.stack.is_empty());
 }
 
 #[test]
