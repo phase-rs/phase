@@ -11292,7 +11292,7 @@ fn try_parse_event(
             let mut def = make_base();
             def.mode = TriggerMode::DamageDone;
             def.damage_kind = kind;
-            // CR 120.4b: the SOURCE-led grammar names the damaging source, so its
+            // CR 603.2: the SOURCE-led grammar names the damaging source, so its
             // threshold reads that source's share and never aggregates across
             // simultaneous sources. Deus of Calamity's ruling is explicit ("6
             // damage to an opponent at one time … won't keep track of
@@ -12886,7 +12886,7 @@ fn try_parse_source_deals_damage_trigger(lower: &str) -> Option<(TriggerMode, Tr
 
     // Shared predicate tail: optional kind, optional "N or more", "damage".
     let (after_damage, (damage_kind, threshold)) = parse_damage_predicate_tail(rest).ok()?;
-    // CR 120.4b: this grammar is SOURCE-led — it names the damaging source, so
+    // CR 603.2: this grammar is SOURCE-led — it names the damaging source, so
     // its threshold reads only that source's share and never aggregates across
     // simultaneous sources (Dragonborn Champion must not fire on two 3-damage
     // sources; Ghyrson Starn's "exactly 1" would break entirely under an

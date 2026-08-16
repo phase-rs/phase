@@ -1,6 +1,13 @@
-//! CR 120.4 + CR 120.4b: per-SOURCE damage aggregation — Pain Magnification, "Whenever an
-//! opponent is dealt 3 or more damage by a single source, that player discards
-//! a card."
+//! CR 603.2c + CR 120.4b: per-SOURCE damage aggregation — Pain Magnification,
+//! "Whenever an opponent is dealt 3 or more damage by a single source, that
+//! player discards a card."
+//!
+//! CR 603.2c is the operative rule for the two-attackers row: an ability
+//! triggers once per occurrence of its trigger event, and "can trigger
+//! repeatedly if one event contains multiple occurrences" — so one damage
+//! event carrying two qualifying sources is two occurrences, not one summed
+//! one. CR 120.4b names the whole-event default that the "…by a single
+//! source" tail narrows away from.
 //!
 //! The "…by a single source" tail narrows the threshold's aggregation domain
 //! from the whole simultaneous damage event (the received-damage grammar's

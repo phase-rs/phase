@@ -2258,8 +2258,13 @@ fn collect_matching_triggers_inner(
         // def has `batched == false` but fires once per batch, so keying this
         // gate on `trig_def.batched` would let it reach settlement carrying
         // `batched: true` and trip the `debug_assert!(!matched.batched)` there.
-        // Unreachable today (settlement carries only `ZoneChanged` occurrences),
-        // but the two gates must not drift apart.
+        // Unreachable today, and for BOTH collections this gate covers
+        // (`skips_batched_definitions` is `Segment | Settlement`): segments are
+        // built only by `append_and_collect_logical_zone_trigger_segment`,
+        // which filters `events` to `ZoneChanged` before collecting, and
+        // settlement replays those same filtered occurrences. No `DamageDealt`
+        // event reaches either, so no whole-event damage def is skipped here
+        // today. The gate exists so the two do not drift apart.
         if collection.skips_batched_definitions() && fires_once_per_batch(trig_def) {
             continue;
         }
