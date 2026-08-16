@@ -7743,9 +7743,9 @@ async fn handle_client_message(
 #[cfg(test)]
 mod state_transport_derived_tests {
     use super::*;
-    use engine::game::deck_loading::PlayerDeckPayload;
+    use engine::game::{deck_loading::PlayerDeckPayload, engine::apply};
     use engine::types::ability::{Effect, ResolvedAbility, SearchSelectionConstraint};
-    use engine::types::actions::GameAction;
+    use engine::types::actions::{GameAction, ResolveAllConsentDecision};
     use engine::types::game_state::{
         ActiveSearchDecisionAuthority, ActiveSearchDecisionControl, PriorityPassingMode,
         StackEntry, StackEntryKind, WaitingFor,
@@ -7927,6 +7927,31 @@ mod state_transport_derived_tests {
                 )),
             },
         });
+        apply(
+            &mut session.state,
+            PlayerId(0),
+            GameAction::BeginResolveAll { max_resolutions: 1 },
+        )
+        .expect("priority holder may start Resolve All consent");
+        let epoch = match session.state.waiting_for {
+            WaitingFor::ResolveAllConsent { epoch, .. } => epoch,
+            ref other => {
+                panic!("Resolve All consent must await the AI representative, got {other:?}")
+            }
+        };
+        apply(
+            &mut session.state,
+            ai_player,
+            GameAction::RespondResolveAllConsent {
+                epoch,
+                decision: ResolveAllConsentDecision::Grant,
+            },
+        )
+        .expect("AI representative may grant Resolve All consent");
+        assert!(matches!(
+            session.state.waiting_for,
+            WaitingFor::ResolveAllReady { epoch: ready_epoch } if ready_epoch == epoch
+        ));
         let revision_before = session.state_revision;
 
         let state: SharedState = Arc::new(Mutex::new(manager));
