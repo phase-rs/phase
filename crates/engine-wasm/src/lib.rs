@@ -2,7 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use rand::SeedableRng;
+use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
@@ -13,9 +13,10 @@ use engine::ai_support::{
 };
 use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracket};
 use engine::database::{CardDatabase, CardSearchQuery};
+#[cfg(test)]
+use engine::game::engine::ResolveAllFastForwardResult as BatchResolveResult;
 use engine::game::engine::{
     apply, apply_for_simulation, resolve_all_ready_is_authorized, resolve_all_ready_prefix,
-    ResolveAllFastForwardResult as BatchResolveResult,
 };
 use engine::game::interaction::{bind_interaction_authority, submit_interaction};
 use engine::game::preview::{compute_preview_diff, preview_auto_payment_sources};

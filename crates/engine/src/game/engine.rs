@@ -76,8 +76,8 @@ use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use super::zones;
 
 pub use super::engine_resolve_batch::{
-    resolve_all_fast_forward, resolve_all_ready_prefix, ResolveAllCallbackDecision,
-    ResolveAllFastForwardResult,
+    resolve_all_fast_forward, resolve_all_ready_is_authorized, resolve_all_ready_prefix,
+    ResolveAllCallbackDecision, ResolveAllFastForwardResult,
 };
 
 #[derive(Debug, Clone, Error)]
