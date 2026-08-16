@@ -25088,7 +25088,12 @@ fn try_parse_exile_until_opponent_becomes_monarch_clause(
     tp: TextPair<'_>,
     ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
-    let (_, (body_lower, suffix)) = nom_primitives::split_once_on(tp.lower, " until ").ok()?;
+    let (_, (body_lower, suffix)) = (
+        take_until::<_, _, OracleError<'_>>(" until "),
+        preceded(tag(" until "), rest),
+    )
+        .parse(tp.lower)
+        .ok()?;
     let body = tp.slice(0, body_lower.len()).trim_end();
     let ast = parse_imperative_family_ast(body.original, body.lower, ctx)?;
     let mut clause = lower_imperative_family_ast(ast);

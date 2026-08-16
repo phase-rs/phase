@@ -20,6 +20,7 @@ When this creature enters, exile target creature an opponent controls until an o
 const OPPONENT_BECOMES_MONARCH: &str = "Target opponent becomes the monarch.";
 const CONTROLLER_BECOMES_MONARCH: &str = "You become the monarch.";
 const DESTROY_CREATURE: &str = "Destroy target creature.";
+const RETURN_FROM_EXILE: &str = "Return target card from exile to the battlefield.";
 
 struct Board {
     runner: GameRunner,
@@ -29,6 +30,7 @@ struct Board {
     controller_crown: ObjectId,
     p1_crown: ObjectId,
     destroy: ObjectId,
+    return_from_exile: ObjectId,
 }
 
 fn board(player_count: u8) -> Board {
@@ -57,6 +59,9 @@ fn board(player_count: u8) -> Board {
     let destroy = scenario
         .add_spell_to_hand_from_oracle(P1, "Destroy Jailer", true, DESTROY_CREATURE)
         .id();
+    let return_from_exile = scenario
+        .add_spell_to_hand_from_oracle(P1, "Return From Exile", true, RETURN_FROM_EXILE)
+        .id();
 
     let mut runner = scenario.build();
     let outcome = runner.cast(jailer).target_object(target).resolve();
@@ -84,6 +89,7 @@ fn board(player_count: u8) -> Board {
         controller_crown,
         p1_crown,
         destroy,
+        return_from_exile,
     }
 }
 
@@ -230,11 +236,15 @@ fn target_leaving_exile_before_monarch_change_is_not_moved_again() {
         mut runner,
         target,
         opponent_crown,
+        return_from_exile,
         ..
     } = board(2);
 
-    let mut events = Vec::new();
-    engine::game::zones::move_to_zone(runner.state_mut(), target, Zone::Battlefield, &mut events);
+    pass_to(&mut runner, P1);
+    runner
+        .cast(return_from_exile)
+        .target_object(target)
+        .resolve();
     assert_eq!(runner.state().objects[&target].zone, Zone::Battlefield);
 
     crown_opponent(&mut runner, opponent_crown, P1);
