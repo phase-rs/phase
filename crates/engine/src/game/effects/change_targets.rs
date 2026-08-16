@@ -123,10 +123,12 @@ pub fn resolve(
     // placeholder effect with no targetable filter (`target_filter()` is `None`),
     // so Aura hosts are enumerated from the source's `Keyword::Enchant(filter)`
     // instead, mirroring the Aura branch of `casting::spell_has_legal_targets`.
-    // CR 115.7: that substitution is keyed on the STACK ENTRY being the Aura
-    // spell. Every other entry — including a triggered or activated ability whose
-    // source happens to be a resident Aura — falls back to its own effect's
-    // declared target filter.
+    // CR 115.1b: that substitution is keyed on the STACK ENTRY being the Aura
+    // spell — "An Aura permanent doesn't target anything; only the spell is
+    // targeted. (An activated or triggered ability of an Aura permanent can also
+    // be targeted.)" Every other entry — including a triggered or activated
+    // ability whose source happens to be a resident Aura — falls back to its own
+    // effect's declared target filter.
     let legal_new_targets = legal_new_targets_for_stack_entry(state, stack_entry_index);
 
     // CR 115.7a: "If a target can't be changed to another legal target, the
@@ -252,10 +254,14 @@ fn legal_new_targets_for_entry(state: &GameState, entry: &StackEntry) -> Vec<Tar
     // needed here only because the cast path synthesizes a placeholder spell
     // ability whose `target_filter()` is `None`.
     //
-    // CR 115.7: A triggered or activated ability of an Aura already on the
-    // battlefield is a DIFFERENT object on the stack, and it declares its own
-    // target through its own effect (Pain for All: "When this Aura enters,
-    // enchanted creature deals damage equal to its power to any other target").
+    // CR 115.1b + CR 113.7a: A triggered or activated ability of an Aura already
+    // on the battlefield is a DIFFERENT object on the stack — 113.7a, "once
+    // activated or triggered, an ability exists on the stack independently of its
+    // source" — and 115.1b says outright that "an Aura permanent doesn't target
+    // anything; only the spell is targeted. (An activated or triggered ability of
+    // an Aura permanent can also be targeted.)" So it declares its own target
+    // through its own effect (Pain for All: "When this Aura enters, enchanted
+    // creature deals damage equal to its power to any other target").
     // Keying this branch on "the source object is an Aura" instead of on the
     // stack entry claimed those abilities too and handed back the Aura's
     // "creature you control" enchant pool for them — a pool that cannot even

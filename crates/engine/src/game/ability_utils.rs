@@ -7395,12 +7395,21 @@ fn chain_has_target_sink_after_deferred_effect(sub_ability: Option<&ResolvedAbil
 ///
 /// Takes the prompt's `current_targets` and **exempts positions whose submission
 /// is unchanged**: CR 115.7d ("the player may leave any number of the targets
-/// unchanged, even if those targets would be illegal") licenses this for the
-/// "choose new targets" scope, and CR 115.7a licenses it for the "change the
-/// target(s)" scope from the other direction — a slot already holding its own
-/// submission was never changed, so "changed only to another legal target" has
-/// nothing to bite on. The exemption is therefore correct without a scope
-/// parameter.
+/// unchanged, even if those targets would be illegal") licenses this outright for
+/// the "choose new targets" scope. CR 115.7a does not grant an equivalent licence
+/// — its unchanged-target allowance is conditional ("if a target can't be changed
+/// to another legal target") — but it does not need to: it constrains only targets
+/// that ARE changed, so a slot already holding its own submission was never
+/// changed and "changed only to another legal target" has nothing to bite on.
+/// The exemption is therefore correct without a scope parameter, by licence under
+/// 115.7d and by non-application under 115.7a.
+///
+/// CR 115.7d's SECOND sentence — new targets "must not cause any unchanged targets
+/// to become illegal" — is vacuous under today's model and is deliberately not
+/// enforced here: `validate_targets_for_ability` evaluates each slot's filter
+/// against the state and the ability, never against a sibling slot's choice, so no
+/// submission can invalidate a neighbour. A future filter that reads sibling slots
+/// must revisit this.
 ///
 /// Consumed by `engine::apply_retarget` AND by
 /// `ai_support::candidates::retarget_actions`, so the reducer and the AI

@@ -12263,11 +12263,11 @@ fn apply_action(
                 new_targets,
             },
         )?,
-        // CR 115.7: Retarget a single-target spell via a board click. The
+        // CR 115.7a: Retarget a single-target spell via a board click. The
         // universal `ChooseTarget` action — already consumed by every other
-        // targeting state — drives single-target retargets (Bolt Bend,
-        // Redirect, Misdirection) so the player picks the new target directly
-        // on the battlefield instead of through a dialog.
+        // targeting state — drives "change the target of" retargets (Bolt Bend,
+        // Misdirection — NOT Redirect, which is "choose new targets", so CR
+        // 115.7d `All`) so the player picks the new target on the battlefield.
         (
             WaitingFor::RetargetChoice {
                 player,
@@ -12599,8 +12599,8 @@ fn apply_retarget(
     // two-surfaced-slot `Both`, `mana_multi_role` also admits the context-ref
     // recipient `Both` (surfaced == 1, generic == 0), which is parser-reachable
     // ("That player adds {R} for each card in target opponent's hand"). A
-    // `Single`-scope retarget (Bolt Bend, Redirect) of that shape therefore does
-    // run this per-slot validation — CR 115.7a-correct, and the reason the check
+    // `Single`-scope retarget (Bolt Bend) of that shape therefore does run
+    // this per-slot validation — CR 115.7a-correct, and the reason the check
     // is wired for both scopes rather than only `All`.
     if let Some(ability) = state
         .stack

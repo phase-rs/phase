@@ -3544,9 +3544,12 @@ fn authorize_candidate_actors(state: &GameState, actions: &mut [CandidateAction]
     }
 }
 
-/// CR 115.7: Every submission `apply_retarget` will accept for a parked
+/// CR 115.7: Submissions `apply_retarget` will accept for a parked
 /// `RetargetChoice`, derived from the prompt's own payload and filtered through
-/// the same per-slot authority the reducer consults.
+/// the same per-slot authority the reducer consults. Sound by construction, and
+/// complete for `Single`; the `All` arm bounds its enumeration deliberately —
+/// see ENUMERATION BOUND below. Not a legality oracle: a submission absent from
+/// this set is not thereby illegal.
 ///
 /// Shared by the engine's candidate generator and `phase-ai`'s fallback so the
 /// two cannot disagree about what a legal retarget is — they previously agreed
@@ -3615,7 +3618,16 @@ pub fn retarget_actions(
         //   - "change the target of " → CR 115.7a, which ends: "If all the
         //     targets aren't changed to other legal targets, none of them are
         //     changed." Remedy for a multi-target entry: ALL-OR-NONE, not
-        //     one-changes-rest-stay. This is Bolt Bend's wording.
+        //     one-changes-rest-stay. This is Bolt Bend's wording. Bolt Bend
+        //     supplies the WORDING only: it reads "with a single target". Of the
+        //     22 printed cards matching `o:"change the target of"`, the six that
+        //     omit that literal phrase (I'm Rubber You're Glue, Muck Drubb,
+        //     Rebound, Ricochet, Silver Wyvern, Torchling) each restrict to one
+        //     target by the equivalent "targets ONLY <x>" / "a single <x>"
+        //     construction instead. So no printed card on this template can
+        //     present a multi-target entry — the gap below is reachable today
+        //     only by synthetic stack entries, which is why its fixture is
+        //     labelled synthetic rather than card-driven.
         //
         //   DEFERRED(out-of-run): interactive Single-scope retarget collapses
         //   multi-target lists (CR 115.7a / CR 115.7b) — upstream cause filter.rs
@@ -3643,6 +3655,17 @@ pub fn retarget_actions(
         // `slot_legal` filter as every other proposal and passes unconditionally,
         // because `retarget_slot_violation` exempts unchanged positions — no
         // carve-out is needed, and none is made.
+        //
+        // ENUMERATION BOUND, stated rather than left silent: this emits the
+        // unchanged anchor plus every SINGLE-slot substitution. CR 115.7d permits
+        // changing several targets at once ("any number of the targets
+        // unchanged"), and those simultaneous multi-slot proposals are NOT
+        // enumerated — the set would be the product of the per-slot pools, and
+        // bounding the AI's branching factor is worth more than the extra
+        // proposals. This is a search-space bound, not a legality claim: the
+        // reducer accepts a multi-slot change if some other agent submits one,
+        // because `retarget_slot_violation` validates each changed position
+        // independently and never requires that only one position moved.
         RetargetScope::All => {
             let mut actions = Vec::new();
             let anchor = current_targets.to_vec();

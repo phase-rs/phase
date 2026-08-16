@@ -4,7 +4,8 @@
 //!
 //! 1. the retarget pool comes from the stack entry's OWN targeting authority,
 //!    not from an Aura host's enchant filter (an Aura's triggered ability is a
-//!    different object on the stack than the Aura spell, CR 303.4a vs CR 115.7);
+//!    different object on the stack than the Aura spell — CR 115.1b + CR 113.7a,
+//!    against the Aura SPELL's own rule, CR 303.4a);
 //! 2. an empty pool resolves as a CR 115.7a no-change instead of parking a
 //!    prompt nothing can discharge;
 //! 3. every submission the AI proposes for a parked prompt is accepted by the
@@ -110,9 +111,11 @@ fn retarget_candidates(state: &GameState) -> Vec<Vec<TargetRef>> {
         .collect()
 }
 
-/// Rows 1a + 1b — CR 115.7 + CR 303.4a: an Aura's *triggered* ability declares
+/// Rows 1a + 1b — CR 115.1b + CR 303.4a: an Aura's *triggered* ability declares
 /// its own target ("any other target"), so its retarget pool must come from that
-/// effect's filter. Keying the CR 303.4a Aura substitution on the source object
+/// effect's filter. CR 115.1b is the on-point rule: "An Aura permanent doesn't
+/// target anything; only the spell is targeted. (An activated or triggered
+/// ability of an Aura permanent can also be targeted.)" Keying the CR 303.4a Aura substitution on the source object
 /// instead of on the stack entry handed back the Aura's "creature you control"
 /// enchant pool, which cannot even contain the trigger's current target — so no
 /// submission was legal and the prompt could never be discharged.
@@ -270,7 +273,7 @@ fn aura_hosted_trigger_retarget_pool_uses_the_abilitys_own_filter() {
     // (CR 115.4). The Aura's "creature you control" enchant filter cannot.
     assert!(
         pool.contains(&TargetRef::Player(P1)),
-        "CR 115.7: the pool must come from the TRIGGER's own target filter, which \
+        "CR 115.1b: the pool must come from the TRIGGER's own target filter, which \
          reaches players; got {pool:?}"
     );
 
@@ -770,7 +773,12 @@ fn assert_multi_role_entry_is_live(runner: &GameRunner) {
 ///   - "change the target of " → CR 115.7a, which ends: "If all the targets
 ///     aren't changed to other legal targets, none of them are changed." Remedy
 ///     for a multi-target entry: ALL-OR-NONE, not one-changes-rest-stay. This is
-///     Bolt Bend's wording.
+///     Bolt Bend's wording — the WORDING only. Bolt Bend itself reads "with a
+///     single target", and of the 22 printed cards matching
+///     `o:"change the target of"`, the six omitting that literal phrase each
+///     restrict to one target by the equivalent "targets ONLY <x>" / "a single
+///     <x>" construction. No printed card on this template can therefore present
+///     a multi-target entry, which is why the fixture below is synthetic.
 ///
 /// Under neither remedy may an undisturbed slot simply be dropped. The length-1
 /// acceptance is recorded here as OBSERVED CURRENT BEHAVIOUR, deliberately NOT
