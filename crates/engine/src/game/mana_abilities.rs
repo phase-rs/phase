@@ -4991,6 +4991,7 @@ mod tests {
             library_placement: None,
             exile_controller: None,
             exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
             may_cost_paid: false,

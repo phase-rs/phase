@@ -2,7 +2,7 @@ use rand::Rng;
 use std::collections::{HashSet, VecDeque};
 use thiserror::Error;
 
-use crate::types::ability::{EffectKind, KeywordAction, TargetRef};
+use crate::types::ability::{DurationEvent, EffectKind, KeywordAction, TargetRef};
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::actions::{
@@ -14769,8 +14769,227 @@ pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
 
 /// CR 607.2a + CR 406.6 + CR 610.3: Check for event-bounded exile returns.
 /// Move linked exiled cards back through the replacement-aware zone pipeline.
+pub(crate) fn duration_event_matches(
+    state: &GameState,
+    source_id: ObjectId,
+    source_incarnation: Option<ObjectIncarnationRef>,
+    controller: PlayerId,
+    duration_event: DurationEvent,
+    event: &GameEvent,
+) -> bool {
+    match (duration_event, event) {
+        (
+            DurationEvent::SourceLeftBattlefield,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                record,
+                ..
+            },
+        ) => {
+            *object_id == source_id
+                && source_incarnation.is_none_or(|expected| {
+                    record
+                        .trigger_source_context
+                        .as_ref()
+                        .is_none_or(|observed| observed.identity.reference == expected)
+                })
+        }
+        (DurationEvent::OpponentBecameMonarch, GameEvent::MonarchChanged { player_id }) => {
+            super::players::is_opponent(state, controller, *player_id)
+        }
+        _ => false,
+    }
+}
+
 pub(super) fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let mut to_return: Vec<crate::types::game_state::ExileLink> = Vec::new();
+    let mut stack_latches = Vec::new();
+    let mut resolving_latches = Vec::new();
+    let mut deferred_latches = Vec::new();
+    let mut ordered_latches = Vec::new();
+
+    for (event_index, event) in events.iter().enumerate() {
+        for entry in &state.stack {
+            let StackEntryKind::TriggeredAbility {
+                ability,
+                trigger_event,
+                ..
+            } = &entry.kind
+            else {
+                continue;
+            };
+            let event_follows_trigger = trigger_event
+                .as_ref()
+                .and_then(|trigger| events.iter().position(|candidate| candidate == trigger))
+                .is_none_or(|trigger_index| event_index > trigger_index);
+            if !event_follows_trigger {
+                continue;
+            }
+            for duration_event in [
+                DurationEvent::SourceLeftBattlefield,
+                DurationEvent::OpponentBecameMonarch,
+            ] {
+                if ability.contains_duration_event(duration_event)
+                    && duration_event_matches(
+                        state,
+                        entry.source_id,
+                        ability
+                            .trigger_source
+                            .as_ref()
+                            .map(|source| source.identity.reference),
+                        entry.controller,
+                        duration_event,
+                        event,
+                    )
+                {
+                    stack_latches.push((entry.id, duration_event));
+                }
+            }
+        }
+
+        if let Some(entry) = state.resolving_stack_entry.as_ref() {
+            if matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }) {
+                if let Some(ability) = entry.ability() {
+                    for duration_event in [
+                        DurationEvent::SourceLeftBattlefield,
+                        DurationEvent::OpponentBecameMonarch,
+                    ] {
+                        if ability.contains_duration_event(duration_event)
+                            && duration_event_matches(
+                                state,
+                                entry.source_id,
+                                ability
+                                    .trigger_source
+                                    .as_ref()
+                                    .map(|source| source.identity.reference),
+                                entry.controller,
+                                duration_event,
+                                event,
+                            )
+                        {
+                            resolving_latches.push(duration_event);
+                        }
+                    }
+                }
+            }
+        }
+
+        for (index, context) in state.deferred_triggers.iter().enumerate() {
+            let event_follows_trigger = context
+                .pending
+                .trigger_event
+                .as_ref()
+                .and_then(|trigger| events.iter().position(|candidate| candidate == trigger))
+                .is_none_or(|trigger_index| event_index > trigger_index);
+            if !event_follows_trigger {
+                continue;
+            }
+            for duration_event in [
+                DurationEvent::SourceLeftBattlefield,
+                DurationEvent::OpponentBecameMonarch,
+            ] {
+                if context
+                    .pending
+                    .ability
+                    .contains_duration_event(duration_event)
+                    && duration_event_matches(
+                        state,
+                        context.pending.source_id,
+                        context
+                            .pending
+                            .ability
+                            .trigger_source
+                            .as_ref()
+                            .map(|source| source.identity.reference),
+                        context.pending.controller,
+                        duration_event,
+                        event,
+                    )
+                {
+                    deferred_latches.push((index, duration_event));
+                }
+            }
+        }
+
+        if let Some(order) = state.pending_trigger_order.as_ref() {
+            for (group_index, group) in order.groups.iter().enumerate() {
+                for (trigger_index, context) in group.triggers.iter().enumerate() {
+                    let event_follows_trigger = context
+                        .pending
+                        .trigger_event
+                        .as_ref()
+                        .and_then(|trigger| {
+                            events.iter().position(|candidate| candidate == trigger)
+                        })
+                        .is_none_or(|origin_index| event_index > origin_index);
+                    if !event_follows_trigger {
+                        continue;
+                    }
+                    for duration_event in [
+                        DurationEvent::SourceLeftBattlefield,
+                        DurationEvent::OpponentBecameMonarch,
+                    ] {
+                        if context
+                            .pending
+                            .ability
+                            .contains_duration_event(duration_event)
+                            && duration_event_matches(
+                                state,
+                                context.pending.source_id,
+                                context
+                                    .pending
+                                    .ability
+                                    .trigger_source
+                                    .as_ref()
+                                    .map(|source| source.identity.reference),
+                                context.pending.controller,
+                                duration_event,
+                                event,
+                            )
+                        {
+                            ordered_latches.push((group_index, trigger_index, duration_event));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (entry_id, duration_event) in stack_latches {
+        if let Some(ability) = state
+            .stack
+            .iter_mut()
+            .find(|entry| entry.id == entry_id)
+            .and_then(StackEntry::ability_mut)
+        {
+            ability.record_duration_event_recursive(duration_event);
+        }
+    }
+    for duration_event in resolving_latches {
+        if let Some(ability) = state
+            .resolving_stack_entry
+            .as_mut()
+            .and_then(StackEntry::ability_mut)
+        {
+            ability.record_duration_event_recursive(duration_event);
+        }
+    }
+    for (index, duration_event) in deferred_latches {
+        if let Some(context) = state.deferred_triggers.get_mut(index) {
+            context.record_duration_event(duration_event);
+        }
+    }
+    for (group_index, trigger_index, duration_event) in ordered_latches {
+        if let Some(context) = state
+            .pending_trigger_order
+            .as_mut()
+            .and_then(|order| order.groups.get_mut(group_index))
+            .and_then(|group| group.triggers.get_mut(trigger_index))
+        {
+            context.record_duration_event(duration_event);
+        }
+    }
 
     for event in events.iter() {
         match event {

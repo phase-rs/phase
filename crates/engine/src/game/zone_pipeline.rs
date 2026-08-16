@@ -710,6 +710,18 @@ pub(crate) fn move_object(
     move_object_with_terminal(state, req, events).into_zone_move_result()
 }
 
+#[cfg(feature = "test-support")]
+pub fn move_object_for_test(
+    state: &mut GameState,
+    req: ZoneMoveRequest,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    matches!(
+        move_object(state, req, events),
+        ZoneMoveResult::NeedsChoice(_)
+    )
+}
+
 pub(crate) fn move_object_with_terminal(
     state: &mut GameState,
     req: ZoneMoveRequest,
@@ -4482,6 +4494,11 @@ fn execute_zone_move_with_applied_terminal(
             if let Some(pending) = state.pending_replacement.as_mut() {
                 pending.exile_controller = exile_controller;
                 pending.exile_duration = duration.cloned();
+                pending.exile_tracking = if track_exiled_by_source {
+                    ZoneDeliveryExileTracking::TrackBySource
+                } else {
+                    ZoneDeliveryExileTracking::None
+                };
             }
             state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
             ZoneMoveTerminalResult::NeedsChoice(player)

@@ -488,6 +488,39 @@ pub fn resolve(
             .map(|cause| EffectResolutionResult { cause, count })
     };
 
+    // CR 610.3b: If the specified event occurred after this triggered ability
+    // triggered but before its initial one-shot zone change, the object does
+    // not move.
+    if let Some(duration_event) = ability
+        .duration
+        .as_ref()
+        .and_then(Duration::zone_change_event)
+    {
+        let occurred_before_this_resolution =
+            ability.context.duration_events.contains(&duration_event);
+        let occurred_earlier_this_resolution = events.iter().any(|event| {
+            crate::game::engine::duration_event_matches(
+                state,
+                ability.source_id,
+                ability
+                    .trigger_source
+                    .as_ref()
+                    .map(|source| source.identity.reference),
+                ability.controller,
+                duration_event,
+                event,
+            )
+        });
+        if occurred_before_this_resolution || occurred_earlier_this_resolution {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+                subject: None,
+            });
+            return Ok(completed_result(0));
+        }
+    }
+
     let mut origin = origin;
 
     let parsed_target = match &ability.effect {

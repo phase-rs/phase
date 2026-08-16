@@ -5912,6 +5912,7 @@ mod tests {
             library_placement: None,
             exile_controller: None,
             exile_duration: None,
+            exile_tracking: ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
             may_cost_paid: false,

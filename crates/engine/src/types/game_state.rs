@@ -18148,6 +18148,10 @@ pub struct PendingReplacement {
     pub exile_controller: Option<PlayerId>,
     #[serde(default)]
     pub exile_duration: Option<crate::types::ability::Duration>,
+    /// Preserve source-linked exile bookkeeping while a zone change waits on
+    /// a CR 616.1 replacement choice.
+    #[serde(default)]
+    pub exile_tracking: ZoneDeliveryExileTracking,
     /// CR 120.4a: carries the excess-redirect rider ("Excess damage is dealt to
     /// that creature's controller instead") across a damage replacement *choice*
     /// pause. The resume in `handle_replacement_choice` rebuilds the

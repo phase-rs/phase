@@ -178,6 +178,11 @@ pub(super) fn handle_replacement_choice(
         .pending_replacement
         .as_ref()
         .and_then(|pending| pending.exile_duration.clone());
+    let parked_exile_tracking = state
+        .pending_replacement
+        .as_ref()
+        .map(|pending| pending.exile_tracking)
+        .unwrap_or_default();
     // CR 120.4a + CR 702.15b: capture the excess-redirect rider and the deferred
     // lifelink bonus BEFORE `continue_replacement` consumes the pending record, so
     // the Damage resume arm can restore them onto the ctx it rebuilds from the
@@ -280,7 +285,7 @@ pub(super) fn handle_replacement_choice(
                             exile_links: crate::game::zone_pipeline::ExileLinkSpec {
                                 duration: parked_exile_duration,
                                 controller: parked_exile_controller,
-                                tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
+                                tracking: parked_exile_tracking,
                             },
                             drain:
                                 crate::types::game_state::PostReplacementDrainOwner::CallerEpilogue,
@@ -1182,6 +1187,12 @@ pub(super) fn handle_replacement_choice(
                 }
                 if pending.exile_duration.is_none() {
                     pending.exile_duration = parked_exile_duration.clone();
+                }
+                if matches!(
+                    pending.exile_tracking,
+                    crate::types::game_state::ZoneDeliveryExileTracking::None
+                ) {
+                    pending.exile_tracking = parked_exile_tracking;
                 }
                 // CR 120.4a: a SECOND material replacement ordering choice on the
                 // same damage event re-parked a fresh record with
@@ -3073,6 +3084,7 @@ mod tests {
             library_placement: None,
             exile_controller: None,
             exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
             may_cost_paid: false,
@@ -3747,6 +3759,7 @@ mod tests {
             library_placement: None,
             exile_controller: None,
             exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
             may_cost_paid: false,

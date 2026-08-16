@@ -7,11 +7,12 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCostOrigin,
     BounceSelection, CardTypeSetSource, CastManaSpentMetric, ChosenAttribute, CommanderOwnership,
     ControllerRef, CopyRetargetPermission, DamageAmountScope, DamageAmountThreshold,
-    DamageKindFilter, DelayedTriggerCondition, Effect, FilterProp, ModalChoice, ObjectScope,
-    OriginConstraint, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, RenownSubject,
-    ResolvedAbility, SacrificeCost, StaticCondition, TargetFilter, TargetRef, TributeOutcome,
-    TriggerCondition, TriggerConstraint, TriggerDefinition, TriggerDefinitionOccurrenceRef,
-    TriggerDefinitionRef, TriggerEntry, TriggerGrantProducerKey, TypeFilter, TypedFilter,
+    DamageKindFilter, DelayedTriggerCondition, DurationEvent, Effect, FilterProp, ModalChoice,
+    ObjectScope, OriginConstraint, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
+    RenownSubject, ResolvedAbility, SacrificeCost, StaticCondition, TargetFilter, TargetRef,
+    TributeOutcome, TriggerCondition, TriggerConstraint, TriggerDefinition,
+    TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry, TriggerGrantProducerKey,
+    TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -323,6 +324,10 @@ pub struct PendingTriggerContext {
     pub pending: PendingTrigger,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trigger_events: Vec<GameEvent>,
+    /// CR 610.3b: specified duration events observed after this ability
+    /// triggered but before it reached the stack.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) duration_events: Vec<DurationEvent>,
     #[serde(
         default,
         skip_serializing_if = "pending_trigger_dispatch_origin_is_normal"
@@ -348,6 +353,7 @@ impl PendingTriggerContext {
         Self {
             pending,
             trigger_events,
+            duration_events: Vec::new(),
             dispatch_origin: PendingTriggerDispatchOrigin::Normal,
             firing: TriggerFiring::Ordinary,
         }
@@ -357,6 +363,7 @@ impl PendingTriggerContext {
         Self {
             pending,
             trigger_events,
+            duration_events: Vec::new(),
             dispatch_origin: PendingTriggerDispatchOrigin::Normal,
             firing: TriggerFiring::Ordinary,
         }
@@ -367,6 +374,7 @@ impl PendingTriggerContext {
         Self {
             pending,
             trigger_events,
+            duration_events: Vec::new(),
             dispatch_origin: PendingTriggerDispatchOrigin::Delayed,
             firing: identity.firing(),
         }
@@ -374,6 +382,14 @@ impl PendingTriggerContext {
 
     pub(crate) fn firing(&self) -> TriggerFiring {
         self.firing
+    }
+
+    pub(crate) fn record_duration_event(&mut self, event: DurationEvent) {
+        if self.pending.ability.contains_duration_event(event)
+            && !self.duration_events.contains(&event)
+        {
+            self.duration_events.push(event);
+        }
     }
 
     #[cfg(test)]
@@ -7359,6 +7375,29 @@ fn push_pending_trigger_to_stack_with_firing(
     events: &mut Vec<GameEvent>,
     firing: TriggerFiring,
 ) -> ObjectId {
+    push_pending_trigger_to_stack_with_firing_and_duration_events(
+        state,
+        trigger,
+        trigger_events,
+        Vec::new(),
+        events,
+        firing,
+    )
+}
+
+fn push_pending_trigger_to_stack_with_firing_and_duration_events(
+    state: &mut GameState,
+    mut trigger: PendingTrigger,
+    trigger_events: Vec<GameEvent>,
+    duration_events: Vec<DurationEvent>,
+    events: &mut Vec<GameEvent>,
+    firing: TriggerFiring,
+) -> ObjectId {
+    for duration_event in duration_events {
+        trigger
+            .ability
+            .record_duration_event_recursive(duration_event);
+    }
     let PendingTrigger {
         source_id,
         controller,
@@ -7837,12 +7876,14 @@ fn dispatch_pending_trigger_context_with_origin(
     let firing = trigger_context.firing();
     let context_pending = trigger_context.pending.clone();
     let context_events = trigger_context.trigger_events.clone();
+    let context_duration_events = trigger_context.duration_events.clone();
     match dispatch_pending_trigger_context(state, trigger_context, events_out) {
         TriggerDispatchDisposition::DroppedTargetUnresolved if firing.is_delayed() => {
-            push_pending_trigger_to_stack_with_firing(
+            push_pending_trigger_to_stack_with_firing_and_duration_events(
                 state,
                 context_pending,
                 context_events,
+                context_duration_events,
                 events_out,
                 firing,
             );
@@ -8078,6 +8119,7 @@ fn dispatch_pending_trigger_context_core(
     let PendingTriggerContext {
         pending: trigger,
         trigger_events,
+        duration_events,
         firing,
         ..
     } = trigger_context;
@@ -8162,10 +8204,11 @@ fn dispatch_pending_trigger_context_core(
             let controller = trigger.controller;
             let source_id = trigger.source_id;
             let pending_for_state = trigger.clone();
-            let entry_id = push_pending_trigger_to_stack_with_firing(
+            let entry_id = push_pending_trigger_to_stack_with_firing_and_duration_events(
                 state,
                 trigger,
                 trigger_events.clone(),
+                duration_events.clone(),
                 events_out,
                 firing,
             );
@@ -8277,10 +8320,11 @@ fn dispatch_pending_trigger_context_core(
                 restore_trigger_event_context(state, context_snapshot);
                 return TriggerDispatchDisposition::ResolvedInline;
             }
-            push_pending_trigger_to_stack_with_firing(
+            push_pending_trigger_to_stack_with_firing_and_duration_events(
                 state,
                 trigger,
                 trigger_events,
+                duration_events,
                 events_out,
                 firing,
             );
@@ -8320,13 +8364,15 @@ fn dispatch_pending_trigger_context_core(
                             // when the division choice completes.
                             let player = prepared_trigger.controller;
                             let pending_for_state = prepared_trigger.clone();
-                            let entry_id = push_pending_trigger_to_stack_with_firing(
-                                state,
-                                prepared_trigger,
-                                trigger_events.clone(),
-                                events_out,
-                                firing,
-                            );
+                            let entry_id =
+                                push_pending_trigger_to_stack_with_firing_and_duration_events(
+                                    state,
+                                    prepared_trigger,
+                                    trigger_events.clone(),
+                                    duration_events.clone(),
+                                    events_out,
+                                    firing,
+                                );
                             state.pending_trigger_event_batch = trigger_events;
                             state.pending_trigger = Some(Box::new(pending_for_state));
                             state.pending_trigger_firing = Some(firing);
@@ -8344,10 +8390,11 @@ fn dispatch_pending_trigger_context_core(
                     }
                 }
             }
-            push_pending_trigger_to_stack_with_firing(
+            push_pending_trigger_to_stack_with_firing_and_duration_events(
                 state,
                 prepared_trigger,
                 trigger_events,
+                duration_events,
                 events_out,
                 firing,
             );
@@ -8361,10 +8408,11 @@ fn dispatch_pending_trigger_context_core(
             // mutates the on-stack entry's `ability.targets` when each target
             // is chosen.
             let pending_for_state = trigger.clone();
-            let entry_id = push_pending_trigger_to_stack_with_firing(
+            let entry_id = push_pending_trigger_to_stack_with_firing_and_duration_events(
                 state,
                 trigger,
                 trigger_events.clone(),
+                duration_events.clone(),
                 events_out,
                 firing,
             );
