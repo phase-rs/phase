@@ -19018,6 +19018,81 @@ fn delayed_trigger_in_effect_chain() {
     ));
 }
 
+/// CR 603.7 + CR 610.3 + CR 725.1: Palace Jailer must exile immediately and
+/// retain a persistent delayed return keyed to an opponent becoming monarch.
+#[test]
+fn palace_jailer_monarch_bounded_exile_preserves_return_provenance() {
+    let clause = parse_effect_clause(
+        "exile target creature an opponent controls until an opponent becomes the monarch",
+        &mut ParseContext::default(),
+    );
+
+    assert!(matches!(
+        clause.effect,
+        Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Exile,
+            target: TargetFilter::Typed(_),
+            ..
+        }
+    ));
+
+    let delayed = clause
+        .sub_ability
+        .as_deref()
+        .expect("monarch-bounded exile must install a delayed return");
+    let Effect::CreateDelayedTrigger {
+        condition:
+            DelayedTriggerCondition::WhenNextEvent {
+                trigger,
+                or_trigger: None,
+                lifetime: DelayedTriggerLifetime::Persistent,
+            },
+        effect: return_effect,
+        uses_tracked_set: false,
+    } = delayed.effect.as_ref()
+    else {
+        panic!(
+            "expected a persistent monarch delayed trigger, got {:?}",
+            delayed.effect
+        );
+    };
+    assert_eq!(trigger.mode, TriggerMode::BecomeMonarch);
+    assert!(matches!(
+        trigger.valid_target,
+        Some(TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::Opponent),
+            ..
+        }))
+    ));
+
+    let Effect::ChangeZone {
+        origin: Some(Zone::Exile),
+        destination: Zone::Battlefield,
+        target: TargetFilter::ParentTarget,
+        ..
+    } = return_effect.effect.as_ref()
+    else {
+        panic!(
+            "expected an exile-guarded ParentTarget return, got {:?}",
+            return_effect.effect
+        );
+    };
+}
+
+#[test]
+fn palace_jailer_monarch_bounded_exile_rejects_other_player_scope() {
+    let clause = parse_effect_clause(
+        "exile target creature an opponent controls until a player becomes the monarch",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(clause.effect, Effect::Unimplemented { .. }),
+        "unsupported player-scope variant must remain a strict parser gap: {:?}",
+        clause.effect
+    );
+}
+
 #[test]
 fn effect_emblem_ninjas_get_plus_one() {
     let e = parse_effect("You get an emblem with \"Ninjas you control get +1/+1.\"");

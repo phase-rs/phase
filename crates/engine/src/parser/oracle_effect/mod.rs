@@ -25080,7 +25080,98 @@ fn parse_imperative_effect(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     parse_imperative_effect_inner(tp, ctx)
 }
 
+/// CR 603.7 + CR 610.3 + CR 725.1: An event-bounded exile creates the exile
+/// immediately and a separate one-shot return effect when an opponent becomes
+/// the monarch. The delayed payload keeps the chosen object as `ParentTarget`
+/// and requires it to still be in exile when the return resolves.
+fn try_parse_exile_until_opponent_becomes_monarch_clause(
+    tp: TextPair<'_>,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let (_, (body_lower, suffix)) = nom_primitives::split_once_on(tp.lower, " until ").ok()?;
+    let body = tp.slice(0, body_lower.len()).trim_end();
+    let ast = parse_imperative_family_ast(body.original, body.lower, ctx)?;
+    let mut clause = lower_imperative_family_ast(ast);
+    if !matches!(
+        clause.effect,
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            ..
+        }
+    ) {
+        return None;
+    }
+
+    let supported_suffix = all_consuming(tag::<_, _, OracleError<'_>>(
+        "an opponent becomes the monarch",
+    ))
+    .parse(suffix)
+    .is_ok();
+    let monarch_suffix = all_consuming(terminated(
+        take_until::<_, _, OracleError<'_>>(" becomes the monarch"),
+        tag(" becomes the monarch"),
+    ))
+    .parse(suffix)
+    .is_ok();
+    if !supported_suffix {
+        if monarch_suffix {
+            return Some(parsed_clause(Effect::unimplemented(
+                "unsupported_monarch_bounded_exile",
+                tp.original,
+            )));
+        }
+        return None;
+    }
+
+    let return_effect = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChangeZone {
+            origin: Some(Zone::Exile),
+            destination: Zone::Battlefield,
+            target: TargetFilter::ParentTarget,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        },
+    );
+    let delayed_return = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::WhenNextEvent {
+                trigger: Box::new(
+                    TriggerDefinition::new(TriggerMode::BecomeMonarch).valid_target(
+                        TargetFilter::Typed(
+                            TypedFilter::default().controller(ControllerRef::Opponent),
+                        ),
+                    ),
+                ),
+                or_trigger: None,
+                lifetime: DelayedTriggerLifetime::Persistent,
+            },
+            effect: Box::new(return_effect),
+            uses_tracked_set: false,
+        },
+    );
+    if let Some(existing) = clause.sub_ability.as_mut() {
+        append_to_deepest_sub_ability(existing, Some(Box::new(delayed_return)));
+    } else {
+        clause.sub_ability = Some(Box::new(delayed_return));
+    }
+    Some(clause)
+}
+
 fn parse_imperative_effect_inner(tp: TextPair, ctx: &mut ParseContext) -> ParsedEffectClause {
+    if let Some(clause) = try_parse_exile_until_opponent_becomes_monarch_clause(tp, ctx) {
+        return clause;
+    }
+
     if let Some(ast) = parse_imperative_family_ast(tp.original, tp.lower, ctx) {
         return lower_imperative_family_ast(ast);
     }
