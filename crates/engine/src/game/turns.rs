@@ -2451,6 +2451,26 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     // should perform a full CR 704 pass at CR 514.3a's exact instant is a
     // separate question, deliberately not answered here.
     //
+    // REACHABILITY — read this block as defence in depth, NOT as documentation
+    // of a live path. No production route through the public API is known that
+    // reaches it with a non-empty queue: nothing in this file calls
+    // `collect_triggers_into_deferred`; the drain at the end of
+    // `process_phase_triggers` sits in that function's shared body, so it
+    // applies to every phase/step arm that calls it; and every
+    // `WaitingFor::Priority` settlement drains through the post-action pipeline.
+    // The one cleanup path that pauses and resumes — discard to maximum hand
+    // size — never re-enters this function (its resume runs
+    // `finish_cleanup_discard` and then the pipeline), so its CR 514.3a
+    // settlement comes from the pipeline, not from here.
+    //
+    // It is kept regardless: CR 514.3a is a real obligation at this exact
+    // instant, the block is inert when the queue is empty (the gate refuses, it
+    // returns `None`, and cleanup advances unchanged), and it is the local
+    // guarantee that a future producer which parks a batch during cleanup
+    // cannot carry it across the Cleanup -> Untap wrap. If you are looking for
+    // the code that settles a parked batch in practice, it is the step-boundary
+    // drain in `process_phase_triggers` or the post-action pipeline.
+    //
     // A parked `deferred_triggers` batch IS "a triggered ability waiting to be
     // put onto the stack", so it must settle HERE, during cleanup — not survive
     // `advance_phase_once`'s Cleanup -> Untap wrap (which runs `start_next_turn`)
@@ -2460,7 +2480,8 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     // a violation of it.
     //
     // POPULATION — this checks `deferred_triggers` only, unlike the CR 603.3b +
-    // issue #1350 guard at `turns.rs:2997`, which checks
+    // issue #1350 guard in `auto_advance_once`'s `Phase::CombatDamage` arm
+    // (grep `issue #1350` in this file), which checks
     // `!deferred_triggers.is_empty() || pending_trigger.is_some()`. The
     // `pending_trigger` disjunct is deliberately excluded, not overlooked: a live
     // `pending_trigger` means a trigger is mid-construction and owns the open
@@ -2468,7 +2489,7 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     // retained by the CR 603.3d narrowing) and the game would be sitting at that
     // trigger's own target/mode choice rather than passing priority into cleanup.
     // If that assumption is ever falsified, the fix is to widen this condition to
-    // match `:2997`, not to add a second block.
+    // match that `Phase::CombatDamage` guard, not to add a second block.
     //
     // The second half of CR 514.3a — "another cleanup step begins" — is ALREADY
     // implemented: `priority.rs:79-90` re-enters `auto_advance` when all players
@@ -2480,11 +2501,14 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     // returns only `Some(..)` — which the `Phase::Cleanup` arm converts to
     // `AutoAdvanceStep::Waiting`, exiting `auto_advance`'s UNBOUNDED loop (no
     // iteration cap) — or `None`, which advances the phase. It can never yield
-    // `Continue`, so it cannot spin that loop. (2) An unbounded REPEAT is a
-    // game-level draw, not a freeze: each repeat cleanup step costs a real
+    // `Continue`, so it cannot spin that loop. Part (1) is what carries
+    // termination; it is sufficient on its own. (2) An unbounded REPEAT would
+    // still not be a freeze: each repeat cleanup step costs a real
     // `PassPriority` from every living seat before `priority.rs:79-90` re-enters,
-    // so a pathological re-parking ability is CR 104.4b (a mandatory loop that
-    // changes no game state is a draw).
+    // so the game remains answerable throughout and any seat may act instead of
+    // passing. No CR draw rule is claimed for that case — CR 104.4b's draw is
+    // for loops of MANDATORY actions and expressly excludes loops containing an
+    // optional action, so it is not the authority here.
     // NOTE: this is NOT the argument `priority.rs:86-89` makes for the
     // control-reversion case — that one is monotone-decreasing (its one-shot TCE
     // is already pruned, so no new event re-fires). Nothing analogous holds for
@@ -2760,10 +2784,15 @@ fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>
 /// waiting in `deferred_triggers` are put on the stack here, not merely
 /// reported, so a parked batch cannot survive a phase or step boundary.
 /// Individual arms must NOT re-derive their own deferred-queue guards; the
-/// `Phase::CombatDamage` guard (issue #1350, comment at `turns.rs:2995`, `if`
-/// at `:2997`) predates this and is retained because it also covers
-/// `pending_trigger`. The CLEANUP step does not reach this function — CR 514.3a
-/// is handled in `execute_cleanup` instead.
+/// `Phase::CombatDamage` guard in `auto_advance_once` (issue #1350) predates
+/// this and is retained because it also covers `pending_trigger`.
+///
+/// The CLEANUP step does not reach this function. On the non-discard path,
+/// CR 514.3a is handled by the deferred-trigger block in `execute_cleanup`. When
+/// cleanup instead pauses for discard to maximum hand size, the resume runs
+/// `finish_cleanup_discard` and then the post-action pipeline — it does not
+/// re-enter `execute_cleanup` — so on that path CR 514.3a settles at the
+/// pipeline's drain rather than in `execute_cleanup`.
 fn process_phase_triggers(
     state: &mut GameState,
     events: &[GameEvent],
@@ -2808,20 +2837,32 @@ fn process_phase_triggers(
     // prompt makes every calling arm fall through to `WaitingFor::Priority`,
     // which is answerable and re-drains through the post-action pipeline.
     // (Note: the entry gate is restrictive, but `dispatch_deferred_triggers_in_order`
-    // ends by calling `drain_deferred_triggers_after_trigger_construction`
-    // (`triggers.rs:8093`), whose `else` arm is permissive — identical to
-    // `engine_priority.rs:265`'s behavior, and behaviourally the same here
-    // because the stack is empty at a step boundary.)
+    // in `triggers.rs` ends in a tail call to
+    // `drain_deferred_triggers_after_trigger_construction`, whose `else` arm is
+    // permissive — identical to the deferred-drain branch of
+    // `engine_priority::run_post_action_pipeline_from`, and behaviourally the
+    // same here because the stack is empty at a step boundary.)
     //
-    // NOTE: unlike `engine_priority.rs:265`, this drain is not gated on
-    // `skip_deferred_trigger_drain`. That flag is threaded only through the
-    // post-action pipeline and every current call site passes `false` (the
-    // three sites that name the flag: `engine.rs:7577`, `engine.rs:12278`,
-    // `engine_resolution_choices.rs:4564`; the remaining
-    // `run_post_action_pipeline` call sites pass the positional literal
-    // `false`), so the two are consistent today. A future caller that passes
-    // `true` must thread the opt-out into `auto_advance` as well rather than
-    // silently losing it here.
+    // NOTE: unlike the post-action pipeline's deferred-drain branch, this drain
+    // is not gated on `skip_deferred_trigger_drain` — and does not need to be.
+    //
+    // Do NOT defend that with a census of the flag's call sites. The opt-out can
+    // be passed positionally (as it is by the trailing `true` in
+    // `engine_resolution_choices::park_cast_during_resolution_cast_observers`),
+    // and a positional literal carries no identifier, so no search for the
+    // flag's name can enumerate the sites that set it.
+    //
+    // The gate is the protection instead. The flag exists to hold a drain back
+    // while a parent resolution continuation is still open (CR 608.2e, issue
+    // #1793). That condition is a property of state, and this drain already
+    // tests it directly: `drain_deferred_trigger_queue` is gated by
+    // `can_drain_deferred_triggers`, which refuses unless
+    // `triggers::resolution_completion_can_settle` — the same predicate that
+    // guards the pipeline's sibling branch, and the one that returns `false`
+    // while `resolving_stack_entry` is live under a resolution-choice prompt.
+    // So the opt-out's condition is enforced here from state rather than
+    // inherited through a parameter, and a caller that sets the flag cannot
+    // lose its effect by reaching this path.
     let prompt = match outcome.prompt {
         Some(prompt) => Some(prompt),
         None => super::triggers::drain_deferred_trigger_queue(state, events_out),

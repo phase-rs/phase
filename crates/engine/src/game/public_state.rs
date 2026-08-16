@@ -38,8 +38,11 @@ pub fn finalize_public_state(state: &mut GameState) {
     finalize_display_state(state);
 }
 
-/// CR 506.1: the combat step whose TURN-BASED ACTION this prompt is the player's
+/// CR 703.1: the combat step whose TURN-BASED ACTION this prompt is the player's
 /// answer to, or `None` when the prompt answers to some other authority.
+/// ("Turn-based actions are game actions that happen automatically when certain
+/// steps or phases begin, or when each step and phase ends." Each bound step's
+/// own rule is cited on its arm below.)
 ///
 /// The bound set is exactly the combat turn-based actions of CR 508.1, CR 509.1,
 /// CR 510.1c and CR 510.1d. It is NOT a closed enumeration of step-associated
@@ -48,7 +51,7 @@ pub fn finalize_public_state(state: &mut GameState) {
 /// unbound, or a legal state would trip the assertion below:
 ///
 /// * `CombatTaxPayment { context: Attacking }`, `ExertChoice`, `EnlistChoice` —
-///   CR 508.1g optional attack costs (CR 701.43d exert, CR 702.154a enlist).
+///   CR 508.1g optional attack costs (CR 701.43d exert, CR 702.154b enlist).
 ///   These are a sub-step of the declaration with their own re-entry
 ///   (`engine_combat::handle_pay_combat_tax`), not the declaration itself.
 /// * `MeldAttackTargetChoice`, `EntryAttackTargetChoice` — CR 508.4 "put onto
@@ -79,8 +82,10 @@ fn step_bound_phase(waiting_for: &WaitingFor) -> Option<Phase> {
 
 pub fn sync_waiting_for(state: &mut GameState, waiting_for: &WaitingFor) {
     state.waiting_for = waiting_for.clone();
-    // CR 506.1: a combat turn-based-action prompt is answerable only during its
-    // own step. Installing one outside that step produces a decision no seat can
+    // CR 703.1: a turn-based action happens automatically when its own step
+    // begins or ends, so a prompt that is a player's answer to one is answerable
+    // only during that step. Installing one outside that step produces a
+    // decision no seat can
     // legally submit and the game cannot leave. `debug_assert!` because after the
     // CR 603.3 drain in `turns::process_phase_triggers` no producer can construct
     // this pairing — an executable invariant, not production validation.
@@ -574,7 +579,7 @@ mod tests {
     use crate::types::identifiers::ObjectId;
     use crate::types::mana::ManaCost;
 
-    /// CR 506.1: every combat turn-based-action prompt maps to the one step it
+    /// CR 703.1: every combat turn-based-action prompt maps to the one step it
     /// can legally be answered in, and every prompt that answers to a DIFFERENT
     /// authority maps to `None`.
     ///
@@ -584,7 +589,7 @@ mod tests {
     /// `sync_waiting_for`'s `debug_assert!` fire on a legal state:
     ///
     /// * `CombatTaxPayment { context: Attacking }`, `ExertChoice`, `EnlistChoice`
-    ///   — CR 508.1g optional attack costs (CR 701.43d exert, CR 702.154a
+    ///   — CR 508.1g optional attack costs (CR 701.43d exert, CR 702.154b
     ///     enlist): a sub-step of the declaration, not the declaration.
     /// * `MeldAttackTargetChoice`, `EntryAttackTargetChoice` — CR 508.4 "put
     ///   onto the battlefield attacking", a resolution-time choice that CR 508.4d
@@ -683,7 +688,7 @@ mod tests {
             }),
             None,
         );
-        // CR 702.154a: enlist is an optional attack cost.
+        // CR 702.154b: enlist's static ability is an optional cost to attack.
         assert_eq!(
             step_bound_phase(&WaitingFor::EnlistChoice {
                 player: PlayerId(0),
