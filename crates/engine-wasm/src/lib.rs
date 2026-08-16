@@ -13,8 +13,6 @@ use engine::ai_support::{
 };
 use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracket};
 use engine::database::{CardDatabase, CardSearchQuery};
-#[cfg(test)]
-use engine::game::engine::ResolveAllFastForwardResult as BatchResolveResult;
 use engine::game::engine::{
     apply, apply_for_simulation, resolve_all_ready_is_authorized, resolve_all_ready_prefix,
 };
@@ -3216,6 +3214,7 @@ mod tests {
     use std::sync::Arc;
 
     use engine::game::deck_loading::create_object_from_card_face;
+    use engine::game::engine::ResolveAllFastForwardResult as BatchResolveResult;
     use engine::game::scenario::{GameScenario, P0, P1};
     use engine::game::zones::create_object;
     use engine::types::ability::{
