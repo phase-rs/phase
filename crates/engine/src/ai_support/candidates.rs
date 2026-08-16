@@ -3615,7 +3615,7 @@ pub fn retarget_actions(
         //   - "change the target of " → CR 115.7a, which ends: "If all the
         //     targets aren't changed to other legal targets, none of them are
         //     changed." Remedy for a multi-target entry: ALL-OR-NONE, not
-        //     one-changes-rest-stay. This is Bolt Bend's and Redirect's wording.
+        //     one-changes-rest-stay. This is Bolt Bend's wording.
         //
         //   DEFERRED(out-of-run): interactive Single-scope retarget collapses
         //   multi-target lists (CR 115.7a / CR 115.7b) — upstream cause filter.rs

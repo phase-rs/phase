@@ -770,7 +770,7 @@ fn assert_multi_role_entry_is_live(runner: &GameRunner) {
 ///   - "change the target of " → CR 115.7a, which ends: "If all the targets
 ///     aren't changed to other legal targets, none of them are changed." Remedy
 ///     for a multi-target entry: ALL-OR-NONE, not one-changes-rest-stay. This is
-///     Bolt Bend's and Redirect's wording.
+///     Bolt Bend's wording.
 ///
 /// Under neither remedy may an undisturbed slot simply be dropped. The length-1
 /// acceptance is recorded here as OBSERVED CURRENT BEHAVIOUR, deliberately NOT
