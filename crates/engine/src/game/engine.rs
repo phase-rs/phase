@@ -15233,7 +15233,12 @@ mod priority_reducer_census_tests {
             .collect::<BTreeSet<_>>();
         let expected_preflight_families = expected
             .iter()
-            .filter(|family| *family != "PassPriority" && *family != "SetAutoPass")
+            .filter(|family| {
+                !matches!(
+                    family.as_str(),
+                    "BeginResolveAll" | "PassPriority" | "SetAutoPass"
+                )
+            })
             .map(|family| (*family).to_owned())
             .collect::<BTreeSet<_>>();
         assert_eq!(preflight_families, expected_preflight_families);
