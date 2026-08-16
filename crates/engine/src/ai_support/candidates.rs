@@ -3574,7 +3574,16 @@ fn semantic_candidate_actions_with_probe(
     probe: Option<&casting::PriorityCastProbe>,
 ) -> Vec<CandidateAction> {
     let mut actions = candidate_actions_exact(state);
-    actions.extend(candidate_actions_broad_with_probe(state, probe));
+    // Resolve All consent is wholly represented by its finite exact domain.
+    // The broad enumerator delegates these same states to `candidate_actions_exact`
+    // for broad-only callers, so composing both here would expose every
+    // Grant, Decline, and Revoke choice twice.
+    if !matches!(
+        &state.waiting_for,
+        WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. }
+    ) {
+        actions.extend(candidate_actions_broad_with_probe(state, probe));
+    }
 
     let has_pending_cast = state.waiting_for.has_pending_cast()
         || (matches!(state.waiting_for, WaitingFor::DistributeAmong { .. })

@@ -15199,6 +15199,7 @@ mod priority_reducer_census_tests {
             "ActivateManaSource",
             "ActivateNinjutsu",
             "ActivateStation",
+            "BeginResolveAll",
             "CastPreparedCopy",
             "CastSpell",
             "CastSpellAsSneak",
@@ -19747,7 +19748,7 @@ mod stage2_injector_tests {
                 //   `begin_pending_trigger_target_selection` is STILL 134 — the function opens
                 //   `:12722 ⇒ :12778`, moving by the same `+56` as the pin, so the control
                 //   that caught this row's one historical silent drift is intact.
-                "game/engine.rs:12912".to_string(),
+                "game/engine.rs:13086".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \

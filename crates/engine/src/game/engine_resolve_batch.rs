@@ -861,6 +861,20 @@ mod tests {
             no_op_entry(2, PlayerId(0)),
             no_op_entry(3, PlayerId(0)),
         ]);
+        let run = ready_consent_run(&state, PlayerId(0))
+            .expect("the initiating representative remains authorized at Ready")
+            .clone();
+        let mut proof = state.clone();
+        proof.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let (boundary, _) = materialize_one_consented_resolution(&mut proof, &run)
+            .expect("a full consent run materializes one ordinary priority cycle");
+        assert_eq!(stack_resolved_count(&boundary.events), 1);
+        assert_eq!(proof.stack.len(), 2);
+        assert!(matches!(proof.waiting_for, WaitingFor::Priority { .. }));
+        assert!(stack::priority_checkpoint_is_settled(&proof));
+        assert!(consent_authorization_matches(&proof, &run));
 
         let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
 
