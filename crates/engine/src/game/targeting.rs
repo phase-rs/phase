@@ -1937,31 +1937,20 @@ fn stack_ability_matches_filter(
             tag,
             kind,
         } => {
-            if !matches!(
-                &entry.kind,
-                // CR 113.3b / CR 113.3c: Activated and triggered abilities are
-                // objects on the stack. Mana abilities do not reach the stack, so
-                // entries of these kinds are targetable stack abilities.
-                StackEntryKind::ActivatedAbility { .. }
-                    | StackEntryKind::TriggeredAbility { .. }
-                    | StackEntryKind::KeywordAction { .. }
-            ) {
+            // CR 113.3b / CR 113.3c: Activated and triggered abilities are
+            // objects on the stack. Mana abilities do not reach the stack
+            // (CR 605.3b), so every ability entry is a targetable stack ability.
+            // CR 115.1: the optional `kind` narrowing restricts that set to the
+            // one kind the effect's text names.
+            //
+            // Both the membership test and the kind narrowing come from
+            // `StackEntryKind::matches_stack_ability_kind` — the single
+            // authority shared with the CR 608.2b resolution recheck in
+            // `game::filter`, so the two gates admit exactly the same entry
+            // kinds. Keyword actions (equip / crew / saddle / station) classify
+            // as Activated there per CR 702.6a / 702.122a / 702.171a / 702.184a.
+            if !entry.kind.matches_stack_ability_kind(kind.as_ref()) {
                 return false;
-            }
-            if let Some(kind) = kind {
-                let matches_kind = matches!(
-                    (kind, &entry.kind),
-                    (
-                        crate::types::ability::StackAbilityKind::Activated,
-                        StackEntryKind::ActivatedAbility { .. }
-                    ) | (
-                        crate::types::ability::StackAbilityKind::Triggered,
-                        StackEntryKind::TriggeredAbility { .. }
-                    )
-                );
-                if !matches_kind {
-                    return false;
-                }
             }
             // CR 113.7a + CR 115.1: when a keyword-origin `tag` is required (e.g.
             // `AbilityTag::Backup` for "becomes the target of a backup ability"),

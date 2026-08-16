@@ -14,7 +14,7 @@ use super::error::{oracle_err, OracleError, OracleResult};
 use super::primitives::parse_color;
 use crate::parser::oracle_util::{parse_subtype, GRANTING_SELF_PLACEHOLDER, OUTLAW_SUBTYPES};
 use crate::types::ability::{
-    Comparator, ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter,
+    Comparator, ControllerRef, FilterProp, StackAbilityKind, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::mana::ManaColor;
@@ -564,38 +564,74 @@ pub fn parse_stack_object_target(input: &str) -> OracleResult<'_, TargetFilter> 
     .parse(input)
 }
 
-/// Parse a single ability-kind leg of a stack-object phrase.
+/// Parse the ability-kind spelling axis of a stack-object phrase.
 ///
-/// CR 113.3b/113.3c: activated and triggered abilities are distinct stack
-/// objects; a lone "triggered ability" or "activated ability" leg narrows
-/// `kind`, while combined phrases accept both.
-fn parse_ability_kind_leg(input: &str) -> OracleResult<'_, TargetFilter> {
+/// CR 113.3b / CR 113.3c: activated and triggered abilities are the two kinds
+/// of ability that exist as objects on the stack. A lone "triggered ability" /
+/// "activated ability" spelling narrows the legal set to that one kind
+/// (CR 115.1: the target is chosen from the set the effect's text defines);
+/// a combined spelling accepts both, which is `None`.
+///
+/// SINGLE AUTHORITY for this axis. Every consumer delegates here:
+///   * `parse_ability_kind_leg` — counter / disjunction
+///   * `oracle_effect::imperative::parse_copy_stack_ability_target` — copy,
+///     composed with the controller axis
+///   * `oracle_static::static_helpers::parse_it_targets_that_targets_spell_filter`
+///     — cost condition, composed with an article prefix
+///   * `oracle_static::static_helpers::is_nested_stack_target_condition` — the
+///     structural gate guarding that cost condition
+///
+/// The change-targets path does NOT call this directly — it delegates to
+/// [`parse_stack_object_target`] (the whole grammar) so it can compose ability
+/// legs with spell legs.
+///
+/// Do NOT re-spell these tags at a call site. Three call sites previously kept
+/// private, divergent lists and silently dropped the narrowing, so every
+/// "copy target triggered ability you control" card could illegally copy an
+/// ACTIVATED ability and Reroute could illegally retarget a TRIGGERED one.
+///
+/// Do NOT add a bare "ability" arm here. This combinator feeds
+/// `parse_ability_kind_leg` → `parse_ability_spell_disjunction`, where a
+/// kindless leg would over-match any phrase containing the word "ability" and
+/// would start stealing the canonical "spell or ability" shape. The one place
+/// that needs the bare article form ("it targets an ability that targets …")
+/// keeps a LOCAL literal for it (`oracle_static/static_helpers.rs`).
+///
+/// `alt` ORDER IS LOAD-BEARING. The invariant the correctness argument relies
+/// on is: EVERY COMBINED SPELLING PRECEDES EVERY BARE SPELLING. Ordering the
+/// arms by descending tag length is the mechanical rule that guarantees it
+/// (same discipline as the list connectors in
+/// `parse_ability_spell_disjunction`). It matters because this combinator has
+/// ANCHORED callers with no disjunction driver behind them to merge a partial
+/// match: on "activated ability or triggered ability you control", a bare-first
+/// ordering would consume only "activated ability", strand " or triggered
+/// ability you control", and drop the phrase.
+pub fn parse_ability_kind(input: &str) -> OracleResult<'_, Option<StackAbilityKind>> {
     alt((
-        map(tag("triggered ability"), |_| TargetFilter::StackAbility {
-            controller: None,
-            tag: None,
-            kind: Some(crate::types::ability::StackAbilityKind::Triggered),
-        }),
-        map(tag("activated ability"), |_| TargetFilter::StackAbility {
-            controller: None,
-            tag: None,
-            kind: Some(crate::types::ability::StackAbilityKind::Activated),
-        }),
-        map(
-            alt((
-                tag("activated ability, triggered ability"),
-                tag("activated or triggered ability"),
-                tag("triggered or activated ability"),
-                tag("triggered ability or activated ability"),
-                tag("activated ability or triggered ability"),
-            )),
-            |_| TargetFilter::StackAbility {
-                controller: None,
-                tag: None,
-                kind: None,
-            },
-        ),
+        // Combined spellings — both kinds legal. Ordered by descending length.
+        value(None, tag("triggered ability or activated ability")), // 38
+        value(None, tag("activated ability or triggered ability")), // 38
+        value(None, tag("activated ability, triggered ability")),   // 36
+        value(None, tag("activated or triggered ability")),         // 30
+        value(None, tag("triggered or activated ability")),         // 30
+        // Single-kind spellings — narrowing.
+        value(Some(StackAbilityKind::Triggered), tag("triggered ability")), // 17
+        value(Some(StackAbilityKind::Activated), tag("activated ability")), // 17
     ))
+    .parse(input)
+}
+
+/// Parse a single ability-kind leg of a stack-object phrase as a filter.
+///
+/// CR 113.3b/113.3c: thin `map` over [`parse_ability_kind`] — the leg
+/// contributes only the kind axis; `controller` and `tag` are supplied by the
+/// enclosing phrase, not by the leg.
+fn parse_ability_kind_leg(input: &str) -> OracleResult<'_, TargetFilter> {
+    map(parse_ability_kind, |kind| TargetFilter::StackAbility {
+        controller: None,
+        tag: None,
+        kind,
+    })
     .parse(input)
 }
 

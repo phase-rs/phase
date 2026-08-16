@@ -25,8 +25,9 @@ use crate::types::ability::{
     ObjectScope, PerpetualModification, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
     QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
     SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta, SpellCastingOption,
-    SpellCastingOptionKind, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
-    TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, VoteSubject, ZoneRef,
+    SpellCastingOptionKind, SpellStackToGraveyardReplacement, StackAbilityKind, StaticCondition,
+    StaticDefinition, TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
+    VoteSubject, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -560,45 +561,30 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::OriginalSource => "original source".into(),
         TargetFilter::SourceOrPaired => "source or paired creature".into(),
         TargetFilter::ExiledCardByIndex { index } => format!("exiled card {index}"),
+        // CR 113.3b / CR 113.3c + CR 109.4: render the two independent axes
+        // (ability kind, controller scope) compositionally. Enumerating the
+        // product as separate match arms silently dropped one axis whenever a
+        // new combination became reachable — the trailing kind-only catch-alls
+        // swallowed controller-bearing filters and rendered them without the
+        // "you control" scope.
         TargetFilter::StackAbility { tag: Some(tag), .. } => format!("{tag:?} ability on stack"),
         TargetFilter::StackAbility {
-            controller: None,
+            controller,
             tag: None,
-            kind: None,
-        } => "ability on stack".into(),
-        TargetFilter::StackAbility {
-            controller: None,
-            tag: None,
-            kind: Some(crate::types::ability::StackAbilityKind::Triggered),
-        } => "triggered ability on stack".into(),
-        TargetFilter::StackAbility {
-            controller: None,
-            tag: None,
-            kind: Some(crate::types::ability::StackAbilityKind::Activated),
-        } => "activated ability on stack".into(),
-        TargetFilter::StackAbility {
-            controller: Some(ControllerRef::You),
-            tag: None,
-            kind: None,
-        } => "ability you control on stack".into(),
-        TargetFilter::StackAbility {
-            controller: Some(ControllerRef::Opponent),
-            tag: None,
-            kind: None,
-        } => "ability opponent controls on stack".into(),
-        TargetFilter::StackAbility {
-            controller: Some(controller),
-            tag: None,
-            kind: None,
-        } => format!("ability scoped to {controller:?} on stack"),
-        TargetFilter::StackAbility {
-            kind: Some(crate::types::ability::StackAbilityKind::Triggered),
-            ..
-        } => "triggered ability on stack".into(),
-        TargetFilter::StackAbility {
-            kind: Some(crate::types::ability::StackAbilityKind::Activated),
-            ..
-        } => "activated ability on stack".into(),
+            kind,
+        } => {
+            let kind_word = match kind {
+                None => "ability",
+                Some(StackAbilityKind::Triggered) => "triggered ability",
+                Some(StackAbilityKind::Activated) => "activated ability",
+            };
+            match controller {
+                None => format!("{kind_word} on stack"),
+                Some(ControllerRef::You) => format!("{kind_word} you control on stack"),
+                Some(ControllerRef::Opponent) => format!("{kind_word} opponent controls on stack"),
+                Some(other) => format!("{kind_word} scoped to {other:?} on stack"),
+            }
+        }
         TargetFilter::StackSpell => "spell on stack".into(),
         TargetFilter::AttachedTo => "attached permanent".into(),
         TargetFilter::LastCreated => "last created".into(),
@@ -11502,6 +11488,60 @@ pub fn format_semantic_audit_markdown(summary: &SemanticAuditSummary) -> String 
 
 #[cfg(test)]
 mod tests {
+
+    /// CR 113.3b / CR 113.3c + CR 109.4: the ability-kind and controller axes
+    /// are independent, so `fmt_target` must render BOTH. Enumerated per-product
+    /// arms could not: the trailing kind-only catch-all swallowed
+    /// controller-bearing filters and dropped the "you control" scope — which
+    /// would make a newly-narrowed copy filter look like a controller misparse
+    /// in coverage output.
+    #[test]
+    fn fmt_target_composes_stack_ability_controller_and_kind() {
+        use crate::types::ability::{ControllerRef, StackAbilityKind, TargetFilter};
+
+        let stack_ability = |controller: Option<ControllerRef>, kind: Option<StackAbilityKind>| {
+            super::fmt_target(&TargetFilter::StackAbility {
+                controller,
+                tag: None,
+                kind,
+            })
+        };
+
+        // The newly reachable combination (Mister Fantastic / Strionic
+        // Resonator / Kirol). Pre-change this rendered "triggered ability on
+        // stack", silently dropping "you control".
+        assert_eq!(
+            stack_ability(Some(ControllerRef::You), Some(StackAbilityKind::Triggered)),
+            "triggered ability you control on stack"
+        );
+        assert_eq!(
+            stack_ability(Some(ControllerRef::You), Some(StackAbilityKind::Activated)),
+            "activated ability you control on stack"
+        );
+
+        // All six pre-existing renderings must be byte-identical.
+        assert_eq!(stack_ability(None, None), "ability on stack");
+        assert_eq!(
+            stack_ability(None, Some(StackAbilityKind::Triggered)),
+            "triggered ability on stack"
+        );
+        assert_eq!(
+            stack_ability(None, Some(StackAbilityKind::Activated)),
+            "activated ability on stack"
+        );
+        assert_eq!(
+            stack_ability(Some(ControllerRef::You), None),
+            "ability you control on stack"
+        );
+        assert_eq!(
+            stack_ability(Some(ControllerRef::Opponent), None),
+            "ability opponent controls on stack"
+        );
+        assert_eq!(
+            stack_ability(Some(ControllerRef::TargetPlayer), None),
+            "ability scoped to TargetPlayer on stack"
+        );
+    }
 
     /// #7317 — an ability's `activation_zone` must reach the parse-diff
     /// signature, under a key that does NOT collide with the `from` that

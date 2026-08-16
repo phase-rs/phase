@@ -6319,6 +6319,94 @@ fn static_this_spell_cost_less_if_it_targets_spell_or_ability_targeting_large_cr
     );
 }
 
+/// CR 113.3b / CR 113.3c + CR 601.2f: the "it targets a(n) …" cost-reduction
+/// condition delegates the ability-kind spelling to the shared axis authority
+/// (`oracle_nom::target::parse_ability_kind`), so a narrowing spelling narrows
+/// `kind` — while the BARE "an ability" form, which names no kind, must keep
+/// working and keep a kindless leg.
+#[test]
+fn it_targets_ability_kind_delegates_to_axis() {
+    use crate::types::ability::StackAbilityKind;
+
+    /// Pull the inner stack-object filter out of a parsed `ModifyCost` static.
+    fn stack_object_filter(line: &str) -> TargetFilter {
+        let def = parse_static_line(line).unwrap_or_else(|| panic!("must parse: {line}"));
+        let StaticMode::ModifyCost {
+            ref spell_filter, ..
+        } = def.mode
+        else {
+            panic!("expected ModifyCost for {line}");
+        };
+        let TargetFilter::Typed(tf) = spell_filter
+            .as_ref()
+            .unwrap_or_else(|| panic!("expected a spell filter for {line}"))
+        else {
+            panic!("expected a typed spell filter for {line}");
+        };
+        let outer = tf
+            .properties
+            .iter()
+            .find_map(|prop| match prop {
+                FilterProp::Targets { filter } => Some(filter.as_ref()),
+                _ => None,
+            })
+            .expect("expected outer Targets property");
+        let TargetFilter::And { filters } = outer else {
+            panic!("expected stack target conjunction, got {outer:?}");
+        };
+        filters
+            .first()
+            .expect("conjunction must carry the stack-object leg")
+            .clone()
+    }
+
+    // The narrowing spelling reaches the axis. Pre-fix this was a kindless leg.
+    assert_eq!(
+        stack_object_filter(
+            "This spell costs {7} less to cast if it targets a triggered ability that targets a creature you control with power 7 or greater.",
+        ),
+        TargetFilter::StackAbility {
+            controller: None,
+            tag: None,
+            kind: Some(StackAbilityKind::Triggered),
+        },
+        "a narrowing spelling must reach the shared kind axis"
+    );
+
+    // The BARE article form names no kind. It must still PARSE (the delegated
+    // arm cannot match it) and must stay kindless. If the local literal were
+    // deleted in favour of the delegation, this whole static would vanish.
+    assert_eq!(
+        stack_object_filter(
+            "This spell costs {7} less to cast if it targets an ability that targets a creature you control with power 7 or greater.",
+        ),
+        TargetFilter::StackAbility {
+            controller: None,
+            tag: None,
+            kind: None,
+        },
+        "bare \"an ability\" names no kind — it must parse and stay kindless"
+    );
+
+    // Not of This World, the only printed reach, is unchanged.
+    assert_eq!(
+        stack_object_filter(
+            "This spell costs {7} less to cast if it targets a spell or ability that targets a creature you control with power 7 or greater.",
+        ),
+        TargetFilter::Or {
+            filters: vec![
+                TargetFilter::StackSpell,
+                TargetFilter::StackAbility {
+                    controller: None,
+                    tag: None,
+                    kind: None,
+                },
+            ],
+        },
+        "the both-kinds literal arm must be untouched"
+    );
+}
+
 #[test]
 fn static_this_spell_cost_less_if_it_targets_stack_object_fails_closed_on_trailing_text() {
     assert!(

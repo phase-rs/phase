@@ -985,6 +985,7 @@ mod springheart_realdb_repro;
 mod sprout_inalla_realistic_offer;
 mod squirming_emergence_mana_value_target;
 mod squirrel_mob_dynamic_pump;
+mod stack_ability_kind_axis;
 mod stack_object_keyword_grants;
 mod std_counters_grammar_axes;
 mod std_dynqty_a_damage_mod_runtime;

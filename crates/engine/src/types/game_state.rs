@@ -16,9 +16,9 @@ use super::ability::{
     CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition, DigRestOrder, Duration,
     EffectKind, FaceDownProfile, GameRestriction, KeywordAction, KickerVariant, LibraryPosition,
     ModalChoice, PermanentEntryMode, PileSource, QuantityExpr, ResolvedAbility,
-    SearchDestinationSplit, SearchSelectionConstraint, StaticCondition, TapCreaturesAggregate,
-    TargetFilter, TargetRef, ThisWayCause, TriggerBaseSetInstanceRef, TriggerCondition,
-    TriggerDefinition, TriggerDefinitionRef, TriggerEntry,
+    SearchDestinationSplit, SearchSelectionConstraint, StackAbilityKind, StaticCondition,
+    TapCreaturesAggregate, TargetFilter, TargetRef, ThisWayCause, TriggerBaseSetInstanceRef,
+    TriggerCondition, TriggerDefinition, TriggerDefinitionRef, TriggerEntry,
 };
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, PrintedCardRef, TokenImageRef};
@@ -14211,6 +14211,53 @@ pub enum StackEntryKind {
     /// additionally carries its own typed object ids (equipment_id, vehicle_id,
     /// mount_id, spacecraft_id) needed at resolution.
     KeywordAction { action: KeywordAction },
+}
+
+impl StackEntryKind {
+    /// CR 113.3b / CR 113.3c: which kind of *ability* this stack entry is, or
+    /// `None` when the entry is a spell (a spell is not an ability, CR 112.1).
+    ///
+    /// SINGLE AUTHORITY for the ability-kind axis of
+    /// `TargetFilter::StackAbility`. Both legality authorities read it from
+    /// here — `game::targeting` at announcement (CR 601.2c) and `game::filter`
+    /// at the resolution recheck (CR 608.2b) — so the two gates cannot admit
+    /// different sets of stack-entry kinds. They previously each spelled the
+    /// mapping out inline and had already drifted: the recheck excluded
+    /// `KeywordAction` entirely while the announce gate admitted them, so a
+    /// kindless counter (Stifle / Trickbind / Repudiate) could legally announce
+    /// a target on an equip/crew entry and then fizzle at resolution.
+    ///
+    /// `KeywordAction` is `Activated`: CR 702.6a (equip), CR 702.122a (crew),
+    /// CR 702.171a (saddle) and CR 702.184a (station) each define the keyword as
+    /// an *activated ability*, so such an entry is an activated ability on the
+    /// stack for every rules purpose — including being a legal target of
+    /// "target activated ability" effects (Squelch, Interdict, Reroute).
+    ///
+    /// Exhaustive on purpose: a future `StackEntryKind` variant must make this
+    /// classification decision explicitly instead of silently defaulting.
+    pub fn stack_ability_kind(&self) -> Option<StackAbilityKind> {
+        match self {
+            StackEntryKind::Spell { .. } => None,
+            StackEntryKind::ActivatedAbility { .. } | StackEntryKind::KeywordAction { .. } => {
+                Some(StackAbilityKind::Activated)
+            }
+            StackEntryKind::TriggeredAbility { .. } => Some(StackAbilityKind::Triggered),
+        }
+    }
+
+    /// CR 113.3b / CR 113.3c + CR 115.1: whether this entry is a stack ability
+    /// that satisfies the optional `kind` narrowing of a
+    /// `TargetFilter::StackAbility`. This is the whole membership test, not just
+    /// the narrowing: a spell entry never satisfies it, and `None` (a combined
+    /// "activated or triggered ability" spelling) accepts either ability kind.
+    /// Mana abilities never reach the stack (CR 605.3b), so every ability entry
+    /// reaching this predicate is targetable in principle.
+    pub fn matches_stack_ability_kind(&self, kind: Option<&StackAbilityKind>) -> bool {
+        match self.stack_ability_kind() {
+            None => false,
+            Some(entry_kind) => kind.is_none_or(|wanted| *wanted == entry_kind),
+        }
+    }
 }
 
 /// CR 608.2e: A clause-local snapshot of an equalization minimum/maximum,
