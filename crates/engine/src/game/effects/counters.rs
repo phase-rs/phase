@@ -865,6 +865,7 @@ fn apply_pending_counter_post_action(
             cause,
             source_id,
             duration,
+            exile_controller,
             exile_tracking,
             enters_attacking,
             drain,
@@ -882,6 +883,7 @@ fn apply_pending_counter_post_action(
                 cause,
                 source_id,
                 duration.as_ref(),
+                exile_controller,
                 exile_tracking,
                 drain,
                 // CR 701.24a: the counter-pause continuation never carries a

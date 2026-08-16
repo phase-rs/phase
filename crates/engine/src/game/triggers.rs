@@ -43289,6 +43289,7 @@ pub mod tests {
                     event,
                     None,
                     None,
+                    None,
                     false,
                     crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
                     None,

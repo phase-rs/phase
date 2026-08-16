@@ -183,6 +183,32 @@ describe("encodeWireMessage / decodeWireMessage", () => {
     expect(out).toEqual(msg);
   });
 
+  it("round-trips monarch-bounded exile links", async () => {
+    const msg: P2PMessage = {
+      type: "state_update",
+      state: buildGameState({
+        exile_links: [
+          {
+            exiled_id: 12,
+            source_id: 34,
+            kind: {
+              UntilOpponentBecomesMonarch: {
+                return_zone: "Battlefield",
+                controller: 0,
+              },
+            },
+          },
+        ],
+      }),
+      events: [],
+      legalActions: [],
+      manaPaymentShortcutActions: [],
+      viewerInteraction: viewerInteractionWithProducedMana,
+    };
+    const bytes = await encodeWireMessage(msg);
+    await expect(decodeWireMessage(bytes)).resolves.toEqual(msg);
+  });
+
   // (b) Tiny messages take FORMAT_RAW.
   it("ping uses FORMAT_RAW (0x00) — too small for gzip to win", async () => {
     const bytes = await encodeWireMessage({ type: "ping", timestamp: 1 });

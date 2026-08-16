@@ -171,6 +171,10 @@ pub struct ExileLinkSpec {
     /// `Some(Duration::UntilHostLeavesPlay)` installs a return-on-source-leave
     /// link; other durations / `None` fall back to `tracking`.
     pub duration: Option<Duration>,
+    /// Resolved controller for a monarch-bounded link. `Some` is captured when
+    /// the originating ability resolves; `None` means that duration cannot
+    /// create a monarch link.
+    pub controller: Option<PlayerId>,
     /// `TrackBySource` records an "exiled with" link; `None` records nothing
     /// unless `duration` requires it.
     pub tracking: ZoneDeliveryExileTracking,
@@ -239,6 +243,7 @@ impl ZoneMoveRequest {
             attach_to: self.mods.attach_to,
             library_placement: self.placement,
             exile_duration: self.exile_links.duration,
+            exile_controller: self.exile_links.controller,
             exile_tracking: self.exile_links.tracking,
             replacement_applied: self.replacement_applied,
             face_down_in_exile: self.face_down_in_exile,
@@ -285,6 +290,7 @@ impl ZoneMoveRequest {
             placement: pending.library_placement,
             exile_links: ExileLinkSpec {
                 duration: pending.exile_duration,
+                controller: pending.exile_controller,
                 tracking: pending.exile_tracking,
             },
             replacement_applied: pending.replacement_applied,
@@ -832,6 +838,7 @@ pub(crate) fn move_object_with_terminal(
                         event,
                         source_id,
                         req.exile_links.duration.as_ref(),
+                        req.exile_links.controller,
                         matches!(
                             req.exile_links.tracking,
                             ZoneDeliveryExileTracking::TrackBySource
@@ -906,6 +913,7 @@ pub(crate) fn move_object_with_terminal(
                     event,
                     source_id,
                     exile_links.duration.as_ref(),
+                    exile_links.controller,
                     track_exiled_by_source,
                     PostReplacementDrainOwner::DeliveryTail,
                     None,
@@ -1043,6 +1051,7 @@ pub(crate) fn move_object_with_terminal(
         track_exiled_by_source,
         None,
         None,
+        exile_links.controller,
         req.replacement_applied,
         events,
     )
@@ -1607,6 +1616,7 @@ pub(crate) fn deliver(
         approved.event,
         ctx.source_id,
         ctx.exile_links.duration.as_ref(),
+        ctx.exile_links.controller,
         track_exiled_by_source,
         ctx.drain,
         // CR 701.24a: most `deliver` callers (bucket-A destroy / sacrifice / SBA /
@@ -1672,6 +1682,7 @@ fn append_zone_delivery_tail_after_counter_pause(
     cause: Option<ObjectId>,
     source_id: Option<ObjectId>,
     duration: Option<&Duration>,
+    exile_controller: Option<PlayerId>,
     exile_tracking: ZoneDeliveryExileTracking,
     drain: PostReplacementDrainOwner,
     enters_attacking: bool,
@@ -1688,6 +1699,7 @@ fn append_zone_delivery_tail_after_counter_pause(
         cause,
         source_id,
         duration: duration.cloned(),
+        exile_controller,
         exile_tracking,
         drain,
         enters_attacking,
@@ -1705,6 +1717,7 @@ pub(crate) fn apply_zone_delivery_tail(
     cause: Option<ObjectId>,
     source_id: Option<ObjectId>,
     duration: Option<&Duration>,
+    exile_controller: Option<PlayerId>,
     exile_tracking: ZoneDeliveryExileTracking,
     drain: PostReplacementDrainOwner,
     // CR 701.24a: when a specific library position was requested, the object was
@@ -1744,11 +1757,9 @@ pub(crate) fn apply_zone_delivery_tail(
                     Some(ExileLinkKind::UntilSourceLeaves { return_zone: from })
                 }
                 Some(Duration::UntilOpponentBecomesMonarch) => {
-                    state.objects.get(&source_id).map(|source| {
-                        ExileLinkKind::UntilOpponentBecomesMonarch {
-                            return_zone: from,
-                            controller: source.controller,
-                        }
+                    exile_controller.map(|controller| ExileLinkKind::UntilOpponentBecomesMonarch {
+                        return_zone: from,
+                        controller,
                     })
                 }
                 _ if matches!(exile_tracking, ZoneDeliveryExileTracking::TrackBySource) => {
@@ -3277,6 +3288,7 @@ pub(crate) fn deliver_replaced_zone_change(
     event: ProposedEvent,
     source_id: Option<ObjectId>,
     duration: Option<&Duration>,
+    exile_controller: Option<PlayerId>,
     track_exiled_by_source: bool,
     drain: PostReplacementDrainOwner,
     library_placement: Option<LibraryPosition>,
@@ -3345,6 +3357,7 @@ pub(crate) fn deliver_replaced_zone_change(
                     cause,
                     source_id,
                     duration,
+                    exile_controller,
                     exile_tracking,
                     drain,
                     library_placement.as_ref(),
@@ -3807,6 +3820,7 @@ pub(crate) fn deliver_replaced_zone_change(
                     cause,
                     source_id,
                     duration,
+                    exile_controller,
                     exile_tracking,
                     drain,
                     enters_attacking,
@@ -3839,6 +3853,7 @@ pub(crate) fn deliver_replaced_zone_change(
                     cause,
                     source_id,
                     duration,
+                    exile_controller,
                     exile_tracking,
                     drain,
                     enters_attacking,
@@ -3854,6 +3869,7 @@ pub(crate) fn deliver_replaced_zone_change(
             cause,
             source_id,
             duration,
+            exile_controller,
             exile_tracking,
             drain,
             library_placement.as_ref(),
@@ -3940,6 +3956,48 @@ pub(crate) fn execute_zone_move(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_zone_move_with_controller(
+    state: &mut GameState,
+    obj_id: ObjectId,
+    from_zone: Zone,
+    dest_zone: Zone,
+    source_id: ObjectId,
+    duration: Option<&Duration>,
+    enter_transformed: bool,
+    enter_tapped: EtbTapState,
+    enters_attacking: bool,
+    controller_override: Option<PlayerId>,
+    effect_enter_with_counters: &[(CounterType, u32)],
+    face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
+    track_exiled_by_source: bool,
+    library_placement: Option<LibraryPosition>,
+    enter_attached_to: Option<AttachTarget>,
+    exile_controller: Option<PlayerId>,
+    events: &mut Vec<GameEvent>,
+) -> ZoneMoveResult {
+    execute_zone_move_with_terminal_and_controller(
+        state,
+        obj_id,
+        from_zone,
+        dest_zone,
+        source_id,
+        duration,
+        enter_transformed,
+        enter_tapped,
+        enters_attacking,
+        controller_override,
+        effect_enter_with_counters,
+        face_down_profile,
+        track_exiled_by_source,
+        library_placement,
+        enter_attached_to,
+        exile_controller,
+        events,
+    )
+    .into_zone_move_result()
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_zone_move_with_terminal(
     state: &mut GameState,
     obj_id: ObjectId,
@@ -3958,6 +4016,47 @@ pub(crate) fn execute_zone_move_with_terminal(
     enter_attached_to: Option<AttachTarget>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveTerminalResult {
+    execute_zone_move_with_terminal_and_controller(
+        state,
+        obj_id,
+        from_zone,
+        dest_zone,
+        source_id,
+        duration,
+        enter_transformed,
+        enter_tapped,
+        enters_attacking,
+        controller_override,
+        effect_enter_with_counters,
+        face_down_profile,
+        track_exiled_by_source,
+        library_placement,
+        enter_attached_to,
+        None,
+        events,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_zone_move_with_terminal_and_controller(
+    state: &mut GameState,
+    obj_id: ObjectId,
+    from_zone: Zone,
+    dest_zone: Zone,
+    source_id: ObjectId,
+    duration: Option<&Duration>,
+    enter_transformed: bool,
+    enter_tapped: EtbTapState,
+    enters_attacking: bool,
+    controller_override: Option<PlayerId>,
+    effect_enter_with_counters: &[(CounterType, u32)],
+    face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
+    track_exiled_by_source: bool,
+    library_placement: Option<LibraryPosition>,
+    enter_attached_to: Option<AttachTarget>,
+    exile_controller: Option<PlayerId>,
+    events: &mut Vec<GameEvent>,
+) -> ZoneMoveTerminalResult {
     execute_zone_move_with_applied_terminal(
         state,
         obj_id,
@@ -3974,6 +4073,7 @@ pub(crate) fn execute_zone_move_with_terminal(
         track_exiled_by_source,
         library_placement,
         enter_attached_to,
+        exile_controller,
         HashSet::new(),
         events,
     )
@@ -3996,6 +4096,7 @@ fn execute_zone_move_with_applied_terminal(
     track_exiled_by_source: bool,
     library_placement: Option<LibraryPosition>,
     enter_attached_to: Option<AttachTarget>,
+    exile_controller: Option<PlayerId>,
     replacement_applied: HashSet<AppliedReplacementKey>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveTerminalResult {
@@ -4301,6 +4402,7 @@ fn execute_zone_move_with_applied_terminal(
                     event,
                     Some(source_id),
                     duration,
+                    exile_controller,
                     track_exiled_by_source,
                     PostReplacementDrainOwner::DeliveryTail,
                     library_placement,
@@ -4340,6 +4442,7 @@ fn execute_zone_move_with_applied_terminal(
                 event,
                 Some(source_id),
                 duration,
+                exile_controller,
                 track_exiled_by_source,
                 PostReplacementDrainOwner::DeliveryTail,
                 library_placement,
@@ -4376,6 +4479,10 @@ fn execute_zone_move_with_applied_terminal(
             // delivery-tail NeedsChoice path above is NOT parked here — its
             // wait state is already set by the counter-pause / devour machinery
             // (`replacement_pause_delivery_result` reads it).
+            if let Some(pending) = state.pending_replacement.as_mut() {
+                pending.exile_controller = exile_controller;
+                pending.exile_duration = duration.cloned();
+            }
             state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
             ZoneMoveTerminalResult::NeedsChoice(player)
         }

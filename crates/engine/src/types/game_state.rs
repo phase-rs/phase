@@ -4833,6 +4833,8 @@ pub struct PendingBatchZoneMoveRequest {
     pub library_placement: Option<LibraryPosition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exile_duration: Option<Duration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exile_controller: Option<PlayerId>,
     #[serde(default)]
     pub exile_tracking: ZoneDeliveryExileTracking,
     #[serde(
@@ -5527,6 +5529,8 @@ pub enum PendingCounterPostAction {
         cause: Option<ObjectId>,
         source_id: Option<ObjectId>,
         duration: Option<Duration>,
+        #[serde(default)]
+        exile_controller: Option<PlayerId>,
         exile_tracking: ZoneDeliveryExileTracking,
         /// CR 508.4: The completed battlefield entry joins combat after any
         /// as-enters replacement choice has settled.
@@ -18138,6 +18142,12 @@ pub struct PendingReplacement {
     /// away. `None` for every other parked event (the common case).
     #[serde(default)]
     pub library_placement: Option<crate::types::ability::LibraryPosition>,
+    /// CR 603.3a + CR 109.5: preserve the controller that resolved a
+    /// monarch-bounded exile while its zone change waits on CR 616.1.
+    #[serde(default)]
+    pub exile_controller: Option<PlayerId>,
+    #[serde(default)]
+    pub exile_duration: Option<crate::types::ability::Duration>,
     /// CR 120.4a: carries the excess-redirect rider ("Excess damage is dealt to
     /// that creature's controller instead") across a damage replacement *choice*
     /// pause. The resume in `handle_replacement_choice` rebuilds the

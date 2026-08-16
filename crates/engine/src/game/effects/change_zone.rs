@@ -803,7 +803,7 @@ pub fn resolve(
             );
             // CR 110.2a: `enters_under_player` was resolved once at resolver
             // entry — pass it straight through (no per-branch re-resolution).
-            match execute_zone_move(
+            match crate::game::zone_pipeline::execute_zone_move_with_controller(
                 state,
                 chosen,
                 scan_zone,
@@ -819,6 +819,7 @@ pub fn resolve(
                 track_exiled_by_source,
                 None,
                 None,
+                Some(ability.controller),
                 events,
             ) {
                 ZoneMoveResult::Done => {
@@ -887,7 +888,7 @@ pub fn resolve(
             );
             // CR 110.2a: pre-resolved controller override (single-eligible
             // branch). No per-branch re-resolution.
-            match execute_zone_move(
+            match crate::game::zone_pipeline::execute_zone_move_with_controller(
                 state,
                 chosen,
                 scan_zone,
@@ -903,6 +904,7 @@ pub fn resolve(
                 track_exiled_by_source,
                 None,
                 None,
+                Some(ability.controller),
                 events,
             ) {
                 ZoneMoveResult::Done => {
@@ -1485,7 +1487,7 @@ pub(crate) fn process_one_zone_move_with_terminal(
         ctx.enters_attacking,
         ctx.enters_modified_if.as_ref(),
     );
-    let result = crate::game::zone_pipeline::execute_zone_move_with_terminal(
+    let result = crate::game::zone_pipeline::execute_zone_move_with_terminal_and_controller(
         state,
         obj_id,
         from_zone,
@@ -1501,6 +1503,7 @@ pub(crate) fn process_one_zone_move_with_terminal(
         ctx.track_exiled_by_source,
         ctx.library_placement.clone(),
         ctx.enter_attached_to,
+        Some(ctx.controller),
         events,
     );
 
@@ -1961,7 +1964,7 @@ pub fn resolve_all(
             anticipated_zone_change_delivery(state, obj_id, dest_zone, ability.source_id);
         let delivery_start = events.len();
         let stack_depth_before_zone_move = state.resolution_stack.len();
-        match crate::game::zone_pipeline::execute_zone_move_with_terminal(
+        match crate::game::zone_pipeline::execute_zone_move_with_terminal_and_controller(
             state,
             obj_id,
             per_object_origin,
@@ -1977,6 +1980,7 @@ pub fn resolve_all(
             track_exiled_by_source,
             effect_library_position.clone(),
             None,
+            Some(ability.controller),
             events,
         ) {
             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {

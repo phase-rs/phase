@@ -1,7 +1,7 @@
 //! Palace Jailer — the ETB exile must last until an opponent becomes the monarch.
 //!
 //! The tests use the real card Oracle text and the cast/apply pipeline. The
-//! delayed return is source-independent, persistent across cleanup, scoped to
+//! event-bounded return is source-independent, persistent across cleanup, scoped to
 //! any opponent, and guarded so a target that left exile is not moved again.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -149,8 +149,86 @@ fn crown_opponent(runner: &mut GameRunner, spell: ObjectId, opponent: PlayerId, 
     );
 }
 
+/// CR 109.5 + CR 603.3a + CR 610.3: The Palace Jailer trigger is controlled by
+/// P0 when it triggers, even if P1 gains control of the source before that
+/// trigger resolves. The monarch-bounded link must use P0 for its opponent
+/// test, not the source object's later controller.
+#[test]
+fn control_change_before_etb_resolution_preserves_trigger_controller() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for player in [P0, P1] {
+        scenario.with_library_top(player, &["Filler 1", "Filler 2", "Filler 3", "Filler 4"]);
+    }
+    let jailer = scenario
+        .add_creature_to_hand_from_oracle(P0, "Palace Jailer", 2, 2, PALACE_JAILER)
+        .id();
+    let target = scenario.add_creature(P1, "Exiled Creature", 2, 2).id();
+    let gain_control = scenario
+        .add_spell_to_hand_from_oracle(
+            P1,
+            "Act of Treason",
+            true,
+            "Gain control of target creature until end of turn.",
+        )
+        .id();
+    let crown = scenario
+        .add_spell_to_hand_from_oracle(P1, "Crown Yourself", true, CONTROLLER_BECOMES_MONARCH)
+        .id();
+
+    let mut runner = scenario.build();
+    let mut committed = runner.cast(jailer).target_object(target).commit();
+    committed
+        .act(GameAction::PassPriority)
+        .expect("P0 can pass priority for Palace Jailer");
+    committed
+        .act(GameAction::PassPriority)
+        .expect("P1 can pass priority for Palace Jailer");
+    assert_eq!(committed.state().objects[&jailer].zone, Zone::Battlefield);
+    committed
+        .act(GameAction::OrderTriggers { order: vec![0, 1] })
+        .expect("the Palace Jailer ETB triggers must be ordered before priority");
+
+    committed
+        .act(GameAction::PassPriority)
+        .expect("P0 can pass priority to the responding player");
+    committed.cast(gain_control).target_object(jailer).resolve();
+    assert_eq!(committed.state().objects[&jailer].controller, P1);
+
+    for _ in 0..8 {
+        if committed.state().objects[&target].zone == Zone::Exile {
+            break;
+        }
+        committed
+            .act(GameAction::PassPriority)
+            .expect("priority must advance the Palace Jailer ETB triggers");
+    }
+    assert_eq!(committed.state().objects[&target].zone, Zone::Exile);
+    assert!(committed.state().exile_links.iter().any(|link| {
+        link.exiled_id == target
+            && matches!(
+                link.kind,
+                ExileLinkKind::UntilOpponentBecomesMonarch { controller: P0, .. }
+            )
+    }));
+
+    for _ in 0..8 {
+        match committed.state().waiting_for {
+            WaitingFor::Priority { player: current } if current == P1 => break,
+            WaitingFor::Priority { .. } => {
+                committed
+                    .act(GameAction::PassPriority)
+                    .expect("priority should advance to P1");
+            }
+            ref waiting => panic!("expected a priority window, got {waiting:?}"),
+        }
+    }
+    committed.cast(crown).resolve();
+    assert_eq!(committed.state().objects[&target].zone, Zone::Battlefield);
+}
+
 /// CR 603.7 + CR 610.3 + CR 725.1: An opponent becoming the monarch returns
-/// the exiled creature through the delayed-trigger path.
+/// the exiled creature through the event-bounded link path.
 #[test]
 fn opponent_becoming_monarch_returns_exiled_creature() {
     let Board {
@@ -196,8 +274,8 @@ fn controller_becoming_monarch_does_not_return_exiled_creature() {
     );
 }
 
-/// CR 603.7d + CR 400.7: Once created, the delayed trigger survives its source
-/// moving to the graveyard and still returns the target on the matching event.
+/// CR 603.7d + CR 400.7: Once created, the event-bounded link survives its
+/// source moving to the graveyard and still returns the target on the matching event.
 #[test]
 fn palace_jailer_in_graveyard_does_not_change_the_delayed_return() {
     let Board {
@@ -260,7 +338,7 @@ fn any_opponent_becoming_monarch_returns_the_selected_creature() {
 }
 
 /// CR 603.7c + CR 610.3: If the object leaves exile before the event, the
-/// delayed return's expected-origin guard makes it a no-op.
+/// event-bounded return's expected-origin guard makes it a no-op.
 #[test]
 fn target_leaving_exile_before_monarch_change_is_not_moved_again() {
     let Board {

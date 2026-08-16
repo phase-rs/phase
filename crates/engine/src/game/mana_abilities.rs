@@ -4989,6 +4989,8 @@ mod tests {
             depth: 0,
             is_optional: false,
             library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
             excess_recipient: None,
             lifelink_bonus: 0,
             may_cost_paid: false,

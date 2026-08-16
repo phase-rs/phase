@@ -83,6 +83,7 @@ pub(crate) fn complete_discard_to_graveyard(
                 event,
                 source_id,
                 None,
+                None,
                 false,
                 crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
                 // Discard delivers to the graveyard — no library placement.
@@ -376,6 +377,7 @@ pub fn resolve(
                             change_zone::deliver_replaced_zone_change(
                                 state,
                                 zone_event,
+                                None,
                                 None,
                                 None,
                                 false,
@@ -778,6 +780,7 @@ fn route_discard(
                 change_zone::deliver_replaced_zone_change(
                     state,
                     zone_event,
+                    None,
                     None,
                     None,
                     false,

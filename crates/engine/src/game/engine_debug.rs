@@ -803,6 +803,7 @@ pub fn route_debug_create_to_battlefield(
                 event,
                 None,
                 None,
+                None,
                 false,
                 crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
                 None,
