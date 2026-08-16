@@ -2448,9 +2448,13 @@ impl ResolutionStack {
     /// `scripts/check-resolution-frame-boundaries.sh` anchors its exemption to
     /// this function BY NAME. The rule the guard enforces is "one search, here",
     /// not "any search that looks identity-shaped": a second search anywhere in
-    /// this file — including a verbatim copy of the expression below — still
-    /// fails the guard. Move this function and the guard fails loudly rather
-    /// than silently widening.
+    /// this file — including a verbatim copy of the expression below, and
+    /// including one added INSIDE this body — still fails the guard, which
+    /// counts the searches in this span and requires exactly one. The guard
+    /// also requires that search to select on `frame_id() == Some(id)`, so the
+    /// exemption cannot be inherited by a positional probe that merely takes
+    /// this function's name. Move this function and the guard fails loudly
+    /// rather than silently widening.
     ///
     /// The distinction the guard draws is between POSITIONAL or
     /// adjacency-inferred access, which guesses a structural relationship the

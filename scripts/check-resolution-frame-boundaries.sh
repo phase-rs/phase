@@ -14,7 +14,12 @@
 # Anchoring to the function name rather than to a closure pattern is what keeps
 # this from becoming a loophole — a second call site cannot acquire its own
 # search by mimicking the expression, and moving or renaming the accessor fails
-# the guard loudly instead of silently widening it. The distinction being drawn
+# the guard loudly instead of silently widening it. Each half of that sentence
+# is CHECKED below rather than left to the reader: the accessor must be defined
+# exactly once, must contain exactly one search, and that search must select on
+# `frame_id() == Some(id)`. A span-only exemption would enforce the weaker
+# "searches only there" while this comment claimed the stronger "one search,
+# there" — the gap being closed here. The distinction being drawn
 # is between positional/adjacency-inferred access, which GUESSES a structural
 # relationship the stack does not guarantee, and identity-addressed access,
 # which asserts one: ids come from a monotonic allocator that never rewinds, so
@@ -350,13 +355,6 @@ for file_name in files:
     if path != resolution_path:
         continue
 
-    # `frames` may be searched in EXACTLY ONE production site: the module's
-    # single identity-addressed accessor. `function_span` raises if it is
-    # missing, so deleting or renaming the accessor fails the guard rather than
-    # quietly removing the anchor.
-    production_spans = test_spans + [
-        function_span(resolution_source, "post_replacement_frame_index")
-    ]
     remove_pattern = re.compile(
         r"\b(?:self\s*\.\s*)?frames\s*\.\s*"
         r"(?:remove|swap_remove|retain|drain|truncate|clear)\s*\("
@@ -367,12 +365,62 @@ for file_name in files:
         r"\s*\.\s*(?:position|rposition|find|find_map|any|next|nth)\s*\(",
         re.DOTALL,
     )
-    for pattern, message in [
-        (remove_pattern, "arbitrary ResolutionStack frame removal is forbidden; use a checked top-only API"),
-        (search_pattern, "generic ResolutionStack frame search is forbidden; use top or adjacent-pair access"),
+
+    # `frames` may be searched in EXACTLY ONE production site: the module's
+    # single identity-addressed accessor. A span-only exemption would enforce
+    # "searches only there" while this script's header promises "one search,
+    # there" -- so the three properties that make the header true are checked
+    # rather than assumed:
+    #
+    #   1. exactly one `fn post_replacement_frame_index` exists. `function_span`
+    #      takes the first textual match, so a second definition would silently
+    #      decide which one is exempt;
+    #   2. its span holds exactly one search, so the exemption cannot be widened
+    #      from the inside by adding a second search beside the first;
+    #   3. that search matches on `frame_id() == Some(id)`, so what is exempted
+    #      is an identity lookup and not a positional or first-match probe
+    #      wearing the accessor's name.
+    #
+    # The removal patterns are NOT exempted here: the accessor reads `frames`
+    # and never restructures it. `function_span` raises when its target is
+    # missing, so deleting or renaming the accessor fails the guard rather than
+    # quietly removing the anchor.
+    accessor = "post_replacement_frame_index"
+    definitions = len(re.findall(rf"\bfn\s+{re.escape(accessor)}\s*\(", resolution_source))
+    if definitions != 1:
+        failures.append(
+            f"  {resolution_path}: expected exactly one `fn {accessor}` "
+            f"definition, found {definitions}"
+        )
+    accessor_start, accessor_end = function_span(resolution_source, accessor)
+    accessor_body = resolution_source[accessor_start:accessor_end]
+    searches = len(search_pattern.findall(accessor_body))
+    if searches != 1:
+        failures.append(
+            f"  {resolution_path}: `{accessor}` is the single sanctioned "
+            f"`frames` search; found {searches}"
+        )
+    if not re.search(r"\bframe_id\s*\(\s*\)\s*==\s*Some\s*\(\s*id\s*\)", accessor_body):
+        failures.append(
+            f"  {resolution_path}: `{accessor}` must select frames by identity "
+            "(`frame_id() == Some(id)`), not by position"
+        )
+
+    for pattern, message, spans in [
+        (
+            remove_pattern,
+            "arbitrary ResolutionStack frame removal is forbidden; use a checked top-only API",
+            test_spans,
+        ),
+        (
+            search_pattern,
+            "generic ResolutionStack frame search is forbidden; use top access, "
+            "adjacent-pair access, or the single identity accessor",
+            test_spans + [(accessor_start, accessor_end)],
+        ),
     ]:
         for match in pattern.finditer(source):
-            if not in_any_span(match.start(), production_spans):
+            if not in_any_span(match.start(), spans):
                 fail(failures, path, source, match.start(), message)
 
 if failures:
