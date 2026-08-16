@@ -4092,7 +4092,18 @@ fn parse_enters_with_counters(
         return Some(def);
     }
 
-    let counter_entries = parse_enters_counter_entries(after_additional);
+    // The conjoined-list reader gets `after_with`, NOT
+    // `after_additional`. The caller-level "an additional " strip above exists
+    // for the single-counter path, and it eats the very article that anchors the
+    // list's leading element: "an additional +1/+1 counter and deathtouch
+    // counter on it" (March Toward Perfection) would arrive as "+1/+1 counter
+    // and …", whose head carries no count, so the whole list was rejected and
+    // every conjunct past the first silently dropped. The element grammar
+    // consumes "[an] additional" itself (`strip_additional_counter_qualifier`),
+    // so handing it the unstripped text is strictly more permissive — it also
+    // picks up "an additional +1/+1 counter and a lifelink counter on it", which
+    // the strip likewise used to break.
+    let counter_entries = parse_enters_counter_entries(after_with);
     // Detect dynamic count: "a number of [type] counters ... equal to [qty]"
     let after_prefix = tag::<_, _, OracleError<'_>>("a number of ")
         .parse(after_additional)
@@ -4786,46 +4797,117 @@ fn strip_additional_counter_qualifier(input: &str) -> &str {
 }
 
 fn parse_enters_counter_entries(after_with: &str) -> Option<Vec<(CounterType, QuantityExpr)>> {
+    parse_enters_counter_entries_with_rest(after_with).map(|(entries, _rest)| entries)
+}
+
+/// As [`parse_enters_counter_entries`], but also returns the text left AFTER the
+/// list's `" on it"` terminator.
+///
+/// The remainder is what lets a caller tell a complete clause from one that
+/// still has a printed instruction attached — "…counter and deathtouch counter
+/// on it" versus "…on it and with haste". A caller that discards it is choosing
+/// to publish whatever it parsed and drop the rest, which is only acceptable
+/// where that partial behavior already existed; a NEW route must look at this
+/// and decide deliberately. See the cast-enters trigger route, which fails
+/// closed on a non-empty remainder.
+fn parse_enters_counter_entries_with_rest(
+    after_with: &str,
+) -> Option<(Vec<(CounterType, QuantityExpr)>, &str)> {
     let mut remaining = after_with;
     let mut entries = Vec::new();
 
-    loop {
-        let (mut count_expr, rest) = parse_count_expr(remaining)?;
-        rewrite_variable_x_to_cost_x_paid(&mut count_expr);
-        // CR 122.1: strip the "additional" qualifier that follows the count word
-        // ("two additional +1/+1 counters") so it doesn't leak into the type.
-        let rest = strip_additional_counter_qualifier(rest);
-
-        let (at_counter, counter_type_raw) = take_until::<_, _, OracleError<'_>>(" counter")
-            .parse(rest)
-            .ok()?;
-        if counter_type_raw.trim().is_empty() {
-            return None;
-        }
-        let counter_type =
-            crate::parser::oracle_effect::counter::normalize_counter_type(counter_type_raw);
-        let (after_space, _) = tag::<_, _, OracleError<'_>>(" ").parse(at_counter).ok()?;
-        let (after_counter_word, _) =
-            alt((tag::<_, _, OracleError<'_>>("counters"), tag("counter")))
-                .parse(after_space)
-                .ok()?;
-
-        entries.push((counter_type, count_expr));
+    let rest_after_list = loop {
+        // Only a NON-LEADING conjunct may elide its count — the first
+        // element's mandatory count is what anchors the list.
+        let (entry, after_counter_word) =
+            parse_enters_counter_entry(remaining, !entries.is_empty())?;
+        entries.push(entry);
 
         if let Some(next) = parse_enters_counter_separator(after_counter_word) {
             remaining = next;
             continue;
         }
 
-        tag::<_, _, OracleError<'_>>(" on it")
+        let (rest, _) = tag::<_, _, OracleError<'_>>(" on it")
             .parse(after_counter_word)
             .ok()?;
-        break;
-    }
+        break rest;
+    };
 
-    (entries.len() >= 2).then_some(entries)
+    (entries.len() >= 2).then_some((entries, rest_after_list))
 }
 
+/// Whether the text trailing a counter list still carries a printed instruction.
+///
+/// Sentence-final punctuation is not an instruction; anything else is. Used to
+/// decide whether a clause was consumed WHOLE, so a route can refuse to publish
+/// a replacement that silently discards half its sentence.
+fn counter_list_remainder_is_exhausted(rest: &str) -> bool {
+    rest.trim().trim_end_matches('.').trim().is_empty()
+}
+
+/// Parse ONE element of an "enters with" counter list, returning the
+/// entry and the remainder after its `counter`/`counters` noun.
+///
+/// Two element shapes, tried in that order:
+///   * COUNTED — "two +1/+1 counters", "an additional lifelink counter",
+///     "X charge counters". The count opens with `oracle_util::parse_count_expr`,
+///     so the whole arithmetic grammar (X, `twice X`, `half X, rounded up`,
+///     `N plus/minus X`) is available and any surviving `X` is rewritten to the
+///     entering object's `CostXPaid` (CR 614.12).
+///   * ELIDED — "…and deathtouch counter on it", where the leading element's
+///     determiner distributes across the conjunction. Delegated to the shared
+///     `oracle_effect::parse_countless_counter_element` so this reader and the
+///     battlefield-rider list in `oracle_effect::lower` cannot drift on the
+///     element grammar; see that function for the recognized-type and
+///     singular-noun guards that keep an unanchored element from over-claiming.
+///
+/// `allow_elided_count` is false at the head of the list and true after any
+/// separator — the count is what anchors the leading element.
+fn parse_enters_counter_entry(
+    input: &str,
+    allow_elided_count: bool,
+) -> Option<((CounterType, QuantityExpr), &str)> {
+    if let Some(parsed) = parse_counted_enters_counter_entry(input) {
+        return Some(parsed);
+    }
+    if !allow_elided_count {
+        return None;
+    }
+    let (rest, entry) =
+        crate::parser::oracle_effect::parse_countless_counter_element(input).ok()?;
+    Some((entry, rest))
+}
+
+/// The COUNTED element shape of [`parse_enters_counter_entry`] — see there.
+fn parse_counted_enters_counter_entry(input: &str) -> Option<((CounterType, QuantityExpr), &str)> {
+    let (mut count_expr, rest) = parse_count_expr(input)?;
+    rewrite_variable_x_to_cost_x_paid(&mut count_expr);
+    // CR 122.1: strip the "additional" qualifier that follows the count word
+    // ("two additional +1/+1 counters") so it doesn't leak into the type.
+    let rest = strip_additional_counter_qualifier(rest);
+
+    let (at_counter, counter_type_raw) = take_until::<_, _, OracleError<'_>>(" counter")
+        .parse(rest)
+        .ok()?;
+    if counter_type_raw.trim().is_empty() {
+        return None;
+    }
+    let counter_type =
+        crate::parser::oracle_effect::counter::normalize_counter_type(counter_type_raw);
+    let (after_space, _) = tag::<_, _, OracleError<'_>>(" ").parse(at_counter).ok()?;
+    let (after_counter_word, _) = alt((tag::<_, _, OracleError<'_>>("counters"), tag("counter")))
+        .parse(after_space)
+        .ok()?;
+
+    Some(((counter_type, count_expr), after_counter_word))
+}
+
+/// Match a list separator AND verify the element after it parses, so a
+/// separator that is really a sentence connective ("…on it, then draw a card")
+/// leaves the list intact. This is the hand-rolled equivalent of the backtracking
+/// nom gets for free from `many0(preceded(sep, element))`; it lives here because
+/// this reader's counted element is not a pure combinator.
 fn parse_enters_counter_separator(input: &str) -> Option<&str> {
     let (after_sep, _) = alt((
         tag::<_, _, OracleError<'_>>(", and "),
@@ -4835,17 +4917,8 @@ fn parse_enters_counter_separator(input: &str) -> Option<&str> {
     .parse(input)
     .ok()?;
 
-    let (_, rest) = parse_count_expr(after_sep)?;
-    let (at_counter, counter_type_raw) = take_until::<_, _, OracleError<'_>>(" counter")
-        .parse(rest)
-        .ok()?;
-    if counter_type_raw.trim().is_empty() {
-        return None;
-    }
-    let (after_space, _) = tag::<_, _, OracleError<'_>>(" ").parse(at_counter).ok()?;
-    alt((tag::<_, _, OracleError<'_>>("counters"), tag("counter")))
-        .parse(after_space)
-        .ok()?;
+    // Post-separator position, so the elided-count form is in scope here too.
+    parse_enters_counter_entry(after_sep, true)?;
 
     Some(after_sep)
 }
@@ -4942,10 +5015,20 @@ fn build_enters_counter_ability(entries: Vec<(CounterType, QuantityExpr)>) -> Ab
 ///   "whenever you cast " → spell filter → ", that " → subject →
 ///   " enters with " → count-prefix → counter-type → " counter(s) on it"
 ///   [", where x is " → quantity ref] [trailing punctuation]
-fn parse_whenever_you_cast_enters_with(
-    norm_lower: &str,
-    original_text: &str,
-) -> Option<ReplacementDefinition> {
+/// CR 603.1: The SHAPE half of the cast-enters recognizer — everything up to and
+/// including `"enters with "`. Split out so "is this the cast-enters shape?" and
+/// "does its payload parse?" are separate questions.
+///
+/// The dispatcher needs both answers. A line that is not this shape must fall
+/// through to the generic replacement route; a line that IS this shape but whose
+/// payload is unsupported must NOT, because that route would model a cast
+/// TRIGGER as an object-hosted replacement — the exact rules error called out
+/// above (CR 603.1 + CR 603.3: the effect must outlive the source leaving the
+/// battlefield). Answering both from one parse keeps the grammar in one place.
+///
+/// Returns the (controller-constrained) spell filter and the text after
+/// `"enters with "`.
+fn parse_cast_enters_with_prefix(norm_lower: &str) -> Option<(TypedFilter, &str)> {
     // Prefix.
     let (rest, _) = tag::<_, _, OracleError<'_>>("whenever you cast ")
         .parse(norm_lower)
@@ -4988,6 +5071,63 @@ fn parse_whenever_you_cast_enters_with(
     let (rest, _) = tag::<_, _, OracleError<'_>>("enters with ")
         .parse(rest)
         .ok()?;
+
+    Some((spell_typed, rest))
+}
+
+fn parse_whenever_you_cast_enters_with(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let (spell_typed, rest) = parse_cast_enters_with_prefix(norm_lower)?;
+
+    // A CONJOINED counter list ("an additional +1/+1 counter and deathtouch
+    // counter on it") routes through `parse_enters_counter_entries` — the same
+    // reader the self-ETB replacement path uses, so this grammar has ONE
+    // authority instead of the bespoke single-counter parse below. The bespoke
+    // parse stays as the fallback for everything the list reader declines.
+    //
+    // Gated on every count being `Fixed`, which is what keeps the two count
+    // axes from silently crossing. The shared reader rewrites a bare `X` to the
+    // entering object's `CostXPaid` (right for a self-ETB "enters with X
+    // counters", CR 614.12), but `X` in THIS shape is bound by the trailing
+    // "where X is …" clause and is resolved below from that clause instead —
+    // Communal Brewing ("enters with X additional +1/+1 counters on it, where X
+    // is the number of ingredient counters on this enchantment") would silently
+    // become CostXPaid without the gate. No printed card puts a conjoined list
+    // and an X count in this position together, so the gate costs no coverage.
+    if let Some((entries, after_list)) =
+        parse_enters_counter_entries_with_rest(rest).filter(|(entries, _)| {
+            entries
+                .iter()
+                .all(|(_, count)| matches!(count, QuantityExpr::Fixed { .. }))
+        })
+    {
+        // FAIL CLOSED on an unconsumed rider. The list stops at " on it", so a
+        // trailing instruction ("… on it and with haste") would otherwise be
+        // dropped while this route published a complete-looking trigger — a
+        // rules-bearing sentence reported as fully supported when half of it was
+        // discarded. Returning `None` for the WHOLE recognizer (rather than
+        // falling through to the single-counter parse below) is deliberate:
+        // falling through would re-publish the same partial ability with even
+        // fewer counters.
+        //
+        // This gate is scoped to THIS route on purpose. The self-ETB path shares
+        // `parse_enters_counter_entries` and has always tolerated a trailing
+        // rider; tightening it there would fail closed on the nine Invasion
+        // kicker cards and drop the counters they place today (#7721), trading a
+        // partial parse for no parse at all.
+        if !counter_list_remainder_is_exhausted(after_list) {
+            return None;
+        }
+        return Some(
+            ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+                .execute(build_enters_counter_ability(entries))
+                .valid_card(TargetFilter::Typed(spell_typed))
+                .destination_zone(Zone::Battlefield)
+                .description(original_text.to_string()),
+        );
+    }
 
     // Count prefix: "an additional" | "N additional" | plain "N" | "x additional" | "x".
     // Mirrors `try_parse_enters_with_additional_counters` — the Wildgrowth
@@ -5096,6 +5236,54 @@ fn parse_whenever_you_cast_enters_with(
 /// object named by `state.current_trigger_event` (this trigger's own
 /// originating `SpellCast` event — CR 603.2) at install time, so only that
 /// exact spell's entry can ever satisfy it.
+/// CR 603.1 + CR 603.3: What the dispatcher learned about a
+/// `"Whenever you cast …, that … enters with …"` line.
+///
+/// The presence axis is decided independently of the parse axis, the same shape
+/// as [`EntersWithLeadingIfOutcome`]: once the cast-enters PREFIX matches, the
+/// line belongs to this recognizer's authority, so an unsupported payload yields
+/// `ShapeUnsupported` and never `NotThisShape`.
+///
+/// That distinction is load-bearing rather than cosmetic. Collapsing both to
+/// `None` lets the caller fall through to the generic replacement route, which
+/// re-parses a cast TRIGGER as an object-hosted replacement — the effect would
+/// then die with its source instead of surviving to affect the cast spell, the
+/// rules error this module's dispatcher note warns against.
+pub(crate) enum CastEntersWithOutcome {
+    /// Not the cast-enters shape. The caller should keep dispatching.
+    NotThisShape,
+    /// The cast-enters shape, fully parsed.
+    Parsed(Box<TriggerDefinition>),
+    /// The cast-enters shape, but its clause carries something this recognizer
+    /// does not support (e.g. a trailing rider the counter list cannot consume).
+    /// The caller MUST fail the line closed rather than fall through.
+    ShapeUnsupported,
+}
+
+/// Tri-state form of [`parse_whenever_you_cast_enters_with_trigger`] — see
+/// [`CastEntersWithOutcome`] for why the caller needs more than `Option`.
+pub(crate) fn parse_whenever_you_cast_enters_with_outcome(
+    text: &str,
+    card_name: &str,
+) -> CastEntersWithOutcome {
+    match parse_whenever_you_cast_enters_with_trigger(text, card_name) {
+        Some(trigger) => CastEntersWithOutcome::Parsed(Box::new(trigger)),
+        None => {
+            // Re-run ONLY the shape prefix against the same normalized text the
+            // recognizer uses, so "my shape, unsupported" is distinguished from
+            // "not my shape" without duplicating the grammar.
+            let stripped = strip_reminder_text(text);
+            let normalized = replace_self_refs(&stripped, card_name);
+            let norm_lower = normalized.to_lowercase();
+            if parse_cast_enters_with_prefix(&norm_lower).is_some() {
+                CastEntersWithOutcome::ShapeUnsupported
+            } else {
+                CastEntersWithOutcome::NotThisShape
+            }
+        }
+    }
+}
+
 pub(crate) fn parse_whenever_you_cast_enters_with_trigger(
     text: &str,
     card_name: &str,
@@ -16458,6 +16646,246 @@ mod tests {
         }
     }
 
+    /// CR 614.1c: a conjoined "enters with" counter list must survive a GATE.
+    /// `self_enters_with_multiple_counter_types` pins the ungated, all-singular
+    /// list (Agent's Toolkit); this pins the two axes that card does not cover,
+    /// because both are places the list could be truncated to its first element:
+    ///
+    ///   * a gate is peeled BEFORE the payload is read — sentence-initial
+    ///     "If <game state>, " (CR 614.1c, Dust Animus) and kicker-conditional
+    ///     "If ~ was kicked, " (CR 702.33d). The gate must land on the
+    ///     definition's single condition slot AND leave the whole list.
+    ///   * a multi-count leading element ("two +1/+1 counters") over a conjoined
+    ///     list — Agent's Toolkit's elements are all bare articles, so the count
+    ///     axis and the conjunct axis have never been exercised together.
+    ///
+    /// Only the kicker case is synthetic. Voidpouncer prints that gate, but its
+    /// line ends in a keyword rider this parser drops (#7721), and a fixture
+    /// asserting only its counters would certify a parse that discards a printed
+    /// instruction — see the note at the fixture.
+    ///
+    /// This is the direct-evidence pin for the claim in
+    /// `oracle_effect::lower::parse_enter_counters_clause_body`'s doc comment
+    /// that the replacement seam needs no routing through that list.
+    #[test]
+    fn gated_self_enters_with_conjoined_counters() {
+        let assert_chain = |text: &str, card: &str, expected: &[(CounterType, i32)]| {
+            let def = parse_replacement_line(text, card)
+                .unwrap_or_else(|| panic!("{card}: gated conjoined enters-with must parse"));
+            assert_eq!(def.event, ReplacementEvent::Moved, "{card}: self-ETB event");
+            assert_eq!(
+                def.valid_card,
+                Some(TargetFilter::SelfRef),
+                "{card}: self-referential subject"
+            );
+            assert!(
+                def.condition.is_some(),
+                "{card}: the gate must reach the condition slot, not be dropped"
+            );
+
+            let mut cursor = Some(def.execute.as_deref().expect("execute ability"));
+            for (index, (counter, count)) in expected.iter().enumerate() {
+                let ability = cursor.unwrap_or_else(|| {
+                    panic!("{card}: conjunct {index} ({counter:?}) was dropped from the chain")
+                });
+                assert!(
+                    matches!(
+                        &*ability.effect,
+                        Effect::PutCounter {
+                            counter_type,
+                            count: QuantityExpr::Fixed { value },
+                            target: TargetFilter::SelfRef,
+                        } if counter_type == counter && value == count
+                    ),
+                    "{card}: conjunct {index} expected {counter:?} x{count}, got {:?}",
+                    ability.effect
+                );
+                cursor = ability.sub_ability.as_deref();
+            }
+            assert!(
+                cursor.is_none(),
+                "{card}: a non-counter conjunct was swallowed as an extra PutCounter"
+            );
+        };
+
+        // Dust Animus — leading game-state gate.
+        assert_chain(
+            "If you control five or more untapped lands, this creature enters with two +1/+1 \
+             counters and a lifelink counter on it.",
+            "Dust Animus",
+            &[
+                (CounterType::Plus1Plus1, 2),
+                (
+                    CounterType::Keyword(crate::types::keywords::KeywordKind::Lifelink),
+                    1,
+                ),
+            ],
+        );
+
+        // A kicker gate, over a synthetic line that prints NO trailing rider.
+        //
+        // Voidpouncer's real text is deliberately not used here. It ends "… on it
+        // and with haste", and that keyword rider is dropped by a separate
+        // pre-existing bug (the nine-card Invasion kicker class, #7721). Asserting
+        // its counters would have this test certify a parse that silently discards
+        // a printed instruction — the partial-parse endorsement is the problem,
+        // not just the missing assertion, so the fixture is out rather than
+        // annotated. #7768 owns that rider; once it lands, a Voidpouncer case
+        // belongs there, asserting counters AND haste together.
+        assert_chain(
+            "If this creature was kicked, it enters with two +1/+1 counters and a trample \
+             counter on it.",
+            "Test Kicker Creature",
+            &[
+                (CounterType::Plus1Plus1, 2),
+                (
+                    CounterType::Keyword(crate::types::keywords::KeywordKind::Trample),
+                    1,
+                ),
+            ],
+        );
+    }
+
+    /// A conjunct whose count is ELIDED must still place its counter.
+    /// English coordination lets the leading determiner distribute — "an
+    /// additional [+1/+1 counter] and [deathtouch counter]" — and every conjunct
+    /// past the first used to be dropped on the floor, so these cards entered
+    /// with only their +1/+1.
+    ///
+    /// These three are the entire printed class (corpus sweep over every
+    /// "enters/enter with … counter" and battlefield-rider line), and they cover
+    /// both separator shapes: bare `" and "` and the Oxford `", …, and "` list.
+    /// The last one also pins that the longer "enters the battlefield with"
+    /// spelling takes the same path as the short "enters with".
+    #[test]
+    fn enters_with_elided_count_conjuncts() {
+        use crate::types::keywords::KeywordKind;
+
+        let assert_chain = |text: &str, card: &str, expected: &[CounterType]| {
+            let def = parse_replacement_line(text, card)
+                .unwrap_or_else(|| panic!("{card}: elided-count conjunct list must parse"));
+            let mut cursor = Some(def.execute.as_deref().expect("execute ability"));
+            for (index, counter) in expected.iter().enumerate() {
+                let ability = cursor.unwrap_or_else(|| {
+                    panic!("{card}: conjunct {index} ({counter:?}) was dropped from the chain")
+                });
+                assert!(
+                    matches!(
+                        &*ability.effect,
+                        // An elided count is exactly one counter (singular noun).
+                        Effect::PutCounter {
+                            counter_type,
+                            count: QuantityExpr::Fixed { value: 1 },
+                            ..
+                        } if counter_type == counter
+                    ),
+                    "{card}: conjunct {index} expected {counter:?} x1, got {:?}",
+                    ability.effect
+                );
+                cursor = ability.sub_ability.as_deref();
+            }
+            assert!(
+                cursor.is_none(),
+                "{card}: trailing text was swallowed as an extra PutCounter"
+            );
+        };
+
+        assert_chain(
+            "When you cast a Phyrexian creature spell, that creature enters with an additional \
+             +1/+1 counter and deathtouch counter on it.",
+            "March Toward Perfection",
+            &[
+                CounterType::Plus1Plus1,
+                CounterType::Keyword(KeywordKind::Deathtouch),
+            ],
+        );
+
+        assert_chain(
+            "When you cast a creature spell, that creature enters with an additional +1/+1 \
+             counter, reach counter, and trample counter on it.",
+            "Arcane Archery",
+            &[
+                CounterType::Plus1Plus1,
+                CounterType::Keyword(KeywordKind::Reach),
+                CounterType::Keyword(KeywordKind::Trample),
+            ],
+        );
+
+        assert_chain(
+            "When you cast a creature spell, that creature enters the battlefield with an \
+             additional +1/+1 counter, trample counter, and vigilance counter on it.",
+            "Tenacious Pup",
+            &[
+                CounterType::Plus1Plus1,
+                CounterType::Keyword(KeywordKind::Trample),
+                CounterType::Keyword(KeywordKind::Vigilance),
+            ],
+        );
+    }
+
+    /// The elided-count element is unanchored (no leading number), so it must not
+    /// widen what the list as a whole claims. Each case below stays on the
+    /// single-counter path — one `PutCounter`, no chain — rather than growing a
+    /// bogus second entry:
+    ///
+    ///   * a non-counter conjunct after the list ("and you draw a card")
+    ///   * a conjunct naming something that is not a counter type — the guard
+    ///     against `parse_strict_counter_type`'s absent `Generic` fallback
+    ///   * a PLURAL elided conjunct, which is ambiguous about whether the head
+    ///     count distributes and so fails closed rather than guessing
+    #[test]
+    fn elided_count_conjunct_does_not_over_claim() {
+        // The expected leading COUNT travels with each fixture. Matching the
+        // type alone with `..` on `count` left the third row provable by a
+        // single +1/+1 — the quantity is exactly what the elided-count work
+        // touches, so it has to be asserted, not elided in the pattern.
+        for (text, expected_count) in [
+            (
+                "This creature enters with an additional +1/+1 counter and you draw a card.",
+                1,
+            ),
+            (
+                "This creature enters with an additional +1/+1 counter and haste on it.",
+                1,
+            ),
+            (
+                "This creature enters with two +1/+1 counters and trample counters on it.",
+                2,
+            ),
+        ] {
+            // Every fixture is REQUIRED to parse. An earlier revision skipped a
+            // `None` with `else { continue }`, which meant a parser that stopped
+            // recognizing the replacement entirely ran no assertion at all and
+            // still went green — indistinguishable from the behavior under test.
+            let def = parse_replacement_line(text, "Test Enterer").unwrap_or_else(|| {
+                panic!(
+                    "{text:?} must still parse as a replacement — a rejection here is a \
+                     coverage regression, not a passing over-claim guard"
+                )
+            });
+            let execute = def.execute.as_deref().expect("execute ability");
+            // The leading counter is claimed, at its exact printed quantity...
+            assert!(
+                matches!(
+                    &*execute.effect,
+                    Effect::PutCounter {
+                        counter_type: CounterType::Plus1Plus1,
+                        count: QuantityExpr::Fixed { value },
+                        ..
+                    } if *value == expected_count
+                ),
+                "{text:?} must still claim its leading +1/+1 x{expected_count}, got {:?}",
+                execute.effect
+            );
+            // ...and nothing after it is.
+            assert!(
+                execute.sub_ability.is_none(),
+                "elided-count element over-claimed on {text:?}: {:?}",
+                execute.sub_ability
+            );
+        }
+    }
+
     #[test]
     fn enters_with_x_counters_uses_cost_x_paid() {
         // CR 107.3m: "This artifact enters with X charge counters on it" — X is the
@@ -21309,6 +21737,203 @@ mod tests {
     /// trigger resolves but before the cast spell does). The trigger's
     /// resolution installs a floating, one-shot `ChangeZone` replacement via
     /// `Effect::AddTargetReplacement`.
+    /// PRODUCTION PATH coverage for the conjoined counter list. The self-ETB
+    /// tests elsewhere in this module call `parse_replacement_line`, but a
+    /// `"Whenever you cast …, that creature enters with …"` line is intercepted
+    /// upstream (`oracle.rs`, Priority 5-pre) and routed to
+    /// `parse_whenever_you_cast_enters_with_trigger` instead — a DIFFERENT
+    /// reader, which until now parsed exactly one `+1/+1`/`-1/-1` counter and so
+    /// truncated any list handed to it.
+    ///
+    /// Every assertion is anchored by a positive reach guard: the trigger must
+    /// be `Some` with the expected mode and a floating one-shot replacement, so
+    /// a parse that never reached this path cannot satisfy the counter-chain
+    /// assertions vacuously.
+    #[test]
+    fn whenever_you_cast_trigger_lifts_conjoined_counter_list() {
+        let text = "Whenever you cast a creature spell, that creature enters with an additional \
+                    +1/+1 counter and deathtouch counter on it.";
+        let trigger = parse_whenever_you_cast_enters_with_trigger(text, "Test Enchantment")
+            .expect("reach guard: the conjoined list must still reach the trigger recognizer");
+        assert_eq!(trigger.mode, TriggerMode::SpellCast);
+
+        let exec = trigger.execute.as_ref().expect("execute set");
+        let Effect::AddTargetReplacement { replacement, .. } = &*exec.effect else {
+            panic!(
+                "reach guard: expected the floating AddTargetReplacement install, got {:?}",
+                exec.effect
+            );
+        };
+        assert_eq!(replacement.event, ReplacementEvent::ChangeZone);
+
+        // Both conjuncts, in printed order, chained as sub-abilities.
+        let mut cursor = Some(replacement.execute.as_deref().expect("execute set"));
+        for (index, (expected_type, expected_count)) in [
+            (CounterType::Plus1Plus1, 1),
+            (
+                CounterType::Keyword(crate::types::keywords::KeywordKind::Deathtouch),
+                1,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let ability = cursor.unwrap_or_else(|| {
+                panic!("conjunct {index} ({expected_type:?}) was truncated off the trigger payload")
+            });
+            assert!(
+                matches!(
+                    &*ability.effect,
+                    Effect::PutCounter { counter_type, count: QuantityExpr::Fixed { value }, target: TargetFilter::SelfRef }
+                        if *counter_type == expected_type && *value == expected_count
+                ),
+                "conjunct {index} expected {expected_type:?} x{expected_count}, got {:?}",
+                ability.effect
+            );
+            cursor = ability.sub_ability.as_deref();
+        }
+        assert!(
+            cursor.is_none(),
+            "trailing text must not be swallowed as an extra counter"
+        );
+    }
+
+    /// The list route must not capture the DYNAMIC count shape. Communal
+    /// Brewing's X is bound by the trailing "where X is …" clause, and the
+    /// shared list reader would rewrite a bare X to the entering object's
+    /// `CostXPaid` (right for a self-ETB "enters with X counters", wrong here).
+    /// The `Fixed`-only gate on the list route is what keeps the two count axes
+    /// apart; without it this count silently becomes `CostXPaid`.
+    /// The shared-list route must not publish a trigger for a clause it only
+    /// half-consumed. `parse_enters_counter_entries` stops at `" on it"`, so a
+    /// printed instruction after it ("… on it and with haste") would otherwise
+    /// be dropped while this route returned a complete-looking
+    /// `AddTargetReplacement` — a rules-bearing sentence reported as fully
+    /// supported with half of it discarded.
+    ///
+    /// Asserted at the production entry point, and paired with the clean line as
+    /// a reach guard so the `None` is provably the RIDER's doing and not the
+    /// recognizer failing to match the shape at all.
+    ///
+    /// SCOPE, measured rather than assumed: this closes the route, not the whole
+    /// pipeline. `oracle.rs` Priority 5-pre falls through to
+    /// `parse_replacement_line_ir` when the trigger recognizer declines, and that
+    /// path still lifts both counters without the rider. That fallthrough is
+    /// unchanged by this PR — the pre-existing single-counter parse also rejected
+    /// this line (its `" counter on it"` tag cannot match `" counter and …"`), so
+    /// the recognizer returned `None` here before this route existed too, and the
+    /// same partial replacement was produced. Closing it end-to-end needs either
+    /// the rider parsed (#7721/#7768) or the self-ETB path tightened, which would
+    /// drop the counters the nine Invasion kicker cards place today.
+    /// END-TO-END fail-closed boundary, through the production `parse_oracle_text`
+    /// pipeline rather than the recognizer alone.
+    ///
+    /// Closing the recognizer is not enough on its own: `oracle.rs` Priority 5-pre
+    /// used to fall through to `parse_replacement_line_ir` whenever the
+    /// recognizer declined, and that route accepted the same line through
+    /// `parse_enters_with_counters` — republishing the counters without the rider,
+    /// AND as an object-hosted replacement. Per CR 603.1 + CR 603.3 that is the
+    /// wrong authority for a cast trigger: the effect must outlive its source
+    /// leaving the battlefield, which a permanent-hosted replacement does not.
+    ///
+    /// So the assertion is about what must NOT be emitted — no replacement, no
+    /// trigger — paired with the rider-free line as a positive control proving
+    /// the pipeline still produces the trigger for the supported shape.
+    #[test]
+    fn cast_enters_with_rider_emits_no_partial_ability_end_to_end() {
+        let rider = "Whenever you cast a creature spell, that creature enters with an \
+                     additional +1/+1 counter and deathtouch counter on it and with haste.";
+        let parsed = parse_oracle_text(
+            rider,
+            "Test Enchantment",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        assert!(
+            parsed.replacements.is_empty(),
+            "the rider line must not publish an object-hosted replacement, got {:?}",
+            parsed.replacements
+        );
+        assert!(
+            parsed.triggers.is_empty(),
+            "nor a trigger, got {:?}",
+            parsed.triggers
+        );
+
+        // Positive control: the same clause WITHOUT the rider still reaches the
+        // dedicated cast-enters trigger authority end-to-end.
+        let clean = "Whenever you cast a creature spell, that creature enters with an \
+                     additional +1/+1 counter and deathtouch counter on it.";
+        let ok = parse_oracle_text(
+            clean,
+            "Test Enchantment",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        assert_eq!(
+            ok.triggers.len(),
+            1,
+            "reach guard: the rider-free clause must still produce its trigger, got {ok:?}"
+        );
+        assert!(
+            ok.replacements.is_empty(),
+            "and must stay a trigger, not an object-hosted replacement, got {:?}",
+            ok.replacements
+        );
+    }
+
+    #[test]
+    fn whenever_you_cast_trigger_fails_closed_on_unconsumed_rider() {
+        let rider = "Whenever you cast a creature spell, that creature enters with an \
+                     additional +1/+1 counter and deathtouch counter on it and with haste.";
+        assert!(
+            parse_whenever_you_cast_enters_with_trigger(rider, "Test Enchantment").is_none(),
+            "a trailing rider must fail the recognizer closed, not publish a partial trigger"
+        );
+
+        // Reach guard: the identical clause WITHOUT the rider still parses, so
+        // the `None` above is the rider's doing.
+        let clean = "Whenever you cast a creature spell, that creature enters with an \
+                     additional +1/+1 counter and deathtouch counter on it.";
+        assert!(
+            parse_whenever_you_cast_enters_with_trigger(clean, "Test Enchantment").is_some(),
+            "reach guard: the rider-free clause must still parse"
+        );
+    }
+
+    #[test]
+    fn whenever_you_cast_trigger_keeps_where_x_count_dynamic() {
+        let text = "Whenever you cast a creature spell, that creature enters with X additional \
+                    +1/+1 counters on it, where X is the number of ingredient counters on this \
+                    enchantment.";
+        let trigger = parse_whenever_you_cast_enters_with_trigger(text, "Communal Brewing")
+            .expect("reach guard: the where-X shape must still parse");
+        let exec = trigger.execute.as_ref().expect("execute set");
+        let Effect::AddTargetReplacement { replacement, .. } = &*exec.effect else {
+            panic!("expected AddTargetReplacement, got {:?}", exec.effect);
+        };
+        let put = replacement.execute.as_ref().expect("execute set");
+        let Effect::PutCounter { count, .. } = &*put.effect else {
+            panic!("expected PutCounter, got {:?}", put.effect);
+        };
+        assert!(
+            !matches!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid
+                }
+            ),
+            "the where-X count must not be rewritten to CostXPaid by the shared list reader, \
+             got {count:?}"
+        );
+        assert!(
+            !matches!(count, QuantityExpr::Fixed { .. }),
+            "the where-X count must stay dynamic, got {count:?}"
+        );
+    }
+
     #[test]
     fn parses_wildgrowth_archaic_trigger() {
         let text = "Whenever you cast a creature spell, that creature enters with X additional +1/+1 counters on it, where X is the number of colors of mana spent to cast it.";

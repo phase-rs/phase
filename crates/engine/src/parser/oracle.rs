@@ -98,7 +98,7 @@ use super::oracle_replacement::{
     find_copy_verb_present, lower_as_enters_becomes_choice_modal,
     lower_as_enters_or_face_up_counters, lower_replacement_ir,
     parse_bidirectional_damage_prevention, parse_replacement_line, parse_replacement_line_ir,
-    parse_whenever_you_cast_enters_with_trigger,
+    parse_whenever_you_cast_enters_with_outcome, CastEntersWithOutcome,
 };
 use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
@@ -5268,10 +5268,26 @@ pub(crate) fn parse_oracle_ir(
             // trigger resolves but before the cast spell does (issue #6492
             // review). Try this shape's dedicated trigger recognizer FIRST so it
             // never falls through to the generic object-hosted replacement path.
-            if let Some(trigger) = parse_whenever_you_cast_enters_with_trigger(&line, card_name) {
-                emitter.trigger_ir_at(item_line, TriggerNodeIr::from_definition(&line, trigger));
-                i += 1;
-                continue;
+            match parse_whenever_you_cast_enters_with_outcome(&line, card_name) {
+                CastEntersWithOutcome::Parsed(trigger) => {
+                    emitter
+                        .trigger_ir_at(item_line, TriggerNodeIr::from_definition(&line, *trigger));
+                    i += 1;
+                    continue;
+                }
+                // CR 603.1 + CR 603.3: the line IS this recognizer's shape, but
+                // part of its clause is unsupported. Falling through would let
+                // the generic route below re-parse a cast TRIGGER as an
+                // object-hosted replacement — publishing a partial ability AND
+                // giving it the wrong lifetime, since the effect must outlive the
+                // source leaving the battlefield. Fail the line closed instead,
+                // so the unsupported clause is reported honestly.
+                CastEntersWithOutcome::ShapeUnsupported => {
+                    emitter.unsupported_at(item_line, line.clone());
+                    i += 1;
+                    continue;
+                }
+                CastEntersWithOutcome::NotThisShape => {}
             }
             // Every other "… enters with …" shape here (kicker-conditional
             // "if ~ was kicked, it enters with …", external "[type] enters
