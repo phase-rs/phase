@@ -25130,10 +25130,10 @@ fn parse_imperative_effect(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     parse_imperative_effect_inner(tp, ctx)
 }
 
-/// CR 603.7 + CR 610.3 + CR 725.1: An event-bounded exile creates the exile
-/// immediately and a separate one-shot return effect when an opponent becomes
-/// the monarch. The delayed payload keeps the chosen object as `ParentTarget`
-/// and requires it to still be in exile when the return resolves.
+/// CR 610.3 + CR 610.3b: This duration marks a zone-change effect that returns
+/// its object immediately after an opponent becomes the monarch. The
+/// `Duration::UntilOpponentBecomesMonarch` link also prevents the initial move
+/// when that event occurred after the ability triggered but before it resolves.
 fn try_parse_exile_until_opponent_becomes_monarch_clause(
     tp: TextPair<'_>,
     ctx: &mut ParseContext,
