@@ -2190,6 +2190,11 @@ fn clear_cleanup_damage(state: &mut GameState, events: &mut Vec<GameEvent>) {
 /// Execute the cleanup step. Returns `Some(WaitingFor)` if the player must
 /// choose which cards to discard down to maximum hand size, or `None` if
 /// cleanup completes immediately.
+///
+/// CR 514.3a: a `Some` return additionally means "triggered abilities were put
+/// on the stack and the active player must receive priority before another
+/// cleanup step begins" — either the control-reversion delayed triggers below,
+/// or a parked `deferred_triggers` batch settled at the tail of this function.
 pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Option<WaitingFor> {
     // CR 508.6 + CR 514.2: Snapshot this turn's attacks so "attacked you during
     // their last turn" (Avenge / O-Kagachi / Weathered Sentinels) can query each
@@ -2426,6 +2431,84 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
             obj.is_saddled = false;
             obj.saddled_by.clear();
         }
+    }
+
+    // CR 514.3a: "At this point, the game checks to see if any state-based
+    // actions would be performed and/or ANY TRIGGERED ABILITIES ARE WAITING TO
+    // BE PUT ONTO THE STACK (including those that trigger 'at the beginning of
+    // the next cleanup step'). If so, those state-based actions are performed,
+    // THEN those triggered abilities are put on the stack, then the active
+    // player gets priority. ... Once the stack is empty and all players pass in
+    // succession, another cleanup step begins."
+    //
+    // SCOPE — this block implements ONLY the triggered-ability half of CR 514.3a.
+    // The rule orders an SBA pass FIRST ("those state-based actions are
+    // performed, then those triggered abilities are put on the stack"); this
+    // block performs no SBA pass. SBAs are instead performed at the priority
+    // boundary this block routes to, by `sba::check_state_based_actions` inside
+    // `engine_priority::run_post_action_pipeline` (`engine_priority.rs:177`),
+    // i.e. AFTER the abilities are stacked rather than before. Whether cleanup
+    // should perform a full CR 704 pass at CR 514.3a's exact instant is a
+    // separate question, deliberately not answered here.
+    //
+    // A parked `deferred_triggers` batch IS "a triggered ability waiting to be
+    // put onto the stack", so it must settle HERE, during cleanup — not survive
+    // `advance_phase_once`'s Cleanup -> Untap wrap (which runs `start_next_turn`)
+    // and land on the next turn's upkeep. CR 514.3 (the parent rule) says no
+    // player normally receives priority during cleanup and then states that this
+    // is the exception; returning `Some(Priority { .. })` is that exception, not
+    // a violation of it.
+    //
+    // POPULATION — this checks `deferred_triggers` only, unlike the CR 603.3b +
+    // issue #1350 guard at `turns.rs:2997`, which checks
+    // `!deferred_triggers.is_empty() || pending_trigger.is_some()`. The
+    // `pending_trigger` disjunct is deliberately excluded, not overlooked: a live
+    // `pending_trigger` means a trigger is mid-construction and owns the open
+    // prompt, so `current_trigger_prompt` still echoes for it (that disjunct is
+    // retained by the CR 603.3d narrowing) and the game would be sitting at that
+    // trigger's own target/mode choice rather than passing priority into cleanup.
+    // If that assumption is ever falsified, the fix is to widen this condition to
+    // match `:2997`, not to add a second block.
+    //
+    // The second half of CR 514.3a — "another cleanup step begins" — is ALREADY
+    // implemented: `priority.rs:79-90` re-enters `auto_advance` when all players
+    // pass with an empty stack at `Phase::Cleanup`, which re-runs this function.
+    // On that repeat the queue is empty, `can_drain_deferred_triggers` refuses,
+    // the stack does not grow, and cleanup advances normally.
+    //
+    // TERMINATION, in two parts. (1) No in-process loop is possible: this block
+    // returns only `Some(..)` — which the `Phase::Cleanup` arm converts to
+    // `AutoAdvanceStep::Waiting`, exiting `auto_advance`'s UNBOUNDED loop (no
+    // iteration cap) — or `None`, which advances the phase. It can never yield
+    // `Continue`, so it cannot spin that loop. (2) An unbounded REPEAT is a
+    // game-level draw, not a freeze: each repeat cleanup step costs a real
+    // `PassPriority` from every living seat before `priority.rs:79-90` re-enters,
+    // so a pathological re-parking ability is CR 104.4b (a mandatory loop that
+    // changes no game state is a draw).
+    // NOTE: this is NOT the argument `priority.rs:86-89` makes for the
+    // control-reversion case — that one is monotone-decreasing (its one-shot TCE
+    // is already pruned, so no new event re-fires). Nothing analogous holds for
+    // `deferred_triggers`, which can in principle be re-parked by a resolving
+    // ability; the two parts above are why termination holds anyway.
+    //
+    // Structurally identical to the CR 514.3a control-reversion block above
+    // (`check_delayed_triggers` + stack-growth pause); same authority, same
+    // shape, different waiting population.
+    //
+    // `drain_deferred_trigger_queue` (the restrictive member, gate
+    // `can_drain_deferred_triggers(state, /*allow_spell_on_stack=*/false)`) is
+    // the right authority: cleanup is reached only after the end step's stack
+    // emptied (CR 500.2), so the guard passes on every normal entry, and a
+    // refusal is inert — the stack does not grow, this returns `None`, and
+    // cleanup advances exactly as it does today.
+    let stack_before = state.stack.len();
+    if let Some(prompt) = super::triggers::drain_deferred_trigger_queue(state, events) {
+        return Some(prompt);
+    }
+    if state.stack.len() > stack_before {
+        return Some(WaitingFor::Priority {
+            player: state.active_player,
+        });
     }
 
     None
@@ -2672,6 +2755,15 @@ fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>
 ///   - an active trigger prompt (`TriggerTargetSelection`, etc.) when
 ///     `pending_trigger` / `deferred_triggers` still hold unresolved work (CR
 ///     603.3). The caller MUST surface this prompt instead of granting priority.
+///
+/// CR 117.5 + CR 603.3: this function is a stack-placement point. Abilities
+/// waiting in `deferred_triggers` are put on the stack here, not merely
+/// reported, so a parked batch cannot survive a phase or step boundary.
+/// Individual arms must NOT re-derive their own deferred-queue guards; the
+/// `Phase::CombatDamage` guard (issue #1350, comment at `turns.rs:2995`, `if`
+/// at `:2997`) predates this and is retained because it also covers
+/// `pending_trigger`. The CLEANUP step does not reach this function — CR 514.3a
+/// is handled in `execute_cleanup` instead.
 fn process_phase_triggers(
     state: &mut GameState,
     events: &[GameEvent],
@@ -2694,7 +2786,47 @@ fn process_phase_triggers(
         &delayed_events,
         events_out,
     );
-    (outcome.fired, outcome.prompt)
+    // CR 117.3a + CR 117.5 + CR 603.3: reaching this point in a phase/step arm
+    // IS the moment "a player would receive priority", so abilities already
+    // waiting in `deferred_triggers` must be PUT ON THE STACK here, not merely
+    // reported. This mirrors what `engine_priority::run_post_action_pipeline`
+    // already does at the sibling (`WaitingFor::Priority`) boundary, using the
+    // same authority and the same gate.
+    //
+    // This is load-bearing, not belt-and-braces: several production
+    // `auto_advance` consumers never run the post-action pipeline at all
+    // (`engine::start_game` and `engine::start_game_skip_mulligan` return an
+    // `ActionResult` directly), so on those paths this is the ONLY drain.
+    // Regression: `parked_queue_drains_at_first_upkeep_from_start_game`.
+    //
+    // `drain_deferred_trigger_queue` (not the post-announcement variant) is
+    // deliberate: its gate is `can_drain_deferred_triggers(state, /*allow_
+    // spell_on_stack=*/false)`. CR 500.2 means a step in which players receive
+    // priority ends only with an empty stack, so on every normal step entry the
+    // guard passes; when it does not, refusing is the CR 601.2h + CR 602.2b
+    // conservative choice (issue #1793) and CANNOT re-wedge the game — a `None`
+    // prompt makes every calling arm fall through to `WaitingFor::Priority`,
+    // which is answerable and re-drains through the post-action pipeline.
+    // (Note: the entry gate is restrictive, but `dispatch_deferred_triggers_in_order`
+    // ends by calling `drain_deferred_triggers_after_trigger_construction`
+    // (`triggers.rs:8093`), whose `else` arm is permissive — identical to
+    // `engine_priority.rs:265`'s behavior, and behaviourally the same here
+    // because the stack is empty at a step boundary.)
+    //
+    // NOTE: unlike `engine_priority.rs:265`, this drain is not gated on
+    // `skip_deferred_trigger_drain`. That flag is threaded only through the
+    // post-action pipeline and every current call site passes `false` (the
+    // three sites that name the flag: `engine.rs:7577`, `engine.rs:12278`,
+    // `engine_resolution_choices.rs:4564`; the remaining
+    // `run_post_action_pipeline` call sites pass the positional literal
+    // `false`), so the two are consistent today. A future caller that passes
+    // `true` must thread the opt-out into `auto_advance` as well rather than
+    // silently losing it here.
+    let prompt = match outcome.prompt {
+        Some(prompt) => Some(prompt),
+        None => super::triggers::drain_deferred_trigger_queue(state, events_out),
+    };
+    (outcome.fired, prompt)
 }
 
 /// CR 800.4: Skip an eliminated active player's remaining turn through the
@@ -9535,3 +9667,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "turns_declare_attackers_wedge_tests.rs"]
+mod declare_attackers_wedge_tests;

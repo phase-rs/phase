@@ -10883,10 +10883,28 @@ fn collect_pending_and_delayed_triggers_for_batch(
     }
 }
 
+/// CR 603.3d: the prompt currently OWED by the trigger machinery, or `None`.
+///
+/// `active_trigger_prompt` echoes `state.waiting_for` only while a trigger is
+/// genuinely mid-construction (`pending_trigger`), because in that case the
+/// live prompt IS that trigger's own target/mode/distribute choice. A merely
+/// PARKED `deferred_triggers` batch owns no prompt: CR 603.3 says such
+/// abilities are put on the stack at the next priority point, which
+/// `turns::process_phase_triggers` now does via `drain_deferred_trigger_queue`.
+/// Echoing on a parked queue instead re-asserted an unrelated prompt — the seam
+/// that pinned a CR 508.1 `DeclareAttackers` prompt across the CR 508.8 advance
+/// to `Phase::EndCombat`, and made the state absorbing (a non-`Priority` return
+/// skips both `apply_action`'s post-action pipeline gate and that pipeline's own
+/// `Priority`-gated deferred drain, so the queue could never leave).
+///
+/// A queue that legitimately cannot drain is still reported through `fired`,
+/// which keeps its own `!deferred_triggers.is_empty()` disjunct at both call
+/// sites, and — where the prompt genuinely changed — through
+/// `inline_resolution_prompt` below.
 fn current_trigger_prompt(state: &GameState, waiting_before: &WaitingFor) -> Option<WaitingFor> {
     let order_triggers_prompt = build_next_order_triggers_prompt_public(state);
     let active_trigger_prompt = (order_triggers_prompt.is_none()
-        && (state.pending_trigger.is_some() || !state.deferred_triggers.is_empty()))
+        && state.pending_trigger.is_some())
     .then(|| state.waiting_for.clone());
     let inline_resolution_prompt = (order_triggers_prompt.is_none()
         && active_trigger_prompt.is_none()

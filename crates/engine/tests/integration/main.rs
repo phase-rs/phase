@@ -173,6 +173,7 @@ mod daretti_emblem_simultaneous_death;
 mod dark_confidant_upkeep;
 mod dark_depths_thespian_stage;
 mod death_priest_myrkul_oxford_anthem;
+mod declare_attackers_end_combat_pairing;
 mod delayed_parent_target_incarnation;
 mod delayed_trigger_continuation;
 mod demilich_helbrute_graveyard_exile_cost;
